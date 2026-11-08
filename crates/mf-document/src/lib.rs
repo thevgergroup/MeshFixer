@@ -10,6 +10,19 @@ use mf_io::SourceInfo;
 
 pub use geometry::{Geometry, GeometryKind};
 
+/// A document state in a session's revision DAG (MF-HIST-001). Monotonic,
+/// never reused.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+pub struct RevisionId(pub u64);
+
+impl std::fmt::Display for RevisionId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "r{}", self.0)
+    }
+}
+
 /// Stable for the lifetime of a session. Never reused (MF-DOC-004).
 #[derive(
     Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,

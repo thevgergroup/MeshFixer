@@ -72,7 +72,10 @@ fn new_command_after_undo_truncates_redo() {
     s.undo();
     // A different command that changes something (max 6 also removes the
     // 4-face island; max 3 would remove nothing and create no revision).
-    assert!(matches!(s.execute(remove(id, "6")).unwrap(), CommitOutcome::NewRevision { .. }));
+    assert!(matches!(
+        s.execute(remove(id, "6")).unwrap(),
+        CommitOutcome::NewRevision { .. }
+    ));
     assert!(!s.can_redo());
 }
 

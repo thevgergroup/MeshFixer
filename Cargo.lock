@@ -2399,7 +2399,9 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-operations",
+ "mf-selection",
  "mf-spec",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -2496,6 +2498,17 @@ dependencies = [
  "pollster 0.4.0",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "mf-selection"
+version = "0.0.1"
+dependencies = [
+ "mf-document",
+ "mf-fixtures",
+ "mf-geometry",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
