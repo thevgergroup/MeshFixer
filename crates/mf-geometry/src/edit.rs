@@ -54,9 +54,9 @@ impl MeshEdit {
         }
         self.face_live.set(id.0 as usize, false);
         self.face_count -= 1;
-        if id.0 >= self.base_faces {
-            self.prov.created_faces.retain(|(f, _)| *f != id);
-        } else {
+        // Faces created in this edit are dropped from `created_faces` in
+        // `finish` (by liveness), keeping this O(1).
+        if id.0 < self.base_faces {
             self.prov.removed_faces.push(id);
         }
         Ok(())
@@ -70,11 +70,8 @@ impl MeshEdit {
         self.vertex_live.set(id.0 as usize, false);
         self.vertex_count -= 1;
         self.vertex_removed = true;
-        if id.0 >= self.base_vertices {
-            self.prov.created_vertices.retain(|v| *v != id);
-        } else {
+        if id.0 < self.base_vertices {
             self.prov.removed_vertices.push(id);
-            self.prov.moved_vertices.retain(|v| *v != id);
         }
         Ok(())
     }
@@ -105,7 +102,8 @@ impl MeshEdit {
             return Err(GeometryError::NoSuchVertex(id.0));
         }
         self.positions.set(id.0 as usize, p);
-        if id.0 < self.base_vertices && !self.prov.moved_vertices.contains(&id) {
+        if id.0 < self.base_vertices {
+            // Deduplicated in `finish`.
             self.prov.moved_vertices.push(id);
         }
         Ok(())
@@ -144,11 +142,26 @@ impl MeshEdit {
                 }
             }
         }
+        // Normalise once: sorted, unique, and only elements still live
+        // (created-then-removed elements never existed as far as provenance
+        // is concerned; a moved-then-removed vertex is just removed).
+        let face_live = &self.face_live;
+        let vertex_live = &self.vertex_live;
         self.prov.removed_faces.sort_unstable();
         self.prov.removed_vertices.sort_unstable();
-        self.prov.created_vertices.sort_unstable();
-        self.prov.moved_vertices.sort_unstable();
+        self.prov
+            .created_faces
+            .retain(|(f, _)| face_live.get(f.0 as usize));
         self.prov.created_faces.sort_by_key(|(f, _)| *f);
+        self.prov
+            .created_vertices
+            .retain(|v| vertex_live.get(v.0 as usize));
+        self.prov.created_vertices.sort_unstable();
+        self.prov
+            .moved_vertices
+            .retain(|v| vertex_live.get(v.0 as usize));
+        self.prov.moved_vertices.sort_unstable();
+        self.prov.moved_vertices.dedup();
         let mesh = Mesh::from_parts(
             self.positions,
             self.faces,

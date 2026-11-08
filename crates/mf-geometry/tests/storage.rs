@@ -246,3 +246,26 @@ fn mixed_create_remove_sequences_never_leave_dangling_faces() {
         }
     }
 }
+
+#[test]
+fn edit_bookkeeping_is_not_quadratic() {
+    // 100k moves and 20k create-then-remove pairs. Quadratic bookkeeping
+    // takes tens of seconds here even in release; linear takes milliseconds.
+    let m = uv_sphere(200, 500); // ~99.5k vertices
+    let start = std::time::Instant::now();
+    let mut e = m.edit();
+    for v in 0..m.vertex_slots().min(100_000) {
+        e.move_vertex(VertexId(v), [0.0, 0.0, 1.0]).unwrap();
+    }
+    for _ in 0..20_000 {
+        let v = e.add_vertex([0.0, 0.0, 3.0]);
+        let f = e.add_face([0, 1, v.0], Sources::default()).unwrap();
+        e.remove_face(f).unwrap();
+        e.remove_vertex(v).unwrap();
+    }
+    let (_, prov) = e.finish().unwrap();
+    let elapsed = start.elapsed();
+    assert!(prov.created_faces.is_empty() && prov.created_vertices.is_empty());
+    assert_eq!(prov.moved_vertices.len(), m.vertex_slots().min(100_000) as usize);
+    assert!(elapsed.as_secs_f64() < 3.0, "edit bookkeeping took {elapsed:?}");
+}
