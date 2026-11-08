@@ -3,6 +3,7 @@ use std::sync::{Arc, OnceLock};
 use serde::Serialize;
 
 use crate::hash::ContentHash;
+use crate::topology::Topology;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum GeometryError {
@@ -44,6 +45,7 @@ struct Inner {
     positions: Vec<[f64; 3]>,
     triangles: Vec<[u32; 3]>,
     hash: OnceLock<ContentHash>,
+    topology: OnceLock<Arc<Topology>>,
 }
 
 impl std::fmt::Debug for Mesh {
@@ -74,6 +76,7 @@ impl Mesh {
                 positions,
                 triangles,
                 hash: OnceLock::new(),
+                topology: OnceLock::new(),
             }),
         })
     }
@@ -136,6 +139,14 @@ impl Mesh {
             }
             ContentHash(*h.finalize().as_bytes())
         })
+    }
+
+    /// Derived topology, computed on first use and cached (MF-GEO-003).
+    pub fn topology(&self) -> Arc<Topology> {
+        self.inner
+            .topology
+            .get_or_init(|| Arc::new(Topology::compute(self.vertex_count(), self.triangles())))
+            .clone()
     }
 
     /// True if both handles point at the same underlying storage.
