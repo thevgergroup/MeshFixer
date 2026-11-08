@@ -34,6 +34,10 @@ pub struct MeshFixerApp {
     pub show_boundaries: bool,
     pub error: Option<String>,
     pub status: Option<String>,
+    /// Every warning from the latest import (MF-ISSUE-004), not just the last.
+    pub warnings: Vec<String>,
+    /// Lines of the last replay report, shown in a window.
+    pub replay_report: Option<Vec<String>>,
     pub viewport: Viewport,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -77,6 +81,8 @@ impl MeshFixerApp {
             show_boundaries: true,
             error: None,
             status: None,
+            warnings: Vec::new(),
+            replay_report: None,
             viewport: Viewport::new(render_state.clone()),
             tx,
             rx,
@@ -104,6 +110,38 @@ impl MeshFixerApp {
             .pick_file()
         {
             self.open(ctx, path);
+        }
+    }
+
+    /// Write the command log for the current revision path.
+    pub fn save_log_to(&mut self, dir: &std::path::Path) -> Result<(), String> {
+        self.session.save_log(dir).map_err(|e| e.to_string())
+    }
+
+    pub fn save_log_dialog(&mut self) {
+        let Some(path) = rfd::FileDialog::new()
+            .set_file_name("session.mfx.log")
+            .save_file()
+        else {
+            return;
+        };
+        match self.save_log_to(&path) {
+            Ok(()) => self.status = Some(format!("Saved command log {}", path.display())),
+            Err(e) => self.error = Some(format!("Saving command log failed: {e}")),
+        }
+    }
+
+    pub fn replay_dialog(&mut self, ctx: &egui::Context) {
+        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+            self.busy = Some(format!("Replaying {}", dir.display()));
+            worker::replay(&self.tx, ctx, dir);
+        }
+    }
+
+    /// Jump to any revision in the DAG, including an abandoned branch.
+    pub fn checkout(&mut self, id: mf_command::RevisionId) {
+        if self.busy.is_none() && self.session.checkout(id) {
+            self.sync_active();
         }
     }
 
@@ -191,8 +229,10 @@ impl MeshFixerApp {
                 self.busy = None;
                 match result {
                     Ok(imported) => {
-                        for w in &imported.warnings {
-                            self.status = Some(format!("Warning: {w}"));
+                        self.warnings = imported.warnings.clone();
+                        if !self.warnings.is_empty() {
+                            self.status =
+                                Some(format!("{} import warning(s)", self.warnings.len()));
                         }
                         let id = self.session.import(imported, name);
                         self.active = Some(id);
@@ -223,6 +263,13 @@ impl MeshFixerApp {
                     self.requested = None;
                 }
                 self.analyses.insert(mesh, analysis);
+            }
+            Message::Replayed(result) => {
+                self.busy = None;
+                match result {
+                    Ok(lines) => self.replay_report = Some(lines),
+                    Err(e) => self.error = Some(format!("Replay failed: {e}")),
+                }
             }
             Message::Exported(result) => {
                 self.busy = None;
@@ -283,7 +330,12 @@ impl eframe::App for MeshFixerApp {
         }
         self.refresh_analysis();
 
+        // Shortcuts go to a focused text field first (MF-ISSUE-009).
+        let typing = ctx.memory(|m| m.focused().is_some());
         let (undo, redo, fit) = ctx.input_mut(|i| {
+            if typing {
+                return (false, false, false);
+            }
             let redo = i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                 egui::Key::Z,
@@ -305,8 +357,14 @@ impl eframe::App for MeshFixerApp {
         crate::panels::error_banner(self, ui);
         crate::panels::status_bar(self, ui);
         crate::panels::side_panel(self, ui);
+        crate::panels::replay_window(self, &ctx);
 
         let vertices = self.displayed.clone();
+        let placeholder = match self.active_mesh() {
+            Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
+            Some(_) => "Analyzing…",
+            None => "Open a mesh with File > Open (STL or OBJ)",
+        };
         let show_boundaries = self.show_boundaries;
         let updating = self.is_analyzing();
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -316,6 +374,7 @@ impl eframe::App for MeshFixerApp {
                 vertices.as_ref(),
                 show_boundaries,
                 updating,
+                placeholder,
             );
         });
 

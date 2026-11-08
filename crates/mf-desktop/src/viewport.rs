@@ -50,16 +50,21 @@ impl Viewport {
         vertices: Option<&Arc<MeshVertices>>,
         show_boundaries: bool,
         updating: bool,
+        placeholder: &str,
     ) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let (Some(cam), Some(vertices)) = (camera.as_mut(), vertices) else {
+            // Nothing to draw: release GPU buffers for a vanished object
+            // (MF-ISSUE-009).
+            self.uploaded = None;
+            self.last_frame = None;
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::from_rgb(38, 41, 46));
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
-                "Open a mesh with File > Open (STL or OBJ)",
+                placeholder,
                 egui::FontId::proportional(16.0),
                 egui::Color32::GRAY,
             );
@@ -162,7 +167,8 @@ impl Viewport {
             self.last_frame = Some(key);
             self.frames_rendered += 1;
         }
-        self.texture.unwrap_or_default()
+        self.texture
+            .expect("the texture is registered whenever a render target exists")
     }
 }
 

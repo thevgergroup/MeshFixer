@@ -21,6 +21,7 @@ pub enum Message {
     Completed(Result<Completed, CommandError>),
     Analyzed { mesh: Mesh, analysis: Analysis },
     Exported(Result<PathBuf, IoError>),
+    Replayed(Result<Vec<String>, String>),
 }
 
 fn spawn(
@@ -59,6 +60,29 @@ pub fn analyze(mesh: Mesh) -> Message {
         vertices: Arc::new(MeshVertices::build(&mesh)),
     };
     Message::Analyzed { mesh, analysis }
+}
+
+/// Replay a command log off the UI thread (it re-imports source files).
+pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
+    spawn(tx, ctx, move || {
+        Message::Replayed(
+            mf_command::replay(&dir)
+                .map(|report| {
+                    let mut lines: Vec<String> = report
+                        .results
+                        .iter()
+                        .map(|(id, v)| format!("command {}: {v:?}", id.0))
+                        .collect();
+                    lines.push(if report.all_verified() {
+                        format!("All {} command(s) verified.", report.results.len())
+                    } else {
+                        "Replay did NOT reproduce the log.".into()
+                    });
+                    lines
+                })
+                .map_err(|e| e.to_string()),
+        )
+    });
 }
 
 pub fn export(

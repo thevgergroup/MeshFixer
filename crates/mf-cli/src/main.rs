@@ -265,7 +265,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
     if m.get_flag("json") {
         println!(
             "{}",
-            serde_json::to_string_pretty(&report).unwrap_or_default()
+            serde_json::to_string_pretty(&report).map_err(|e| Failure::Runtime(e.to_string()))?
         );
     } else if let Some(obj) = report.as_object() {
         for (k, v) in obj {

@@ -21,11 +21,27 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     app.export_dialog(&ctx);
                     ui.close();
                 }
+                ui.separator();
+                if ui
+                    .add_enabled(idle, egui::Button::new("Save Command Log…"))
+                    .clicked()
+                {
+                    app.save_log_dialog();
+                    ui.close();
+                }
+                if ui
+                    .add_enabled(idle, egui::Button::new("Replay Command Log…"))
+                    .clicked()
+                {
+                    app.replay_dialog(&ctx);
+                    ui.close();
+                }
             });
             ui.menu_button("Edit", |ui| {
+                let idle = app.busy.is_none();
                 if ui
                     .add_enabled(
-                        app.session.can_undo(),
+                        idle && app.session.can_undo(),
                         egui::Button::new("Undo").shortcut_text("Cmd+Z"),
                     )
                     .clicked()
@@ -35,7 +51,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 }
                 if ui
                     .add_enabled(
-                        app.session.can_redo(),
+                        idle && app.session.can_redo(),
                         egui::Button::new("Redo").shortcut_text("Shift+Cmd+Z"),
                     )
                     .clicked()
@@ -97,6 +113,24 @@ pub fn status_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             });
         });
     });
+}
+
+/// The last replay's per-command verdicts.
+pub fn replay_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    let Some(lines) = app.replay_report.clone() else {
+        return;
+    };
+    let mut open = true;
+    egui::Window::new("Replay report")
+        .open(&mut open)
+        .show(ctx, |ui| {
+            for line in &lines {
+                ui.label(line);
+            }
+        });
+    if !open {
+        app.replay_report = None;
+    }
 }
 
 pub fn side_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
@@ -326,16 +360,44 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             app.redo();
         }
     });
-    let cursor = app.session.history_cursor();
-    for (i, label) in app.session.history_labels().iter().enumerate() {
-        let text = egui::RichText::new(label);
-        let text = if i == cursor {
-            text.strong()
-        } else if i > cursor {
-            text.weak().italics()
-        } else {
-            text
+    // The full revision DAG (MF-HIST-001). Revisions on the current path are
+    // normal, abandoned branches and redo targets are greyed. Click to jump.
+    let current = app.session.current();
+    let mut on_path = std::collections::BTreeSet::new();
+    let mut cur = Some(current);
+    while let Some(r) = cur {
+        on_path.insert(r);
+        cur = app.session.node(r).and_then(|n| n.parent);
+    }
+    let mut clicked = None;
+    let mut stack = vec![(mf_command::RevisionId(0), 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        let Some(node) = app.session.node(id) else {
+            continue;
         };
-        ui.label(text);
+        let mut text = egui::RichText::new(&node.label);
+        if id == current {
+            text = text.strong();
+        } else if !on_path.contains(&id) {
+            text = text.weak().italics();
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 12.0);
+            if ui.selectable_label(id == current, text).clicked() {
+                clicked = Some(id);
+            }
+        });
+        // Children pushed in reverse so the oldest branch is drawn first.
+        for &c in node.children.iter().rev() {
+            let child_depth = if node.children.len() > 1 {
+                depth + 1
+            } else {
+                depth
+            };
+            stack.push((c, child_depth));
+        }
+    }
+    if let Some(id) = clicked {
+        app.checkout(id);
     }
 }

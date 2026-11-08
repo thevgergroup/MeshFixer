@@ -319,7 +319,7 @@ impl Session {
             input_revision,
             input_hash: c.input_hash,
             output_revision: RevisionId(self.nodes.len() as u64),
-            output_hash: c.output_hash.unwrap_or_default(),
+            output_hash: c.output_hash.expect("a change always has an output hash"),
             output_summary: c
                 .output_summary
                 .expect("a change always has an output summary"),
@@ -426,7 +426,7 @@ impl Session {
         self.linear_view()
             .iter()
             .position(|&r| r == self.cursor)
-            .unwrap_or(0)
+            .expect("the linear view contains the cursor")
     }
 
     /// Command records from the root to the current revision.
