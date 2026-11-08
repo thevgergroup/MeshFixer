@@ -8,18 +8,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Sev | Title | Source | Milestone | Resolution criteria |
 |---|---|---|---|---|---|
-| MF-ISSUE-001 | S2 | Counts beyond `u32` are truncated silently | M1 review minor 1 | M2 | `Mesh::new` rejects `positions.len() > u32::MAX` and `triangles.len()*3 > u32::MAX`, and `stl::read` uses `checked_mul` on the facet count before allocating. Tests use synthetic counts, not real allocations. |
 | MF-ISSUE-002 | S3 | Misleading STL error messages | M1 review minor 2 | M2 | A binary file with a wrong facet count or trailing padding gets either a warning-and-read-by-size path or an error that names the binary/ASCII ambiguity. A `solid` header with a size mismatch reports "binary STL with ASCII-looking header", not a UTF-8 error. A fixture covers each case. |
-| MF-ISSUE-003 | S2 | Non-finite diagnostic values serialize as `null` | M1 review minor 3 (export part fixed) | M2 | Area, perimeter and volume overflow is reported explicitly (an error or `non_finite` status), never a silent `null`. Test with coordinates near 1e308. |
-| MF-ISSUE-004 | S2 | Swallowed errors | M1 review minor 4 | M2 | The CLI JSON serialization error propagates (exit 1). All import warnings are shown, not just the last. `topology.rs` `unwrap_or(0)` and the viewport's `unwrap_or_default()` are replaced by invariants that fail loudly. A grep check for `unwrap_or_default` in non-test code goes into CI with an allowlist. |
-| MF-ISSUE-005 | S3 | No-op operation still creates a revision and a full copy | M1 review minor 5 | M2 | When `remove_small_components` removes nothing, it returns a report with no new revision (or a revision sharing storage), and unreferenced vertices are kept. Test: no history entry and pointer-equal mesh. |
-| MF-ISSUE-006 | S3 | Empty mesh shows "Open a mesh" | M1 review minor 6 | M2 | The viewport shows "Empty mesh (0 triangles)" for an opened empty object. Covered by the GUI test. |
-| MF-ISSUE-007 | **S1** | Touching boundary loops (two holes sharing a vertex) aren't traced | M1 review minor 7 | **Before M3 starts** | Loops are split at pinch vertices into separate traced loops with stable IDs. `untraced_boundary_edges` is 0 for bowtie-hole fixtures. Required before `fill_holes` (MF-OP-002), because filling an untraced loop is impossible and filling a merged loop gives wrong geometry. |
-| MF-ISSUE-008 | S3 | Doubled triangle reports closed and manifold | M1 review minor 8 | M2 | Add a `duplicate_faces` count (same vertex set) to diagnostics, with a fixture. |
-| MF-ISSUE-009 | S3 | Keyboard and lifecycle UX | M1 review minor 9 | M2 | Cmd+Z goes to a focused text field before document undo. The Edit menu's Undo/Redo are disabled while busy. GPU buffers are released when the active object disappears. |
-| MF-ISSUE-011 | S3 | Ledger evidence recorded the empty doc-test line | M1 review minor 11 | M2 process | Task completion records summed test totals (CI summary script). |
-| MF-ISSUE-012 | S2 | **Spec gap:** tolerance duplicate vertices (MF-GEO-004) not implemented | M1 review | M2 | `duplicate_vertices_tolerance` in diagnostics, with tolerance relative to bbox diagonal (default 1e-6) and spatial-hash or sort based (deterministic). Added to the M2 plan. Fixture with known near-duplicates. |
-| MF-ISSUE-013 | S2 | Memory: 1.1 GB peak RSS at 4.8M triangles vs 400 MB budget | M1 report | **M2 (priority)** | A counting allocator plus a breakdown by category (mesh storage, topology, import scratch, history, GPU buffers) is reported by `--metrics` and the benchmark CI. M2's storage design is justified against these numbers before history and selections build on it. |
 | MF-ISSUE-019 | S3 | Topology construction scratch is 468 MB at 4.8M triangles | ADR-0001 measurements | M4 | Topology build peak ≤ 150 MB at 5M (packed `u64` edge keys, no separate fan array), measured with `--metrics`. |
 | MF-ISSUE-020 | S3 | Tombstoned slots accumulate in long sessions | ADR-0001 | M4 | A `mesh.compact` operation that emits provenance (a slot remap) like any edit, plus a dead-slot ratio in diagnostics. |
 | MF-ISSUE-021 | S3 | Misleading replay/log error variants | M2 review minor | M3 | A missing ancestor node and a missing replay target get their own error variants. Tests cover both messages. |
@@ -39,6 +28,17 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-001 | Counts beyond `u32` are truncated silently | `Mesh::check_counts` in `Mesh::new` and `MeshEdit::finish` · test `new_rejects_counts_over_u32` (M2 T3) |
+| MF-ISSUE-003 | Non-finite diagnostic values serialize as `null` | `non_finite` flag, `VolumeStatus::NonFinite`, `Option` area and perimeter · test `huge_coordinates_report_non_finite` (M2 T5) |
+| MF-ISSUE-004 | Swallowed errors | CLI JSON error propagates; all import warnings listed; topology `unwrap_or(0)` removed (corners derived from half-edges); invariants use `expect`; CI `scripts/check-swallowed-defaults.sh` with a reviewed allowlist (M2 T3/T10) |
+| MF-ISSUE-005 | No-op operation still creates a revision and a full copy | `OpOutput.change = None`, `CommitOutcome::NoChange` · tests `noop_returns_no_change`, `noop_operation_creates_no_revision` (M2 T6) |
+| MF-ISSUE-006 | Empty mesh shows "Open a mesh" | Viewport placeholder "Empty mesh (0 triangles)" (M2 T10) |
+| MF-ISSUE-007 | Touching boundary loops (two holes sharing a vertex) aren't traced | Edge-based loop tracing with counter-clockwise gap pairing at pinched vertices · tests `bowtie_holes_trace_as_two_loops`, `three_loops_meeting_at_one_vertex` (M2 T5) |
+| MF-ISSUE-008 | Doubled triangle reports closed and manifold | `duplicate_faces` · test `duplicate_face_counted` (M2 T5) |
+| MF-ISSUE-009 | Keyboard and lifecycle UX | Shortcuts yield to focused text fields; Edit menu disabled while busy; GPU buffers released with no active object (M2 T10) |
+| MF-ISSUE-011 | Ledger evidence recorded the empty doc-test line | Ledger records summed totals; CI summary script (M2 T1) |
+| MF-ISSUE-012 | **Spec gap:** tolerance duplicate vertices (MF-GEO-004) not implemented | `duplicate_vertices_tolerance` (grid hash, 1e-6 × diagonal) · test `near_duplicates_counted` (M2 T5) |
+| MF-ISSUE-013 | Memory: 1.1 GB peak RSS at 4.8M triangles vs 400 MB budget | Counting allocator + `--metrics`; 4.8M working set 143 MB (budget 400); process peak 1383 → 612 MB. See ADR-0001 (M2 T1–T3) |
 | MF-ISSUE-014 | Cross-platform CI not yet run | CI run 42492436343 (PR #1): ubuntu, macOS and Windows each 84 verified passes, 0 skipped, 0 failed. Every GPU and GUI test ran on all three (lavapipe, Metal, WARP). |
 | MF-ISSUE-010 | Non-atomic export could destroy the source file | `fix(io): atomic, verified export` · tests `failed_export_leaves_existing_file_intact`, `export_replaces_existing_file_atomically` |
 | — | Binary STL export wrote `inf` for out-of-range coordinates (part of minor 3) | Same commit: `write_binary` rejects coordinates outside f32 |
