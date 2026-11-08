@@ -42,9 +42,9 @@ fn hash_stable() {
 #[test]
 fn hash_order_sensitive() {
     let a = cube(1.0);
-    let mut tris = a.triangles().to_vec();
+    let (positions, mut tris) = a.to_arrays();
     tris.swap(0, 1);
-    let b = Mesh::new(a.positions().to_vec(), tris).unwrap();
+    let b = Mesh::new(positions, tris).unwrap();
     assert_ne!(a.content_hash(), b.content_hash());
 }
 

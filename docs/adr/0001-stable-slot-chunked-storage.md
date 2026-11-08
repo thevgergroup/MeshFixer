@@ -1,6 +1,31 @@
 # ADR-0001: Stable-slot chunked mesh storage
 
-Status: Proposed (M2 Task 3) · 2026-11-08
+Status: Accepted (M2 Task 3) · 2026-11-08
+
+## Context
+
+MeshFixer must support localized, surgical editing with undo, editable history and selections that survive edits (spec MF-DOC-002, MF-SEL-001…003, MF-OP-003). M1 stored a mesh as two flat `Vec`s, so every revision was a full copy, and any deletion compacted and renumbered every element after it. Under that model a selection made before an edit means nothing afterwards without a full remap.
+
+## Decision
+
+1. **Chunked copy-on-write storage.** Positions, faces and liveness bitsets are stored in chunks of 32,768 elements behind `Arc`. An edit copies only the chunks it writes. A revision shares every other chunk with its parent.
+2. **Stable slots with tombstones.** Removing a face or vertex clears its liveness bit. Its slot is never reused. Creating one appends a new slot. A kept element therefore has **the same ID in every revision**, which is what makes selection translation (MF-SEL-003) cheap and exact.
+3. **One edit path that records provenance.** All changes go through `MeshEdit`, which records removed, created (with sources), moved and kept elements as it goes. Provenance is total by construction (`provenance_is_total`).
+4. **Explicit compaction.** Export iterates only live elements (renumbering densely), and `Mesh::compacted()` returns a tombstone-free mesh plus slot maps when one is needed.
+5. **Content identity includes slot IDs** (`mf-mesh-v2` hash). Two meshes with the same live geometry but different slot layouts are different revisions. Use the equivalence comparator (MF-DOC-003) to compare geometry.
+
+## Alternatives considered
+
+- **Compact on every edit and carry a per-edit renumbering map.** Rejected. Every deletion becomes a global renumbering, which breaks chunk sharing (all later chunks change) and makes every selection go through an O(n) map.
+- **Per-revision ID maps over flat arrays.** Rejected. It costs O(n) memory per revision, which is exactly what MF-DOC-002 forbids.
+- **A half-edge structure as the primary representation.** Deferred. It's heavier per element and not needed for the M2 contracts. Topology stays derived and cached (MF-GEO-003).
+
+## Consequences
+
+- Every reader must iterate live elements (`faces()`, `vertices()`) or index by slot (`corner_position`). The `export_skips_tombstoned_faces` test guards the writers.
+- Tombstones cost 1 bit per slot. Long editing sessions accumulate dead slots. A future `compact` command (which emits a provenance map like any other edit) can reclaim them; tracked as MF-ISSUE-020.
+- Topology arrays are sized by slots, not live elements, so dead slots cost a few bytes each in transient topology scratch.
+- `Mesh::new` still copies its input `Vec`s into chunks, so construction briefly holds about 2× the mesh. That accounts for most of the import peak rising from 374 to 404 MB. It's acceptable, and readers can build chunked storage directly later if import peak matters.
 
 ## Measurements (M2 Task 1, before any redesign)
 
@@ -39,3 +64,13 @@ Items 1 and 2 are addressed in Task 2, and item 4 by `MeshEdit` in Task 3. Item 
 | process peak, remove-small run | 1383 MB | 802 MB |
 
 The remaining large transient is topology construction (468 MB), tracked as MF-ISSUE-019.
+
+### After Task 3 (stable-slot chunked storage)
+
+| | 0.96M tri | 4.8M tri |
+|---|---|---|
+| mesh (retained) | 22 MB | 111 MB |
+| topology (retained) | 4 MB | 32 MB |
+| **working set (gate ≤ 400 MB at 5M)** | 26 MB | **143 MB ✓** |
+| remove_small: retained by new revision | 4 MB | 32 MB (topology only; storage shared). Was 224 MB |
+| process peak, remove-small run | 118 MB | 612 MB. Was 1383 MB |

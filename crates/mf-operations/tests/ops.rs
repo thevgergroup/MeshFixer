@@ -44,8 +44,7 @@ fn removes_island() {
     let mesh = out.mesh.unwrap();
     assert_eq!(mesh.triangle_count(), 12);
     assert_eq!(inspect(&mesh).components, 1);
-    assert_eq!(mesh.positions(), c.positions());
-    assert_eq!(mesh.triangles(), c.triangles());
+    assert_eq!(mesh.to_arrays(), c.to_arrays());
     assert_eq!(out.report["removed_components"], 1);
     assert_eq!(out.report["removed_triangles"], 4);
 }
@@ -61,8 +60,7 @@ fn kept_faces_keep_relative_order() {
         .unwrap()
         .mesh
         .unwrap();
-    assert_eq!(mesh.positions(), c.positions());
-    assert_eq!(mesh.triangles(), c.triangles());
+    assert_eq!(mesh.to_arrays(), c.to_arrays());
 }
 
 #[test]

@@ -69,7 +69,7 @@ fn norm(a: [f64; 3]) -> f64 {
 
 pub fn inspect(mesh: &Mesh) -> Diagnostics {
     let topo = mesh.topology();
-    let pos = mesh.positions();
+    let pos = |v: u32| mesh.corner_position(v);
     let bbox = mesh.bounding_box();
     let diag = bbox.map(|b| b.diagonal()).unwrap_or(0.0);
     let degenerate_area = 1e-12 * diag * diag;
@@ -77,8 +77,8 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
     let mut surface_area = 0.0;
     let mut volume6 = 0.0;
     let mut degenerate = 0;
-    for t in mesh.triangles() {
-        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+    for (_, t) in mesh.faces() {
+        let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
         let area = 0.5 * norm(cross(sub(b, a), sub(c, a)));
         surface_area += area;
         volume6 += dot(a, cross(b, c));
@@ -87,10 +87,10 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         }
     }
 
-    let mut sorted: Vec<[u64; 3]> = pos.iter().map(|p| p.map(f64::to_bits)).collect();
+    let mut sorted: Vec<[u64; 3]> = mesh.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    let duplicate_vertices_exact = pos.len() - sorted.len();
+    let duplicate_vertices_exact = mesh.vertex_count() - sorted.len();
 
     let boundary_loops = topo
         .boundary_loops
@@ -100,8 +100,8 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
             let mut perimeter = 0.0;
             let mut sum = [0.0; 3];
             for k in 0..n {
-                let p = pos[l.vertices[k] as usize];
-                perimeter += norm(sub(pos[l.vertices[(k + 1) % n] as usize], p));
+                let p = pos(l.vertices[k]);
+                perimeter += norm(sub(pos(l.vertices[(k + 1) % n]), p));
                 for i in 0..3 {
                     sum[i] += p[i];
                 }

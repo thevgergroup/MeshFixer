@@ -152,30 +152,29 @@ pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoErro
     Ok(())
 }
 
-/// Re-parse encoded bytes and check they describe the same mesh.
+/// Check encoded bytes describe the same mesh, without a full re-import
+/// where a cheaper exact check exists.
 fn verify_encoded(mesh: &Mesh, bytes: &[u8], format: Format) -> Result<(), String> {
-    let decoded = match format {
-        Format::StlBinary => return stl::verify_binary(bytes, mesh.triangle_count()),
-        Format::StlAscii => stl::read(bytes).map(|(m, _)| m),
-        Format::Obj => std::str::from_utf8(bytes)
-            .map_err(|e| IoError::Parse {
-                line: 0,
-                message: e.to_string(),
-            })
-            .and_then(|t| obj::read(t).map(|(m, _, _)| m)),
+    match format {
+        Format::StlBinary => stl::verify_binary(bytes, mesh.triangle_count()),
+        Format::Obj => {
+            let text = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            obj::verify(text, mesh)
+        }
+        Format::StlAscii => {
+            let decoded = stl::read(bytes)
+                .map_err(|e| format!("verification re-read failed: {e}"))?
+                .0;
+            if decoded.triangle_count() != mesh.triangle_count() {
+                return Err(format!(
+                    "verification found {} triangles, expected {}",
+                    decoded.triangle_count(),
+                    mesh.triangle_count()
+                ));
+            }
+            Ok(())
+        }
     }
-    .map_err(|e| format!("verification re-read failed: {e}"))?;
-    if decoded.triangle_count() != mesh.triangle_count() {
-        return Err(format!(
-            "verification found {} triangles, expected {}",
-            decoded.triangle_count(),
-            mesh.triangle_count()
-        ));
-    }
-    if format == Format::Obj && decoded.positions() != mesh.positions() {
-        return Err("verification found different vertex positions".into());
-    }
-    Ok(())
 }
 
 /// Count significant digits in a decimal literal's mantissa.

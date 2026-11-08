@@ -3,12 +3,18 @@
 //! `mf-geometry` depends on nothing else in the workspace (spec §2). Working
 //! geometry uses `f64` positions and `u32` indices (MF-GEO-001).
 
+mod chunked;
 mod diagnostics;
+mod edit;
 mod hash;
+mod ids;
 mod mesh;
 mod topology;
 
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect};
 pub use hash::ContentHash;
-pub use mesh::{Aabb, GeometryError, Mesh};
+pub use chunked::CHUNK;
+pub use edit::MeshEdit;
+pub use ids::{FaceId, Provenance, Sources, VertexId};
+pub use mesh::{Aabb, Compaction, GeometryError, Mesh};
 pub use topology::{BoundaryLoop, Topology};

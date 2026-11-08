@@ -81,15 +81,96 @@ pub fn read(text: &str) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError>
     ))
 }
 
-/// Writes positions with shortest round-trip `f64` formatting, so no precision is lost.
+/// Writes live vertices and faces with shortest round-trip `f64` formatting,
+/// so no precision is lost. Vertex slots are renumbered densely.
 pub fn write(mesh: &Mesh) -> String {
     use std::fmt::Write;
-    let mut s = String::from("# MeshFixer OBJ\n");
-    for p in mesh.positions() {
+    // Pre-size so the buffer never doubles (doubling briefly holds two copies).
+    let estimate = 16 + mesh.vertex_count() * 64 + mesh.face_count() * 32;
+    let mut s = String::with_capacity(estimate);
+    s.push_str("# MeshFixer OBJ\n");
+    // 1-based OBJ index per vertex slot (0 for tombstoned slots).
+    let mut index = vec![0u32; mesh.vertex_slots() as usize];
+    for (n, (id, p)) in mesh.vertices().enumerate() {
+        index[id.0 as usize] = n as u32 + 1;
         let _ = writeln!(s, "v {} {} {}", p[0], p[1], p[2]);
     }
-    for t in mesh.triangles() {
-        let _ = writeln!(s, "f {} {} {}", t[0] + 1, t[1] + 1, t[2] + 1);
+    for (_, t) in mesh.faces() {
+        let [a, b, c] = t.map(|v| index[v as usize]);
+        let _ = writeln!(s, "f {a} {b} {c}");
     }
     s
+}
+
+/// Check written OBJ text against the mesh without building a new mesh:
+/// every `v` line must match the next live vertex exactly, and every `f`
+/// line the next live face (renumbered as [`write`] does).
+pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
+    let mut index = vec![0u32; mesh.vertex_slots() as usize];
+    for (n, (id, _)) in mesh.vertices().enumerate() {
+        index[id.0 as usize] = n as u32 + 1;
+    }
+    let mut vertices = mesh.vertices();
+    let mut faces = mesh.faces();
+    for (i, line) in text.lines().enumerate() {
+        let mut tok = line.split_ascii_whitespace();
+        match tok.next() {
+            Some("v") => {
+                let expected = vertices.next().ok_or_else(|| format!("line {}: extra vertex", i + 1))?.1;
+                for c in expected {
+                    let got: f64 = tok
+                        .next()
+                        .and_then(|t| t.parse().ok())
+                        .ok_or_else(|| format!("line {}: bad vertex", i + 1))?;
+                    if got.to_bits() != c.to_bits() {
+                        return Err(format!("line {}: vertex {got} != {c}", i + 1));
+                    }
+                }
+            }
+            Some("f") => {
+                let expected = faces.next().ok_or_else(|| format!("line {}: extra face", i + 1))?.1;
+                for v in expected {
+                    let got: u32 = tok
+                        .next()
+                        .and_then(|t| t.parse().ok())
+                        .ok_or_else(|| format!("line {}: bad face", i + 1))?;
+                    if got != index[v as usize] {
+                        return Err(format!("line {}: face index {got} != {}", i + 1, index[v as usize]));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if vertices.next().is_some() || faces.next().is_some() {
+        return Err("output is missing vertices or faces".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tri() -> Mesh {
+        Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("valid")
+    }
+
+    #[test]
+    fn verify_accepts_own_output() {
+        assert_eq!(verify(&write(&tri()), &tri()), Ok(()));
+    }
+
+    #[test]
+    fn verify_catches_changed_coordinate_index_and_truncation() {
+        let text = write(&tri());
+        assert!(verify(&text.replace("v 1 0 0", "v 1.0000001 0 0"), &tri()).is_err());
+        assert!(verify(&text.replace("f 1 2 3", "f 1 3 2"), &tri()).is_err());
+        let truncated: String = text.lines().take(3).map(|l| format!("{l}\n")).collect();
+        assert!(verify(&truncated, &tri()).is_err());
+    }
 }

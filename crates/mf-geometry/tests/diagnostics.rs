@@ -130,9 +130,9 @@ fn diagnostics_serialize() {
 fn collapsed_triangle_does_not_break_manifoldness() {
     // A closed tetrahedron plus one face collapsed onto edge (0,1), as STL welding produces.
     let t = mf_fixtures::tetrahedron();
-    let mut tris = t.triangles().to_vec();
+    let (positions, mut tris) = t.to_arrays();
     tris.push([0, 0, 1]);
-    let m = Mesh::new(t.positions().to_vec(), tris).unwrap();
+    let m = Mesh::new(positions, tris).unwrap();
     let d = inspect(&m);
     assert_eq!(d.degenerate_triangles, 1);
     assert_eq!(d.non_manifold_edges, 0);

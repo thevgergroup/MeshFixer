@@ -1,7 +1,7 @@
 //! STL reader/writer. Binary is detected by exact size (`84 + 50·n`), not by
 //! the `solid` prefix, because many binary exporters write `solid` headers.
 
-use mf_geometry::Mesh;
+use mf_geometry::{Mesh, VertexId};
 use rayon::slice::ParallelSliceMut;
 
 use crate::{IoError, SourcePrecision, significant_digits};
@@ -199,7 +199,7 @@ fn weld(corners: &[[f64; 3]]) -> Result<Mesh, IoError> {
 }
 
 fn facet_normal(m: &Mesh, t: [u32; 3]) -> [f32; 3] {
-    let p = |i: u32| m.positions()[i as usize];
+    let p = |i: u32| m.corner_position(i);
     let (a, b, c) = (p(t[0]), p(t[1]), p(t[2]));
     let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
     let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
@@ -218,10 +218,9 @@ fn facet_normal(m: &Mesh, t: [u32; 3]) -> [f32; 3] {
 
 /// Binary STL stores `f32`. Coordinates that don't fit are an error, never `inf`.
 pub fn write_binary(mesh: &Mesh) -> Result<Vec<u8>, String> {
-    if let Some(v) = mesh
-        .positions()
-        .iter()
-        .position(|p| p.iter().any(|&c| !(c as f32).is_finite()))
+    if let Some((VertexId(v), _)) = mesh
+        .vertices()
+        .find(|(_, p)| p.iter().any(|&c| !(c as f32).is_finite()))
     {
         return Err(format!(
             "vertex {v} has a coordinate outside the 32-bit float range binary STL can store"
@@ -233,12 +232,12 @@ pub fn write_binary(mesh: &Mesh) -> Result<Vec<u8>, String> {
     header[..tag.len()].copy_from_slice(tag);
     out.extend_from_slice(&header);
     out.extend_from_slice(&(mesh.triangle_count() as u32).to_le_bytes());
-    for &t in mesh.triangles() {
+    for (_, t) in mesh.faces() {
         for c in facet_normal(mesh, t) {
             out.extend_from_slice(&c.to_le_bytes());
         }
         for i in t {
-            for c in mesh.positions()[i as usize] {
+            for c in mesh.corner_position(i) {
                 out.extend_from_slice(&(c as f32).to_le_bytes());
             }
         }
@@ -250,7 +249,7 @@ pub fn write_binary(mesh: &Mesh) -> Result<Vec<u8>, String> {
 pub fn write_ascii(mesh: &Mesh) -> String {
     use std::fmt::Write;
     let mut s = String::from("solid meshfixer\n");
-    for &t in mesh.triangles() {
+    for (_, t) in mesh.faces() {
         let n = facet_normal(mesh, t);
         let _ = writeln!(
             s,
@@ -258,7 +257,7 @@ pub fn write_ascii(mesh: &Mesh) -> String {
             n[0], n[1], n[2]
         );
         for i in t {
-            let p = mesh.positions()[i as usize];
+            let p = mesh.corner_position(i);
             let _ = writeln!(s, "      vertex {} {} {}", p[0], p[1], p[2]);
         }
         s.push_str("    endloop\n  endfacet\n");

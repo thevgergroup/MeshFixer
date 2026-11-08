@@ -34,24 +34,23 @@ pub fn cube(size: f64) -> Mesh {
 
 /// Unit cube with its top face (two triangles) removed: one 4-edge hole.
 pub fn cube_with_missing_face() -> Mesh {
-    let c = cube(1.0);
-    let tris: Vec<_> = c
-        .triangles()
+    let (positions, triangles) = cube(1.0).to_arrays();
+    let tris: Vec<_> = triangles
         .iter()
         .enumerate()
         .filter(|(i, _)| *i != 2 && *i != 3)
         .map(|(_, t)| *t)
         .collect();
-    Mesh::new(c.positions().to_vec(), tris).expect("valid")
+    Mesh::new(positions, tris).expect("valid")
 }
 
 pub fn translated(mesh: &Mesh, d: [f64; 3]) -> Mesh {
-    let positions = mesh
-        .positions()
+    let (positions, triangles) = mesh.to_arrays();
+    let positions = positions
         .iter()
         .map(|p| [p[0] + d[0], p[1] + d[1], p[2] + d[2]])
         .collect();
-    Mesh::new(positions, mesh.triangles().to_vec()).expect("valid")
+    Mesh::new(positions, triangles).expect("valid")
 }
 
 /// Concatenate meshes in order, offsetting indices.
@@ -60,8 +59,9 @@ pub fn merge(meshes: &[Mesh]) -> Mesh {
     let mut triangles = Vec::new();
     for m in meshes {
         let base = positions.len() as u32;
-        positions.extend_from_slice(m.positions());
-        triangles.extend(m.triangles().iter().map(|t| t.map(|i| i + base)));
+        let (p, t) = m.to_arrays();
+        positions.extend_from_slice(&p);
+        triangles.extend(t.iter().map(|t| t.map(|i| i + base)));
     }
     Mesh::new(positions, triangles).expect("valid")
 }
@@ -83,9 +83,9 @@ pub fn tetrahedron() -> Mesh {
 /// Tetrahedron with one face's winding reversed.
 pub fn flipped_tetrahedron() -> Mesh {
     let t = tetrahedron();
-    let mut tris = t.triangles().to_vec();
+    let (positions, mut tris) = t.to_arrays();
     tris[0] = [tris[0][0], tris[0][2], tris[0][1]];
-    Mesh::new(t.positions().to_vec(), tris).expect("valid")
+    Mesh::new(positions, tris).expect("valid")
 }
 
 /// Closed UV sphere of radius 1 centred at the origin, outward winding.
@@ -187,7 +187,7 @@ impl SplitMix {
 pub fn damaged_sphere(spec: &DamageSpec) -> Mesh {
     let sphere = uv_sphere(spec.rings, spec.segments);
     let mut rng = SplitMix(spec.seed);
-    let mut positions = sphere.positions().to_vec();
+    let (mut positions, sphere_triangles) = sphere.to_arrays();
     let centroid = |t: &[u32; 3]| {
         let p = t.map(|i| positions[i as usize]);
         let c = [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0);
@@ -196,8 +196,7 @@ pub fn damaged_sphere(spec: &DamageSpec) -> Mesh {
     };
     let holes: Vec<[f64; 3]> = (0..spec.holes).map(|_| rng.direction()).collect();
     let cos_radius = 0.12f64.cos();
-    let mut triangles: Vec<[u32; 3]> = sphere
-        .triangles()
+    let mut triangles: Vec<[u32; 3]> = sphere_triangles
         .iter()
         .filter(|t| {
             let c = centroid(t);
@@ -219,15 +218,14 @@ pub fn damaged_sphere(spec: &DamageSpec) -> Mesh {
     }
 
     let mut parts = vec![Mesh::new(positions, triangles).expect("valid")];
-    let tet = tetrahedron();
+    let (tet_positions, tet_triangles) = tetrahedron().to_arrays();
     for _ in 0..spec.islands {
         let d = rng.direction();
-        let scaled: Vec<[f64; 3]> = tet
-            .positions()
+        let scaled: Vec<[f64; 3]> = tet_positions
             .iter()
             .map(|p| [0, 1, 2].map(|k| p[k] * 0.01 + d[k] * 1.05))
             .collect();
-        parts.push(Mesh::new(scaled, tet.triangles().to_vec()).expect("valid"));
+        parts.push(Mesh::new(scaled, tet_triangles.clone()).expect("valid"));
     }
     merge(&parts)
 }
