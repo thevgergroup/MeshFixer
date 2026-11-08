@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meshfixer.dev/schema/operation.schema.json",
+  "title": "MeshFixer operation spec (MF-SPEC-001)",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "version", "summary", "geometry_kinds", "target", "parameters", "effects", "runtime"],
+  "properties": {
+    "id": { "type": "string", "pattern": "^[a-z]+\\.[a-z_]+$" },
+    "version": { "type": "integer", "minimum": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+    "geometry_kinds": { "type": "array", "items": { "enum": ["mesh"] }, "minItems": 1 },
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["whole_object", "kinds"],
+      "properties": {
+        "whole_object": { "type": "boolean" },
+        "kinds": { "type": "array", "items": { "enum": ["face_set", "component", "boundary_loop"] } }
+      }
+    },
+    "parameters": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "type", "default", "description"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "type": { "enum": ["integer", "float", "bool"] },
+          "default": { "type": ["number", "boolean"] },
+          "min": { "type": "number" },
+          "max": { "type": "number" },
+          "unit": { "type": "string" },
+          "description": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "preconditions": { "type": "array", "items": { "type": "string" } },
+    "postconditions": { "type": "array", "items": { "type": "string" } },
+    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes"] } },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cancellable", "progress"],
+      "properties": {
+        "cancellable": { "type": "boolean" },
+        "progress": { "type": "boolean" }
+      }
+    }
+  }
+}

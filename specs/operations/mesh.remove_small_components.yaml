@@ -1,0 +1,26 @@
+id: mesh.remove_small_components
+version: 1
+summary: Delete disconnected islands smaller than a triangle-count threshold.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: max_triangles
+    type: integer
+    default: 100
+    min: 1
+    description: Remove components with fewer triangles than this
+  - name: keep_largest
+    type: bool
+    default: true
+    description: Never remove the largest component, even if it is below the threshold
+preconditions:
+  - target is a mesh
+postconditions:
+  - every remaining component has at least max_triangles triangles, or is the largest
+  - kept faces are unchanged and keep their relative order
+effects: [geometry_changes, topology_changes]
+runtime:
+  cancellable: false
+  progress: false
