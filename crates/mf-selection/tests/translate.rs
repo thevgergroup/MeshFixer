@@ -159,3 +159,46 @@ fn selection_serializes() {
     let back: Selection = serde_json::from_value(serde_json::to_value(&s).unwrap()).unwrap();
     assert_eq!(back, s);
 }
+
+#[test]
+fn faces_follow_a_compaction_remap_both_ways() {
+    let (_, tomb, _) = remove_island(); // faces 12..16 tombstoned
+    let (compact, map) = tomb.compacted();
+    let prov = mf_geometry::Provenance::from_compaction(&map);
+    // Faces 0..12 keep their positions, so a selection of face 3 stays face 3;
+    // build a case with a real renumbering instead: tombstone face 0 first.
+    let mut e = tomb.edit();
+    e.remove_face(FaceId(0)).unwrap();
+    let (holey, _) = e.finish().unwrap();
+    let (compact2, map2) = holey.compacted();
+    let prov2 = mf_geometry::Provenance::from_compaction(&map2);
+    let s = Selection {
+        revision: RevisionId(1),
+        ..sel(SelectionKind::Faces, vec![1, 5])
+    };
+    match resolve(
+        &s,
+        &holey,
+        &compact2,
+        &[Step::Forward(&prov2)],
+        RevisionId(2),
+    ) {
+        Translation::Mapped(m) => assert_eq!(m.ids, vec![0, 4]),
+        other => panic!("{other:?}"),
+    }
+    let back = Selection {
+        revision: RevisionId(2),
+        ..sel(SelectionKind::Faces, vec![0, 4])
+    };
+    match resolve(
+        &back,
+        &compact2,
+        &holey,
+        &[Step::Backward(&prov2)],
+        RevisionId(1),
+    ) {
+        Translation::Mapped(m) => assert_eq!(m.ids, vec![1, 5]),
+        other => panic!("{other:?}"),
+    }
+    let _ = (compact, prov);
+}

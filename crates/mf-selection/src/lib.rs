@@ -10,7 +10,7 @@
 use std::collections::BTreeSet;
 
 use mf_document::{ObjectId, RevisionId};
-use mf_geometry::{FaceId, Mesh, Provenance, VertexId};
+use mf_geometry::{FaceId, Mesh, Provenance};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,39 +76,106 @@ pub enum Step<'a> {
     Backward(&'a Provenance),
 }
 
-/// Face IDs surviving `steps`, and those lost on the way (both sorted).
-pub fn translate_faces(ids: &[u32], steps: &[Step]) -> (Vec<u32>, Vec<u32>) {
-    let mut alive: BTreeSet<u32> = ids.iter().copied().collect();
+/// Follow element IDs through `steps`. Each ID is tracked as (source ID,
+/// current ID) so a remap (compaction) can renumber it while `lost` still
+/// reports source IDs. Returns (current IDs of survivors, lost source IDs),
+/// both sorted.
+fn follow(
+    ids: &[u32],
+    steps: &[Step],
+    gone: impl Fn(&Step) -> Vec<u32>,
+    remap_of: impl Fn(&mf_geometry::SlotRemap) -> Vec<Option<u32>>,
+) -> (Vec<u32>, Vec<u32>) {
+    let mut alive: Vec<(u32, u32)> = ids.iter().map(|&i| (i, i)).collect();
+    alive.sort_unstable();
+    alive.dedup();
     let mut lost = BTreeSet::new();
     for step in steps {
-        let gone: Vec<u32> = match step {
-            Step::Forward(p) => p.removed_faces.iter().map(|f| f.0).collect(),
-            Step::Backward(p) => p.created_faces.iter().map(|(f, _)| f.0).collect(),
+        let removed: BTreeSet<u32> = gone(step).into_iter().collect();
+        let p = match step {
+            Step::Forward(p) | Step::Backward(p) => p,
         };
-        for f in gone {
-            if alive.remove(&f) {
-                lost.insert(f);
+        // Lists use the pre-remap numbering going forward and the
+        // post-remap numbering going backward, so order matters.
+        let remap = p.remap.as_ref().map(|r| {
+            let forward = remap_of(r);
+            match step {
+                Step::Forward(_) => forward,
+                Step::Backward(_) => {
+                    let len = forward
+                        .iter()
+                        .flatten()
+                        .map(|&n| n as usize + 1)
+                        .max()
+                        .unwrap_or(0);
+                    let mut inverse = vec![None; len];
+                    for (old, new) in forward.iter().enumerate() {
+                        if let Some(n) = new {
+                            inverse[*n as usize] = Some(old as u32);
+                        }
+                    }
+                    inverse
+                }
             }
+        });
+        let apply_remap = |alive: &mut Vec<(u32, u32)>, lost: &mut BTreeSet<u32>| {
+            if let Some(map) = &remap {
+                alive.retain_mut(
+                    |(src, cur)| match map.get(*cur as usize).copied().flatten() {
+                        Some(n) => {
+                            *cur = n;
+                            true
+                        }
+                        None => {
+                            lost.insert(*src);
+                            false
+                        }
+                    },
+                );
+            }
+        };
+        if matches!(step, Step::Backward(_)) {
+            apply_remap(&mut alive, &mut lost);
+        }
+        alive.retain(|(src, cur)| {
+            let keep = !removed.contains(cur);
+            if !keep {
+                lost.insert(*src);
+            }
+            keep
+        });
+        if matches!(step, Step::Forward(_)) {
+            apply_remap(&mut alive, &mut lost);
         }
     }
-    (alive.into_iter().collect(), lost.into_iter().collect())
+    let mut current: Vec<u32> = alive.into_iter().map(|(_, c)| c).collect();
+    current.sort_unstable();
+    (current, lost.into_iter().collect())
+}
+
+/// Face IDs surviving `steps`, and the source IDs lost on the way.
+pub fn translate_faces(ids: &[u32], steps: &[Step]) -> (Vec<u32>, Vec<u32>) {
+    follow(
+        ids,
+        steps,
+        |s| match s {
+            Step::Forward(p) => p.removed_faces.iter().map(|f| f.0).collect(),
+            Step::Backward(p) => p.created_faces.iter().map(|(f, _)| f.0).collect(),
+        },
+        |r| r.faces.iter().map(|f| f.map(|f| f.0)).collect(),
+    )
 }
 
 fn translate_vertices(ids: &[u32], steps: &[Step]) -> (Vec<u32>, Vec<u32>) {
-    let mut alive: BTreeSet<u32> = ids.iter().copied().collect();
-    let mut lost = BTreeSet::new();
-    for step in steps {
-        let gone: Vec<VertexId> = match step {
-            Step::Forward(p) => p.removed_vertices.clone(),
-            Step::Backward(p) => p.created_vertices.clone(),
-        };
-        for v in gone {
-            if alive.remove(&v.0) {
-                lost.insert(v.0);
-            }
-        }
-    }
-    (alive.into_iter().collect(), lost.into_iter().collect())
+    follow(
+        ids,
+        steps,
+        |s| match s {
+            Step::Forward(p) => p.removed_vertices.iter().map(|v| v.0).collect(),
+            Step::Backward(p) => p.created_vertices.iter().map(|v| v.0).collect(),
+        },
+        |r| r.vertices.iter().map(|v| v.map(|v| v.0)).collect(),
+    )
 }
 
 fn at(sel: &Selection, to: RevisionId, kind: SelectionKind, ids: Vec<u32>) -> Selection {

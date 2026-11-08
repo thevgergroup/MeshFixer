@@ -97,6 +97,21 @@ impl MeshEdit {
         Ok(id)
     }
 
+    /// Change a live face's vertices, keeping its ID (edge flips, welds).
+    pub fn set_face(&mut self, id: FaceId, tri: [u32; 3]) -> Result<(), GeometryError> {
+        if !self.is_face_live(id) {
+            return Err(GeometryError::NoSuchFace(id.0));
+        }
+        if let Some(&v) = tri.iter().find(|&&v| !self.is_vertex_live(VertexId(v))) {
+            return Err(GeometryError::NoSuchVertex(v));
+        }
+        self.faces.set(id.0 as usize, tri);
+        if id.0 < self.base_faces {
+            self.prov.modified_faces.push(id);
+        }
+        Ok(())
+    }
+
     pub fn move_vertex(&mut self, id: VertexId, p: [f64; 3]) -> Result<(), GeometryError> {
         if !self.is_vertex_live(id) {
             return Err(GeometryError::NoSuchVertex(id.0));
@@ -149,6 +164,11 @@ impl MeshEdit {
         let vertex_live = &self.vertex_live;
         self.prov.removed_faces.sort_unstable();
         self.prov.removed_vertices.sort_unstable();
+        self.prov
+            .modified_faces
+            .retain(|f| face_live.get(f.0 as usize));
+        self.prov.modified_faces.sort_unstable();
+        self.prov.modified_faces.dedup();
         self.prov
             .created_faces
             .retain(|(f, _)| face_live.get(f.0 as usize));

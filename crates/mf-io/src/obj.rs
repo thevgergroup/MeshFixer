@@ -193,7 +193,11 @@ mod verify_index_zero {
 
     #[test]
     fn verify_rejects_index_zero() {
-        let m = Mesh::new(vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], vec![[0, 1, 2]]).expect("valid");
+        let m = Mesh::new(
+            vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .expect("valid");
         let bad = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 0\n";
         assert!(verify(bad, &m).is_err());
     }

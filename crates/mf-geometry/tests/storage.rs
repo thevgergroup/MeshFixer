@@ -208,7 +208,10 @@ fn removing_a_vertex_created_in_the_same_edit_is_checked() {
     e.add_face([4, 5, v.0], Sources::default()).unwrap();
     e.remove_vertex(v).unwrap();
     assert!(
-        matches!(e.finish(), Err(mf_geometry::GeometryError::FaceUsesRemovedVertex { .. })),
+        matches!(
+            e.finish(),
+            Err(mf_geometry::GeometryError::FaceUsesRemovedVertex { .. })
+        ),
         "a live face still uses the removed vertex"
     );
 }
@@ -240,7 +243,10 @@ fn mixed_create_remove_sequences_never_leave_dangling_faces() {
         }
         if let Ok((out, _)) = e.finish() {
             for (_, t) in out.faces() {
-                assert!(t.iter().all(|&v| out.position(VertexId(v)).is_some()), "face uses a dead vertex");
+                assert!(
+                    t.iter().all(|&v| out.position(VertexId(v)).is_some()),
+                    "face uses a dead vertex"
+                );
             }
             let _ = out.compacted();
         }
@@ -266,6 +272,40 @@ fn edit_bookkeeping_is_not_quadratic() {
     let (_, prov) = e.finish().unwrap();
     let elapsed = start.elapsed();
     assert!(prov.created_faces.is_empty() && prov.created_vertices.is_empty());
-    assert_eq!(prov.moved_vertices.len(), m.vertex_slots().min(100_000) as usize);
-    assert!(elapsed.as_secs_f64() < 3.0, "edit bookkeeping took {elapsed:?}");
+    assert_eq!(
+        prov.moved_vertices.len(),
+        m.vertex_slots().min(100_000) as usize
+    );
+    assert!(
+        elapsed.as_secs_f64() < 3.0,
+        "edit bookkeeping took {elapsed:?}"
+    );
+}
+
+#[test]
+fn set_face_keeps_the_id_and_records_a_modification() {
+    let m = cube(1.0);
+    let mut e = m.edit();
+    e.set_face(FaceId(0), [0, 3, 2]).unwrap();
+    let (out, prov) = e.finish().unwrap();
+    assert_eq!(out.face(FaceId(0)), Some([0, 3, 2]));
+    assert_eq!(prov.modified_faces, vec![FaceId(0)]);
+    assert!(prov.removed_faces.is_empty() && prov.created_faces.is_empty());
+    let mut e = m.edit();
+    assert!(e.set_face(FaceId(99), [0, 1, 2]).is_err());
+    assert!(e.set_face(FaceId(1), [0, 1, 77]).is_err());
+}
+
+#[test]
+fn compaction_is_expressible_as_provenance() {
+    let m = cube(1.0);
+    let mut e = m.edit();
+    e.remove_face(FaceId(0)).unwrap();
+    let (tomb, _) = e.finish().unwrap();
+    let (compact, map) = tomb.compacted();
+    let prov = mf_geometry::Provenance::from_compaction(&map);
+    let remap = prov.remap.as_ref().unwrap();
+    assert_eq!(remap.faces[1], Some(FaceId(0)));
+    assert_eq!(remap.faces[0], None);
+    assert_eq!(compact.face(FaceId(0)), tomb.face(FaceId(1)));
 }

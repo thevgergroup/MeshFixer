@@ -6,7 +6,7 @@ use serde::Serialize;
 use crate::chunked::{Bits, Chunked};
 use crate::edit::MeshEdit;
 use crate::hash::ContentHash;
-use crate::ids::{FaceId, VertexId};
+use crate::ids::{FaceId, SlotRemap, VertexId};
 use crate::topology::Topology;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -45,11 +45,7 @@ impl Aabb {
 }
 
 /// Old-slot → new-slot maps produced by [`Mesh::compacted`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Compaction {
-    pub faces: Vec<Option<FaceId>>,
-    pub vertices: Vec<Option<VertexId>>,
-}
+pub type Compaction = SlotRemap;
 
 /// An immutable indexed triangle mesh (working representation, MF-GEO-001).
 ///

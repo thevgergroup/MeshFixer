@@ -17,6 +17,6 @@ pub use compare::{Equivalence, equivalent};
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect};
 pub use edit::MeshEdit;
 pub use hash::ContentHash;
-pub use ids::{FaceId, Provenance, Sources, VertexId};
+pub use ids::{FaceId, Provenance, SlotRemap, Sources, VertexId};
 pub use mesh::{Aabb, Compaction, GeometryError, Mesh};
 pub use topology::{BoundaryLoop, Topology};
