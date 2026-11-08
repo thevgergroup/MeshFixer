@@ -206,6 +206,7 @@ fn ten_revisions_cost_under_one_and_a_half_times_one() {
     let _ = current.topology(); // the current revision is analysed (as the UI does)
     let one = current.heap_bytes() + current.topology().heap_bytes();
     let all = s.history_bytes();
+    eprintln!("history: {all} B for 10 revisions vs {one} B for one ({:.2}×)", all as f64 / one as f64);
     assert!(
         (all as f64) < 1.5 * one as f64,
         "history {all} B vs one revision {one} B ({:.2}×)",
