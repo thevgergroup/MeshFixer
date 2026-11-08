@@ -14,7 +14,7 @@ jobs:
         include:
           # Linux is the required GPU environment: Mesa lavapipe (software
           # Vulkan) runs every render and GUI test, and skips fail the build.
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             require_gpu: "1"
           - os: macos-latest
             require_gpu: "0"
@@ -25,7 +25,7 @@ jobs:
       MF_REQUIRE_GPU: ${{ matrix.require_gpu }}
       MF_SKIP_LOG: ${{ github.workspace }}/skipped-tests.txt
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
@@ -47,7 +47,7 @@ jobs:
         if: always()
         shell: bash
         run: scripts/ci-test-summary.sh test-output.txt "$MF_SKIP_LOG"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: test-results-${{ matrix.os }}
@@ -59,11 +59,11 @@ jobs:
   evidence:
     # Durable milestone evidence: screenshots, sample repaired model,
     # diagnostics and benchmark numbers with machine info.
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       MF_REQUIRE_GPU: "1"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev mesa-vulkan-drivers
@@ -72,7 +72,7 @@ jobs:
         run: scripts/evidence.sh evidence
       - name: GUI workflow screenshots
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: milestone-evidence
           path: evidence/
@@ -84,7 +84,7 @@ jobs:
             --op mesh.remove_small_components --param max_triangles=100 \
             --save-log xos/session.mfx.log -o xos/linux-result.stl
           target/release/meshfixer replay xos/session.mfx.log
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: replay-fixture
           path: xos/
@@ -99,11 +99,11 @@ jobs:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p mf-cli
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: replay-fixture
           path: xos
@@ -115,9 +115,9 @@ jobs:
           { echo "### Cross-OS replay on ${RUNNER_OS}"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   deny:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
