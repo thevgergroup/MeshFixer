@@ -112,9 +112,9 @@ impl Mesh {
             max: first,
         };
         for p in &self.inner.positions {
-            for i in 0..3 {
-                bb.min[i] = bb.min[i].min(p[i]);
-                bb.max[i] = bb.max[i].max(p[i]);
+            for (i, &c) in p.iter().enumerate() {
+                bb.min[i] = bb.min[i].min(c);
+                bb.max[i] = bb.max[i].max(c);
             }
         }
         Some(bb)

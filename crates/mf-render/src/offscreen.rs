@@ -3,11 +3,11 @@
 use image::RgbaImage;
 use mf_geometry::Mesh;
 
-use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+pub use crate::target::BACKGROUND_RGBA;
+use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTarget};
 
-pub const BACKGROUND_RGBA: [u8; 4] = [38, 41, 46, 255];
-const COLOR: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// Offscreen renders use MSAA like the desktop view, so the same path is tested.
+const SAMPLES: u32 = 4;
 
 fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     let instance =
@@ -27,54 +27,25 @@ pub fn render_image(
     show_boundaries: bool,
 ) -> Result<RgbaImage, RenderError> {
     let (device, queue) = device()?;
-    let size = wgpu::Extent3d {
-        width,
-        height,
-        depth_or_array_layers: 1,
-    };
-    let texture = |format, usage, label| {
-        device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage,
-            view_formats: &[],
-        })
-    };
-    let color = texture(
-        COLOR,
-        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-        "mf offscreen color",
-    );
-    let depth = texture(
-        DEPTH,
-        wgpu::TextureUsages::RENDER_ATTACHMENT,
-        "mf offscreen depth",
-    );
-    let color_view = color.create_view(&Default::default());
-    let depth_view = depth.create_view(&Default::default());
-
-    let renderer = MeshRenderer::new(
-        &device,
-        RenderTargetFormat {
-            color: COLOR,
-            depth: DEPTH,
-            samples: 1,
-        },
-    );
+    let target = RenderTarget::new(&device, width, height, SAMPLES);
+    let renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
     let gpu = GpuMesh::upload(&device, mesh);
-    if let Some(bb) = mesh.bounding_box() {
-        renderer.prepare(
-            &queue,
-            &gpu,
-            &OrbitCamera::fit(&bb),
-            width as f32 / height as f32,
-        );
-    }
+    let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
+    let drawable = camera
+        .as_ref()
+        .filter(|_| !mesh.is_empty())
+        .map(|c| (&gpu, c));
+    target.draw(&device, &queue, &renderer, drawable, show_boundaries);
+    read_back(&device, &queue, &target)
+}
 
+/// Copy a target's resolved colour into an image.
+pub fn read_back(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    target: &RenderTarget,
+) -> Result<RgbaImage, RenderError> {
+    let (width, height) = (target.width, target.height);
     let row = width * 4;
     let padded =
         row.div_ceil(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT) * wgpu::COPY_BYTES_PER_ROW_ALIGNMENT;
@@ -84,45 +55,10 @@ pub fn render_image(
         usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
         mapped_at_creation: false,
     });
-
     let mut encoder = device.create_command_encoder(&Default::default());
-    {
-        let bg = BACKGROUND_RGBA.map(|c| c as f64 / 255.0);
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("mf offscreen"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &color_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color {
-                        r: bg[0],
-                        g: bg[1],
-                        b: bg[2],
-                        a: bg[3],
-                    }),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &depth_view,
-                depth_ops: Some(wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(1.0),
-                    store: wgpu::StoreOp::Store,
-                }),
-                stencil_ops: None,
-            }),
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
-        if !mesh.is_empty() {
-            renderer.paint(&mut pass, &gpu, show_boundaries);
-        }
-    }
     encoder.copy_texture_to_buffer(
         wgpu::TexelCopyTextureInfo {
-            texture: &color,
+            texture: target.texture(),
             mip_level: 0,
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
@@ -135,10 +71,13 @@ pub fn render_image(
                 rows_per_image: Some(height),
             },
         },
-        size,
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     queue.submit([encoder.finish()]);
-
     let (tx, rx) = std::sync::mpsc::channel();
     readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);

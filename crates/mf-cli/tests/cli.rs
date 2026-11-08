@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use std::path::Path;
 use std::process::{Command, Output};
 
@@ -119,4 +121,26 @@ fn render_writes_png() {
     assert!(out.status.success(), "{stderr}");
     let bytes = std::fs::read(&png).unwrap();
     assert_eq!(&bytes[1..4], b"PNG");
+}
+
+#[test]
+fn gen_fixture_damaged() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("d.stl");
+    let out = meshfixer(&[
+        "gen-fixture",
+        "damaged",
+        p.to_str().unwrap(),
+        "--triangles",
+        "20000",
+        "--seed",
+        "3",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let d = mf_geometry::inspect(&mf_io::read_path(&p).unwrap().mesh);
+    assert!(d.components > 1 && !d.boundary_loops.is_empty());
 }

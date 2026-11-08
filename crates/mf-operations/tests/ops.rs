@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use mf_fixtures::{cube, merge, tetrahedron, translated};

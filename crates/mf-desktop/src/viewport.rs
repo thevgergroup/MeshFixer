@@ -1,0 +1,173 @@
+//! 3D viewport. The scene renders into an `mf-render` [`RenderTarget`] that
+//! egui shows as an image, so the renderer is independent of egui's own
+//! render pass formats. It only re-renders when something changed.
+
+use std::sync::Arc;
+
+use eframe::egui;
+use eframe::egui_wgpu::RenderState;
+use mf_render::{GpuMesh, MeshRenderer, MeshVertices, OrbitCamera, RenderTarget};
+
+pub const MSAA_SAMPLES: u32 = 4;
+
+#[derive(Clone, Copy, PartialEq)]
+struct FrameKey {
+    camera: OrbitCamera,
+    show_boundaries: bool,
+    size: (u32, u32),
+}
+
+pub struct Viewport {
+    render_state: RenderState,
+    renderer: MeshRenderer,
+    target: Option<RenderTarget>,
+    texture: Option<egui::TextureId>,
+    uploaded: Option<(Arc<MeshVertices>, GpuMesh)>,
+    last_frame: Option<FrameKey>,
+    /// Frames actually rendered (for tests and the debug readout).
+    pub frames_rendered: u64,
+}
+
+impl Viewport {
+    pub fn new(render_state: RenderState) -> Viewport {
+        let renderer = MeshRenderer::new(&render_state.device, RenderTarget::format(MSAA_SAMPLES));
+        Viewport {
+            render_state,
+            renderer,
+            target: None,
+            texture: None,
+            uploaded: None,
+            last_frame: None,
+            frames_rendered: 0,
+        }
+    }
+
+    /// Draw the viewport into the remaining space and handle camera input.
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        camera: &mut Option<OrbitCamera>,
+        vertices: Option<&Arc<MeshVertices>>,
+        show_boundaries: bool,
+    ) {
+        let (rect, response) =
+            ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
+        let (Some(cam), Some(vertices)) = (camera.as_mut(), vertices) else {
+            ui.painter()
+                .rect_filled(rect, 0.0, egui::Color32::from_rgb(38, 41, 46));
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "Open a mesh with File > Open (STL or OBJ)",
+                egui::FontId::proportional(16.0),
+                egui::Color32::GRAY,
+            );
+            return;
+        };
+        handle_input(ui, &response, rect, cam);
+
+        let ppp = ui.ctx().pixels_per_point();
+        let size = (
+            (rect.width() * ppp).round().max(1.0) as u32,
+            (rect.height() * ppp).round().max(1.0) as u32,
+        );
+        let texture = self.render(*cam, vertices, show_boundaries, size);
+        ui.painter().image(
+            texture,
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        ui.painter().text(
+            rect.left_bottom() + egui::vec2(8.0, -8.0),
+            egui::Align2::LEFT_BOTTOM,
+            "drag: orbit · shift/right-drag: pan · scroll: zoom · F: fit",
+            egui::FontId::proportional(12.0),
+            egui::Color32::from_gray(140),
+        );
+    }
+
+    fn render(
+        &mut self,
+        camera: OrbitCamera,
+        vertices: &Arc<MeshVertices>,
+        show_boundaries: bool,
+        size: (u32, u32),
+    ) -> egui::TextureId {
+        let device = &self.render_state.device;
+        let mut dirty = false;
+
+        let resize = self
+            .target
+            .as_ref()
+            .is_none_or(|t| (t.width, t.height) != size);
+        if resize {
+            let target = RenderTarget::new(device, size.0, size.1, MSAA_SAMPLES);
+            let mut egui_renderer = self.render_state.renderer.write();
+            let id = match self.texture {
+                Some(id) => {
+                    egui_renderer.update_egui_texture_from_wgpu_texture(
+                        device,
+                        target.view(),
+                        wgpu::FilterMode::Linear,
+                        id,
+                    );
+                    id
+                }
+                None => egui_renderer.register_native_texture(
+                    device,
+                    target.view(),
+                    wgpu::FilterMode::Linear,
+                ),
+            };
+            self.texture = Some(id);
+            self.target = Some(target);
+            dirty = true;
+        }
+
+        if !matches!(&self.uploaded, Some((v, _)) if Arc::ptr_eq(v, vertices)) {
+            // Upload only. Vertex data was built on a worker thread.
+            self.uploaded = Some((vertices.clone(), GpuMesh::from_vertices(device, vertices)));
+            dirty = true;
+        }
+
+        let key = FrameKey {
+            camera,
+            show_boundaries,
+            size,
+        };
+        dirty |= self.last_frame != Some(key);
+
+        if dirty && let (Some(target), Some((_, gpu))) = (&self.target, &self.uploaded) {
+            target.draw(
+                device,
+                &self.render_state.queue,
+                &self.renderer,
+                Some((gpu, &camera)),
+                show_boundaries,
+            );
+            self.last_frame = Some(key);
+            self.frames_rendered += 1;
+        }
+        self.texture.unwrap_or_default()
+    }
+}
+
+fn handle_input(ui: &egui::Ui, response: &egui::Response, rect: egui::Rect, cam: &mut OrbitCamera) {
+    let delta = response.drag_delta();
+    let pan = response.dragged_by(egui::PointerButton::Secondary)
+        || response.dragged_by(egui::PointerButton::Middle)
+        || (response.dragged_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.shift));
+    if pan {
+        let h = rect.height().max(1.0) as f64;
+        cam.pan(delta.x as f64 / h, delta.y as f64 / h);
+    } else if response.dragged_by(egui::PointerButton::Primary) {
+        cam.orbit(delta.x as f64 * 0.01, delta.y as f64 * 0.01);
+    }
+    if response.hovered() {
+        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll != 0.0 {
+            cam.zoom((-scroll as f64 * 0.002).exp());
+        }
+    }
+}

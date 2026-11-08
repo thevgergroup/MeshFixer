@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use glam::{DVec3, DVec4};
 use mf_fixtures::{cube, cube_with_missing_face, translated};
 use mf_geometry::Mesh;
@@ -97,4 +99,19 @@ fn offscreen_empty_mesh_ok() {
         return;
     };
     assert!(img.pixels().all(|p| p.0 == offscreen::BACKGROUND_RGBA));
+}
+
+#[test]
+fn mesh_vertices_build_matches_helpers() {
+    let m = translated(&cube_with_missing_face(), [100.0, 0.0, 0.0]);
+    let v = mf_render::MeshVertices::build(&m);
+    let origin = DVec3::from(m.bounding_box().unwrap().center());
+    assert_eq!(v.origin, origin);
+    assert_eq!(v.triangle_count, 10);
+    assert_eq!(v.surface, surface_vertices(&m, origin));
+    assert_eq!(v.lines, boundary_line_vertices(&m, origin));
+    assert_eq!(
+        mf_render::MeshVertices::build(&Mesh::empty()).surface.len(),
+        0
+    );
 }

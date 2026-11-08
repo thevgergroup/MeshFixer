@@ -128,3 +128,106 @@ pub fn uv_sphere(rings: u32, segments: u32) -> Mesh {
     }
     Mesh::new(positions, triangles).expect("valid")
 }
+
+/// Controlled damage on a UV sphere, representative of scan output.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DamageSpec {
+    pub rings: u32,
+    pub segments: u32,
+    /// Holes punched by deleting faces within a small cap.
+    pub holes: u32,
+    /// Tiny tetrahedron islands floating just off the surface.
+    pub islands: u32,
+    /// Face corners split onto exact-duplicate vertices (unwelded seams).
+    pub unwelded: u32,
+    pub seed: u64,
+}
+
+impl DamageSpec {
+    /// Roughly `triangles` triangles, with damage scaled to match.
+    pub fn for_triangles(triangles: usize, seed: u64) -> DamageSpec {
+        // tris = 2·seg·(rings-1), with seg = 2·rings.
+        let rings = ((triangles as f64 / 4.0).sqrt().round() as u32).max(8);
+        DamageSpec {
+            rings,
+            segments: rings * 2,
+            holes: 12,
+            islands: 50,
+            unwelded: 200,
+            seed,
+        }
+    }
+}
+
+struct SplitMix(u64);
+
+impl SplitMix {
+    fn next(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+    fn unit(&mut self) -> f64 {
+        (self.next() >> 11) as f64 / (1u64 << 53) as f64
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n.max(1) as u64) as usize
+    }
+    fn direction(&mut self) -> [f64; 3] {
+        let z = self.unit() * 2.0 - 1.0;
+        let phi = self.unit() * std::f64::consts::TAU;
+        let r = (1.0 - z * z).sqrt();
+        [r * phi.cos(), r * phi.sin(), z]
+    }
+}
+
+/// Deterministic damaged sphere: holes, islands and unwelded corners.
+pub fn damaged_sphere(spec: &DamageSpec) -> Mesh {
+    let sphere = uv_sphere(spec.rings, spec.segments);
+    let mut rng = SplitMix(spec.seed);
+    let mut positions = sphere.positions().to_vec();
+    let centroid = |t: &[u32; 3]| {
+        let p = t.map(|i| positions[i as usize]);
+        let c = [0, 1, 2].map(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0);
+        let n = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt().max(1e-12);
+        c.map(|x| x / n)
+    };
+    let holes: Vec<[f64; 3]> = (0..spec.holes).map(|_| rng.direction()).collect();
+    let cos_radius = 0.12f64.cos();
+    let mut triangles: Vec<[u32; 3]> = sphere
+        .triangles()
+        .iter()
+        .filter(|t| {
+            let c = centroid(t);
+            !holes
+                .iter()
+                .any(|h| h[0] * c[0] + h[1] * c[1] + h[2] * c[2] > cos_radius)
+        })
+        .copied()
+        .collect();
+
+    for _ in 0..spec.unwelded {
+        if triangles.is_empty() {
+            break;
+        }
+        let f = rng.below(triangles.len());
+        let v = triangles[f][0];
+        positions.push(positions[v as usize]);
+        triangles[f][0] = positions.len() as u32 - 1;
+    }
+
+    let mut parts = vec![Mesh::new(positions, triangles).expect("valid")];
+    let tet = tetrahedron();
+    for _ in 0..spec.islands {
+        let d = rng.direction();
+        let scaled: Vec<[f64; 3]> = tet
+            .positions()
+            .iter()
+            .map(|p| [0, 1, 2].map(|k| p[k] * 0.01 + d[k] * 1.05))
+            .collect();
+        parts.push(Mesh::new(scaled, tet.triangles().to_vec()).expect("valid"));
+    }
+    merge(&parts)
+}

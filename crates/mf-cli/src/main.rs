@@ -50,6 +50,13 @@ fn output_arg() -> Arg {
         .help("Output mesh (.stl or .obj)")
 }
 
+fn output_positional() -> Arg {
+    Arg::new("output")
+        .required(true)
+        .value_parser(clap::value_parser!(PathBuf))
+        .help("Output mesh (.stl or .obj)")
+}
+
 fn cli() -> Command {
     let mut cmd = Command::new("meshfixer")
         .about("Inspect and repair meshes")
@@ -97,6 +104,29 @@ fn cli() -> Command {
                         .help("Don't draw boundary-loop overlays"),
                 ),
         );
+    cmd = cmd.subcommand(
+        Command::new("gen-fixture")
+            .about("Generate a deterministic test mesh")
+            .arg(
+                Arg::new("kind")
+                    .required(true)
+                    .value_parser(["damaged"])
+                    .help("damaged: UV sphere with holes, islands and unwelded corners"),
+            )
+            .arg(output_positional())
+            .arg(
+                Arg::new("triangles")
+                    .long("triangles")
+                    .default_value("1000000")
+                    .value_parser(clap::value_parser!(u64).range(100..=200_000_000)),
+            )
+            .arg(
+                Arg::new("seed")
+                    .long("seed")
+                    .default_value("1")
+                    .value_parser(clap::value_parser!(u64)),
+            ),
+    );
     for spec in mf_spec::builtin::specs()
         .iter()
         .filter(|s| !s.is_read_only())
@@ -180,6 +210,26 @@ fn render(m: &ArgMatches) -> Result<(), Failure> {
     Ok(())
 }
 
+fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
+    let output = m
+        .get_one::<PathBuf>("output")
+        .ok_or_else(|| Failure::Usage("missing output".into()))?;
+    let format = Format::from_path(output).ok_or_else(|| {
+        Failure::Usage(format!("unsupported output format: {}", output.display()))
+    })?;
+    let triangles = *m.get_one::<u64>("triangles").unwrap_or(&1_000_000) as usize;
+    let seed = *m.get_one::<u64>("seed").unwrap_or(&1);
+    let mesh =
+        mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(triangles, seed));
+    mf_io::write_path(&mesh, output, format)?;
+    eprintln!(
+        "wrote {} triangles to {}",
+        mesh.triangle_count(),
+        output.display()
+    );
+    Ok(())
+}
+
 fn run_operation(spec: &mf_spec::OperationSpec, m: &ArgMatches) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
@@ -217,6 +267,7 @@ fn main() -> ExitCode {
     let result = match matches.subcommand() {
         Some(("inspect", m)) => inspect(m),
         Some(("render", m)) => render(m),
+        Some(("gen-fixture", m)) => gen_fixture(m),
         Some((name, m)) => match mf_spec::builtin::specs()
             .iter()
             .find(|s| mf_spec::cli::subcommand_name(s) == name)

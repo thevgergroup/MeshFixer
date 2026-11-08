@@ -61,6 +61,32 @@ pub fn boundary_line_vertices(mesh: &Mesh, origin: DVec3) -> Vec<LineVertex> {
     out
 }
 
+/// CPU-side vertex data for one mesh revision. Building it is O(n), so
+/// frontends do it off the UI thread and only upload on the render thread
+/// (MF-RT-001).
+#[derive(Debug, Clone)]
+pub struct MeshVertices {
+    pub origin: DVec3,
+    pub triangle_count: usize,
+    pub surface: Vec<SurfaceVertex>,
+    pub lines: Vec<LineVertex>,
+}
+
+impl MeshVertices {
+    pub fn build(mesh: &Mesh) -> MeshVertices {
+        let origin = mesh
+            .bounding_box()
+            .map(|b| DVec3::from(b.center()))
+            .unwrap_or(DVec3::ZERO);
+        MeshVertices {
+            origin,
+            triangle_count: mesh.triangle_count(),
+            surface: surface_vertices(mesh, origin),
+            lines: boundary_line_vertices(mesh, origin),
+        }
+    }
+}
+
 /// GPU buffers for one mesh revision.
 pub struct GpuMesh {
     pub origin: DVec3,
@@ -73,12 +99,10 @@ pub struct GpuMesh {
 
 impl GpuMesh {
     pub fn upload(device: &wgpu::Device, mesh: &Mesh) -> GpuMesh {
-        let origin = mesh
-            .bounding_box()
-            .map(|b| DVec3::from(b.center()))
-            .unwrap_or(DVec3::ZERO);
-        let surface = surface_vertices(mesh, origin);
-        let lines = boundary_line_vertices(mesh, origin);
+        GpuMesh::from_vertices(device, &MeshVertices::build(mesh))
+    }
+
+    pub fn from_vertices(device: &wgpu::Device, v: &MeshVertices) -> GpuMesh {
         let buffer = |label: &str, bytes: &[u8]| {
             (!bytes.is_empty()).then(|| {
                 device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -89,12 +113,12 @@ impl GpuMesh {
             })
         };
         GpuMesh {
-            origin,
-            triangle_count: mesh.triangle_count(),
-            surface: buffer("mf surface", bytemuck::cast_slice(&surface)),
-            surface_vertices: surface.len() as u32,
-            lines: buffer("mf boundary lines", bytemuck::cast_slice(&lines)),
-            line_vertices: lines.len() as u32,
+            origin: v.origin,
+            triangle_count: v.triangle_count,
+            surface: buffer("mf surface", bytemuck::cast_slice(&v.surface)),
+            surface_vertices: v.surface.len() as u32,
+            lines: buffer("mf boundary lines", bytemuck::cast_slice(&v.lines)),
+            line_vertices: v.lines.len() as u32,
         }
     }
 }

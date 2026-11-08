@@ -8,10 +8,14 @@ mod camera;
 mod gpu_mesh;
 pub mod offscreen;
 mod renderer;
+mod target;
 
 pub use camera::OrbitCamera;
-pub use gpu_mesh::{GpuMesh, LineVertex, SurfaceVertex, boundary_line_vertices, surface_vertices};
+pub use gpu_mesh::{
+    GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices, surface_vertices,
+};
 pub use renderer::{MeshRenderer, RenderTargetFormat};
+pub use target::RenderTarget;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {

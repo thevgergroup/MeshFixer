@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use std::collections::BTreeMap;
 
 use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, Session};

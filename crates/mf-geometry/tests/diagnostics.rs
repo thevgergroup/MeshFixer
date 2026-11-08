@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use std::sync::Arc;
 
 use mf_fixtures::{

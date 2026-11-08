@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use mf_fixtures::{cube, translated};
 use mf_geometry::{GeometryError, Mesh};
 

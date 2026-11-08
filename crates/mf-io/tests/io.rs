@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
 use mf_fixtures::{cube, uv_sphere};
 use mf_geometry::Mesh;
 use mf_io::{Format, IoError, SourcePrecision, obj, read_path, stl, write_path};
