@@ -2383,6 +2383,7 @@ dependencies = [
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
+ "mf-metrics",
  "mf-render",
  "mf-spec",
  "serde_json",
@@ -2449,6 +2450,13 @@ dependencies = [
  "serde",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mf-metrics"
+version = "0.0.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

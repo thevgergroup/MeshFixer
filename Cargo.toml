@@ -16,6 +16,7 @@ mf-spec = { path = "crates/mf-spec" }
 mf-operations = { path = "crates/mf-operations" }
 mf-command = { path = "crates/mf-command" }
 mf-render = { path = "crates/mf-render" }
+mf-metrics = { path = "crates/mf-metrics" }
 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }

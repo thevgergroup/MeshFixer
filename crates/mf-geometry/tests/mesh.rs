@@ -66,3 +66,16 @@ fn clone_is_cheap_and_shares_hash() {
     assert_eq!(b.triangle_count(), 12);
     assert_eq!(b.vertex_count(), 8);
 }
+
+#[test]
+fn heap_bytes_cube() {
+    let m = cube(1.0);
+    let buffers = 8 * 24 + 12 * 12;
+    assert!(
+        m.heap_bytes() >= buffers && m.heap_bytes() < buffers + 512,
+        "{}",
+        m.heap_bytes()
+    );
+    let t = m.topology();
+    assert!(t.heap_bytes() >= 12 * 4, "components hold every face id");
+}

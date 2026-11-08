@@ -11,6 +11,43 @@ use std::process::ExitCode;
 use clap::{Arg, ArgMatches, Command};
 use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, Session};
 use mf_io::{Format, IoError};
+use mf_metrics::{CountingAlloc, Phase, measure};
+
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
+
+/// Per-run measurements written by `--metrics` (MF-RT-005, MF-ISSUE-013).
+#[derive(Default)]
+struct Metrics {
+    phases: Vec<Phase>,
+    mesh_bytes: u64,
+    topology_bytes: u64,
+}
+
+impl Metrics {
+    fn record<R>(&mut self, name: &str, f: impl FnOnce() -> R) -> R {
+        let (r, phase) = measure(name, f);
+        self.phases.push(phase);
+        r
+    }
+
+    fn structures(&mut self, mesh: &mf_geometry::Mesh) {
+        self.mesh_bytes = mesh.heap_bytes();
+        self.topology_bytes = mesh.topology().heap_bytes();
+    }
+
+    fn write(&self, path: &Path) -> Result<(), Failure> {
+        let json = serde_json::json!({
+            "phases": self.phases,
+            "structures": { "mesh": self.mesh_bytes, "topology": self.topology_bytes },
+            "peak_heap": mf_metrics::peak_bytes_since_start(),
+            "allocator_installed": mf_metrics::is_installed(),
+        });
+        let text =
+            serde_json::to_string_pretty(&json).map_err(|e| Failure::Runtime(e.to_string()))?;
+        std::fs::write(path, text).map_err(|e| Failure::Runtime(format!("writing metrics: {e}")))
+    }
+}
 
 enum Failure {
     Usage(String),
@@ -62,6 +99,13 @@ fn cli() -> Command {
         .about("Inspect and repair meshes")
         .version(env!("CARGO_PKG_VERSION"))
         .subcommand_required(true)
+        .arg(
+            Arg::new("metrics")
+                .long("metrics")
+                .global(true)
+                .value_parser(clap::value_parser!(PathBuf))
+                .help("Write timing and memory measurements as JSON to this path"),
+        )
         .subcommand(
             Command::new("inspect")
                 .about("Report mesh diagnostics")
@@ -140,8 +184,8 @@ fn cli() -> Command {
     cmd
 }
 
-fn open(path: &Path) -> Result<(Session, ObjectId), Failure> {
-    let imported = mf_io::read_path(path)?;
+fn open(path: &Path, metrics: &mut Metrics) -> Result<(Session, ObjectId), Failure> {
+    let imported = metrics.record("import", || mf_io::read_path(path))?;
     for w in &imported.warnings {
         eprintln!("warning: {w}");
     }
@@ -155,11 +199,16 @@ fn open(path: &Path) -> Result<(Session, ObjectId), Failure> {
     Ok((session, id))
 }
 
-fn inspect(m: &ArgMatches) -> Result<(), Failure> {
+fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
     let path = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let (mut session, id) = open(path)?;
+    let (mut session, id) = open(path, metrics)?;
+    if let Some(object) = session.document().object(id) {
+        let mesh = object.mesh.clone();
+        metrics.record("topology", || mesh.topology());
+        metrics.structures(&mesh);
+    }
     let inv = Invocation {
         op_id: "mesh.inspect".into(),
         target: id,
@@ -230,7 +279,11 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
     Ok(())
 }
 
-fn run_operation(spec: &mf_spec::OperationSpec, m: &ArgMatches) -> Result<(), Failure> {
+fn run_operation(
+    spec: &mf_spec::OperationSpec,
+    m: &ArgMatches,
+    metrics: &mut Metrics,
+) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
@@ -245,11 +298,13 @@ fn run_operation(spec: &mf_spec::OperationSpec, m: &ArgMatches) -> Result<(), Fa
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
-    let (mut session, id) = open(input)?;
-    let outcome = session.execute(Invocation {
-        op_id: spec.id.clone(),
-        target: id,
-        raw_params,
+    let (mut session, id) = open(input, metrics)?;
+    let outcome = metrics.record("operation", || {
+        session.execute(Invocation {
+            op_id: spec.id.clone(),
+            target: id,
+            raw_params,
+        })
     })?;
     if let CommitOutcome::NewRevision { report } = outcome {
         eprintln!("{}: {report}", spec.id);
@@ -258,25 +313,36 @@ fn run_operation(spec: &mf_spec::OperationSpec, m: &ArgMatches) -> Result<(), Fa
         .document()
         .object(id)
         .ok_or_else(|| Failure::Runtime("object disappeared".into()))?;
-    mf_io::write_path(&object.mesh, output, format)?;
+    metrics.structures(&object.mesh);
+    metrics.record("export", || mf_io::write_path(&object.mesh, output, format))?;
     Ok(())
 }
 
 fn main() -> ExitCode {
     let matches = cli().get_matches();
+    let mut metrics = Metrics::default();
     let result = match matches.subcommand() {
-        Some(("inspect", m)) => inspect(m),
+        Some(("inspect", m)) => inspect(m, &mut metrics),
         Some(("render", m)) => render(m),
         Some(("gen-fixture", m)) => gen_fixture(m),
         Some((name, m)) => match mf_spec::builtin::specs()
             .iter()
             .find(|s| mf_spec::cli::subcommand_name(s) == name)
         {
-            Some(spec) => run_operation(spec, m),
+            Some(spec) => run_operation(spec, m, &mut metrics),
             None => Err(Failure::Usage(format!("unknown command '{name}'"))),
         },
         None => Err(Failure::Usage("no command given".into())),
     };
+    let result = result.and_then(|()| {
+        let path = matches
+            .subcommand()
+            .and_then(|(_, m)| m.get_one::<PathBuf>("metrics").cloned());
+        match path {
+            Some(p) => metrics.write(&p),
+            None => Ok(()),
+        }
+    });
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Usage(msg)) => {

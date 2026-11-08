@@ -66,6 +66,22 @@ struct HalfEdge {
 }
 
 impl Topology {
+    /// Heap bytes retained by this topology.
+    pub fn heap_bytes(&self) -> u64 {
+        let comps: usize = self
+            .components
+            .iter()
+            .map(|c| c.capacity() * 4 + std::mem::size_of::<Vec<u32>>())
+            .sum();
+        let loops: usize = self
+            .boundary_loops
+            .iter()
+            .map(|l| l.vertices.capacity() * 4 + std::mem::size_of::<BoundaryLoop>())
+            .sum();
+        (std::mem::size_of::<Topology>() + comps + loops + self.non_manifold_edges.capacity() * 8)
+            as u64
+    }
+
     pub fn compute(vertex_count: usize, triangles: &[[u32; 3]]) -> Topology {
         // Faces with a repeated index (collapsed onto an edge or point) have
         // no area and no well-defined edges. They're reported as degenerate

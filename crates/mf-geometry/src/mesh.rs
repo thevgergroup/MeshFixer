@@ -149,6 +149,13 @@ impl Mesh {
             .clone()
     }
 
+    /// Heap bytes owned by the mesh buffers (excludes cached topology).
+    pub fn heap_bytes(&self) -> u64 {
+        (std::mem::size_of::<Inner>()
+            + self.inner.positions.capacity() * std::mem::size_of::<[f64; 3]>()
+            + self.inner.triangles.capacity() * std::mem::size_of::<[u32; 3]>()) as u64
+    }
+
     /// True if both handles point at the same underlying storage.
     pub fn ptr_eq(a: &Mesh, b: &Mesh) -> bool {
         Arc::ptr_eq(&a.inner, &b.inner)

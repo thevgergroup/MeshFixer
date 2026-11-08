@@ -144,3 +144,33 @@ fn gen_fixture_damaged() {
     let d = mf_geometry::inspect(&mf_io::read_path(&p).unwrap().mesh);
     assert!(d.components > 1 && !d.boundary_loops.is_empty());
 }
+
+#[test]
+fn metrics_json_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let metrics = dir.path().join("m.json");
+    let out = meshfixer(&[
+        "inspect",
+        &damaged(dir.path()),
+        "--json",
+        "--metrics",
+        metrics.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&metrics).unwrap()).unwrap();
+    let phases: Vec<&str> = v["phases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(phases, ["import", "topology"]);
+    assert!(v["phases"][0]["peak_bytes"].as_u64().unwrap() > 0);
+    assert!(v["structures"]["mesh"].as_u64().unwrap() > 0);
+    assert!(v["structures"]["topology"].as_u64().unwrap() > 0);
+    assert!(v["peak_heap"].as_u64().unwrap() > 0);
+}

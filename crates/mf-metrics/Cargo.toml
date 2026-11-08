@@ -1,0 +1,16 @@
+[package]
+name = "mf-metrics"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# The global allocator needs `unsafe`; it's confined to alloc.rs.
+[lints.rust]
+unsafe_code = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+
+[dependencies]
+serde.workspace = true
