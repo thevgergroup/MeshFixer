@@ -8,7 +8,7 @@ mod hash;
 mod mesh;
 mod topology;
 
-pub use diagnostics::{Diagnostics, LoopSummary, inspect};
+pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect};
 pub use hash::ContentHash;
 pub use mesh::{Aabb, GeometryError, Mesh};
 pub use topology::{BoundaryLoop, Topology};

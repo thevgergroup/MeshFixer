@@ -140,3 +140,32 @@ fn collapsed_triangle_does_not_break_manifoldness() {
     assert!(d.is_closed && d.is_manifold);
     assert!(d.signed_volume.is_some());
 }
+
+#[test]
+fn volume_status_explains_missing_volume() {
+    use mf_geometry::VolumeStatus;
+    assert_eq!(inspect(&cube(1.0)).volume_status, VolumeStatus::Ok);
+    assert_eq!(
+        inspect(&cube_with_missing_face()).volume_status,
+        VolumeStatus::Open
+    );
+    assert_eq!(
+        inspect(&flipped_tetrahedron()).volume_status,
+        VolumeStatus::InconsistentOrientation
+    );
+    assert_eq!(inspect(&Mesh::empty()).volume_status, VolumeStatus::Empty);
+    let fin = Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.5, 1.0, 0.0],
+            [0.5, -1.0, 0.0],
+            [0.5, 0.0, 1.0],
+        ],
+        vec![[0, 1, 2], [1, 0, 3], [0, 1, 4]],
+    )
+    .unwrap();
+    assert_eq!(inspect(&fin).volume_status, VolumeStatus::NonManifold);
+    let v = serde_json::to_value(inspect(&flipped_tetrahedron())).unwrap();
+    assert_eq!(v["volume_status"], "inconsistent_orientation");
+}

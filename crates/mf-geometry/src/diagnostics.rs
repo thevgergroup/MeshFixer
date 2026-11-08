@@ -12,6 +12,18 @@ pub struct LoopSummary {
     pub centroid: [f64; 3],
 }
 
+/// Why `signed_volume` is or isn't available. Each case maps to a different
+/// repair: fill holes, fix non-manifold geometry, or reorient faces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VolumeStatus {
+    Ok,
+    Empty,
+    NonManifold,
+    Open,
+    InconsistentOrientation,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Diagnostics {
     pub triangle_count: usize,
@@ -30,6 +42,7 @@ pub struct Diagnostics {
     pub surface_area: f64,
     /// Only reported for closed, manifold, consistently oriented meshes.
     pub signed_volume: Option<f64>,
+    pub volume_status: VolumeStatus,
     pub is_closed: bool,
     pub is_manifold: bool,
 }
@@ -104,8 +117,18 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
 
     let is_closed = !mesh.is_empty() && topo.boundary_edges == 0;
     let is_manifold = topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0;
-    let signed_volume =
-        (is_closed && is_manifold && topo.inconsistent_edges == 0).then_some(volume6 / 6.0);
+    let volume_status = if mesh.is_empty() {
+        VolumeStatus::Empty
+    } else if !is_manifold {
+        VolumeStatus::NonManifold
+    } else if !is_closed {
+        VolumeStatus::Open
+    } else if topo.inconsistent_edges > 0 {
+        VolumeStatus::InconsistentOrientation
+    } else {
+        VolumeStatus::Ok
+    };
+    let signed_volume = (volume_status == VolumeStatus::Ok).then_some(volume6 / 6.0);
 
     Diagnostics {
         triangle_count: mesh.triangle_count(),
@@ -122,6 +145,7 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         bounding_box: bbox,
         surface_area,
         signed_volume,
+        volume_status,
         is_closed,
         is_manifold,
     }
