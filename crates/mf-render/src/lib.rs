@@ -18,7 +18,7 @@ pub use gpu_mesh::{
 pub use renderer::{MeshRenderer, RenderTargetFormat};
 pub use target::RenderTarget;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum RenderError {
     #[error("no GPU adapter is available")]
     NoAdapter,

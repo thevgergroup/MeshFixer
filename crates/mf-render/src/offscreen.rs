@@ -9,7 +9,7 @@ use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTarget};
 /// Offscreen renders use MSAA like the desktop view, so the same path is tested.
 const SAMPLES: u32 = 4;
 
-fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
+fn create_device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
     let instance =
         wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle_from_env());
     let adapter =
@@ -17,6 +17,16 @@ fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
             .map_err(|_| RenderError::NoAdapter)?;
     pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor::default()))
         .map_err(|e| RenderError::Device(e.to_string()))
+}
+
+/// One headless device per process, created on first use and shared by all
+/// offscreen renders. Creating and dropping devices concurrently crashes
+/// Mesa's lavapipe Vulkan driver (reproduced in CI: 3/15 runs segfaulted with
+/// per-call devices); a wgpu device is safe to share across threads.
+fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
+    static DEVICE: std::sync::OnceLock<Result<(wgpu::Device, wgpu::Queue), RenderError>> =
+        std::sync::OnceLock::new();
+    DEVICE.get_or_init(create_device).clone()
 }
 
 /// True if a GPU adapter can be created (used to gate GPU tests).
