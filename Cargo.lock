@@ -987,6 +987,15 @@ version = "0.0.1"
 [[package]]
 name = "mf-command"
 version = "0.0.1"
+dependencies = [
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-operations",
+ "mf-spec",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "mf-desktop"
