@@ -18,7 +18,7 @@ use mf_render::MeshVertices;
 
 pub enum Message {
     Imported(Result<Imported, IoError>, String),
-    Completed(Result<Completed, CommandError>),
+    Completed(Box<Result<Completed, CommandError>>),
     Analyzed { mesh: Mesh, analysis: Analysis },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
@@ -50,7 +50,7 @@ pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) 
 }
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
-    spawn(tx, ctx, move || Message::Completed(prepared.run()));
+    spawn(tx, ctx, move || Message::Completed(Box::new(prepared.run())));
 }
 
 /// Diagnostics and render vertices for one revision (O(n), so off the UI thread).

@@ -243,7 +243,7 @@ impl MeshFixerApp {
             }
             Message::Completed(result) => {
                 self.busy = None;
-                match result.and_then(|c| self.session.commit(c)) {
+                match (*result).and_then(|c| self.session.commit(c)) {
                     Ok(CommitOutcome::NewRevision { report })
                     | Ok(CommitOutcome::Report(report)) => {
                         self.status = Some(report.to_string());
