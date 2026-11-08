@@ -199,3 +199,50 @@ fn removed_vertices_are_not_exported_or_counted() {
     assert_eq!(prov.removed_vertices, vec![extra]);
     assert_eq!(out.to_arrays().0.len(), 8);
 }
+
+#[test]
+fn removing_a_vertex_created_in_the_same_edit_is_checked() {
+    let m = cube(1.0);
+    let mut e = m.edit();
+    let v = e.add_vertex([0.5, 0.5, 2.0]);
+    e.add_face([4, 5, v.0], Sources::default()).unwrap();
+    e.remove_vertex(v).unwrap();
+    assert!(
+        matches!(e.finish(), Err(mf_geometry::GeometryError::FaceUsesRemovedVertex { .. })),
+        "a live face still uses the removed vertex"
+    );
+}
+
+#[test]
+fn mixed_create_remove_sequences_never_leave_dangling_faces() {
+    let base = cube(1.0);
+    let mut seed = 99u64;
+    let mut next = |n: u64| {
+        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+        (seed >> 33) % n
+    };
+    for _ in 0..200 {
+        let mut e = base.edit();
+        let mut mine = Vec::new();
+        for _ in 0..next(6) + 1 {
+            match next(3) {
+                0 => mine.push(e.add_vertex([next(5) as f64, 1.0, 2.0])),
+                1 if !mine.is_empty() => {
+                    let v = mine[next(mine.len() as u64) as usize];
+                    let _ = e.add_face([0, 1, v.0], Sources::default());
+                }
+                _ if !mine.is_empty() => {
+                    let v = mine[next(mine.len() as u64) as usize];
+                    let _ = e.remove_vertex(v);
+                }
+                _ => {}
+            }
+        }
+        if let Ok((out, _)) = e.finish() {
+            for (_, t) in out.faces() {
+                assert!(t.iter().all(|&v| out.position(VertexId(v)).is_some()), "face uses a dead vertex");
+            }
+            let _ = out.compacted();
+        }
+    }
+}

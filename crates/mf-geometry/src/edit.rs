@@ -17,6 +17,10 @@ pub struct MeshEdit {
     face_count: usize,
     vertex_count: usize,
     prov: Provenance,
+    /// Any vertex removed in this edit, including one it created. Drives the
+    /// referential-integrity check in `finish` (provenance alone misses
+    /// created-then-removed vertices).
+    vertex_removed: bool,
 }
 
 impl MeshEdit {
@@ -32,6 +36,7 @@ impl MeshEdit {
             face_count: inner.face_count,
             vertex_count: inner.vertex_count,
             prov: Provenance::default(),
+            vertex_removed: false,
         }
     }
 
@@ -64,6 +69,7 @@ impl MeshEdit {
         }
         self.vertex_live.set(id.0 as usize, false);
         self.vertex_count -= 1;
+        self.vertex_removed = true;
         if id.0 >= self.base_vertices {
             self.prov.created_vertices.retain(|v| *v != id);
         } else {
@@ -124,7 +130,7 @@ impl MeshEdit {
                 });
             }
         }
-        if !self.prov.removed_vertices.is_empty() {
+        if self.vertex_removed {
             // Linear check, only when vertices were removed.
             for (i, tri) in self.faces.iter().enumerate() {
                 if !self.face_live.get(i) {

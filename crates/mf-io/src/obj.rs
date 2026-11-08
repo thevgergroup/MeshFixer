@@ -140,7 +140,9 @@ pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
                         .next()
                         .and_then(|t| t.parse().ok())
                         .ok_or_else(|| format!("line {}: bad face", i + 1))?;
-                    if got != index[v as usize] {
+                    // 0 is never a valid OBJ index (1-based), even if a
+                    // tombstoned slot would map to it.
+                    if got == 0 || got != index[v as usize] {
                         return Err(format!(
                             "line {}: face index {got} != {}",
                             i + 1,
@@ -182,5 +184,17 @@ mod tests {
         assert!(verify(&text.replace("f 1 2 3", "f 1 3 2"), &tri()).is_err());
         let truncated: String = text.lines().take(3).map(|l| format!("{l}\n")).collect();
         assert!(verify(&truncated, &tri()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod verify_index_zero {
+    use super::*;
+
+    #[test]
+    fn verify_rejects_index_zero() {
+        let m = Mesh::new(vec![[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], vec![[0, 1, 2]]).expect("valid");
+        let bad = "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 0\n";
+        assert!(verify(bad, &m).is_err());
     }
 }
