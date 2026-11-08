@@ -17,6 +17,8 @@ mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
 mf-command.workspace = true
+mf-render.workspace = true
+image.workspace = true
 clap.workspace = true
 serde_json.workspace = true
 

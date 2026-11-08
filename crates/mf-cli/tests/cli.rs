@@ -96,3 +96,27 @@ fn missing_file_exit_code_1() {
     let out = meshfixer(&["inspect", "/nonexistent/file.stl"]);
     assert_eq!(out.status.code(), Some(1));
 }
+
+#[test]
+fn render_writes_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("out.png");
+    let out = meshfixer(&[
+        "render",
+        &damaged(dir.path()),
+        "-o",
+        png.to_str().unwrap(),
+        "--width",
+        "80",
+        "--height",
+        "60",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("no GPU adapter") {
+        eprintln!("SKIPPED: no GPU adapter available");
+        return;
+    }
+    assert!(out.status.success(), "{stderr}");
+    let bytes = std::fs::read(&png).unwrap();
+    assert_eq!(&bytes[1..4], b"PNG");
+}

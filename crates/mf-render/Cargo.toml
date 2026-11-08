@@ -5,7 +5,14 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
-[lints]
-workspace = true
-
 [dependencies]
+mf-geometry.workspace = true
+wgpu.workspace = true
+glam.workspace = true
+bytemuck.workspace = true
+image.workspace = true
+pollster.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mf-fixtures.workspace = true

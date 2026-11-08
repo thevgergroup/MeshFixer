@@ -65,6 +65,37 @@ fn cli() -> Command {
                         .action(clap::ArgAction::SetTrue)
                         .help("Print diagnostics as JSON"),
                 ),
+        )
+        .subcommand(
+            Command::new("render")
+                .about("Render a mesh to a PNG image without opening a window")
+                .arg(input_arg())
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Output PNG"),
+                )
+                .arg(
+                    Arg::new("width")
+                        .long("width")
+                        .default_value("1024")
+                        .value_parser(clap::value_parser!(u32).range(1..=16384)),
+                )
+                .arg(
+                    Arg::new("height")
+                        .long("height")
+                        .default_value("768")
+                        .value_parser(clap::value_parser!(u32).range(1..=16384)),
+                )
+                .arg(
+                    Arg::new("no-boundaries")
+                        .long("no-boundaries")
+                        .action(clap::ArgAction::SetTrue)
+                        .help("Don't draw boundary-loop overlays"),
+                ),
         );
     for spec in mf_spec::builtin::specs()
         .iter()
@@ -126,6 +157,29 @@ fn inspect(m: &ArgMatches) -> Result<(), Failure> {
     Ok(())
 }
 
+fn render(m: &ArgMatches) -> Result<(), Failure> {
+    let input = m
+        .get_one::<PathBuf>("input")
+        .ok_or_else(|| Failure::Usage("missing input".into()))?;
+    let output = m
+        .get_one::<PathBuf>("output")
+        .ok_or_else(|| Failure::Usage("missing output".into()))?;
+    let width = *m.get_one::<u32>("width").unwrap_or(&1024);
+    let height = *m.get_one::<u32>("height").unwrap_or(&768);
+    let imported = mf_io::read_path(input)?;
+    let image = mf_render::offscreen::render_image(
+        &imported.mesh,
+        width,
+        height,
+        !m.get_flag("no-boundaries"),
+    )
+    .map_err(|e| Failure::Runtime(e.to_string()))?;
+    image
+        .save_with_format(output, image::ImageFormat::Png)
+        .map_err(|e| Failure::Runtime(e.to_string()))?;
+    Ok(())
+}
+
 fn run_operation(spec: &mf_spec::OperationSpec, m: &ArgMatches) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
@@ -162,6 +216,7 @@ fn main() -> ExitCode {
     let matches = cli().get_matches();
     let result = match matches.subcommand() {
         Some(("inspect", m)) => inspect(m),
+        Some(("render", m)) => render(m),
         Some((name, m)) => match mf_spec::builtin::specs()
             .iter()
             .find(|s| mf_spec::cli::subcommand_name(s) == name)

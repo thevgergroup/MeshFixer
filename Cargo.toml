@@ -24,6 +24,7 @@ serde-saphyr = "2.1"
 clap = { version = "4.6", features = ["string"] }
 thiserror = "2"
 glam = "0.30"
+wgpu = "30"
 bytemuck = { version = "1", features = ["derive"] }
 image = { version = "0.25", default-features = false, features = ["png"] }
 pollster = "0.4"
