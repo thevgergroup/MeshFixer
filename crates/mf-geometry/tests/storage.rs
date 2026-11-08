@@ -349,11 +349,38 @@ fn sources_must_be_faces_of_the_input_revision() {
     let mut e = m.edit();
     let v = e.add_vertex([0.5, 0.5, 2.0]);
     let a = e.add_face([4, 5, v.0], Sources::default()).unwrap();
-    let err = e.add_face([5, 6, v.0], Sources { faces: vec![a], loops: vec![] });
-    assert!(matches!(err, Err(mf_geometry::GeometryError::InvalidSource(f)) if f == a.0), "{err:?}");
-    let err = e.add_face([5, 6, v.0], Sources { faces: vec![FaceId(500)], loops: vec![] });
-    assert!(matches!(err, Err(mf_geometry::GeometryError::InvalidSource(500))), "{err:?}");
+    let err = e.add_face(
+        [5, 6, v.0],
+        Sources {
+            faces: vec![a],
+            loops: vec![],
+        },
+    );
+    assert!(
+        matches!(err, Err(mf_geometry::GeometryError::InvalidSource(f)) if f == a.0),
+        "{err:?}"
+    );
+    let err = e.add_face(
+        [5, 6, v.0],
+        Sources {
+            faces: vec![FaceId(500)],
+            loops: vec![],
+        },
+    );
+    assert!(
+        matches!(err, Err(mf_geometry::GeometryError::InvalidSource(500))),
+        "{err:?}"
+    );
     // Removed input faces are valid sources (retriangulation).
     e.remove_face(FaceId(2)).unwrap();
-    assert!(e.add_face([5, 6, v.0], Sources { faces: vec![FaceId(2)], loops: vec![] }).is_ok());
+    assert!(
+        e.add_face(
+            [5, 6, v.0],
+            Sources {
+                faces: vec![FaceId(2)],
+                loops: vec![]
+            }
+        )
+        .is_ok()
+    );
 }
