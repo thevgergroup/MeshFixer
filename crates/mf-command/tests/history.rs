@@ -172,3 +172,11 @@ fn translate_before_import_reports_missing_object() {
     );
     let _ = first;
 }
+
+#[test]
+fn record_floats_parse_back_exactly() {
+    // 0.171417 parsed back as 0.17141699999999999 without serde_json's
+    // `float_roundtrip` feature (seen as a flaky record round-trip).
+    let back: f64 = serde_json::from_str(&serde_json::to_string(&0.171417_f64).unwrap()).unwrap();
+    assert_eq!(back.to_bits(), 0.171417_f64.to_bits());
+}

@@ -35,11 +35,15 @@ pub struct CommandRecord {
     pub input_revision: RevisionId,
     /// Content hash (hex) of the target's geometry before the command.
     pub input_hash: String,
+    /// Structure hash (hex): everything but positions (MF-CMD-004).
+    pub input_structure_hash: String,
     pub output_revision: RevisionId,
     pub output_hash: String,
-    /// Geometry summary of the output, used to classify a replay whose
-    /// hash differs as `Equivalent` or `Mismatch` (MF-CMD-004).
-    pub output_summary: GeometrySummary,
+    pub output_structure_hash: String,
+    /// Extent and area of the output, used when a replay's structure matches
+    /// but positions differ. Computed when the log is saved, not on commit,
+    /// so commits stay cheap on large meshes.
+    pub output_summary: Option<GeometrySummary>,
     /// Commands that produced this command's inputs (empty if an import did).
     pub depends_on: Vec<CommandId>,
     pub affected_objects: Vec<ObjectId>,
@@ -93,9 +97,9 @@ impl GeometrySummary {
         }
     }
 
-    /// Largest coordinate or relative-area deviation, if the invariants
-    /// match exactly; `None` if they don't.
-    pub fn deviation(&self, other: &GeometrySummary) -> Option<f64> {
+    /// `(largest bounding-box coordinate difference, relative area
+    /// difference)` if the invariants match exactly; `None` if they don't.
+    pub fn deviation(&self, other: &GeometrySummary) -> Option<(f64, f64)> {
         let same = self.faces == other.faces
             && self.vertices == other.vertices
             && self.components == other.components
@@ -117,7 +121,7 @@ impl GeometrySummary {
             (None, None) => 0.0,
             _ => return None,
         };
-        Some(bbox.max(area))
+        Some((bbox, area))
     }
 
     /// Scale for tolerances: the bounding-box diagonal.

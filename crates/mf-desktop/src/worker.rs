@@ -50,7 +50,9 @@ pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) 
 }
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
-    spawn(tx, ctx, move || Message::Completed(Box::new(prepared.run())));
+    spawn(tx, ctx, move || {
+        Message::Completed(Box::new(prepared.run()))
+    });
 }
 
 /// Diagnostics and render vertices for one revision (O(n), so off the UI thread).

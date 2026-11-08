@@ -13,8 +13,8 @@ use crate::mesh::Mesh;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct Equivalence {
-    /// Face count, components, boundary loops, Euler characteristic and
-    /// manifoldness all match.
+    /// Face count, components, boundary loops, Euler characteristic,
+    /// manifoldness and orientation consistency all match.
     pub invariants_match: bool,
     /// Symmetric maximum nearest-vertex distance, when it is within the
     /// tolerance. `None` means some vertex has no counterpart within it.
@@ -22,7 +22,7 @@ pub struct Equivalence {
     pub within: bool,
 }
 
-fn invariants(m: &Mesh) -> (usize, usize, usize, i64, bool) {
+fn invariants(m: &Mesh) -> (usize, usize, usize, i64, bool, usize) {
     let d = inspect(m);
     let euler = m.vertex_count() as i64 - m.topology().edge_count as i64 + m.face_count() as i64;
     (
@@ -31,6 +31,7 @@ fn invariants(m: &Mesh) -> (usize, usize, usize, i64, bool) {
         d.boundary_loops.len(),
         euler,
         d.is_manifold,
+        d.inconsistent_orientation_edges,
     )
 }
 

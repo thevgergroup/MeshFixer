@@ -2,7 +2,74 @@
 //! (MF-DOC-002, ADR-0001). Revisions share every chunk they didn't touch.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+
+static CHUNK_HASHES: AtomicU64 = AtomicU64::new(0);
+
+/// Number of chunk hashes computed so far in this process (diagnostics and
+/// tests: proves a revision rehashes only the chunks it copied).
+pub fn chunk_hashes_computed() -> u64 {
+    CHUNK_HASHES.load(Ordering::Relaxed)
+}
+
+/// Canonical little-endian bytes of a stored element.
+pub trait ChunkBytes {
+    fn hash_into(&self, h: &mut blake3::Hasher);
+}
+
+impl ChunkBytes for [f64; 3] {
+    fn hash_into(&self, h: &mut blake3::Hasher) {
+        for c in self {
+            h.update(&c.to_le_bytes());
+        }
+    }
+}
+
+impl ChunkBytes for [u32; 3] {
+    fn hash_into(&self, h: &mut blake3::Hasher) {
+        for c in self {
+            h.update(&c.to_le_bytes());
+        }
+    }
+}
+
+impl ChunkBytes for u64 {
+    fn hash_into(&self, h: &mut blake3::Hasher) {
+        h.update(&self.to_le_bytes());
+    }
+}
+
+/// One chunk of elements plus its cached hash. Cloning (copy-on-write)
+/// starts with an empty cache, so a copied chunk can never carry a stale hash.
+pub struct Chunk<T> {
+    data: Vec<T>,
+    hash: OnceLock<[u8; 32]>,
+}
+
+impl<T: Clone> Clone for Chunk<T> {
+    fn clone(&self) -> Self {
+        Chunk {
+            data: self.data.clone(),
+            hash: OnceLock::new(),
+        }
+    }
+}
+
+impl<T> Chunk<T> {
+    fn new(data: Vec<T>) -> Self {
+        Chunk {
+            data,
+            hash: OnceLock::new(),
+        }
+    }
+
+    /// Mutable access; clears the cached hash.
+    fn data_mut(&mut self) -> &mut Vec<T> {
+        self.hash = OnceLock::new();
+        &mut self.data
+    }
+}
 
 /// Elements per chunk.
 pub const CHUNK: usize = 32_768;
@@ -10,14 +77,17 @@ pub const CHUNK: usize = 32_768;
 #[allow(clippy::len_without_is_empty)] // crate-internal
 #[derive(Clone, Default)]
 pub struct Chunked<T> {
-    chunks: Vec<Arc<Vec<T>>>,
+    chunks: Vec<Arc<Chunk<T>>>,
     len: usize,
 }
 
 impl<T: Copy> Chunked<T> {
     pub fn from_vec(v: Vec<T>) -> Self {
         let len = v.len();
-        let chunks = v.chunks(CHUNK).map(|c| Arc::new(c.to_vec())).collect();
+        let chunks = v
+            .chunks(CHUNK)
+            .map(|c| Arc::new(Chunk::new(c.to_vec())))
+            .collect();
         Chunked { chunks, len }
     }
 
@@ -26,24 +96,24 @@ impl<T: Copy> Chunked<T> {
     }
 
     pub fn get(&self, i: usize) -> T {
-        self.chunks[i / CHUNK][i % CHUNK]
+        self.chunks[i / CHUNK].data[i % CHUNK]
     }
 
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
-        self.chunks.iter().flat_map(|c| c.iter().copied())
+        self.chunks.iter().flat_map(|c| c.data.iter().copied())
     }
 
     /// Write one element, copying its chunk first if another revision shares it.
     pub fn set(&mut self, i: usize, value: T) {
-        Arc::make_mut(&mut self.chunks[i / CHUNK])[i % CHUNK] = value;
+        Arc::make_mut(&mut self.chunks[i / CHUNK]).data_mut()[i % CHUNK] = value;
     }
 
     pub fn push(&mut self, value: T) {
         if self.len.is_multiple_of(CHUNK) {
-            self.chunks.push(Arc::new(Vec::new()));
+            self.chunks.push(Arc::new(Chunk::new(Vec::new())));
         }
         if let Some(last) = self.chunks.last_mut() {
-            Arc::make_mut(last).push(value);
+            Arc::make_mut(last).data_mut().push(value);
         }
         self.len += 1;
     }
@@ -59,14 +129,37 @@ impl<T: Copy> Chunked<T> {
         }
     }
 
+    /// Feed every chunk's (cached) hash into `h`, plus the length.
+    pub fn hash_into(&self, h: &mut blake3::Hasher)
+    where
+        T: ChunkBytes,
+    {
+        h.update(&(self.len as u64).to_le_bytes());
+        for c in &self.chunks {
+            let digest = c.hash.get_or_init(|| {
+                CHUNK_HASHES.fetch_add(1, Ordering::Relaxed);
+                let mut ch = blake3::Hasher::new();
+                for x in &c.data {
+                    x.hash_into(&mut ch);
+                }
+                *ch.finalize().as_bytes()
+            });
+            h.update(digest);
+        }
+    }
+
     /// Heap bytes of chunks not already in `seen` (chunk identity by address).
     pub fn unique_heap_bytes(&self, seen: &mut HashSet<usize>) -> u64 {
-        let own = self.chunks.capacity() * std::mem::size_of::<Arc<Vec<T>>>();
+        let own = self.chunks.capacity() * std::mem::size_of::<Arc<Chunk<T>>>();
         let chunks: usize = self
             .chunks
             .iter()
             .filter(|c| seen.insert(Arc::as_ptr(c) as usize))
-            .map(|c| c.capacity() * std::mem::size_of::<T>() + 2 * std::mem::size_of::<usize>())
+            .map(|c| {
+                c.data.capacity() * std::mem::size_of::<T>()
+                    + std::mem::size_of::<Chunk<T>>()
+                    + 2 * std::mem::size_of::<usize>()
+            })
             .sum();
         (own + chunks) as u64
     }
@@ -116,5 +209,10 @@ impl Bits {
 
     pub fn unique_heap_bytes(&self, seen: &mut HashSet<usize>) -> u64 {
         self.words.unique_heap_bytes(seen)
+    }
+
+    pub fn hash_into(&self, h: &mut blake3::Hasher) {
+        h.update(&(self.len as u64).to_le_bytes());
+        self.words.hash_into(h);
     }
 }

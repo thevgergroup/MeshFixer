@@ -48,3 +48,15 @@ fn different_topology_is_not_equivalent() {
     let r = equivalent(&a, &b, 1.0);
     assert!(!r.invariants_match && !r.within);
 }
+
+#[test]
+fn flipped_winding_is_not_equivalent() {
+    let a = mf_fixtures::cube(1.0);
+    let mut e = a.edit();
+    let t = a.face(mf_geometry::FaceId(0)).unwrap();
+    e.set_face(mf_geometry::FaceId(0), [t[0], t[2], t[1]])
+        .unwrap();
+    let (b, _) = e.finish().unwrap();
+    let r = equivalent(&a, &b, 1.0);
+    assert!(!r.invariants_match && !r.within, "{r:?}");
+}

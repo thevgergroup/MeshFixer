@@ -12,7 +12,7 @@ mod ids;
 mod mesh;
 mod topology;
 
-pub use chunked::CHUNK;
+pub use chunked::{CHUNK, chunk_hashes_computed};
 pub use compare::{Equivalence, equivalent};
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect};
 pub use edit::MeshEdit;

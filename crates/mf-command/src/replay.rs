@@ -18,6 +18,12 @@ pub enum Verdict {
         expected_hash: String,
         actual_hash: String,
     },
+    /// The command's input didn't match the log, so its output can't be
+    /// compared; later commands were not attempted.
+    InputMismatch {
+        expected_hash: String,
+        actual_hash: String,
+    },
     /// The command could not run; later commands were not attempted.
     Failed { error: String },
 }
@@ -112,48 +118,47 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                         available: v,
                     });
                 }
-                let inv = Invocation {
-                    op_id: record.op_id.clone(),
-                    target: record.target,
-                    raw_params: record
-                        .params
-                        .0
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_string()))
-                        .collect(),
-                };
-                let verdict = match session.execute(inv) {
-                    Ok(CommitOutcome::NewRevision { .. }) => {
-                        let mesh = session
-                            .document()
-                            .object(record.target)
-                            .and_then(|o| o.mesh())
-                            .ok_or(LogError::MissingSourceEntry(record.target))?;
-                        let actual_hash = mesh.content_hash().to_hex();
-                        if actual_hash == record.output_hash {
-                            Verdict::Exact
+                // Check the input before running: an output comparison is
+                // meaningless if the input already differs (review I4). A
+                // content difference with identical structure is expected
+                // after an earlier `Equivalent` verdict (platform drift).
+                let input = session
+                    .document()
+                    .object(record.target)
+                    .and_then(|o| o.mesh())
+                    .cloned();
+                let drifted = results
+                    .iter()
+                    .any(|(_, v)| matches!(v, Verdict::Equivalent { .. }));
+                let input_verdict = match &input {
+                    None => Some(Verdict::Failed {
+                        error: format!(
+                            "object {} is not a mesh in the replayed session",
+                            record.target
+                        ),
+                    }),
+                    Some(m) => {
+                        let content = m.content_hash().to_hex();
+                        let structure_ok =
+                            m.structure_hash().to_hex() == record.input_structure_hash;
+                        if content == record.input_hash || (drifted && structure_ok) {
+                            None
                         } else {
-                            let tolerance = 1e-9 * record.output_summary.diagonal().max(1.0);
-                            match GeometrySummary::of(mesh).deviation(&record.output_summary) {
-                                Some(d) if d <= tolerance => {
-                                    Verdict::Equivalent { max_deviation: d }
-                                }
-                                _ => Verdict::Mismatch {
-                                    expected_hash: record.output_hash.clone(),
-                                    actual_hash,
-                                },
-                            }
+                            Some(Verdict::InputMismatch {
+                                expected_hash: record.input_hash.clone(),
+                                actual_hash: content,
+                            })
                         }
                     }
-                    Ok(_) => Verdict::Mismatch {
-                        expected_hash: record.output_hash.clone(),
-                        actual_hash: "no change".into(),
-                    },
-                    Err(e) => Verdict::Failed {
-                        error: e.to_string(),
-                    },
                 };
-                let stop = matches!(verdict, Verdict::Failed { .. });
+                let verdict = match input_verdict {
+                    Some(v) => v,
+                    None => run_and_classify(&mut session, &record)?,
+                };
+                let stop = matches!(
+                    verdict,
+                    Verdict::Failed { .. } | Verdict::InputMismatch { .. }
+                );
                 results.push((record.id, verdict));
                 if stop {
                     break;
@@ -162,4 +167,65 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
         }
     }
     Ok(ReplayReport { results, session })
+}
+
+/// Run one recorded command and compare its output with the record.
+/// `Exact`: same content hash. `Equivalent`: same structure (slots, liveness,
+/// face indices, so orientation too) with extent within `1e-9 ×` diagonal and
+/// area within `1e-9` relative. Anything else is a `Mismatch`.
+fn run_and_classify(
+    session: &mut Session,
+    record: &crate::record::CommandRecord,
+) -> Result<Verdict, LogError> {
+    let inv = Invocation {
+        op_id: record.op_id.clone(),
+        target: record.target,
+        raw_params: record
+            .params
+            .0
+            .iter()
+            .map(|(k, v)| (k.clone(), v.to_string()))
+            .collect(),
+    };
+    Ok(match session.execute(inv) {
+        Ok(CommitOutcome::NewRevision { .. }) => {
+            let mesh = session
+                .document()
+                .object(record.target)
+                .and_then(|o| o.mesh())
+                .ok_or(LogError::MissingSourceEntry(record.target))?;
+            let actual_hash = mesh.content_hash().to_hex();
+            let mismatch = |actual_hash: String| Verdict::Mismatch {
+                expected_hash: record.output_hash.clone(),
+                actual_hash,
+            };
+            if actual_hash == record.output_hash {
+                Verdict::Exact
+            } else if mesh.structure_hash().to_hex() != record.output_structure_hash {
+                mismatch(actual_hash)
+            } else {
+                match &record.output_summary {
+                    None => mismatch(actual_hash),
+                    Some(expected) => {
+                        let tolerance = 1e-9 * expected.diagonal().max(1.0);
+                        match GeometrySummary::of(mesh).deviation(expected) {
+                            Some((bbox, area)) if bbox <= tolerance && area <= 1e-9 => {
+                                Verdict::Equivalent {
+                                    max_deviation: bbox,
+                                }
+                            }
+                            _ => mismatch(actual_hash),
+                        }
+                    }
+                }
+            }
+        }
+        Ok(_) => Verdict::Mismatch {
+            expected_hash: record.output_hash.clone(),
+            actual_hash: "no change".into(),
+        },
+        Err(e) => Verdict::Failed {
+            error: e.to_string(),
+        },
+    })
 }

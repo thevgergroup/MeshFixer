@@ -150,7 +150,14 @@ impl Session {
                 });
             }
             if let Some(record) = &node.record {
-                events.push(Event::Command(Box::new(record.clone())));
+                let mut record = record.clone();
+                // Summaries are computed here, once, rather than on every commit.
+                if record.output_summary.is_none()
+                    && let Some(mesh) = node.document.object(record.target).and_then(|o| o.mesh())
+                {
+                    record.output_summary = Some(crate::record::GeometrySummary::of(mesh));
+                }
+                events.push(Event::Command(Box::new(record)));
             }
         }
         let manifest = Manifest {

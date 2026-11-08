@@ -72,7 +72,9 @@ fn heap_bytes_cube() {
     let m = cube(1.0);
     let buffers = 8 * 24 + 12 * 12;
     assert!(
-        m.heap_bytes() >= buffers && m.heap_bytes() < buffers + 512,
+        // Fixed overhead (mesh header + one header per chunk, each with a
+        // cached hash) stays under 1 KiB regardless of mesh size.
+        m.heap_bytes() >= buffers && m.heap_bytes() < buffers + 1024,
         "{}",
         m.heap_bytes()
     );

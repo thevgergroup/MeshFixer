@@ -309,3 +309,34 @@ fn compaction_is_expressible_as_provenance() {
     assert_eq!(remap.faces[0], None);
     assert_eq!(compact.face(FaceId(0)), tomb.face(FaceId(1)));
 }
+
+#[test]
+fn revision_hashing_only_touches_copied_chunks() {
+    let m = uv_sphere(160, 320); // 4 face chunks, 2 position chunks
+    let _ = m.content_hash();
+    let _ = m.structure_hash();
+    let before = mf_geometry::chunk_hashes_computed();
+    let mut e = m.edit();
+    e.remove_face(FaceId(5)).unwrap();
+    let (out, _) = e.finish().unwrap();
+    let _ = out.content_hash();
+    let _ = out.structure_hash();
+    let hashed = mf_geometry::chunk_hashes_computed() - before;
+    assert_eq!(hashed, 1, "only the face-liveness chunk changed");
+    assert_ne!(out.content_hash(), m.content_hash());
+    assert_ne!(out.structure_hash(), m.structure_hash());
+}
+
+#[test]
+fn structure_hash_ignores_positions_only() {
+    let m = cube(1.0);
+    let mut e = m.edit();
+    e.move_vertex(VertexId(0), [-0.5, 0.0, 0.0]).unwrap();
+    let (moved, _) = e.finish().unwrap();
+    assert_ne!(moved.content_hash(), m.content_hash());
+    assert_eq!(moved.structure_hash(), m.structure_hash());
+    let mut e = m.edit();
+    e.set_face(FaceId(0), [0, 1, 2]).unwrap(); // flip winding
+    let (flipped, _) = e.finish().unwrap();
+    assert_ne!(flipped.structure_hash(), m.structure_hash());
+}

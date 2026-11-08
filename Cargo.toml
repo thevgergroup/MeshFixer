@@ -23,7 +23,7 @@ mf-selection = { path = "crates/mf-selection" }
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
 rayon = "1.12"
-serde_json = "1"
+serde_json = { version = "1", features = ["float_roundtrip"] }
 serde-saphyr = "2.1"
 clap = { version = "4.6", features = ["string"] }
 thiserror = "2"

@@ -9,8 +9,7 @@ use mf_selection::{Selection, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
 use crate::record::{
-    AffectedSummary, CommandId, CommandRecord, CommandStatus, GeometrySummary, ImportRecord,
-    platform,
+    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, platform,
 };
 
 /// A request to run an operation, as issued by any frontend.
@@ -61,12 +60,14 @@ impl Prepared {
         let output = self
             .op
             .execute(&self.input, &self.selection, &self.params)?;
+        // Cheap: built from per-chunk hashes cached on shared chunks, so only
+        // the chunks this command copied are hashed (review I6).
         let input_hash = self.input.content_hash().to_hex();
-        let output_hash = output
+        let input_structure_hash = self.input.structure_hash().to_hex();
+        let output_hashes = output
             .change
             .as_ref()
-            .map(|(m, _)| m.content_hash().to_hex());
-        let output_summary = output.change.as_ref().map(|(m, _)| GeometrySummary::of(m));
+            .map(|(m, _)| (m.content_hash().to_hex(), m.structure_hash().to_hex()));
         let kept = output
             .change
             .as_ref()
@@ -79,8 +80,8 @@ impl Prepared {
             params: self.params,
             output,
             input_hash,
-            output_hash,
-            output_summary,
+            input_structure_hash,
+            output_hashes,
             kept,
             duration: start.elapsed(),
         })
@@ -95,8 +96,8 @@ pub struct Completed {
     pub params: Params,
     pub output: OpOutput,
     input_hash: String,
-    output_hash: Option<String>,
-    output_summary: Option<GeometrySummary>,
+    input_structure_hash: String,
+    output_hashes: Option<(String, String)>,
     kept: u64,
     pub duration: Duration,
 }
@@ -302,6 +303,10 @@ impl Session {
                 }
             });
         };
+        let (output_hash, output_structure_hash) = c
+            .output_hashes
+            .clone()
+            .expect("a change always has output hashes");
         let document = self
             .document()
             .with_geometry(c.target, Geometry::Mesh(mesh))
@@ -318,11 +323,11 @@ impl Session {
             params: c.params.clone(),
             input_revision,
             input_hash: c.input_hash,
+            input_structure_hash: c.input_structure_hash,
             output_revision: RevisionId(self.nodes.len() as u64),
-            output_hash: c.output_hash.expect("a change always has an output hash"),
-            output_summary: c
-                .output_summary
-                .expect("a change always has an output summary"),
+            output_hash,
+            output_structure_hash,
+            output_summary: None,
             depends_on: self
                 .producer(c.target, input_revision)
                 .into_iter()

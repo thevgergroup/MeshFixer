@@ -108,3 +108,26 @@ fn cli_raw_params_roundtrip() {
         .unwrap();
     assert_eq!(cli::raw_params(spec, &m), raw(&[("max_triangles", "12")]));
 }
+
+#[test]
+fn float_params_roundtrip_exactly_through_json() {
+    // Command logs must reproduce parameters bit-for-bit (MF-CMD-004).
+    // A value seen to drift (0.171417 → 0.17141699999999999) with
+    // serde_json's default parser, then a broad sweep.
+    for v in [0.171417_f64, 0.9595, 1e-300, 5e-324, f64::MAX] {
+        let back: ParamValue =
+            serde_json::from_str(&serde_json::to_string(&ParamValue::Float(v)).unwrap()).unwrap();
+        assert_eq!(
+            back,
+            ParamValue::Float(v),
+            "value {v:e} changed in a JSON round trip"
+        );
+    }
+    let mut x = 0.123_456_789_f64;
+    for i in 0..20_000 {
+        x = (x * 1.75 + i as f64 * 1e-7).fract() * 10f64.powi((i % 12) - 6);
+        let p = ParamValue::Float(x);
+        let back: ParamValue = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back, p, "value {x:e} changed in a JSON round trip");
+    }
+}

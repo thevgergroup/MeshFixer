@@ -66,6 +66,7 @@ pub(crate) struct Inner {
     pub(crate) face_count: usize,
     pub(crate) vertex_count: usize,
     hash: OnceLock<ContentHash>,
+    structure: OnceLock<ContentHash>,
     topology: OnceLock<Arc<Topology>>,
 }
 
@@ -131,6 +132,7 @@ impl Mesh {
                 face_count,
                 vertex_count,
                 hash: OnceLock::new(),
+                structure: OnceLock::new(),
                 topology: OnceLock::new(),
             }),
         }
@@ -272,26 +274,32 @@ impl Mesh {
         Some(bb)
     }
 
-    /// Canonical content hash (MF-DOC-003), cached. Covers live elements
-    /// *with their slot IDs*: slot identity is part of content identity.
+    /// Canonical content hash (MF-DOC-003), cached. Covers every slot (with
+    /// liveness) of positions and faces, so slot identity is part of content
+    /// identity. Built from per-chunk hashes cached on the shared chunks, so
+    /// a new revision only hashes the chunks it copied.
     pub fn content_hash(&self) -> ContentHash {
         *self.inner.hash.get_or_init(|| {
             let mut h = blake3::Hasher::new();
-            h.update(b"mf-mesh-v2");
-            h.update(&(self.vertex_count() as u64).to_le_bytes());
-            for (id, p) in self.vertices() {
-                h.update(&id.0.to_le_bytes());
-                for c in p {
-                    h.update(&c.to_le_bytes());
-                }
-            }
-            h.update(&(self.face_count() as u64).to_le_bytes());
-            for (id, t) in self.faces() {
-                h.update(&id.0.to_le_bytes());
-                for i in t {
-                    h.update(&i.to_le_bytes());
-                }
-            }
+            h.update(b"mf-mesh-v3");
+            h.update(self.structure_hash().0.as_slice());
+            self.inner.positions.hash_into(&mut h);
+            ContentHash(*h.finalize().as_bytes())
+        })
+    }
+
+    /// Hash of everything except vertex positions: slots, liveness and face
+    /// indices (so also orientation). Two revisions with equal structure
+    /// hashes differ at most in where their vertices are, which is what a
+    /// cross-platform `Equivalent` replay may differ in (MF-CMD-004).
+    pub fn structure_hash(&self) -> ContentHash {
+        *self.inner.structure.get_or_init(|| {
+            let mut h = blake3::Hasher::new();
+            h.update(b"mf-structure-v1");
+            h.update(&(self.inner.positions.len() as u64).to_le_bytes());
+            self.inner.vertex_live.hash_into(&mut h);
+            self.inner.face_live.hash_into(&mut h);
+            self.inner.faces.hash_into(&mut h);
             ContentHash(*h.finalize().as_bytes())
         })
     }
@@ -302,6 +310,11 @@ impl Mesh {
             .topology
             .get_or_init(|| Arc::new(Topology::compute(self)))
             .clone()
+    }
+
+    /// True if this revision's topology has been computed and is cached.
+    pub fn has_cached_topology(&self) -> bool {
+        self.inner.topology.get().is_some()
     }
 
     /// Heap bytes owned by this mesh's storage (excludes cached topology).

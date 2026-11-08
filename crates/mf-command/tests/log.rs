@@ -123,3 +123,73 @@ fn save_rejects_objects_without_a_source_file() {
         Err(LogError::NoSource { .. })
     ));
 }
+
+fn tamper(log: &Path, field: &str) {
+    let path = log.join("commands.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+    v[field] = serde_json::Value::String("0".repeat(64));
+    let first = text.lines().next().unwrap();
+    std::fs::write(
+        &path,
+        format!("{first}\n{}\n", serde_json::to_string(&v).unwrap()),
+    )
+    .unwrap();
+}
+
+#[test]
+fn equivalent_when_only_positions_differ() {
+    // Same structure, different bits: what another platform's floating point
+    // would produce. Simulated by changing only the recorded output hash.
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.mfx.log");
+    setup(dir.path()).save_log(&log).unwrap();
+    tamper(&log, "output_hash");
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::Equivalent { .. }),
+        "{:?}",
+        report.results
+    );
+}
+
+#[test]
+fn mismatch_when_structure_differs() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.mfx.log");
+    setup(dir.path()).save_log(&log).unwrap();
+    tamper(&log, "output_hash");
+    tamper(&log, "output_structure_hash");
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::Mismatch { .. }),
+        "{:?}",
+        report.results
+    );
+}
+
+#[test]
+fn input_mismatch_is_detected_before_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.mfx.log");
+    setup(dir.path()).save_log(&log).unwrap();
+    tamper(&log, "input_hash");
+    tamper(&log, "input_structure_hash");
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::InputMismatch { .. }),
+        "{:?}",
+        report.results
+    );
+}
+
+#[test]
+fn commit_does_not_force_topology_on_the_new_revision() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = setup(dir.path());
+    let mesh = s.document().objects()[0].mesh().unwrap();
+    assert!(
+        !mesh.has_cached_topology(),
+        "summary and analysis are computed lazily"
+    );
+}
