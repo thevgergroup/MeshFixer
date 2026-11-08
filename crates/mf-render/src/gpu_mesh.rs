@@ -27,10 +27,10 @@ fn local(p: [f64; 3], origin: DVec3) -> [f32; 3] {
 /// Temporary for M1: M4 replaces this with chunked, indexed buffers that
 /// support partial re-upload (MF-RENDER-003).
 pub fn surface_vertices(mesh: &Mesh, origin: DVec3) -> Vec<SurfaceVertex> {
-    let pos = mesh.positions();
+    let pos = |v: u32| mesh.corner_position(v);
     let mut out = Vec::with_capacity(mesh.triangle_count() * 3);
-    for t in mesh.triangles() {
-        let [a, b, c] = t.map(|i| DVec3::from(pos[i as usize]));
+    for (_, t) in mesh.faces() {
+        let [a, b, c] = t.map(|i| DVec3::from(pos(i)));
         let n = (b - a)
             .cross(c - a)
             .normalize_or_zero()
@@ -38,7 +38,7 @@ pub fn surface_vertices(mesh: &Mesh, origin: DVec3) -> Vec<SurfaceVertex> {
             .to_array();
         for i in t {
             out.push(SurfaceVertex {
-                position: local(pos[*i as usize], origin),
+                position: local(pos(i), origin),
                 normal: n,
             });
         }
@@ -48,14 +48,14 @@ pub fn surface_vertices(mesh: &Mesh, origin: DVec3) -> Vec<SurfaceVertex> {
 
 /// Line-list vertices for every traced boundary loop edge.
 pub fn boundary_line_vertices(mesh: &Mesh, origin: DVec3) -> Vec<LineVertex> {
-    let pos = mesh.positions();
+    let pos = |v: u32| mesh.corner_position(v);
     let mut out = Vec::new();
     for l in &mesh.topology().boundary_loops {
         let n = l.vertices.len();
         for k in 0..n {
             for v in [l.vertices[k], l.vertices[(k + 1) % n]] {
                 out.push(LineVertex {
-                    position: local(pos[v as usize], origin),
+                    position: local(pos(v), origin),
                 });
             }
         }

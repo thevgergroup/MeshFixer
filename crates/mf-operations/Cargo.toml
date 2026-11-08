@@ -9,6 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+serde.workspace = true
 mf-geometry.workspace = true
 mf-spec.workspace = true
 serde_json.workspace = true

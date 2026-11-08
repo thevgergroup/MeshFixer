@@ -42,9 +42,9 @@ fn hash_stable() {
 #[test]
 fn hash_order_sensitive() {
     let a = cube(1.0);
-    let mut tris = a.triangles().to_vec();
+    let (positions, mut tris) = a.to_arrays();
     tris.swap(0, 1);
-    let b = Mesh::new(a.positions().to_vec(), tris).unwrap();
+    let b = Mesh::new(positions, tris).unwrap();
     assert_ne!(a.content_hash(), b.content_hash());
 }
 
@@ -65,4 +65,19 @@ fn clone_is_cheap_and_shares_hash() {
     assert_eq!(b.content_hash(), h);
     assert_eq!(b.triangle_count(), 12);
     assert_eq!(b.vertex_count(), 8);
+}
+
+#[test]
+fn heap_bytes_cube() {
+    let m = cube(1.0);
+    let buffers = 8 * 24 + 12 * 12;
+    assert!(
+        // Fixed overhead (mesh header + one header per chunk, each with a
+        // cached hash) stays under 1 KiB regardless of mesh size.
+        m.heap_bytes() >= buffers && m.heap_bytes() < buffers + 1024,
+        "{}",
+        m.heap_bytes()
+    );
+    let t = m.topology();
+    assert!(t.heap_bytes() >= 12 * 4, "components hold every face id");
 }

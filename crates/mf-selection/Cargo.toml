@@ -1,0 +1,18 @@
+[package]
+name = "mf-selection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mf-geometry.workspace = true
+mf-document.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+mf-fixtures.workspace = true
+serde_json.workspace = true

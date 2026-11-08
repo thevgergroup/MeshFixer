@@ -25,6 +25,15 @@ $bin gen-fixture damaged "$out/damaged-1m.stl" --triangles 1000000 --seed 1
 $bin inspect "$out/damaged-1m.stl" --json > "$out/inspect-before.json"
 $bin remove-small-components "$out/damaged-1m.stl" -o "$out/repaired-1m.stl" --max-triangles 100
 $bin inspect "$out/repaired-1m.stl" --json > "$out/inspect-after.json"
+# Allocator-level memory breakdown (MF-ISSUE-013): phases plus retained structures.
+$bin inspect "$out/damaged-1m.stl" --json --metrics "$out/metrics-inspect-1m.json" > /dev/null
+$bin remove-small-components "$out/damaged-1m.stl" -o "$out/tmp-metrics.stl" --metrics "$out/metrics-remove-small-1m.json"
+rm -f "$out/tmp-metrics.stl"
+# Command log + verified replay (MF-CMD-004).
+$bin run "$out/damaged-1m.stl" --op mesh.remove_small_components --param max_triangles=100 \
+  --save-log "$out/session.mfx.log" -o "$out/tmp-run.stl"
+$bin replay "$out/session.mfx.log" > "$out/replay-report.txt"
+rm -f "$out/tmp-run.stl"
 $bin render "$out/damaged-1m.stl" -o "$out/before.png"
 $bin render "$out/repaired-1m.stl" -o "$out/after.png"
 
@@ -37,5 +46,5 @@ $bin render "$out/repaired-1m.stl" -o "$out/after.png"
   echo "  ]"
   echo "}"
 } > "$out/benchmarks.json"
-rm -f "$out/tmp.stl" "$out/damaged-1m.stl"
+rm -f "$out/tmp.stl"
 cat "$out/benchmarks.json"

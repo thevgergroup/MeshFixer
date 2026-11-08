@@ -1,0 +1,6 @@
+# Reviewed uses of unwrap_or_default() in production code (MF-ISSUE-004).
+# Format: "path: trimmed source line  # reason"
+crates/mf-spec/src/cli.rs: .unwrap_or_default();  # optional ", unit: …" help suffix; no unit means empty text
+crates/mf-desktop/src/panels.rs: .unwrap_or_default();  # optional " unit" suffix on a DragValue; no unit means empty text
+crates/mf-desktop/src/app.rs: .unwrap_or_default();  # no mutating ops registered / op without parameters: empty selection or empty parameter map is the correct value
+crates/mf-desktop/src/app.rs: .unwrap_or_default()  # params_for: an operation id with no spec has no parameters (empty map)

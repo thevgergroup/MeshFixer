@@ -7,6 +7,7 @@ Status: **Phase 0 spike.** See `docs/spec/phase0-spec.md` and `docs/plan/phase0-
 ```bash
 cargo run -p mf-desktop -- model.stl     # desktop app
 cargo run -p mf-cli -- inspect model.stl # CLI
+scripts/check.sh                         # same checks as CI; run before pushing
 cargo test --workspace
 ```
 

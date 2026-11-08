@@ -1,5 +1,7 @@
 //! `mesh.inspect` diagnostics (MF-GEO-004).
 
+use std::collections::HashMap;
+
 use serde::Serialize;
 
 use crate::mesh::{Aabb, Mesh};
@@ -8,7 +10,8 @@ use crate::mesh::{Aabb, Mesh};
 pub struct LoopSummary {
     pub id: u32,
     pub edge_count: usize,
-    pub perimeter: f64,
+    /// `None` if it overflowed (see `non_finite`).
+    pub perimeter: Option<f64>,
     pub centroid: [f64; 3],
 }
 
@@ -19,6 +22,8 @@ pub struct LoopSummary {
 pub enum VolumeStatus {
     Ok,
     Empty,
+    /// Coordinates so large that area or volume overflowed.
+    NonFinite,
     NonManifold,
     Open,
     InconsistentOrientation,
@@ -37,9 +42,16 @@ pub struct Diagnostics {
     /// Triangles with area below `1e-12 * bbox_diagonal²`, or a repeated index.
     pub degenerate_triangles: usize,
     pub duplicate_vertices_exact: usize,
+    /// Vertices within `1e-6 × bbox diagonal` of a lower-ID vertex.
+    pub duplicate_vertices_tolerance: usize,
+    /// Faces with the same vertex set as a lower-ID face.
+    pub duplicate_faces: usize,
     pub inconsistent_orientation_edges: usize,
     pub bounding_box: Option<Aabb>,
-    pub surface_area: f64,
+    /// `None` if it overflowed (see `non_finite`).
+    pub surface_area: Option<f64>,
+    /// True if area, volume or a perimeter overflowed to infinity.
+    pub non_finite: bool,
     /// Only reported for closed, manifold, consistently oriented meshes.
     pub signed_volume: Option<f64>,
     pub volume_status: VolumeStatus,
@@ -69,7 +81,7 @@ fn norm(a: [f64; 3]) -> f64 {
 
 pub fn inspect(mesh: &Mesh) -> Diagnostics {
     let topo = mesh.topology();
-    let pos = mesh.positions();
+    let pos = |v: u32| mesh.corner_position(v);
     let bbox = mesh.bounding_box();
     let diag = bbox.map(|b| b.diagonal()).unwrap_or(0.0);
     let degenerate_area = 1e-12 * diag * diag;
@@ -77,8 +89,8 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
     let mut surface_area = 0.0;
     let mut volume6 = 0.0;
     let mut degenerate = 0;
-    for t in mesh.triangles() {
-        let (a, b, c) = (pos[t[0] as usize], pos[t[1] as usize], pos[t[2] as usize]);
+    for (_, t) in mesh.faces() {
+        let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
         let area = 0.5 * norm(cross(sub(b, a), sub(c, a)));
         surface_area += area;
         volume6 += dot(a, cross(b, c));
@@ -87,12 +99,12 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         }
     }
 
-    let mut sorted: Vec<[u64; 3]> = pos.iter().map(|p| p.map(f64::to_bits)).collect();
+    let mut sorted: Vec<[u64; 3]> = mesh.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
     sorted.sort_unstable();
     sorted.dedup();
-    let duplicate_vertices_exact = pos.len() - sorted.len();
+    let duplicate_vertices_exact = mesh.vertex_count() - sorted.len();
 
-    let boundary_loops = topo
+    let boundary_loops: Vec<LoopSummary> = topo
         .boundary_loops
         .iter()
         .map(|l| {
@@ -100,8 +112,8 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
             let mut perimeter = 0.0;
             let mut sum = [0.0; 3];
             for k in 0..n {
-                let p = pos[l.vertices[k] as usize];
-                perimeter += norm(sub(pos[l.vertices[(k + 1) % n] as usize], p));
+                let p = pos(l.vertices[k]);
+                perimeter += norm(sub(pos(l.vertices[(k + 1) % n]), p));
                 for i in 0..3 {
                     sum[i] += p[i];
                 }
@@ -109,16 +121,39 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
             LoopSummary {
                 id: l.id,
                 edge_count: l.edge_count,
-                perimeter,
+                perimeter: perimeter.is_finite().then_some(perimeter),
                 centroid: sum.map(|s| s / n as f64),
             }
         })
         .collect();
 
+    let duplicate_vertices_tolerance = near_duplicates(mesh, 1e-6 * diag);
+    let duplicate_faces = {
+        let mut sorted: Vec<[u32; 3]> = mesh
+            .faces()
+            .map(|(_, mut t)| {
+                t.sort_unstable();
+                t
+            })
+            .filter(|t| t[0] != t[1] && t[1] != t[2])
+            .collect();
+        let n = sorted.len();
+        sorted.sort_unstable();
+        sorted.dedup();
+        n - sorted.len()
+    };
+    let non_finite = !surface_area.is_finite()
+        || !volume6.is_finite()
+        || boundary_loops
+            .iter()
+            .any(|l: &LoopSummary| l.perimeter.is_none());
+
     let is_closed = !mesh.is_empty() && topo.boundary_edges == 0;
     let is_manifold = topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0;
     let volume_status = if mesh.is_empty() {
         VolumeStatus::Empty
+    } else if non_finite {
+        VolumeStatus::NonFinite
     } else if !is_manifold {
         VolumeStatus::NonManifold
     } else if !is_closed {
@@ -141,12 +176,48 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         non_manifold_vertices: topo.non_manifold_vertices,
         degenerate_triangles: degenerate,
         duplicate_vertices_exact,
+        duplicate_vertices_tolerance,
+        duplicate_faces,
         inconsistent_orientation_edges: topo.inconsistent_edges,
         bounding_box: bbox,
-        surface_area,
+        surface_area: surface_area.is_finite().then_some(surface_area),
+        non_finite,
         signed_volume,
         volume_status,
         is_closed,
         is_manifold,
     }
+}
+
+/// Count live vertices lying within `tolerance` of a lower-ID live vertex,
+/// using a uniform grid (cell = tolerance). The count doesn't depend on hash
+/// iteration order (MF-ISSUE-012).
+fn near_duplicates(mesh: &Mesh, tolerance: f64) -> usize {
+    if !(tolerance > 0.0 && tolerance.is_finite()) {
+        return 0;
+    }
+    let cell = |p: [f64; 3]| p.map(|c| (c / tolerance).floor() as i64);
+    let mut grid: HashMap<[i64; 3], Vec<[f64; 3]>> = HashMap::new();
+    let mut count = 0;
+    for (_, p) in mesh.vertices() {
+        let c = cell(p);
+        let mut dup = false;
+        'search: for dx in -1..=1 {
+            for dy in -1..=1 {
+                for dz in -1..=1 {
+                    if let Some(pts) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz])
+                        && pts.iter().any(|q| norm(sub(p, *q)) <= tolerance)
+                    {
+                        dup = true;
+                        break 'search;
+                    }
+                }
+            }
+        }
+        if dup {
+            count += 1;
+        }
+        grid.entry(c).or_default().push(p);
+    }
+    count
 }

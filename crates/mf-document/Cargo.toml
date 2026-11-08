@@ -1,0 +1,19 @@
+[package]
+name = "mf-document"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Adds a non-mesh geometry kind so tests can prove the document, history and
+# command layers don't assume triangles (MF-DOC-005).
+test-kinds = []
+
+[dependencies]
+mf-geometry.workspace = true
+mf-io.workspace = true
+serde.workspace = true

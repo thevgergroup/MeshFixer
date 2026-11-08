@@ -16,7 +16,7 @@ fn cube_closed() {
     assert_eq!(d.boundary_edges, 0);
     assert!(d.boundary_loops.is_empty());
     assert!(d.is_closed && d.is_manifold);
-    assert!((d.surface_area - 6.0).abs() < 1e-12);
+    assert!((d.surface_area.unwrap() - 6.0).abs() < 1e-12);
     assert!((d.signed_volume.unwrap() - 1.0).abs() < 1e-12);
     assert_eq!(d.inconsistent_orientation_edges, 0);
 }
@@ -33,7 +33,7 @@ fn missing_face() {
     let d = inspect(&cube_with_missing_face());
     assert_eq!(d.boundary_loops.len(), 1);
     assert_eq!(d.boundary_loops[0].edge_count, 4);
-    assert!((d.boundary_loops[0].perimeter - 4.0).abs() < 1e-12);
+    assert!((d.boundary_loops[0].perimeter.unwrap() - 4.0).abs() < 1e-12);
     assert_eq!(d.boundary_loops[0].centroid, [0.5, 0.5, 1.0]);
     assert_eq!(d.boundary_edges, 4);
     assert!(!d.is_closed);
@@ -130,9 +130,9 @@ fn diagnostics_serialize() {
 fn collapsed_triangle_does_not_break_manifoldness() {
     // A closed tetrahedron plus one face collapsed onto edge (0,1), as STL welding produces.
     let t = mf_fixtures::tetrahedron();
-    let mut tris = t.triangles().to_vec();
+    let (positions, mut tris) = t.to_arrays();
     tris.push([0, 0, 1]);
-    let m = Mesh::new(t.positions().to_vec(), tris).unwrap();
+    let m = Mesh::new(positions, tris).unwrap();
     let d = inspect(&m);
     assert_eq!(d.degenerate_triangles, 1);
     assert_eq!(d.non_manifold_edges, 0);

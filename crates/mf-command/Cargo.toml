@@ -9,6 +9,9 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+mf-selection.workspace = true
+serde.workspace = true
+mf-document.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
@@ -18,3 +21,9 @@ thiserror.workspace = true
 
 [dev-dependencies]
 mf-fixtures.workspace = true
+mf-document = { workspace = true, features = ["test-kinds"] }
+mf-selection.workspace = true
+tempfile.workspace = true
+rayon.workspace = true
+blake3.workspace = true
+serde_json.workspace = true

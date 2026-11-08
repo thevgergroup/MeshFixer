@@ -99,4 +99,31 @@ fn open_inspect_apply_undo_redo() {
 
     harness.get_by_label("Redo").click();
     wait_until(&mut harness, "redo", |a| components(a) == Some(after));
+
+    // Branch: undo, then apply with a different parameter. The first branch
+    // is retained in the revision DAG (MF-HIST-001).
+    harness.get_by_label("Undo").click();
+    wait_until(&mut harness, "undo before branching", |a| {
+        components(a) == Some(before)
+    });
+    let base = harness.state().session.current();
+    harness
+        .state_mut()
+        .params_for("mesh.remove_small_components")
+        .insert("max_triangles".into(), mf_spec::ParamValue::Int(6));
+    harness.get_by_label("Apply").click();
+    wait_until(&mut harness, "branch apply", |a| {
+        a.session.current() != base && components(a).is_some()
+    });
+    assert_eq!(
+        harness.state().session.node(base).unwrap().children.len(),
+        2
+    );
+    save(&mut harness, "04-branched");
+
+    // Save the command log from the app, then replay it headlessly.
+    let log = dir.path().join("session.mfx.log");
+    harness.state_mut().save_log_to(&log).unwrap();
+    let report = mf_command::replay(&log).unwrap();
+    assert!(report.all_verified(), "{:?}", report.results);
 }

@@ -58,7 +58,10 @@ fn cache_only_answers_for_the_exact_revision() {
     assert_eq!(cache.get(&a), Some(&"A"));
     // Same content, different revision object: not a hit (identity is by revision, not by value).
     assert_eq!(
-        cache.get(&mf_geometry::Mesh::new(a.positions().to_vec(), a.triangles().to_vec()).unwrap()),
+        cache.get(&{
+            let (p, t) = a.to_arrays();
+            mf_geometry::Mesh::new(p, t).unwrap()
+        }),
         None
     );
     assert_eq!(

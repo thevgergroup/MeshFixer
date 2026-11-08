@@ -2383,6 +2383,7 @@ dependencies = [
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
+ "mf-metrics",
  "mf-render",
  "mf-spec",
  "serde_json",
@@ -2393,12 +2394,18 @@ dependencies = [
 name = "mf-command"
 version = "0.0.1"
 dependencies = [
+ "blake3",
+ "mf-document",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-operations",
+ "mf-selection",
  "mf-spec",
+ "rayon",
+ "serde",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2421,6 +2428,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "mf-document"
+version = "0.0.1"
+dependencies = [
+ "mf-geometry",
+ "mf-io",
+ "serde",
+]
+
+[[package]]
 name = "mf-fixtures"
 version = "0.0.1"
 dependencies = [
@@ -2434,6 +2450,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "mf-fixtures",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2446,9 +2463,18 @@ dependencies = [
  "blake3",
  "mf-fixtures",
  "mf-geometry",
+ "mf-metrics",
+ "rayon",
  "serde",
  "tempfile",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mf-metrics"
+version = "0.0.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]
@@ -2458,6 +2484,7 @@ dependencies = [
  "mf-fixtures",
  "mf-geometry",
  "mf-spec",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]
@@ -2474,6 +2501,17 @@ dependencies = [
  "pollster 0.4.0",
  "thiserror 2.0.21",
  "wgpu",
+]
+
+[[package]]
+name = "mf-selection"
+version = "0.0.1"
+dependencies = [
+ "mf-document",
+ "mf-fixtures",
+ "mf-geometry",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

@@ -18,9 +18,10 @@ use mf_render::MeshVertices;
 
 pub enum Message {
     Imported(Result<Imported, IoError>, String),
-    Completed(Result<Completed, CommandError>),
+    Completed(Box<Result<Completed, CommandError>>),
     Analyzed { mesh: Mesh, analysis: Analysis },
     Exported(Result<PathBuf, IoError>),
+    Replayed(Result<Vec<String>, String>),
 }
 
 fn spawn(
@@ -49,7 +50,9 @@ pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) 
 }
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
-    spawn(tx, ctx, move || Message::Completed(prepared.run()));
+    spawn(tx, ctx, move || {
+        Message::Completed(Box::new(prepared.run()))
+    });
 }
 
 /// Diagnostics and render vertices for one revision (O(n), so off the UI thread).
@@ -59,6 +62,29 @@ pub fn analyze(mesh: Mesh) -> Message {
         vertices: Arc::new(MeshVertices::build(&mesh)),
     };
     Message::Analyzed { mesh, analysis }
+}
+
+/// Replay a command log off the UI thread (it re-imports source files).
+pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
+    spawn(tx, ctx, move || {
+        Message::Replayed(
+            mf_command::replay(&dir)
+                .map(|report| {
+                    let mut lines: Vec<String> = report
+                        .results
+                        .iter()
+                        .map(|(id, v)| format!("command {}: {v:?}", id.0))
+                        .collect();
+                    lines.push(if report.all_verified() {
+                        format!("All {} command(s) verified.", report.results.len())
+                    } else {
+                        "Replay did NOT reproduce the log.".into()
+                    });
+                    lines
+                })
+                .map_err(|e| e.to_string()),
+        )
+    });
 }
 
 pub fn export(

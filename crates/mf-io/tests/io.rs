@@ -25,7 +25,7 @@ fn stl_ascii_parse() {
     let text = "solid t\n facet normal 0 0 1\n  outer loop\n   vertex 0 0 0\n   vertex 1 0 0\n   vertex 0 1 0\n  endloop\n endfacet\nendsolid t\n";
     let (m, _) = stl::read(text.as_bytes()).unwrap();
     assert_eq!(m.triangle_count(), 1);
-    assert_eq!(m.positions()[1], [1.0, 0.0, 0.0]);
+    assert_eq!(m.to_arrays().0[1], [1.0, 0.0, 0.0]);
 }
 
 #[test]
@@ -90,8 +90,8 @@ fn obj_roundtrip_precision() {
     );
     let out = obj::write(&m);
     let (m2, _, _) = obj::read(&out).unwrap();
-    assert_eq!(m2.positions(), m.positions());
-    assert_eq!(m.positions()[0][0], 0.123456789012345);
+    assert_eq!(m2.to_arrays().0, m.to_arrays().0);
+    assert_eq!(m.to_arrays().0[0][0], 0.123456789012345);
 }
 
 #[test]
@@ -99,7 +99,7 @@ fn relative_and_slash_indices() {
     let src = "v 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvn 0 0 1\nf -3/1/1 -2/1/1 -1/1/1\nf 1//1 2//1 3//1\nf 1/1 2/1 3/1\n";
     let (m, _, warnings) = obj::read(src).unwrap();
     assert_eq!(m.triangle_count(), 3);
-    assert!(m.triangles().iter().all(|t| *t == [0, 1, 2]));
+    assert!(m.to_arrays().1.iter().all(|t| *t == [0, 1, 2]));
     assert_eq!(warnings.len(), 2, "{warnings:?}"); // one each for vt, vn
 }
 
@@ -114,7 +114,7 @@ fn out_of_range_index_errors() {
 #[test]
 fn quad_triangulated() {
     let (m, _, _) = obj::read("v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nf 1 2 3 4\n").unwrap();
-    assert_eq!(m.triangles(), &[[0, 1, 2], [0, 2, 3]]);
+    assert_eq!(m.to_arrays().1, vec![[0, 1, 2], [0, 2, 3]]);
 }
 
 #[test]
@@ -185,4 +185,42 @@ fn export_replaces_existing_file_atomically() {
     write_path(&cube(1.0), &p, Format::Obj).unwrap();
     assert_eq!(read_path(&p).unwrap().mesh.triangle_count(), 12);
     assert_eq!(files_in(dir.path()), vec!["out.obj"]);
+}
+
+#[test]
+fn stl_weld_identical_at_1_and_8_threads() {
+    let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(50_000, 4));
+    let bytes = stl::write_binary(&mesh).unwrap();
+    let run = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
+        pool.install(|| stl::read(&bytes).unwrap().0.content_hash())
+    };
+    assert_eq!(run(1), run(8));
+}
+
+#[test]
+fn export_skips_tombstoned_faces() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut e = cube(1.0).edit();
+    e.remove_face(mf_geometry::FaceId(2)).unwrap();
+    e.remove_face(mf_geometry::FaceId(3)).unwrap();
+    let (open, _) = e.finish().unwrap();
+    for (name, fmt) in [
+        ("t.stl", Format::StlBinary),
+        ("t.obj", Format::Obj),
+        ("a.stl", Format::StlAscii),
+    ] {
+        let p = dir.path().join(name);
+        write_path(&open, &p, fmt).unwrap();
+        let back = read_path(&p).unwrap().mesh;
+        assert_eq!(back.triangle_count(), 10, "{name}");
+        assert_eq!(
+            mf_geometry::inspect(&back).boundary_loops.len(),
+            1,
+            "{name}"
+        );
+    }
 }
