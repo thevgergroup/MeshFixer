@@ -73,6 +73,43 @@ jobs:
         with:
           name: milestone-evidence
           path: evidence/
+      - name: Command log for cross-OS replay
+        run: |
+          mkdir -p xos
+          target/release/meshfixer gen-fixture damaged xos/scan.stl --triangles 200000 --seed 5
+          target/release/meshfixer run xos/scan.stl \
+            --op mesh.remove_small_components --param max_triangles=100 \
+            --save-log xos/session.mfx.log -o xos/linux-result.stl
+          target/release/meshfixer replay xos/session.mfx.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: replay-fixture
+          path: xos/
+
+  replay-cross-os:
+    # MF-CMD-005 cross-platform level: a log written on Linux must replay on
+    # macOS and Windows as Exact or Equivalent (the summary says which).
+    needs: evidence
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p mf-cli
+      - uses: actions/download-artifact@v4
+        with:
+          name: replay-fixture
+          path: xos
+      - name: Replay Linux log
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/meshfixer replay xos/session.mfx.log | tee replay.txt
+          { echo "### Cross-OS replay on ${RUNNER_OS}"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   deny:
     runs-on: ubuntu-latest

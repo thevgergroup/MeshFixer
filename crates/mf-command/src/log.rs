@@ -27,7 +27,8 @@ pub(crate) struct Manifest {
 pub(crate) struct SourceEntry {
     pub object: ObjectId,
     /// Relative to the log directory when possible, otherwise absolute.
-    pub path: PathBuf,
+    /// Relative paths always use `/`, so logs move between operating systems.
+    pub path: String,
     /// BLAKE3 of the file bytes, hex.
     pub content_hash: String,
 }
@@ -104,6 +105,14 @@ pub(crate) fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
     Some(rel)
 }
 
+/// Relative path with `/` separators on every OS.
+pub(crate) fn portable(rel: &Path) -> String {
+    rel.components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl Session {
     /// Write the path from the root to the current revision as a log.
     pub fn save_log(&self, dir: &Path) -> Result<(), LogError> {
@@ -126,7 +135,10 @@ impl Session {
                 let source = import.source.as_ref().ok_or(LogError::NoSource {
                     object: import.object,
                 })?;
-                let path = relative_to(&source.path, dir).unwrap_or_else(|| source.path.clone());
+                let path = match relative_to(&source.path, dir) {
+                    Some(rel) => portable(&rel),
+                    None => source.path.to_string_lossy().into_owned(),
+                };
                 sources.push(SourceEntry {
                     object: import.object,
                     path,

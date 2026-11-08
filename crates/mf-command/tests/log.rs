@@ -35,6 +35,11 @@ fn save_load_replay_exact() {
     let log = dir.path().join("session.mfx.log");
     s.save_log(&log).unwrap();
     assert!(log.join("manifest.json").exists() && log.join("commands.jsonl").exists());
+    let manifest = std::fs::read_to_string(log.join("manifest.json")).unwrap();
+    assert!(
+        manifest.contains("\"path\": \"../scan.stl\""),
+        "portable relative path: {manifest}"
+    );
     let report = replay(&log).unwrap();
     assert_eq!(report.results.len(), 1);
     assert!(

@@ -71,10 +71,15 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                     .iter()
                     .find(|s| s.object == object)
                     .ok_or(LogError::MissingSourceEntry(object))?;
-                let path = if entry.path.is_absolute() {
-                    entry.path.clone()
+                let stored = Path::new(&entry.path);
+                let path = if stored.is_absolute() {
+                    stored.to_path_buf()
                 } else {
-                    dir.join(&entry.path)
+                    // Relative paths are stored with `/`; rebuild per OS.
+                    entry
+                        .path
+                        .split('/')
+                        .fold(dir.to_path_buf(), |p, part| p.join(part))
                 };
                 let imported = mf_io::read_path(&path).map_err(|error| LogError::SourceRead {
                     path: path.clone(),

@@ -24,3 +24,5 @@ mf-fixtures.workspace = true
 mf-document = { workspace = true, features = ["test-kinds"] }
 mf-selection.workspace = true
 tempfile.workspace = true
+rayon.workspace = true
+blake3.workspace = true
