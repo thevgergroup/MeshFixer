@@ -169,3 +169,32 @@ fn threemf_read_is_linear_in_file_size() {
         model.objects[0].mesh.face_count()
     );
 }
+
+#[test]
+fn threemf_extensions_and_properties_are_warned_never_silently_lost() {
+    let xml = format!(
+        r##"<?xml version="1.0"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:s="http://schemas.microsoft.com/3dmanufacturing/slice/2015/07"
+       requiredextensions="s">
+  <resources>
+    <basematerials id="5"><base name="red" displaycolor="#FF0000"/></basematerials>
+    <s:slicestack id="9"><s:slice ztop="1"><s:vertices><s:vertex x="0" y="0"/></s:vertices></s:slice></s:slicestack>
+    <object id="1" type="model" pid="5" pindex="0"><mesh><vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/></vertices><triangles><triangle v1="0" v2="1" v3="2" pid="5" p1="0"/></triangles></mesh></object>
+    <object id="2" type="support">{TRI}</object>
+  </resources>
+  <build><item objectid="1"/><item objectid="2"/></build>
+</model>"##
+    );
+    let (m, warnings) = threemf::read(&zip_model(&xml, true)).unwrap();
+    assert_eq!(m.objects.len(), 2, "core geometry still imports");
+    assert_eq!(m.objects[0].mesh.triangle_count(), 1);
+    let has = |needle: &str| warnings.iter().any(|w| w.contains(needle));
+    assert!(has("requires extension"), "{warnings:?}");
+    assert!(
+        has("s:slicestack"),
+        "non-core elements are named: {warnings:?}"
+    );
+    assert!(has("material") && has("colour"), "{warnings:?}");
+    assert!(has("object 2") && has("support"), "{warnings:?}");
+}

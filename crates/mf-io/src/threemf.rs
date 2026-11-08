@@ -2,6 +2,7 @@
 //! the model unit. Unsupported features (components, extensions) produce
 //! warnings rather than silent loss.
 
+use std::collections::BTreeSet;
 use std::io::{Cursor, Read, Write};
 
 use mf_geometry::Mesh;
@@ -65,6 +66,7 @@ pub struct Model {
     pub objects: Vec<ModelObject>,
 }
 
+const CORE_NS: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
 const MODEL_REL: &str = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel";
 const DEFAULT_MODEL_PATH: &str = "3D/3dmodel.model";
 
@@ -100,6 +102,36 @@ impl<'a> LineCounter<'a> {
         self.offset = offset;
         self.line
     }
+}
+
+/// Prefixes the `<model>` element binds to the core namespace (`None` for
+/// the default namespace). With no default namespace declared, unprefixed
+/// elements are taken as core.
+fn core_namespace_prefixes(e: &BytesStart) -> Result<BTreeSet<Option<String>>, String> {
+    let mut core = BTreeSet::new();
+    let mut default_declared = false;
+    for a in e.attributes() {
+        let a = a.map_err(|err| format!("malformed attribute: {err}"))?;
+        let key = a.key.as_ref().to_owned();
+        let prefix = if key == "xmlns" {
+            default_declared = true;
+            None
+        } else if let Some(p) = key.strip_prefix("xmlns:") {
+            Some(p.to_owned())
+        } else {
+            continue;
+        };
+        let uri = a
+            .normalized_value(XmlVersion::Implicit1_0)
+            .map_err(|err| format!("namespace {key} has an invalid value: {err}"))?;
+        if uri == CORE_NS {
+            core.insert(prefix);
+        }
+    }
+    if !default_declared {
+        core.insert(None);
+    }
+    Ok(core)
 }
 
 /// An attribute's decoded value. A malformed attribute or value is an error
@@ -183,6 +215,12 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     let mut items: Vec<(u32, [f64; 12], usize)> = Vec::new();
     let mut saw_build = false;
     let mut digits = 0u8;
+    // Namespace prefixes bound to the core namespace (`None` is the default
+    // namespace). Elements in any other namespace are extensions: skipped
+    // and named in a warning, never parsed as core elements.
+    let mut core_prefixes: BTreeSet<Option<String>> = BTreeSet::from([None]);
+    let mut ignored_elements: BTreeSet<String> = BTreeSet::new();
+    let mut has_properties = false;
     let mut reader = quick_xml::Reader::from_str(&text);
     let mut lines = LineCounter::new(&text);
     loop {
@@ -229,8 +267,21 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
             _ => (None, false),
         };
         if let Some(e) = e {
+            if e.local_name().as_ref() == "model" {
+                core_prefixes = core_namespace_prefixes(&e).map_err(parse_err)?;
+            }
+            let prefix = e.name().prefix().map(|p| p.as_ref().to_owned());
+            if !core_prefixes.contains(&prefix) {
+                ignored_elements.insert(e.name().as_ref().to_owned());
+                continue;
+            }
             match e.local_name().as_ref() {
                 "model" => {
+                    if let Some(req) = attr(&e, "requiredextensions").map_err(parse_err)? {
+                        warnings.push(format!(
+                            "3MF model requires extension(s) '{req}', which MeshFixer doesn't support; only core geometry was imported"
+                        ));
+                    }
                     if let Some(u) = attr(&e, "unit").map_err(parse_err)? {
                         unit = Unit::from_attr(&u)
                             .ok_or_else(|| parse_err(format!("unknown 3MF unit '{u}'")))?;
@@ -242,6 +293,14 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
                         // allow-swallow: a non-numeric id becomes the named error on the next line
                         .and_then(|v| v.parse().ok())
                         .ok_or_else(|| parse_err("<object> needs a numeric id".into()))?;
+                    if let Some(t) = attr(&e, "type").map_err(parse_err)?
+                        && t != "model"
+                    {
+                        warnings.push(format!(
+                            "object {id} has type '{t}'; MeshFixer imports it as an ordinary model"
+                        ));
+                    }
+                    has_properties |= attr(&e, "pid").map_err(parse_err)?.is_some();
                     let obj = Obj {
                         id,
                         name: attr(&e, "name").map_err(parse_err)?,
@@ -273,6 +332,8 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
                 }
                 "triangle" => {
                     let t = [index(&e, "v1")?, index(&e, "v2")?, index(&e, "v3")?];
+                    has_properties |= attr(&e, "pid").map_err(parse_err)?.is_some()
+                        || attr(&e, "p1").map_err(parse_err)?.is_some();
                     current
                         .as_mut()
                         .ok_or_else(|| parse_err("<triangle> outside an object".into()))?
@@ -284,6 +345,7 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
                         o.has_components = true;
                     }
                 }
+                "basematerials" => has_properties = true,
                 "build" => saw_build = true,
                 "item" => {
                     let id = attr(&e, "objectid")
@@ -311,6 +373,19 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
                 _ => {}
             }
         }
+    }
+
+    if has_properties {
+        warnings.push(
+            "3MF material and colour properties are ignored; MeshFixer imports geometry only"
+                .into(),
+        );
+    }
+    if !ignored_elements.is_empty() {
+        warnings.push(format!(
+            "ignored 3MF extension elements: {}",
+            ignored_elements.into_iter().collect::<Vec<_>>().join(", ")
+        ));
     }
 
     let to_model_object = |o: &Obj, transform: [f64; 12]| -> Result<ModelObject, IoError> {
