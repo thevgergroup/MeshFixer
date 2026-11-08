@@ -66,10 +66,12 @@ impl Viewport {
         };
         handle_input(ui, &response, rect, cam);
 
+        // Clamp to the device limit; egui scales the image up if needed.
         let ppp = ui.ctx().pixels_per_point();
+        let max = RenderTarget::max_dimension(&self.render_state.device) as f32;
         let size = (
-            (rect.width() * ppp).round().max(1.0) as u32,
-            (rect.height() * ppp).round().max(1.0) as u32,
+            (rect.width() * ppp).round().clamp(1.0, max) as u32,
+            (rect.height() * ppp).round().clamp(1.0, max) as u32,
         );
         let texture = self.render(*cam, vertices, show_boundaries, size);
         ui.painter().image(
@@ -102,7 +104,8 @@ impl Viewport {
             .as_ref()
             .is_none_or(|t| (t.width, t.height) != size);
         if resize {
-            let target = RenderTarget::new(device, size.0, size.1, MSAA_SAMPLES);
+            let target = RenderTarget::new(device, size.0, size.1, MSAA_SAMPLES)
+                .expect("viewport size is clamped to the device limit");
             let mut egui_renderer = self.render_state.renderer.write();
             let id = match self.texture {
                 Some(id) => {

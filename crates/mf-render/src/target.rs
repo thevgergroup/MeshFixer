@@ -3,7 +3,7 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderTargetFormat};
+use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -28,8 +28,22 @@ impl RenderTarget {
         }
     }
 
-    pub fn new(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> RenderTarget {
+    /// Largest width or height this device can render.
+    pub fn max_dimension(device: &wgpu::Device) -> u32 {
+        device.limits().max_texture_dimension_2d
+    }
+
+    pub fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        samples: u32,
+    ) -> Result<RenderTarget, RenderError> {
         let (width, height) = (width.max(1), height.max(1));
+        let max = Self::max_dimension(device);
+        if width > max || height > max {
+            return Err(RenderError::TooLarge { width, height, max });
+        }
         let size = wgpu::Extent3d {
             width,
             height,
@@ -71,7 +85,7 @@ impl RenderTarget {
             samples.max(1),
         )
         .create_view(&Default::default());
-        RenderTarget {
+        Ok(RenderTarget {
             width,
             height,
             samples,
@@ -79,7 +93,7 @@ impl RenderTarget {
             resolved_view: resolved.create_view(&Default::default()),
             resolved,
             depth_view,
-        }
+        })
     }
 
     pub fn texture(&self) -> &wgpu::Texture {

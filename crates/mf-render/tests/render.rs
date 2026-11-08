@@ -144,3 +144,15 @@ fn chunked_upload_renders_identically() {
     let chunked = offscreen::render_image_with_chunk_limit(&m, 96, 72, true, 24 * 300).unwrap();
     assert_eq!(whole, chunked);
 }
+
+#[test]
+fn oversized_render_is_an_error_not_a_panic() {
+    match offscreen::render_image(&cube(1.0), 20_000, 64, true) {
+        Err(RenderError::NoAdapter) => eprintln!("SKIPPED: no GPU adapter available"),
+        Err(RenderError::TooLarge { width, height, max }) => {
+            assert_eq!((width, height), (20_000, 64));
+            assert!(max < 20_000);
+        }
+        other => panic!("expected TooLarge, got {:?}", other.map(|i| i.dimensions())),
+    }
+}

@@ -24,6 +24,8 @@ pub enum RenderError {
     NoAdapter,
     #[error("failed to create GPU device: {0}")]
     Device(String),
+    #[error("render size {width}x{height} exceeds the GPU's maximum texture size {max}")]
+    TooLarge { width: u32, height: u32, max: u32 },
     #[error("failed to read back rendered image: {0}")]
     Readback(String),
 }

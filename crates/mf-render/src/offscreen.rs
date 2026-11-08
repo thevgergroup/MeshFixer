@@ -38,7 +38,7 @@ pub fn render_image_with_chunk_limit(
     max_chunk_bytes: u64,
 ) -> Result<RgbaImage, RenderError> {
     let (device, queue) = device()?;
-    let target = RenderTarget::new(&device, width, height, SAMPLES);
+    let target = RenderTarget::new(&device, width, height, SAMPLES)?;
     let renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
     let limit = max_chunk_bytes.min(device.limits().max_buffer_size);
     let gpu = GpuMesh::from_vertices_with_limit(&device, &crate::MeshVertices::build(mesh), limit);
