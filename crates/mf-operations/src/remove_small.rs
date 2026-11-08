@@ -2,7 +2,7 @@ use mf_geometry::{FaceId, Mesh, VertexId};
 use mf_spec::Params;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation};
+use crate::{OpError, OpOutput, Operation, Target, unsupported_target};
 
 pub struct RemoveSmallComponents;
 
@@ -15,7 +15,10 @@ impl Operation for RemoveSmallComponents {
         1
     }
 
-    fn execute(&self, input: &Mesh, params: &Params) -> Result<OpOutput, OpError> {
+    fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError> {
+        if *target != Target::WholeObject {
+            return Err(unsupported_target(self.id(), target));
+        }
         let max_triangles = params.get_int("max_triangles")?.max(0) as usize;
         let keep_largest = params.get_bool("keep_largest")?;
         let topo = input.topology();
@@ -33,6 +36,17 @@ impl Operation for RemoveSmallComponents {
                 removed_components += 1;
                 removed_triangles += comp.len();
             }
+        }
+
+        let report = json!({
+            "removed_components": removed_components,
+            "removed_triangles": removed_triangles,
+        });
+        if removed_components == 0 {
+            return Ok(OpOutput {
+                change: None,
+                report,
+            });
         }
 
         // Tombstone removed faces, and vertices used only by removed faces.
@@ -64,13 +78,10 @@ impl Operation for RemoveSmallComponents {
                 edit.remove_vertex(VertexId(v)).map_err(fail)?;
             }
         }
-        let (mesh, _provenance) = edit.finish().map_err(fail)?;
+        let change = edit.finish().map_err(fail)?;
         Ok(OpOutput {
-            mesh: Some(mesh),
-            report: json!({
-                "removed_components": removed_components,
-                "removed_triangles": removed_triangles,
-            }),
+            change: Some(change),
+            report,
         })
     }
 }

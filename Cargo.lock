@@ -2479,6 +2479,7 @@ dependencies = [
  "mf-fixtures",
  "mf-geometry",
  "mf-spec",
+ "serde",
  "serde_json",
  "thiserror 2.0.21",
 ]

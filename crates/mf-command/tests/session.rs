@@ -70,7 +70,9 @@ fn new_command_after_undo_truncates_redo() {
     let id = s.import(imported(damaged()), "part".into());
     s.execute(remove(id, "5")).unwrap();
     s.undo();
-    s.execute(remove(id, "3")).unwrap();
+    // A different command that changes something (max 6 also removes the
+    // 4-face island; max 3 would remove nothing and create no revision).
+    assert!(matches!(s.execute(remove(id, "6")).unwrap(), CommitOutcome::NewRevision { .. }));
     assert!(!s.can_redo());
 }
 
@@ -158,4 +160,15 @@ fn object_ids_never_reused() {
     s.undo();
     let b = s.import(imported(cube(1.0)), "b".into());
     assert_ne!(a, b);
+}
+
+#[test]
+fn noop_operation_creates_no_revision() {
+    let mut s = Session::new();
+    let id = s.import(imported(cube(1.0)), "part".into());
+    let rev = s.revision();
+    let out = s.execute(remove(id, "5")).unwrap();
+    assert!(matches!(out, CommitOutcome::NoChange { .. }), "{out:?}");
+    assert_eq!(s.revision(), rev);
+    assert_eq!(s.history_labels().len(), 2);
 }

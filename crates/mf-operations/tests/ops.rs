@@ -39,9 +39,13 @@ fn removes_island() {
     let input = merge(&[c.clone(), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
     let op = find("mesh.remove_small_components").unwrap();
     let out = op
-        .execute(&input, &params(op.id(), &[("max_triangles", "5")]))
+        .execute(
+            &input,
+            &mf_operations::Target::WholeObject,
+            &params(op.id(), &[("max_triangles", "5")]),
+        )
         .unwrap();
-    let mesh = out.mesh.unwrap();
+    let mesh = out.change.unwrap().0;
     assert_eq!(mesh.triangle_count(), 12);
     assert_eq!(inspect(&mesh).components, 1);
     assert_eq!(mesh.to_arrays(), c.to_arrays());
@@ -56,10 +60,15 @@ fn kept_faces_keep_relative_order() {
     let input = merge(&[tetrahedron(), c.clone()]);
     let op = find("mesh.remove_small_components").unwrap();
     let mesh = op
-        .execute(&input, &params(op.id(), &[("max_triangles", "5")]))
+        .execute(
+            &input,
+            &mf_operations::Target::WholeObject,
+            &params(op.id(), &[("max_triangles", "5")]),
+        )
         .unwrap()
-        .mesh
-        .unwrap();
+        .change
+        .unwrap()
+        .0;
     assert_eq!(mesh.to_arrays(), c.to_arrays());
 }
 
@@ -68,22 +77,29 @@ fn keep_largest_guard() {
     let input = merge(&[tetrahedron(), translated(&cube(1.0), [5.0, 0.0, 0.0])]);
     let op = find("mesh.remove_small_components").unwrap();
     let kept = op
-        .execute(&input, &params(op.id(), &[("max_triangles", "50")]))
+        .execute(
+            &input,
+            &mf_operations::Target::WholeObject,
+            &params(op.id(), &[("max_triangles", "50")]),
+        )
         .unwrap()
-        .mesh
-        .unwrap();
+        .change
+        .unwrap()
+        .0;
     assert_eq!(kept.triangle_count(), 12);
     let none = op
         .execute(
             &input,
+            &mf_operations::Target::WholeObject,
             &params(
                 op.id(),
                 &[("max_triangles", "50"), ("keep_largest", "false")],
             ),
         )
         .unwrap()
-        .mesh
-        .unwrap();
+        .change
+        .unwrap()
+        .0;
     assert!(none.is_empty());
     assert_eq!(none.vertex_count(), 0);
 }
@@ -93,8 +109,12 @@ fn input_not_mutated() {
     let input = merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
     let before = input.content_hash();
     let op = find("mesh.remove_small_components").unwrap();
-    op.execute(&input, &params(op.id(), &[("max_triangles", "5")]))
-        .unwrap();
+    op.execute(
+        &input,
+        &mf_operations::Target::WholeObject,
+        &params(op.id(), &[("max_triangles", "5")]),
+    )
+    .unwrap();
     assert_eq!(input.content_hash(), before);
     assert_eq!(input.triangle_count(), 16);
 }
@@ -102,8 +122,14 @@ fn input_not_mutated() {
 #[test]
 fn inspect_is_read_only() {
     let op = find("mesh.inspect").unwrap();
-    let out = op.execute(&cube(1.0), &params(op.id(), &[])).unwrap();
-    assert!(out.mesh.is_none());
+    let out = op
+        .execute(
+            &cube(1.0),
+            &mf_operations::Target::WholeObject,
+            &params(op.id(), &[]),
+        )
+        .unwrap();
+    assert!(out.change.is_none());
     assert_eq!(out.report["components"], 1);
     assert_eq!(out.report["is_closed"], true);
 }
@@ -111,6 +137,74 @@ fn inspect_is_read_only() {
 #[test]
 fn empty_mesh_ok() {
     let op = find("mesh.remove_small_components").unwrap();
-    let out = op.execute(&Mesh::empty(), &params(op.id(), &[])).unwrap();
-    assert!(out.mesh.unwrap().is_empty());
+    let out = op
+        .execute(
+            &Mesh::empty(),
+            &mf_operations::Target::WholeObject,
+            &params(op.id(), &[]),
+        )
+        .unwrap();
+    assert!(out.change.is_none(), "nothing to remove: no new revision");
+}
+
+mod edit_based {
+    use super::*;
+    use mf_geometry::FaceId;
+    use mf_operations::{OpError, Target};
+
+    fn island_input() -> Mesh {
+        merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])])
+    }
+
+    #[test]
+    fn kept_faces_keep_their_ids() {
+        let input = island_input();
+        let op = find("mesh.remove_small_components").unwrap();
+        let out = op
+            .execute(
+                &input,
+                &Target::WholeObject,
+                &params(op.id(), &[("max_triangles", "5")]),
+            )
+            .unwrap();
+        let (mesh, prov) = out.change.unwrap();
+        let kept: Vec<_> = mesh.faces().collect();
+        let cube_faces: Vec<_> = input.faces().take(12).collect();
+        assert_eq!(kept, cube_faces, "same IDs, same indices");
+        assert_eq!(prov.removed_faces, (12..16).map(FaceId).collect::<Vec<_>>());
+        assert!(prov.created_faces.is_empty());
+    }
+
+    #[test]
+    fn noop_returns_no_change() {
+        let op = find("mesh.remove_small_components").unwrap();
+        let out = op
+            .execute(&cube(1.0), &Target::WholeObject, &params(op.id(), &[]))
+            .unwrap();
+        assert!(out.change.is_none());
+        assert_eq!(out.report["removed_components"], 0);
+    }
+
+    #[test]
+    fn targeted_variants_rejected_until_m3() {
+        let op = find("mesh.remove_small_components").unwrap();
+        let err = op
+            .execute(
+                &cube(1.0),
+                &Target::Faces(vec![FaceId(0)]),
+                &params(op.id(), &[]),
+            )
+            .err()
+            .unwrap();
+        assert!(
+            matches!(
+                err,
+                OpError::Failed {
+                    code: "unsupported_target",
+                    ..
+                }
+            ),
+            "{err:?}"
+        );
+    }
 }

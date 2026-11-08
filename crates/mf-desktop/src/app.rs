@@ -208,6 +208,9 @@ impl MeshFixerApp {
                     | Ok(CommitOutcome::Report(report)) => {
                         self.status = Some(report.to_string());
                     }
+                    Ok(CommitOutcome::NoChange { report }) => {
+                        self.status = Some(format!("Nothing to change: {report}"));
+                    }
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }

@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use mf_geometry::Mesh;
 use mf_io::Imported;
-use mf_operations::{OpError, OpOutput, Operation};
+use mf_operations::{OpError, OpOutput, Operation, Target};
 use mf_spec::{Params, SpecError};
 
 use mf_document::{Document, Geometry, Object, ObjectId};
@@ -41,6 +41,7 @@ pub struct Prepared {
     target: ObjectId,
     op: &'static dyn Operation,
     input: Mesh,
+    selection: Target,
     params: Params,
 }
 
@@ -51,7 +52,9 @@ impl Prepared {
 
     pub fn run(self) -> Result<Completed, CommandError> {
         let start = Instant::now();
-        let output = self.op.execute(&self.input, &self.params)?;
+        let output = self
+            .op
+            .execute(&self.input, &self.selection, &self.params)?;
         Ok(Completed {
             base_revision: self.base_revision,
             target: self.target,
@@ -76,6 +79,10 @@ pub struct Completed {
 pub enum CommitOutcome {
     /// Read-only operation: nothing was added to history.
     Report(serde_json::Value),
+    /// The operation ran but changed nothing: no revision was created.
+    NoChange {
+        report: serde_json::Value,
+    },
     NewRevision {
         report: serde_json::Value,
     },
@@ -192,6 +199,7 @@ impl Session {
             target: inv.target,
             op,
             input,
+            selection: Target::WholeObject,
             params,
         })
     }
@@ -203,9 +211,18 @@ impl Session {
                 actual: self.revision(),
             });
         }
-        let Some(mesh) = c.output.mesh else {
-            return Ok(CommitOutcome::Report(c.output.report));
+        let Some((mesh, provenance)) = c.output.change else {
+            let read_only = mf_spec::builtin::get(c.op_id).is_some_and(|s| s.is_read_only());
+            return Ok(if read_only {
+                CommitOutcome::Report(c.output.report)
+            } else {
+                CommitOutcome::NoChange {
+                    report: c.output.report,
+                }
+            });
         };
+        // Provenance is stored on revisions in M2 Task 7 (selection translation).
+        drop(provenance);
         let doc = self
             .document()
             .with_geometry(c.target, Geometry::Mesh(mesh))
