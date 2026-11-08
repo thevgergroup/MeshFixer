@@ -4,3 +4,4 @@
 /fixtures/generated/
 /artifacts/
 *.profraw
+/.superpowers/
