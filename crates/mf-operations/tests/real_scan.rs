@@ -36,6 +36,24 @@ fn edge_faces(m: &Mesh) -> HashMap<(u32, u32), u32> {
     count
 }
 
+/// Magnitude of a loop's vector area: ~0 for a slit (collinear vertices),
+/// which can't be closed without zero-area triangles.
+fn vector_area(m: &Mesh, vertices: &[u32]) -> f64 {
+    let p: Vec<[f64; 3]> = vertices.iter().map(|&v| m.corner_position(v)).collect();
+    let mut s = [0.0; 3];
+    for k in 0..p.len() {
+        let (a, b) = (p[k], p[(k + 1) % p.len()]);
+        s[0] += a[1] * b[2] - a[2] * b[1];
+        s[1] += a[2] * b[0] - a[0] * b[2];
+        s[2] += a[0] * b[1] - a[1] * b[0];
+    }
+    0.5 * (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt()
+}
+
+/// Slit threshold: a millionth of the smallest real hole's area here
+/// (~1e-8 m²), far above rounding noise in a millimetre-quantised scan.
+const SLIT_AREA: f64 = 1e-14;
+
 #[test]
 fn real_scan_has_holes_and_islands() {
     let Some(m) = scan("real_scan_has_holes_and_islands") else {
@@ -68,9 +86,26 @@ fn fill_each_small_hole_of_real_scan_untouched_outside() {
         .map(|l| l.id)
         .collect();
     assert!(loops.len() >= 50, "{}", loops.len());
+    let topo = m.topology();
+    let diag = m.bounding_box().unwrap().diagonal();
+    let min_area = 1e-12 * diag * diag;
+    let mut slits = 0;
     for id in loops {
-        // One command per hole, each on the imported mesh.
-        let out = op.execute(&m, &Target::Loops(vec![id]), &params).unwrap();
+        // One command per hole, each on the imported mesh. A slit (collinear
+        // crack) is refused by name rather than "filled" with zero-area
+        // triangles; everything else closes.
+        let out = match op.execute(&m, &Target::Loops(vec![id]), &params) {
+            Ok(out) => out,
+            Err(mf_operations::OpError::Failed { code, message }) => {
+                assert_eq!(code, "loop_untriangulable", "loop {id}: {message}");
+                let l = topo.boundary_loops.iter().find(|l| l.id == id).unwrap();
+                let area = vector_area(&m, &l.vertices);
+                assert!(area < SLIT_AREA, "loop {id} refused but has area {area}");
+                slits += 1;
+                continue;
+            }
+            Err(e) => panic!("loop {id}: {e}"),
+        };
         let (after, prov) = out.change.unwrap();
         // Untouched outside the target: every input face keeps its ID and
         // indices, every input vertex its exact position, nothing removed.
@@ -97,7 +132,14 @@ fn fill_each_small_hole_of_real_scan_untouched_outside() {
             let total = n + before_edges.get(e).copied().unwrap_or(0);
             assert_eq!(total, 2, "loop {id}: edge {e:?} has {total} faces");
         }
+        // No new face is degenerate (by inspect's threshold).
+        for (f, _) in &prov.created_faces {
+            let t = after.face(*f).unwrap();
+            let area = vector_area(&after, &t);
+            assert!(area >= min_area, "loop {id}: face {f:?} has area {area}");
+        }
     }
+    assert!(slits <= 10, "{slits} slits");
 }
 
 #[test]
@@ -116,8 +158,16 @@ fn real_scan_render_before_after() {
         .unwrap();
     let (after, _) = out.change.unwrap();
     let d = inspect(&after);
-    assert!(d.boundary_loops.is_empty(), "{}", out.report);
+    // Every hole closes except the slits, which are reported by name.
+    let skipped = out.report["skipped_loops"].as_array().unwrap();
+    assert!(
+        skipped.iter().all(|s| s["reason"] == "untriangulable"),
+        "{}",
+        out.report
+    );
+    assert_eq!(d.boundary_loops.len(), skipped.len(), "{}", out.report);
     assert_eq!(d.non_manifold_edges, 0);
+    assert_eq!(d.degenerate_triangles, inspect(&m).degenerate_triangles);
     for (name, mesh) in [("before", &m), ("after", &after)] {
         let image = mf_render::offscreen::render_image(mesh, 1600, 1200, true).unwrap();
         if let Ok(dir) = std::env::var("MF_ARTIFACTS") {

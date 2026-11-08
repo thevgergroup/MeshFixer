@@ -171,7 +171,7 @@ impl Operation for FillHoles {
                         return Err(failed(
                             "loop_self_touching",
                             format!(
-                                "loop {id} passes through the same vertex twice; fill its parts separately"
+                                "loop {id} passes through the same vertex twice, which fill_holes can't close as one patch"
                             ),
                         ));
                     }
@@ -185,6 +185,10 @@ impl Operation for FillHoles {
 
         let normals = outer_normals(input, &fill);
         let (sigma, existing) = loop_context(input, &fill);
+        // The same threshold `inspect` reports as degenerate.
+        let min_area = input
+            .bounding_box()
+            .map_or(0.0, |b| 1e-12 * b.diagonal() * b.diagonal());
         let mut edit = input.edit();
         let mut filled = Vec::new();
         for (li, (l, outer)) in fill.iter().zip(&normals).enumerate() {
@@ -193,18 +197,25 @@ impl Operation for FillHoles {
                 .iter()
                 .map(|&v| input.corner_position(v))
                 .collect();
-            let Some(tris) = triangulate::triangulate(&points, outer, &existing[li]) else {
+            // A loop with no valid patch: an error when it was selected,
+            // skipped and reported in a whole-object run.
+            let mut untriangulable = || {
                 if matches!(target, Target::Loops(_)) {
                     return Err(failed(
                         "loop_untriangulable",
                         format!(
-                            "loop {} cannot be closed without adding a face to an existing edge (the result would be non-manifold)",
+                            "loop {} cannot be closed without a zero-area triangle or a face on an existing edge (it is flat, or folded onto the mesh)",
                             l.id
                         ),
                     ));
                 }
                 skipped
                     .push(json!({"id": l.id, "edges": l.edge_count, "reason": "untriangulable"}));
+                Ok(())
+            };
+            let Some(tris) = triangulate::triangulate(&points, outer, &existing[li], min_area)
+            else {
+                untriangulable()?;
                 continue;
             };
             let mut patch = refine::Patch {
@@ -216,6 +227,10 @@ impl Operation for FillHoles {
             if refine {
                 patch.sigma = sigma[li].clone();
                 patch.refine(&existing[li]);
+            }
+            if patch.min_area() < min_area {
+                untriangulable()?;
+                continue;
             }
             // Local → mesh vertex IDs: boundary first, then new vertices.
             let mut ids: Vec<u32> = l.vertices.clone();

@@ -6,7 +6,8 @@
 //! across the boundary edges, so the patch meets its surroundings smoothly.
 //!
 //! A chord between two loop vertices that are already joined by a mesh edge
-//! is never used: that edge would gain a third face (non-manifold).
+//! is never used: that edge would gain a third face (non-manifold). Nor is a
+//! triangle with less than `min_area` (a collinear loop has no valid fill).
 
 use std::collections::BTreeSet;
 
@@ -77,16 +78,18 @@ fn dihedral(n1: [f64; 3], n2: [f64; 3]) -> f64 {
 /// `k → k+1` (`k = n-1` is the closing edge `n-1 → 0`).
 ///
 /// `existing` holds the pairs `(i, j)`, `i < j`, of loop vertices already
-/// joined by a mesh edge; those chords are excluded.
+/// joined by a mesh edge; those chords are excluded, as are triangles with
+/// area below `min_area`.
 ///
 /// Returns triangles as index triples into `p`, emitted as `[m, i, j]` so
 /// each boundary edge `k → k+1` appears reversed (`k+1 → k`): the patch is
 /// oriented consistently with the faces it meets. `None` when every
-/// triangulation would reuse an existing edge.
+/// triangulation would reuse an existing edge or need a degenerate triangle.
 pub fn triangulate(
     p: &[[f64; 3]],
     outer: &[[f64; 3]],
     existing: &BTreeSet<(usize, usize)>,
+    min_area: f64,
 ) -> Option<Vec<[usize; 3]>> {
     let n = p.len();
     assert!(n >= 3 && outer.len() == n);
@@ -124,6 +127,9 @@ pub fn triangulate(
                 }
                 // Emitted winding [m, i, j].
                 let (nrm, area) = normal_area(p[m], p[i], p[j]);
+                if area < min_area {
+                    continue;
+                }
                 let mut angle = a
                     .angle
                     .max(b.angle)
@@ -195,16 +201,22 @@ mod tests {
             [1.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        let free = chords(&triangulate(&p, &[UP; 4], &BTreeSet::new()).unwrap());
+        let free = chords(&triangulate(&p, &[UP; 4], &BTreeSet::new(), 0.0).unwrap());
         let (used, other) = if free.contains(&(0, 2)) {
             ((0, 2), (1, 3))
         } else {
             ((1, 3), (0, 2))
         };
         assert!(free.contains(&used));
-        let tris = triangulate(&p, &[UP; 4], &BTreeSet::from([used])).unwrap();
+        let tris = triangulate(&p, &[UP; 4], &BTreeSet::from([used]), 0.0).unwrap();
         assert!(!chords(&tris).contains(&used), "{tris:?}");
         assert!(chords(&tris).contains(&other));
+    }
+
+    #[test]
+    fn collinear_points_have_no_triangulation() {
+        let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
+        assert!(triangulate(&p, &[UP; 3], &BTreeSet::new(), 1e-12).is_none());
     }
 
     #[test]
@@ -216,6 +228,6 @@ mod tests {
             [0.0, 1.0, 0.0],
         ];
         let existing = BTreeSet::from([(0, 2), (1, 3)]);
-        assert!(triangulate(&p, &[UP; 4], &existing).is_none());
+        assert!(triangulate(&p, &[UP; 4], &existing, 0.0).is_none());
     }
 }

@@ -59,6 +59,24 @@ fn edge(a: usize, b: usize) -> (usize, usize) {
 }
 
 impl Patch {
+    /// Smallest triangle area in the patch.
+    pub fn min_area(&self) -> f64 {
+        self.tris
+            .iter()
+            .map(|t| {
+                let [a, b, c] = t.map(|v| self.positions[v]);
+                let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let n = [
+                    u[1] * v[2] - u[2] * v[1],
+                    u[2] * v[0] - u[0] * v[2],
+                    u[0] * v[1] - u[1] * v[0],
+                ];
+                0.5 * (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min)
+    }
+
     /// Split pass: returns true if any triangle was split.
     fn split(&mut self) -> bool {
         let sqrt2 = std::f64::consts::SQRT_2;

@@ -187,9 +187,6 @@ fn whole_object_reports_skipped_loops() {
 #[test]
 fn degenerate_loops_fill_or_fail_by_name() {
     // A 3-edge hole fills with exactly one triangle.
-    let m = cube_with_missing_face();
-    let mut e = m.edit();
-    e.remove_face(FaceId(0)).unwrap();
     let one = two_holes();
     let target = one
         .topology()
@@ -209,7 +206,62 @@ fn degenerate_loops_fill_or_fail_by_name() {
         }
         other => panic!("{other:?}"),
     }
-    let _ = e;
+}
+
+/// A slit: a 3-edge loop whose vertices are collinear. Two triangles sit
+/// above edges 0–1 and 1–2, one below edge 0–2, so the only "fill" would
+/// be a zero-area triangle.
+fn collinear_slit() -> Mesh {
+    Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [2.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, -1.0, 0.0],
+        ],
+        vec![[0, 1, 3], [1, 2, 3], [2, 0, 4]],
+    )
+    .unwrap()
+}
+
+#[test]
+fn collinear_loop_is_never_filled_with_a_zero_area_triangle() {
+    let m = collinear_slit();
+    let topo = m.topology();
+    let slit = topo
+        .boundary_loops
+        .iter()
+        .find(|l| l.edge_count == 3)
+        .expect("the slit is a 3-edge loop")
+        .id;
+    for refine in ["false", "true"] {
+        let p = [("refine", refine)];
+        // Selected: fails by name.
+        match fill(&m, Target::Loops(vec![slit]), &p).unwrap_err() {
+            OpError::Failed { code, message } => {
+                assert_eq!(code, "loop_untriangulable");
+                assert!(message.contains(&format!("loop {slit}")), "{message}");
+            }
+            other => panic!("{other:?}"),
+        }
+        // Whole object: skipped and reported, and nothing degenerate added.
+        let out = find("mesh.fill_holes")
+            .unwrap()
+            .execute(&m, &Target::WholeObject, &params(&p))
+            .unwrap();
+        let skipped = out.report["skipped_loops"].as_array().unwrap();
+        assert!(
+            skipped
+                .iter()
+                .any(|s| s["id"] == slit && s["reason"] == "untriangulable"),
+            "{}",
+            out.report
+        );
+        if let Some((after, _)) = out.change {
+            assert_eq!(inspect(&after).degenerate_triangles, 0);
+        }
+    }
 }
 
 #[test]
