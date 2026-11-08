@@ -16,5 +16,9 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+mf-io.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+jsonschema.workspace = true
 mf-fixtures.workspace = true
 rayon.workspace = true

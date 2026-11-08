@@ -1,0 +1,4 @@
+- name: inspect is read-only
+  given: { fixture: cube }
+  when: { op: mesh.inspect }
+  expect: { changed: false, components: 1, is_closed: true, signed_volume: 1.0 }

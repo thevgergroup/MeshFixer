@@ -1,0 +1,29 @@
+# mesh.remove_small_components. Faces 0-11: cube; 12-15 and 16-19: tetrahedra.
+- name: whole object removes every small island
+  given: { fixture: cube_and_two_tetrahedra }
+  when: { op: mesh.remove_small_components, params: { max_triangles: 5 } }
+  expect:
+    components: 1
+    triangle_count: 12
+    untouched_outside_target: true
+    provenance_total: true
+
+- name: a selected island is the only one removed
+  given: { fixture: cube_and_two_tetrahedra }
+  select: { component_containing_face: 12 }
+  when: { op: mesh.remove_small_components, params: { max_triangles: 5 } }
+  expect:
+    components: 2
+    triangle_count: 16
+    provenance_total: true
+
+- name: a selected component above the threshold fails by name
+  given: { fixture: cube_and_two_tetrahedra }
+  select: { component_containing_face: 0 }
+  when: { op: mesh.remove_small_components, params: { max_triangles: 5 } }
+  expect: { error: component_too_large }
+
+- name: nothing to remove means no new revision
+  given: { fixture: cube }
+  when: { op: mesh.remove_small_components }
+  expect: { changed: false, components: 1 }
