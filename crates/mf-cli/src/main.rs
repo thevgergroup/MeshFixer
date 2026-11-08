@@ -10,10 +10,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Arg, ArgMatches, Command};
-use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, Session};
+use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
 use mf_io::{Format, IoError};
 use mf_metrics::{CountingAlloc, Phase, measure};
-use mf_selection::{Selection, SelectionKind};
+use mf_selection::{Selection, SelectionKind, Translation};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -412,17 +412,36 @@ fn select_arg(repeatable: bool) -> Arg {
 }
 
 /// Bind a parsed `--select` to the session's current revision.
+/// A `--select`'s IDs name elements of the imported mesh (`import`). Later
+/// steps run on edited revisions, where IDs may have changed (loops are
+/// renumbered when one is filled), so the selection is translated to the
+/// current revision. Anything short of a full mapping is an error: running
+/// on part of the selection, or on a guess, would edit the wrong place.
 fn selection_for(
     session: &Session,
     object: ObjectId,
+    import: RevisionId,
     select: &Option<Select>,
-) -> Option<Selection> {
-    select.as_ref().map(|(kind, ids)| Selection {
+) -> Result<Option<Selection>, Failure> {
+    let Some((kind, ids)) = select else {
+        return Ok(None);
+    };
+    let sel = Selection {
         object,
-        revision: session.current(),
+        revision: import,
         kind: *kind,
         ids: ids.clone(),
-    })
+    };
+    if import == session.current() {
+        return Ok(Some(sel));
+    }
+    match session.translate(&sel, session.current()) {
+        Translation::Mapped(s) => Ok(Some(s)),
+        other => Err(Failure::Runtime(format!(
+            "--select {}: after the earlier steps, the selected elements can't be found unchanged ({other:?})",
+            ids.iter().map(u32::to_string).collect::<Vec<_>>().join(",")
+        ))),
+    }
 }
 
 /// One `--op` with the `--param`s and optional `--select` that follow it.
@@ -511,8 +530,9 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
     }
     let (mut session, id) = open(input, metrics)?;
+    let import = session.current();
     for Step { op, raw, select } in seq {
-        let selection = selection_for(&session, id, &select);
+        let selection = selection_for(&session, id, import, &select)?;
         let outcome = metrics.record("operation", || {
             session.execute(Invocation {
                 selection,
@@ -589,7 +609,7 @@ fn run_operation(
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
     let (mut session, id) = open(input, metrics)?;
-    let selection = selection_for(&session, id, &select);
+    let selection = selection_for(&session, id, session.current(), &select)?;
     let outcome = metrics.record("operation", || {
         session.execute(Invocation {
             selection,

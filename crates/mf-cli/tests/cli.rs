@@ -366,3 +366,70 @@ fn run_on_3mf_keeps_every_object() {
         String::from_utf8_lossy(&inspect.stderr)
     );
 }
+
+/// Triangular holes (3-edge loops) as (id, centroid), by id.
+fn holes(path: &str) -> Vec<(u64, Vec<f64>)> {
+    let out = meshfixer(&["inspect", path, "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut h: Vec<(u64, Vec<f64>)> = v["boundary_loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["edge_count"] == 3)
+        .map(|l| {
+            let c = l["centroid"].as_array().unwrap();
+            (
+                l["id"].as_u64().unwrap(),
+                c.iter().map(|x| x.as_f64().unwrap()).collect(),
+            )
+        })
+        .collect();
+    h.sort_by_key(|(id, _)| *id);
+    h
+}
+
+#[test]
+fn select_ids_in_later_steps_refer_to_the_imported_mesh() {
+    // A grid with three triangular holes. Filling the first renumbers the
+    // loops after it, so the second step's IDs must be translated from the
+    // imported revision, not read in the current one.
+    let dir = tempfile::tempdir().unwrap();
+    let n = 8;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let mut e = mf_fixtures::grid(n).edit();
+    for (i, j) in [(1, 1), (4, 1), (4, 5)] {
+        e.remove_face(mf_geometry::FaceId(cell(i, j))).unwrap();
+    }
+    let input = dir.path().join("holes.obj");
+    write_path(&e.finish().unwrap().0, &input, Format::Obj).unwrap();
+    let input = input.to_str().unwrap();
+    let before = holes(input);
+    assert_eq!(before.len(), 3);
+    let out_path = dir.path().join("out.obj");
+    let out = meshfixer(&[
+        "run",
+        input,
+        "--op",
+        "mesh.fill_holes",
+        "--select",
+        &format!("loop:{}", before[0].0),
+        "--op",
+        "mesh.fill_holes",
+        "--select",
+        &format!("loop:{}", before[1].0),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = holes(out_path.to_str().unwrap());
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(
+        after[0].1, before[2].1,
+        "the third hole is the one left open"
+    );
+}
