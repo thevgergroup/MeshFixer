@@ -2502,6 +2502,7 @@ dependencies = [
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
+ "mf-render",
  "mf-spec",
  "rayon",
  "serde",
