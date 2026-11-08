@@ -11,7 +11,7 @@ use mf_render::{MeshVertices, OrbitCamera};
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::viewport::{Click, Viewport};
+use crate::viewport::{Click, ViewOptions, Viewport};
 use crate::worker::{self, Analysis, Message};
 use mf_render::{LineVertex, loop_line_vertices, pick_loop, screen_position};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
@@ -301,8 +301,9 @@ impl MeshFixerApp {
                 self.selection = Some(mapped);
             }
             Translation::Failed(TranslateError::LoopClosed { faces }) => {
+                let plural = if faces.len() == 1 { "" } else { "s" };
                 self.status = Some(format!(
-                    "Hole filled ({} faces); selection cleared",
+                    "Hole filled ({} face{plural}); selection cleared",
                     faces.len()
                 ));
             }
@@ -586,10 +587,12 @@ impl eframe::App for MeshFixerApp {
                     ui,
                     &mut self.camera,
                     vertices.as_ref(),
-                    show_boundaries,
-                    highlight.as_ref(),
-                    updating,
-                    placeholder,
+                    ViewOptions {
+                        show_boundaries,
+                        highlight: highlight.as_ref(),
+                        updating,
+                        placeholder,
+                    },
                 )
             })
             .inner;

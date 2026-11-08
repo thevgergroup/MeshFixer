@@ -21,6 +21,16 @@ struct FrameKey {
     highlight: usize,
 }
 
+/// How to draw the view this frame.
+pub struct ViewOptions<'a> {
+    pub show_boundaries: bool,
+    pub highlight: Option<&'a Arc<Vec<LineVertex>>>,
+    /// The geometry shown is from the previous revision while the current one is analysed.
+    pub updating: bool,
+    /// Text shown when there's nothing to draw.
+    pub placeholder: &'a str,
+}
+
 /// A primary click in the viewport (not a drag), in points relative to the
 /// viewport's top-left, with the viewport size in points.
 #[derive(Debug, Clone, Copy)]
@@ -66,11 +76,14 @@ impl Viewport {
         ui: &mut egui::Ui,
         camera: &mut Option<OrbitCamera>,
         vertices: Option<&Arc<MeshVertices>>,
-        show_boundaries: bool,
-        highlight: Option<&Arc<Vec<LineVertex>>>,
-        updating: bool,
-        placeholder: &str,
+        options: ViewOptions<'_>,
     ) -> Option<Click> {
+        let ViewOptions {
+            show_boundaries,
+            highlight,
+            updating,
+            placeholder,
+        } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let (Some(cam), Some(vertices)) = (camera.as_mut(), vertices) else {
