@@ -9,6 +9,8 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+zip.workspace = true
+quick-xml.workspace = true
 rayon.workspace = true
 mf-geometry.workspace = true
 blake3.workspace = true
@@ -16,6 +18,7 @@ serde.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+zip.workspace = true
 mf-fixtures.workspace = true
 tempfile.workspace = true
 blake3.workspace = true

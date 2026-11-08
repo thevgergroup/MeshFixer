@@ -7,6 +7,7 @@
 mod geometry;
 
 use mf_io::SourceInfo;
+pub use mf_io::threemf::{IDENTITY as IDENTITY_TRANSFORM, Unit};
 
 pub use geometry::{Geometry, GeometryKind};
 
@@ -41,6 +42,10 @@ pub struct Object {
     pub name: String,
     pub geometry: Geometry,
     pub source: Option<SourceInfo>,
+    /// Placement as a row-major 3×4 affine in 3MF order (last three values
+    /// are the translation). Stored and exported; Phase 0 tools edit geometry
+    /// in object space and the viewer draws the active object untransformed.
+    pub transform: [f64; 12],
 }
 
 impl Object {
@@ -54,9 +59,22 @@ impl Object {
 #[derive(Debug, Clone, Default)]
 pub struct Document {
     objects: Vec<Object>,
+    /// Model units (MF-DOC-004); millimetres unless an import says otherwise.
+    units: Unit,
 }
 
 impl Document {
+    pub fn units(&self) -> Unit {
+        self.units
+    }
+
+    /// A new document with different units (coordinates are not converted).
+    pub fn with_units(&self, units: Unit) -> Document {
+        let mut d = self.clone();
+        d.units = units;
+        d
+    }
+
     pub fn objects(&self) -> &[Object] {
         &self.objects
     }

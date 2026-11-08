@@ -36,7 +36,13 @@ pub(crate) struct SourceEntry {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Event {
-    Import { object: ObjectId, name: String },
+    Import {
+        object: ObjectId,
+        name: String,
+        /// Which object of the source file (0 for STL/OBJ).
+        #[serde(default)]
+        part: usize,
+    },
     Command(Box<CommandRecord>),
 }
 
@@ -69,6 +75,12 @@ pub enum LogError {
     },
     #[error("log references source for object {0}, which the manifest doesn't list")]
     MissingSourceEntry(ObjectId),
+    #[error("{path} has {objects} object(s); the log imports part {part}")]
+    MissingPart {
+        path: PathBuf,
+        part: usize,
+        objects: usize,
+    },
     #[error("object {0} vanished from the replayed session after its command ran")]
     TargetMissing(ObjectId),
     #[error("replay allocated object {actual}, but the log expected {expected}")]
@@ -151,6 +163,7 @@ impl Session {
                 events.push(Event::Import {
                     object: import.object,
                     name: import.name.clone(),
+                    part: import.part,
                 });
             }
             if let Some(record) = &node.record {

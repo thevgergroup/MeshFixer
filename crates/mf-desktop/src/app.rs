@@ -108,7 +108,7 @@ impl MeshFixerApp {
 
     pub fn open_dialog(&mut self, ctx: &egui::Context) {
         if let Some(path) = rfd::FileDialog::new()
-            .add_filter("Meshes", &["stl", "obj"])
+            .add_filter("Meshes", &["stl", "obj", "3mf"])
             .pick_file()
         {
             self.open(ctx, path);
@@ -152,6 +152,7 @@ impl MeshFixerApp {
             return;
         };
         let Some(path) = rfd::FileDialog::new()
+            .add_filter("3MF (all objects)", &["3mf"])
             .add_filter("Binary STL", &["stl"])
             .add_filter("OBJ", &["obj"])
             .save_file()
@@ -159,12 +160,42 @@ impl MeshFixerApp {
             return;
         };
         match Format::from_path(&path) {
+            Some(Format::ThreeMf) => match self.document_model() {
+                Ok(model) => {
+                    self.busy = Some(format!("Exporting {}", path.display()));
+                    worker::export(&self.tx, ctx, worker::ExportJob::Model(model), path);
+                }
+                Err(e) => self.error = Some(e),
+            },
             Some(format) => {
                 self.busy = Some(format!("Exporting {}", path.display()));
-                worker::export(&self.tx, ctx, mesh, path, format);
+                worker::export(&self.tx, ctx, worker::ExportJob::Mesh(mesh, format), path);
             }
             None => self.error = Some(format!("Unsupported export format: {}", path.display())),
         }
+    }
+
+    /// The whole document as a 3MF model (every object, transforms, units).
+    pub fn document_model(&self) -> Result<mf_io::threemf::Model, String> {
+        let doc = self.session.document();
+        let objects = doc
+            .objects()
+            .iter()
+            .map(|o| {
+                let mesh = o
+                    .mesh()
+                    .ok_or_else(|| format!("object '{}' is not a mesh", o.name))?;
+                Ok(mf_io::threemf::ModelObject {
+                    name: o.name.clone(),
+                    mesh: mesh.clone(),
+                    transform: o.transform,
+                })
+            })
+            .collect::<Result<Vec<_>, String>>()?;
+        Ok(mf_io::threemf::Model {
+            unit: doc.units(),
+            objects,
+        })
     }
 
     /// Current parameter values for an operation, initialized from spec defaults.
@@ -229,18 +260,23 @@ impl MeshFixerApp {
 
     fn handle(&mut self, msg: Message) {
         match msg {
-            Message::Imported(result, name) => {
+            Message::Imported(result) => {
                 self.busy = None;
                 match result {
-                    Ok(imported) => {
-                        self.warnings = imported.warnings.clone();
+                    Ok(model) => {
+                        let (ids, warnings) = self.session.import_model(model);
+                        self.warnings = warnings;
                         if !self.warnings.is_empty() {
                             self.status =
                                 Some(format!("{} import warning(s)", self.warnings.len()));
                         }
-                        let id = self.session.import(imported, name);
-                        self.active = Some(id);
-                        self.camera = None;
+                        match ids.first() {
+                            Some(&id) => {
+                                self.active = Some(id);
+                                self.camera = None;
+                            }
+                            None => self.error = Some("The file contains no mesh objects".into()),
+                        }
                     }
                     Err(e) => self.error = Some(format!("Import failed: {e}")),
                 }

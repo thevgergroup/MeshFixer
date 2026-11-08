@@ -230,19 +230,70 @@ fn cli() -> Command {
     cmd
 }
 
+/// Import every object of the file; commands act on the first one.
 fn open(path: &Path, metrics: &mut Metrics) -> Result<(Session, ObjectId), Failure> {
-    let imported = metrics.record("import", || mf_io::read_path(path))?;
-    for w in &imported.warnings {
+    let model = metrics.record("import", || mf_io::read_model(path))?;
+    let mut session = Session::new();
+    let (ids, warnings) = session.import_model(model);
+    for w in &warnings {
         eprintln!("warning: {w}");
     }
-    let mut session = Session::new();
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("object")
-        .to_owned();
-    let id = session.import(imported, name);
-    Ok((session, id))
+    let first = *ids
+        .first()
+        .ok_or_else(|| Failure::Runtime(format!("{} contains no mesh objects", path.display())))?;
+    if ids.len() > 1 {
+        eprintln!(
+            "note: {} has {} objects; commands act on the first ('{}'), 3MF output keeps them all",
+            path.display(),
+            ids.len(),
+            session
+                .document()
+                .object(first)
+                .map_or("", |o| o.name.as_str())
+        );
+    }
+    Ok((session, first))
+}
+
+/// Write the result: every object (with transforms and units) for 3MF,
+/// otherwise the target object's mesh.
+fn export(
+    session: &Session,
+    id: ObjectId,
+    output: &Path,
+    format: Format,
+    metrics: &mut Metrics,
+) -> Result<(), Failure> {
+    let doc = session.document();
+    let mesh = doc
+        .object(id)
+        .and_then(|o| o.mesh())
+        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+    metrics.structures(mesh);
+    if format == Format::ThreeMf {
+        let objects = doc
+            .objects()
+            .iter()
+            .map(|o| {
+                let mesh = o.mesh().ok_or_else(|| {
+                    Failure::Runtime(format!("object '{}' is not a mesh", o.name))
+                })?;
+                Ok(mf_io::threemf::ModelObject {
+                    name: o.name.clone(),
+                    mesh: mesh.clone(),
+                    transform: o.transform,
+                })
+            })
+            .collect::<Result<Vec<_>, Failure>>()?;
+        let model = mf_io::threemf::Model {
+            unit: doc.units(),
+            objects,
+        };
+        metrics.record("export", || mf_io::write_model_path(&model, output))?;
+    } else {
+        metrics.record("export", || mf_io::write_path(mesh, output, format))?;
+    }
+    Ok(())
 }
 
 fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
@@ -482,14 +533,7 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
             .map_err(|e| Failure::Runtime(e.to_string()))?;
         eprintln!("saved command log to {}", dir.display());
     }
-    let mesh = session
-        .document()
-        .object(id)
-        .and_then(|o| o.mesh())
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    metrics.structures(mesh);
-    metrics.record("export", || mf_io::write_path(mesh, output, format))?;
-    Ok(())
+    export(&session, id, output, format, metrics)
 }
 
 fn replay_log(m: &ArgMatches) -> Result<(), Failure> {
@@ -557,16 +601,7 @@ fn run_operation(
     if let CommitOutcome::NewRevision { report } = outcome {
         eprintln!("{}: {report}", spec.id);
     }
-    let object = session
-        .document()
-        .object(id)
-        .ok_or_else(|| Failure::Runtime("object disappeared".into()))?;
-    let mesh = object
-        .mesh()
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    metrics.structures(mesh);
-    metrics.record("export", || mf_io::write_path(mesh, output, format))?;
-    Ok(())
+    export(&session, id, output, format, metrics)
 }
 
 fn main() -> ExitCode {

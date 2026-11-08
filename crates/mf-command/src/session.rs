@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mf_document::{Document, Geometry, Object, ObjectId, RevisionId};
+use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, RevisionId, Unit};
 use mf_geometry::{Mesh, Provenance};
-use mf_io::{Imported, SourceInfo};
+use mf_io::threemf::ModelObject;
+use mf_io::{Imported, ImportedModel, SourceInfo};
 use mf_operations::{OpError, OpOutput, Operation, Target};
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
@@ -264,7 +265,66 @@ impl Session {
     }
 
     pub fn import(&mut self, imported: Imported, name: String) -> ObjectId {
-        self.add_geometry(Geometry::Mesh(imported.mesh), name, Some(imported.source))
+        self.add_object(
+            Geometry::Mesh(imported.mesh),
+            name,
+            Some(imported.source),
+            0,
+            IDENTITY_TRANSFORM,
+            None,
+        )
+    }
+
+    /// Import every object of a model (one revision per object, so each
+    /// import can be replayed from its part of the source file). Returns the
+    /// new object IDs and any warnings (the file's own, plus a unit mismatch).
+    pub fn import_model(&mut self, model: ImportedModel) -> (Vec<ObjectId>, Vec<String>) {
+        let mut warnings = model.warnings;
+        let first_import = self.document().objects().is_empty();
+        if !first_import && self.document().units() != model.unit {
+            warnings.push(format!(
+                "{} uses {:?} but the document uses {:?}; coordinates are not converted",
+                model.source.path.display(),
+                model.unit,
+                self.document().units()
+            ));
+        }
+        let ids = model
+            .objects
+            .into_iter()
+            .enumerate()
+            .map(|(part, o)| {
+                let units = first_import.then_some(model.unit);
+                self.add_object(
+                    Geometry::Mesh(o.mesh),
+                    o.name,
+                    Some(model.source.clone()),
+                    part,
+                    o.transform,
+                    units,
+                )
+            })
+            .collect();
+        (ids, warnings)
+    }
+
+    /// Import one object of a source file (used by replay).
+    pub fn import_object(
+        &mut self,
+        object: ModelObject,
+        unit: Unit,
+        source: SourceInfo,
+        part: usize,
+    ) -> ObjectId {
+        let units = self.document().objects().is_empty().then_some(unit);
+        self.add_object(
+            Geometry::Mesh(object.mesh),
+            object.name,
+            Some(source),
+            part,
+            object.transform,
+            units,
+        )
     }
 
     /// Add an object of any geometry kind (a history entry, like an import).
@@ -274,14 +334,30 @@ impl Session {
         name: String,
         source: Option<SourceInfo>,
     ) -> ObjectId {
+        self.add_object(geometry, name, source, 0, IDENTITY_TRANSFORM, None)
+    }
+
+    fn add_object(
+        &mut self,
+        geometry: Geometry,
+        name: String,
+        source: Option<SourceInfo>,
+        part: usize,
+        transform: [f64; 12],
+        units: Option<Unit>,
+    ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
-        let document = self.document().with_object(Object {
+        let mut document = self.document().with_object(Object {
             id,
             name: name.clone(),
             geometry,
             source: source.clone(),
+            transform,
         });
+        if let Some(u) = units {
+            document = document.with_units(u);
+        }
         self.push(RevisionNode {
             id: RevisionId(0),
             parent: None,
@@ -292,6 +368,7 @@ impl Session {
                 object: id,
                 name,
                 source,
+                part,
             }),
             document,
             provenance: BTreeMap::new(),

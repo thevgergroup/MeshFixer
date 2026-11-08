@@ -65,6 +65,9 @@ fn open_inspect_apply_undo_redo() {
     wait_until(&mut harness, "import + analysis", |a| {
         components(a).is_some()
     });
+    // Settle once so egui_kittest's accessibility check always runs (it only
+    // runs when the UI settles, which otherwise depends on timing).
+    harness.run();
     let before = components(harness.state()).unwrap();
     assert!(before >= 21, "sphere + 20 islands, got {before}");
     assert!(harness.state().viewport.frames_rendered >= 1);

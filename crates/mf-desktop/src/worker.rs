@@ -13,11 +13,11 @@ pub struct Analysis {
     pub diagnostics: Diagnostics,
     pub vertices: Arc<MeshVertices>,
 }
-use mf_io::{Format, Imported, IoError};
+use mf_io::{Format, ImportedModel, IoError};
 use mf_render::MeshVertices;
 
 pub enum Message {
-    Imported(Result<Imported, IoError>, String),
+    Imported(Result<ImportedModel, IoError>),
     Completed(Box<Result<Completed, CommandError>>),
     Analyzed { mesh: Mesh, analysis: Analysis },
     Exported(Result<PathBuf, IoError>),
@@ -40,14 +40,7 @@ fn spawn(
 }
 
 pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) {
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("object")
-        .to_owned();
-    spawn(tx, ctx, move || {
-        Message::Imported(mf_io::read_path(&path), name)
-    });
+    spawn(tx, ctx, move || Message::Imported(mf_io::read_model(&path)));
 }
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
@@ -88,14 +81,18 @@ pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
     });
 }
 
-pub fn export(
-    tx: &Sender<Message>,
-    ctx: &eframe::egui::Context,
-    mesh: Mesh,
-    path: PathBuf,
-    format: Format,
-) {
+/// What to export: one mesh, or a whole 3MF model.
+pub enum ExportJob {
+    Mesh(Mesh, Format),
+    Model(mf_io::threemf::Model),
+}
+
+pub fn export(tx: &Sender<Message>, ctx: &eframe::egui::Context, job: ExportJob, path: PathBuf) {
     spawn(tx, ctx, move || {
-        Message::Exported(mf_io::write_path(&mesh, &path, format).map(|()| path))
+        let result = match &job {
+            ExportJob::Mesh(mesh, format) => mf_io::write_path(mesh, &path, *format),
+            ExportJob::Model(model) => mf_io::write_model_path(model, &path),
+        };
+        Message::Exported(result.map(|()| path))
     });
 }

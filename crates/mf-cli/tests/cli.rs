@@ -315,3 +315,54 @@ fn select_arg_parses_and_reaches_the_record() {
     ]);
     assert_eq!(bad.status.code(), Some(2));
 }
+
+#[test]
+fn run_on_3mf_keeps_every_object() {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                name: "a".into(),
+                mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
+                transform: IDENTITY,
+            },
+            ModelObject {
+                name: "b".into(),
+                mesh: tetrahedron(),
+                transform: IDENTITY,
+            },
+        ],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--max-triangles",
+        "5",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    assert_eq!(back.objects.len(), 2, "every object is written back");
+    assert_eq!(
+        back.objects[0].mesh.triangle_count(),
+        12,
+        "the first object was repaired"
+    );
+    assert_eq!(
+        back.objects[1].mesh.triangle_count(),
+        4,
+        "other objects are untouched"
+    );
+    let inspect = meshfixer(&["inspect", input.to_str().unwrap(), "--json"]);
+    assert!(
+        inspect.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+}

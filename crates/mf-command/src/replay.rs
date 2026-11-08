@@ -71,7 +71,7 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
             message: e.to_string(),
         })?;
         match event {
-            Event::Import { object, name } => {
+            Event::Import { object, name, part } => {
                 let entry = manifest
                     .sources
                     .iter()
@@ -87,11 +87,11 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                         .split('/')
                         .fold(dir.to_path_buf(), |p, part| p.join(part))
                 };
-                let imported = mf_io::read_path(&path).map_err(|error| LogError::SourceRead {
+                let mut model = mf_io::read_model(&path).map_err(|error| LogError::SourceRead {
                     path: path.clone(),
                     error,
                 })?;
-                let actual = imported.source.content_hash.to_hex();
+                let actual = model.source.content_hash.to_hex();
                 if actual != entry.content_hash {
                     return Err(LogError::SourceChanged {
                         path,
@@ -99,7 +99,16 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                         actual,
                     });
                 }
-                let id = session.import(imported, name);
+                if part >= model.objects.len() {
+                    return Err(LogError::MissingPart {
+                        path,
+                        part,
+                        objects: model.objects.len(),
+                    });
+                }
+                let mut obj = model.objects.swap_remove(part);
+                obj.name = name;
+                let id = session.import_object(obj, model.unit, model.source, part);
                 if id != object {
                     return Err(LogError::ObjectIdMismatch {
                         expected: object,

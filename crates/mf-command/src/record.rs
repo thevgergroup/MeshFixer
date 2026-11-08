@@ -61,6 +61,8 @@ pub struct ImportRecord {
     pub object: ObjectId,
     pub name: String,
     pub source: Option<SourceInfo>,
+    /// Which object of the source file (3MF can hold several).
+    pub part: usize,
 }
 
 pub fn platform() -> String {
