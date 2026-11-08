@@ -180,3 +180,30 @@ fn record_floats_parse_back_exactly() {
     let back: f64 = serde_json::from_str(&serde_json::to_string(&0.171417_f64).unwrap()).unwrap();
     assert_eq!(back.to_bits(), 0.171417_f64.to_bits());
 }
+
+#[test]
+fn ten_revisions_cost_under_one_and_a_half_times_one() {
+    // MF-DOC-002: ten successive revisions use < 1.5× the memory of one.
+    // A body plus ten islands of distinct sizes; each command removes one more.
+    let mut parts = vec![mf_fixtures::uv_sphere(100, 200)];
+    for i in 0..10u32 {
+        parts.push(translated(&mf_fixtures::uv_sphere(2 + i, 3 + i), [10.0 + 5.0 * i as f64, 0.0, 0.0]));
+    }
+    let mut s = Session::new();
+    let id = s.import(imported(merge(&parts)), "part".into());
+    let sizes: Vec<usize> = (0..10u32).map(|i| 2 * (3 + i as usize) * (1 + i as usize)).collect();
+    for size in sizes {
+        let out = s.execute(remove(id, &(size + 1).to_string())).unwrap();
+        assert!(matches!(out, mf_command::CommitOutcome::NewRevision { .. }));
+    }
+    assert_eq!(s.records_to_current().len(), 10);
+    let current = s.document().object(id).unwrap().mesh().unwrap().clone();
+    let _ = current.topology(); // the current revision is analysed (as the UI does)
+    let one = current.heap_bytes() + current.topology().heap_bytes();
+    let all = s.history_bytes();
+    assert!(
+        (all as f64) < 1.5 * one as f64,
+        "history {all} B vs one revision {one} B ({:.2}×)",
+        all as f64 / one as f64
+    );
+}

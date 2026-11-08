@@ -197,7 +197,28 @@ impl Session {
         self.nodes[self.cursor.0 as usize].children.push(id);
         self.nodes.push(node);
         self.cursor = id;
+        self.trim_caches();
         id
+    }
+
+    /// Keep derived topology only for the current revision's meshes; other
+    /// revisions recompute it on demand (MF-DOC-002, review I5).
+    fn trim_caches(&mut self) {
+        let current: Vec<Mesh> = self
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| o.mesh().cloned())
+            .collect();
+        for node in &self.nodes {
+            for object in node.document.objects() {
+                if let Some(mesh) = object.mesh()
+                    && !current.iter().any(|c| Mesh::ptr_eq(c, mesh))
+                {
+                    mesh.release_topology();
+                }
+            }
+        }
     }
 
     pub fn import(&mut self, imported: Imported, name: String) -> ObjectId {
@@ -376,6 +397,7 @@ impl Session {
         match self.current_node().parent {
             Some(p) => {
                 self.cursor = p;
+                self.trim_caches();
                 true
             }
             None => false,
@@ -387,6 +409,7 @@ impl Session {
         match self.current_node().children.last() {
             Some(&c) => {
                 self.cursor = c;
+                self.trim_caches();
                 true
             }
             None => false,
@@ -398,6 +421,7 @@ impl Session {
         let ok = self.node(id).is_some();
         if ok {
             self.cursor = id;
+            self.trim_caches();
         }
         ok
     }
@@ -447,6 +471,25 @@ impl Session {
         }
         out.reverse();
         out
+    }
+
+    /// Heap bytes held by all revisions in the DAG: mesh storage with
+    /// shared chunks counted once, plus each distinct revision's cached
+    /// topology (MF-DOC-002, review I5).
+    pub fn history_bytes(&self) -> u64 {
+        let mut seen = std::collections::HashSet::new();
+        let mut meshes_seen = std::collections::HashSet::new();
+        let mut total = 0;
+        for node in &self.nodes {
+            for object in node.document.objects() {
+                let Some(mesh) = object.mesh() else { continue };
+                total += mesh.unique_heap_bytes(&mut seen);
+                if meshes_seen.insert(mesh.content_hash()) && mesh.has_cached_topology() {
+                    total += mesh.topology().heap_bytes();
+                }
+            }
+        }
+        total
     }
 
     fn ancestors(&self, rev: RevisionId) -> Vec<RevisionId> {

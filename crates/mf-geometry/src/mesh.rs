@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use serde::Serialize;
 
@@ -67,7 +67,8 @@ pub(crate) struct Inner {
     pub(crate) vertex_count: usize,
     hash: OnceLock<ContentHash>,
     structure: OnceLock<ContentHash>,
-    topology: OnceLock<Arc<Topology>>,
+    /// Derived, so it can be dropped and recomputed (review I5).
+    topology: Mutex<Option<Arc<Topology>>>,
 }
 
 impl std::fmt::Debug for Mesh {
@@ -133,7 +134,7 @@ impl Mesh {
                 vertex_count,
                 hash: OnceLock::new(),
                 structure: OnceLock::new(),
-                topology: OnceLock::new(),
+                topology: Mutex::new(None),
             }),
         }
     }
@@ -306,15 +307,30 @@ impl Mesh {
 
     /// Derived topology, computed on first use and cached (MF-GEO-003).
     pub fn topology(&self) -> Arc<Topology> {
+        let mut cached = self.lock_topology();
+        cached
+            .get_or_insert_with(|| Arc::new(Topology::compute(self)))
+            .clone()
+    }
+
+    fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {
+        // A panic while computing topology leaves nothing half-written (the
+        // value is only stored on success), so a poisoned lock is safe to use.
         self.inner
             .topology
-            .get_or_init(|| Arc::new(Topology::compute(self)))
-            .clone()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Drop the cached topology; the next `topology()` call recomputes it.
+    /// Used to keep only the current revision's topology in memory.
+    pub fn release_topology(&self) {
+        *self.lock_topology() = None;
     }
 
     /// True if this revision's topology has been computed and is cached.
     pub fn has_cached_topology(&self) -> bool {
-        self.inner.topology.get().is_some()
+        self.lock_topology().is_some()
     }
 
     /// Heap bytes owned by this mesh's storage (excludes cached topology).
