@@ -68,10 +68,10 @@ fn boundary_lines_for_hole() {
     assert!(boundary_line_vertices(&cube(1.0), DVec3::ZERO).is_empty());
 }
 
-fn gpu_or_skip<T>(r: Result<T, RenderError>) -> Option<T> {
+fn gpu_or_skip<T>(test: &str, r: Result<T, RenderError>) -> Option<T> {
     match r {
         Err(RenderError::NoAdapter) => {
-            eprintln!("SKIPPED: no GPU adapter available");
+            mf_fixtures::skip::gpu_unavailable(test);
             None
         }
         other => Some(other.unwrap()),
@@ -80,7 +80,10 @@ fn gpu_or_skip<T>(r: Result<T, RenderError>) -> Option<T> {
 
 #[test]
 fn offscreen_cube_not_blank() {
-    let Some(img) = gpu_or_skip(offscreen::render_image(&cube(1.0), 64, 48, true)) else {
+    let Some(img) = gpu_or_skip(
+        "offscreen_cube_not_blank",
+        offscreen::render_image(&cube(1.0), 64, 48, true),
+    ) else {
         return;
     };
     assert_eq!(img.dimensions(), (64, 48));
@@ -95,7 +98,10 @@ fn offscreen_cube_not_blank() {
 
 #[test]
 fn offscreen_empty_mesh_ok() {
-    let Some(img) = gpu_or_skip(offscreen::render_image(&Mesh::empty(), 16, 16, true)) else {
+    let Some(img) = gpu_or_skip(
+        "offscreen_empty_mesh_ok",
+        offscreen::render_image(&Mesh::empty(), 16, 16, true),
+    ) else {
         return;
     };
     assert!(img.pixels().all(|p| p.0 == offscreen::BACKGROUND_RGBA));
@@ -132,13 +138,10 @@ fn chunk_ranges_respect_limit_and_primitive_size() {
 #[test]
 fn chunked_upload_renders_identically() {
     let m = mf_fixtures::uv_sphere(24, 48);
-    let Some(whole) = gpu_or_skip(offscreen::render_image_with_chunk_limit(
-        &m,
-        96,
-        72,
-        true,
-        u64::MAX,
-    )) else {
+    let Some(whole) = gpu_or_skip(
+        "chunked_upload_renders_identically",
+        offscreen::render_image_with_chunk_limit(&m, 96, 72, true, u64::MAX),
+    ) else {
         return;
     };
     let chunked = offscreen::render_image_with_chunk_limit(&m, 96, 72, true, 24 * 300).unwrap();
@@ -148,7 +151,9 @@ fn chunked_upload_renders_identically() {
 #[test]
 fn oversized_render_is_an_error_not_a_panic() {
     match offscreen::render_image(&cube(1.0), 20_000, 64, true) {
-        Err(RenderError::NoAdapter) => eprintln!("SKIPPED: no GPU adapter available"),
+        Err(RenderError::NoAdapter) => {
+            mf_fixtures::skip::gpu_unavailable("oversized_render_is_an_error_not_a_panic")
+        }
         Err(RenderError::TooLarge { width, height, max }) => {
             assert_eq!((width, height), (20_000, 64));
             assert!(max < 20_000);

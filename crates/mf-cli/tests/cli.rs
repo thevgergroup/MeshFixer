@@ -115,7 +115,7 @@ fn render_writes_png() {
     ]);
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("no GPU adapter") {
-        eprintln!("SKIPPED: no GPU adapter available");
+        mf_fixtures::skip::gpu_unavailable("render_writes_png");
         return;
     }
     assert!(out.status.success(), "{stderr}");

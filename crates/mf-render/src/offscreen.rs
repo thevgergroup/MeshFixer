@@ -19,6 +19,11 @@ fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
         .map_err(|e| RenderError::Device(e.to_string()))
 }
 
+/// True if a GPU adapter can be created (used to gate GPU tests).
+pub fn gpu_available() -> bool {
+    device().is_ok()
+}
+
 /// Render `mesh` framed by a default camera.
 pub fn render_image(
     mesh: &Mesh,

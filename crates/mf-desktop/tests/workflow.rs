@@ -41,6 +41,10 @@ fn save(harness: &mut Harness<'_, MeshFixerApp>, name: &str) {
 
 #[test]
 fn open_inspect_apply_undo_redo() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("open_inspect_apply_undo_redo");
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("damaged.obj");
     let spec = DamageSpec {

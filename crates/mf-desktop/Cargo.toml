@@ -30,6 +30,7 @@ serde_json.workspace = true
 [dev-dependencies]
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
 mf-fixtures.workspace = true
+mf-render.workspace = true
 tempfile.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true

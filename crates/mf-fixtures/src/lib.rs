@@ -231,3 +231,38 @@ pub fn damaged_sphere(spec: &DamageSpec) -> Mesh {
     }
     merge(&parts)
 }
+
+/// Policy for tests that need a GPU adapter.
+///
+/// A skipped GPU test must never look like a pass. With `MF_REQUIRE_GPU=1`
+/// a missing adapter fails the test. Otherwise the skip is printed and
+/// appended to `MF_SKIP_LOG`, which CI reports separately from passes.
+pub mod skip {
+    use std::io::Write;
+    use std::path::Path;
+
+    /// Call when a GPU test can't run. Reads the policy from the environment.
+    pub fn gpu_unavailable(test: &str) {
+        let require = std::env::var("MF_REQUIRE_GPU").is_ok_and(|v| v == "1");
+        let log = std::env::var_os("MF_SKIP_LOG");
+        record_gpu_skip(test, require, log.as_deref().map(Path::new));
+    }
+
+    pub fn record_gpu_skip(test: &str, require: bool, log: Option<&Path>) {
+        assert!(
+            !require,
+            "GPU required (MF_REQUIRE_GPU=1) but no adapter is available for {test}"
+        );
+        eprintln!("SKIPPED: {test}: no GPU adapter available");
+        if let Some(log) = log {
+            let written = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(log)
+                .and_then(|mut f| writeln!(f, "{test}"));
+            if let Err(e) = written {
+                panic!("could not record skip of {test} in {}: {e}", log.display());
+            }
+        }
+    }
+}
