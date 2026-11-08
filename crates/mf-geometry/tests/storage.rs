@@ -11,21 +11,39 @@ use mf_geometry::{CHUNK, FaceId, Mesh, Sources, VertexId};
 fn chunked_cow_shares_untouched_chunks() {
     let m = uv_sphere(160, 320); // 101,760 faces, 50,882 vertices
     assert!(m.face_slots() as usize > 3 * CHUNK);
-    let all = |a: &Mesh, n: usize, f: &dyn Fn(&Mesh, &Mesh, usize) -> bool| (0..n).filter(|&i| f(a, &m, i)).count();
+    let all = |a: &Mesh, n: usize, f: &dyn Fn(&Mesh, &Mesh, usize) -> bool| {
+        (0..n).filter(|&i| f(a, &m, i)).count()
+    };
 
     // Removing a face only flips a tombstone bit: all geometry chunks stay shared.
     let mut e = m.edit();
     e.remove_face(FaceId(5)).unwrap();
     let (removed, _) = e.finish().unwrap();
-    assert_eq!(all(&removed, removed.face_chunk_count(), &|a, b, i| a.shares_face_chunk(b, i)), m.face_chunk_count());
-    assert_eq!(all(&removed, removed.position_chunk_count(), &|a, b, i| a.shares_position_chunk(b, i)), m.position_chunk_count());
+    assert_eq!(
+        all(&removed, removed.face_chunk_count(), &|a, b, i| a
+            .shares_face_chunk(b, i)),
+        m.face_chunk_count()
+    );
+    assert_eq!(
+        all(&removed, removed.position_chunk_count(), &|a, b, i| a
+            .shares_position_chunk(b, i)),
+        m.position_chunk_count()
+    );
 
     // Moving one vertex copies exactly one position chunk.
     let mut e = m.edit();
     e.move_vertex(VertexId(40_000), [0.0, 0.0, 3.0]).unwrap();
     let (moved, prov) = e.finish().unwrap();
-    assert_eq!(all(&moved, moved.position_chunk_count(), &|a, b, i| a.shares_position_chunk(b, i)), m.position_chunk_count() - 1);
-    assert_eq!(all(&moved, moved.face_chunk_count(), &|a, b, i| a.shares_face_chunk(b, i)), m.face_chunk_count());
+    assert_eq!(
+        all(&moved, moved.position_chunk_count(), &|a, b, i| a
+            .shares_position_chunk(b, i)),
+        m.position_chunk_count() - 1
+    );
+    assert_eq!(
+        all(&moved, moved.face_chunk_count(), &|a, b, i| a
+            .shares_face_chunk(b, i)),
+        m.face_chunk_count()
+    );
     assert_eq!(prov.moved_vertices, vec![VertexId(40_000)]);
 }
 
@@ -36,7 +54,15 @@ fn edit_remove_and_add_keeps_ids() {
     e.remove_face(FaceId(2)).unwrap();
     e.remove_face(FaceId(3)).unwrap();
     let v = e.add_vertex([0.5, 0.5, 1.5]);
-    let f = e.add_face([4, 5, v.0], Sources { faces: vec![FaceId(2)], loops: vec![] }).unwrap();
+    let f = e
+        .add_face(
+            [4, 5, v.0],
+            Sources {
+                faces: vec![FaceId(2)],
+                loops: vec![],
+            },
+        )
+        .unwrap();
     let (out, prov) = e.finish().unwrap();
     assert_eq!(f, FaceId(12));
     assert_eq!(v, VertexId(8));
@@ -68,7 +94,9 @@ fn provenance_is_total() {
     let base = uv_sphere(12, 24);
     let mut seed = 0x1234_5678u64;
     let mut next = |n: u32| {
-        seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
         ((seed >> 33) % n as u64) as u32
     };
     for _ in 0..64 {
@@ -83,18 +111,25 @@ fn provenance_is_total() {
         for _ in 0..next(5) {
             let a = next(base.vertex_slots());
             let v = e.add_vertex([0.0, 0.0, 2.0]);
-            e.add_face([a, (a + 1) % base.vertex_slots(), v.0], Sources::default()).unwrap();
+            e.add_face([a, (a + 1) % base.vertex_slots(), v.0], Sources::default())
+                .unwrap();
         }
         let (out, prov) = e.finish().unwrap();
         let created: HashSet<FaceId> = prov.created_faces.iter().map(|(f, _)| *f).collect();
         let removed: HashSet<FaceId> = prov.removed_faces.iter().copied().collect();
         for (id, tri) in out.faces() {
             let kept = base.face(id) == Some(tri);
-            assert!(kept ^ created.contains(&id), "output face {id:?} must be kept xor created");
+            assert!(
+                kept ^ created.contains(&id),
+                "output face {id:?} must be kept xor created"
+            );
         }
         for (id, _) in base.faces() {
             let kept = out.face(id) == base.face(id);
-            assert!(kept ^ removed.contains(&id), "input face {id:?} must be kept xor removed");
+            assert!(
+                kept ^ removed.contains(&id),
+                "input face {id:?} must be kept xor removed"
+            );
         }
     }
 }
@@ -120,7 +155,11 @@ fn hash_includes_slot_identity() {
     let (tomb, _) = e.finish().unwrap();
     let (compact, _) = tomb.compacted();
     assert_eq!(tomb.to_arrays(), compact.to_arrays(), "same live geometry");
-    assert_ne!(tomb.content_hash(), compact.content_hash(), "different slot identity");
+    assert_ne!(
+        tomb.content_hash(),
+        compact.content_hash(),
+        "different slot identity"
+    );
 }
 
 #[test]
@@ -133,7 +172,10 @@ fn history_bytes_count_shared_chunks_once() {
     let first = m.unique_heap_bytes(&mut seen);
     let second = out.unique_heap_bytes(&mut seen);
     assert!(first > 0);
-    assert!(second < first / 4, "second revision adds only its copied chunks: {second} vs {first}");
+    assert!(
+        second < first / 4,
+        "second revision adds only its copied chunks: {second} vs {first}"
+    );
 }
 
 #[test]

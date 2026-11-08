@@ -32,7 +32,10 @@ fn stl_import_peak_bounded() {
     assert!(
         phase.peak_bytes <= bound,
         "import peak {} > bound {} (file {}, mesh {})",
-        phase.peak_bytes, bound, file_len, mesh_bytes
+        phase.peak_bytes,
+        bound,
+        file_len,
+        mesh_bytes
     );
 }
 
@@ -49,7 +52,10 @@ fn export_peak_bounded() {
         assert!(
             phase.peak_bytes <= bound,
             "{name}: export peak {} > bound {} (encoded {}, mesh {})",
-            phase.peak_bytes, bound, encoded, mesh.heap_bytes()
+            phase.peak_bytes,
+            bound,
+            encoded,
+            mesh.heap_bytes()
         );
     }
 }

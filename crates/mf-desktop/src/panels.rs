@@ -123,7 +123,13 @@ fn objects(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .document()
         .objects()
         .iter()
-        .map(|o| (o.id, o.name.clone(), o.mesh.triangle_count()))
+        .map(|o| {
+            (
+                o.id,
+                o.name.clone(),
+                o.mesh().map_or(0, |m| m.triangle_count()),
+            )
+        })
         .collect();
     if objects.is_empty() {
         ui.weak("No objects");

@@ -192,7 +192,10 @@ fn stl_weld_identical_at_1_and_8_threads() {
     let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(50_000, 4));
     let bytes = stl::write_binary(&mesh).unwrap();
     let run = |threads| {
-        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(threads)
+            .build()
+            .unwrap();
         pool.install(|| stl::read(&bytes).unwrap().0.content_hash())
     };
     assert_eq!(run(1), run(8));
@@ -205,11 +208,19 @@ fn export_skips_tombstoned_faces() {
     e.remove_face(mf_geometry::FaceId(2)).unwrap();
     e.remove_face(mf_geometry::FaceId(3)).unwrap();
     let (open, _) = e.finish().unwrap();
-    for (name, fmt) in [("t.stl", Format::StlBinary), ("t.obj", Format::Obj), ("a.stl", Format::StlAscii)] {
+    for (name, fmt) in [
+        ("t.stl", Format::StlBinary),
+        ("t.obj", Format::Obj),
+        ("a.stl", Format::StlAscii),
+    ] {
         let p = dir.path().join(name);
         write_path(&open, &p, fmt).unwrap();
         let back = read_path(&p).unwrap().mesh;
         assert_eq!(back.triangle_count(), 10, "{name}");
-        assert_eq!(mf_geometry::inspect(&back).boundary_loops.len(), 1, "{name}");
+        assert_eq!(
+            mf_geometry::inspect(&back).boundary_loops.len(),
+            1,
+            "{name}"
+        );
     }
 }

@@ -116,7 +116,10 @@ pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
         let mut tok = line.split_ascii_whitespace();
         match tok.next() {
             Some("v") => {
-                let expected = vertices.next().ok_or_else(|| format!("line {}: extra vertex", i + 1))?.1;
+                let expected = vertices
+                    .next()
+                    .ok_or_else(|| format!("line {}: extra vertex", i + 1))?
+                    .1;
                 for c in expected {
                     let got: f64 = tok
                         .next()
@@ -128,14 +131,21 @@ pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
                 }
             }
             Some("f") => {
-                let expected = faces.next().ok_or_else(|| format!("line {}: extra face", i + 1))?.1;
+                let expected = faces
+                    .next()
+                    .ok_or_else(|| format!("line {}: extra face", i + 1))?
+                    .1;
                 for v in expected {
                     let got: u32 = tok
                         .next()
                         .and_then(|t| t.parse().ok())
                         .ok_or_else(|| format!("line {}: bad face", i + 1))?;
                     if got != index[v as usize] {
-                        return Err(format!("line {}: face index {got} != {}", i + 1, index[v as usize]));
+                        return Err(format!(
+                            "line {}: face index {got} != {}",
+                            i + 1,
+                            index[v as usize]
+                        ));
                     }
                 }
             }

@@ -204,8 +204,8 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
     let (mut session, id) = open(path, metrics)?;
-    if let Some(object) = session.document().object(id) {
-        let mesh = object.mesh.clone();
+    if let Some(mesh) = session.document().object(id).and_then(|o| o.mesh()) {
+        let mesh = mesh.clone();
         metrics.record("topology", || mesh.topology());
         metrics.structures(&mesh);
     }
@@ -313,8 +313,11 @@ fn run_operation(
         .document()
         .object(id)
         .ok_or_else(|| Failure::Runtime("object disappeared".into()))?;
-    metrics.structures(&object.mesh);
-    metrics.record("export", || mf_io::write_path(&object.mesh, output, format))?;
+    let mesh = object
+        .mesh()
+        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+    metrics.structures(mesh);
+    metrics.record("export", || mf_io::write_path(mesh, output, format))?;
     Ok(())
 }
 

@@ -99,7 +99,10 @@ fn read_binary(body: &[u8], n: usize) -> Result<Mesh, IoError> {
 pub(crate) fn verify_binary(bytes: &[u8], triangles: usize) -> Result<(), String> {
     let expected = HEADER + 4 + FACET * triangles;
     if bytes.len() != expected {
-        return Err(format!("encoded {} bytes, expected {expected}", bytes.len()));
+        return Err(format!(
+            "encoded {} bytes, expected {expected}",
+            bytes.len()
+        ));
     }
     let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
     if n != triangles {

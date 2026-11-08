@@ -31,6 +31,8 @@ pub struct Topology {
     pub non_manifold_vertices: usize,
     /// Two-face edges whose faces traverse the edge in the same direction.
     pub inconsistent_edges: usize,
+    /// Distinct undirected edges of live, non-collapsed faces.
+    pub edge_count: usize,
 }
 
 struct UnionFind(Vec<u32>);
@@ -120,8 +122,22 @@ impl Topology {
 
         // A half-edge starts at corner `c` and ends at corner `c + 1`, so the
         // corners of its low and high vertices follow from its direction.
-        let lo_corner = |e: &HalfEdge| e.face * 3 + if e.forward { e.corner as u32 } else { (e.corner as u32 + 1) % 3 };
-        let hi_corner = |e: &HalfEdge| e.face * 3 + if e.forward { (e.corner as u32 + 1) % 3 } else { e.corner as u32 };
+        let lo_corner = |e: &HalfEdge| {
+            e.face * 3
+                + if e.forward {
+                    e.corner as u32
+                } else {
+                    (e.corner as u32 + 1) % 3
+                }
+        };
+        let hi_corner = |e: &HalfEdge| {
+            e.face * 3
+                + if e.forward {
+                    (e.corner as u32 + 1) % 3
+                } else {
+                    e.corner as u32
+                }
+        };
 
         let mut i = 0;
         while i < edges.len() {
@@ -130,6 +146,7 @@ impl Topology {
                 j += 1;
             }
             let group = &edges[i..j];
+            topo.edge_count += 1;
             let (lo, hi) = (group[0].lo, group[0].hi);
             match group.len() {
                 1 => {

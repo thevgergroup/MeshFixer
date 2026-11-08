@@ -90,7 +90,7 @@ impl MeshFixerApp {
     pub fn active_mesh(&self) -> Option<&Mesh> {
         self.active
             .and_then(|id| self.session.document().object(id))
-            .map(|o| &o.mesh)
+            .and_then(|o| o.mesh())
     }
 
     pub fn open(&mut self, ctx: &egui::Context, path: PathBuf) {

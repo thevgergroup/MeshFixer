@@ -113,8 +113,15 @@ impl MeshEdit {
             .iter()
             .chain(&self.prov.moved_vertices);
         for v in touched {
-            if !self.positions.get(v.0 as usize).iter().all(|c| c.is_finite()) {
-                return Err(GeometryError::NonFinite { vertex: v.0 as usize });
+            if !self
+                .positions
+                .get(v.0 as usize)
+                .iter()
+                .all(|c| c.is_finite())
+            {
+                return Err(GeometryError::NonFinite {
+                    vertex: v.0 as usize,
+                });
             }
         }
         if !self.prov.removed_vertices.is_empty() {
@@ -124,7 +131,10 @@ impl MeshEdit {
                     continue;
                 }
                 if let Some(&v) = tri.iter().find(|&&v| !self.vertex_live.get(v as usize)) {
-                    return Err(GeometryError::FaceUsesRemovedVertex { face: i as u32, vertex: v });
+                    return Err(GeometryError::FaceUsesRemovedVertex {
+                        face: i as u32,
+                        vertex: v,
+                    });
                 }
             }
         }

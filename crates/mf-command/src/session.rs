@@ -6,7 +6,8 @@ use mf_io::Imported;
 use mf_operations::{OpError, OpOutput, Operation};
 use mf_spec::{Params, SpecError};
 
-use crate::document::{Document, Object, ObjectId};
+use mf_document::{Document, Geometry, Object, ObjectId};
+use mf_io::SourceInfo;
 
 /// A request to run an operation, as issued by any frontend.
 #[derive(Debug, Clone)]
@@ -30,6 +31,8 @@ pub enum CommandError {
         "the document changed while the command ran (expected revision {expected}, now {actual})"
     )]
     StaleInput { expected: u64, actual: u64 },
+    #[error("{op} does not support {kind} geometry")]
+    UnsupportedGeometry { op: String, kind: String },
 }
 
 /// A validated command, ready to run on any thread.
@@ -136,13 +139,23 @@ impl Session {
     }
 
     pub fn import(&mut self, imported: Imported, name: String) -> ObjectId {
+        self.add_geometry(Geometry::Mesh(imported.mesh), name, Some(imported.source))
+    }
+
+    /// Add an object of any geometry kind (a history entry, like an import).
+    pub fn add_geometry(
+        &mut self,
+        geometry: Geometry,
+        name: String,
+        source: Option<SourceInfo>,
+    ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
         let doc = self.document().with_object(Object {
             id,
             name: name.clone(),
-            mesh: imported.mesh,
-            source: Some(imported.source),
+            geometry,
+            source,
         });
         self.push(format!("Import {name}"), doc);
         id
@@ -158,11 +171,27 @@ impl Session {
             .document()
             .object(inv.target)
             .ok_or(CommandError::UnknownObject(inv.target))?;
+        let kind = object.geometry.kind().as_str();
+        if !spec.geometry_kinds.iter().any(|k| k == kind) {
+            return Err(CommandError::UnsupportedGeometry {
+                op: spec.id.clone(),
+                kind: kind.to_owned(),
+            });
+        }
+        // Every Phase 0 operation is a mesh operation; the spec check above
+        // guarantees the object is a mesh here.
+        let input = object
+            .mesh()
+            .ok_or_else(|| CommandError::UnsupportedGeometry {
+                op: spec.id.clone(),
+                kind: kind.to_owned(),
+            })?
+            .clone();
         Ok(Prepared {
             base_revision: self.revision(),
             target: inv.target,
             op,
-            input: object.mesh.clone(),
+            input,
             params,
         })
     }
@@ -179,7 +208,7 @@ impl Session {
         };
         let doc = self
             .document()
-            .with_mesh(c.target, mesh)
+            .with_geometry(c.target, Geometry::Mesh(mesh))
             .ok_or(CommandError::UnknownObject(c.target))?;
         let params: Vec<String> = c.params.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
         self.push(format!("{} ({})", c.op_id, params.join(", ")), doc);

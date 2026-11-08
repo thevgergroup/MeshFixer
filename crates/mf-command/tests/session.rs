@@ -33,7 +33,7 @@ fn remove(target: ObjectId, max: &str) -> Invocation {
 }
 
 fn hash_of(s: &Session, id: ObjectId) -> ContentHash {
-    s.document().object(id).unwrap().mesh.content_hash()
+    s.document().object(id).unwrap().geometry.content_hash()
 }
 
 #[test]

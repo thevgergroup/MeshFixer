@@ -2394,6 +2394,7 @@ dependencies = [
 name = "mf-command"
 version = "0.0.1"
 dependencies = [
+ "mf-document",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
@@ -2419,6 +2420,15 @@ dependencies = [
  "serde_json",
  "tempfile",
  "wgpu",
+]
+
+[[package]]
+name = "mf-document"
+version = "0.0.1"
+dependencies = [
+ "mf-geometry",
+ "mf-io",
+ "serde",
 ]
 
 [[package]]

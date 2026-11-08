@@ -184,7 +184,8 @@ impl Mesh {
     }
 
     pub fn face(&self, id: FaceId) -> Option<[u32; 3]> {
-        self.is_face_live(id).then(|| self.inner.faces.get(id.0 as usize))
+        self.is_face_live(id)
+            .then(|| self.inner.faces.get(id.0 as usize))
     }
 
     pub fn position(&self, id: VertexId) -> Option<[f64; 3]> {
