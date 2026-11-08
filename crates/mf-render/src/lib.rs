@@ -12,7 +12,8 @@ mod target;
 
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
-    GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices, surface_vertices,
+    GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices, chunk_ranges,
+    surface_vertices,
 };
 pub use renderer::{MeshRenderer, RenderTargetFormat};
 pub use target::RenderTarget;

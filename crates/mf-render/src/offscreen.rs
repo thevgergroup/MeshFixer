@@ -26,10 +26,22 @@ pub fn render_image(
     height: u32,
     show_boundaries: bool,
 ) -> Result<RgbaImage, RenderError> {
+    render_image_with_chunk_limit(mesh, width, height, show_boundaries, u64::MAX)
+}
+
+/// As [`render_image`], with GPU buffers capped at `max_chunk_bytes` (testing).
+pub fn render_image_with_chunk_limit(
+    mesh: &Mesh,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+    max_chunk_bytes: u64,
+) -> Result<RgbaImage, RenderError> {
     let (device, queue) = device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES);
     let renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
-    let gpu = GpuMesh::upload(&device, mesh);
+    let limit = max_chunk_bytes.min(device.limits().max_buffer_size);
+    let gpu = GpuMesh::from_vertices_with_limit(&device, &crate::MeshVertices::build(mesh), limit);
     let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
     let drawable = camera
         .as_ref()

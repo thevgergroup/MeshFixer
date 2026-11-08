@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
 use mf_geometry::Mesh;
@@ -87,14 +89,24 @@ impl MeshVertices {
     }
 }
 
-/// GPU buffers for one mesh revision.
+/// Split `count` vertices into consecutive ranges that fit in `max_bytes`,
+/// never splitting a primitive of `primitive` vertices.
+pub fn chunk_ranges(count: u32, stride: u64, max_bytes: u64, primitive: u32) -> Vec<Range<u32>> {
+    let fit = (max_bytes / stride.max(1)).min(u32::MAX as u64) as u32;
+    let per = (fit / primitive * primitive).max(primitive);
+    (0..count)
+        .step_by(per as usize)
+        .map(|start| start..(start + per).min(count))
+        .collect()
+}
+
+/// GPU buffers for one mesh revision, split into chunks under the device's
+/// maximum buffer size.
 pub struct GpuMesh {
     pub origin: DVec3,
     pub triangle_count: usize,
-    pub(crate) surface: Option<wgpu::Buffer>,
-    pub(crate) surface_vertices: u32,
-    pub(crate) lines: Option<wgpu::Buffer>,
-    pub(crate) line_vertices: u32,
+    pub(crate) surface: Vec<(wgpu::Buffer, u32)>,
+    pub(crate) lines: Vec<(wgpu::Buffer, u32)>,
 }
 
 impl GpuMesh {
@@ -103,22 +115,39 @@ impl GpuMesh {
     }
 
     pub fn from_vertices(device: &wgpu::Device, v: &MeshVertices) -> GpuMesh {
-        let buffer = |label: &str, bytes: &[u8]| {
-            (!bytes.is_empty()).then(|| {
-                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some(label),
-                    contents: bytes,
-                    usage: wgpu::BufferUsages::VERTEX,
+        GpuMesh::from_vertices_with_limit(device, v, device.limits().max_buffer_size)
+    }
+
+    pub fn from_vertices_with_limit(
+        device: &wgpu::Device,
+        v: &MeshVertices,
+        max_bytes: u64,
+    ) -> GpuMesh {
+        fn chunks<T: Pod>(
+            device: &wgpu::Device,
+            label: &str,
+            data: &[T],
+            max_bytes: u64,
+            primitive: u32,
+        ) -> Vec<(wgpu::Buffer, u32)> {
+            let stride = std::mem::size_of::<T>() as u64;
+            chunk_ranges(data.len() as u32, stride, max_bytes, primitive)
+                .into_iter()
+                .map(|r| {
+                    let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(label),
+                        contents: bytemuck::cast_slice(&data[r.start as usize..r.end as usize]),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+                    (buffer, r.len() as u32)
                 })
-            })
-        };
+                .collect()
+        }
         GpuMesh {
             origin: v.origin,
             triangle_count: v.triangle_count,
-            surface: buffer("mf surface", bytemuck::cast_slice(&v.surface)),
-            surface_vertices: v.surface.len() as u32,
-            lines: buffer("mf boundary lines", bytemuck::cast_slice(&v.lines)),
-            line_vertices: v.lines.len() as u32,
+            surface: chunks(device, "mf surface", &v.surface, max_bytes, 3),
+            lines: chunks(device, "mf boundary lines", &v.lines, max_bytes, 2),
         }
     }
 }

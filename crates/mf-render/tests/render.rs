@@ -115,3 +115,32 @@ fn mesh_vertices_build_matches_helpers() {
         0
     );
 }
+
+#[test]
+fn chunk_ranges_respect_limit_and_primitive_size() {
+    use mf_render::chunk_ranges;
+    // 10 triangles (30 vertices) of 24-byte vertices, max 7 vertices per chunk -> 6 (2 tris).
+    let r = chunk_ranges(30, 24, 24 * 7, 3);
+    assert_eq!(r.first(), Some(&(0..6)));
+    assert_eq!(r.last().map(|x| x.end), Some(30));
+    assert!(r.iter().all(|x| x.len() % 3 == 0 && x.len() <= 7));
+    assert!(r.windows(2).all(|w| w[0].end == w[1].start));
+    assert!(chunk_ranges(0, 24, 1024, 3).is_empty());
+    assert_eq!(chunk_ranges(4, 12, 1 << 20, 2), vec![0..4]);
+}
+
+#[test]
+fn chunked_upload_renders_identically() {
+    let m = mf_fixtures::uv_sphere(24, 48);
+    let Some(whole) = gpu_or_skip(offscreen::render_image_with_chunk_limit(
+        &m,
+        96,
+        72,
+        true,
+        u64::MAX,
+    )) else {
+        return;
+    };
+    let chunked = offscreen::render_image_with_chunk_limit(&m, 96, 72, true, 24 * 300).unwrap();
+    assert_eq!(whole, chunked);
+}

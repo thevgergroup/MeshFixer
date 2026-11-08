@@ -145,15 +145,17 @@ impl MeshRenderer {
 
     pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &GpuMesh, show_boundaries: bool) {
         pass.set_bind_group(0, &self.bind_group, &[]);
-        if let Some(buf) = &mesh.surface {
-            pass.set_pipeline(&self.surface_pipeline);
+        pass.set_pipeline(&self.surface_pipeline);
+        for (buf, count) in &mesh.surface {
             pass.set_vertex_buffer(0, buf.slice(..));
-            pass.draw(0..mesh.surface_vertices, 0..1);
+            pass.draw(0..*count, 0..1);
         }
-        if show_boundaries && let Some(buf) = &mesh.lines {
+        if show_boundaries {
             pass.set_pipeline(&self.line_pipeline);
-            pass.set_vertex_buffer(0, buf.slice(..));
-            pass.draw(0..mesh.line_vertices, 0..1);
+            for (buf, count) in &mesh.lines {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
         }
     }
 }
