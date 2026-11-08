@@ -189,7 +189,18 @@ fn diagnostics(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 "Inconsistent edges",
                 d.inconsistent_orientation_edges.to_string(),
             );
-            row("Surface area", format!("{:.4}", d.surface_area));
+            row(
+                "Surface area",
+                d.surface_area
+                    .map_or("overflow (coordinates too large)".into(), |a| {
+                        format!("{a:.4}")
+                    }),
+            );
+            row(
+                "Near-duplicate vertices",
+                d.duplicate_vertices_tolerance.to_string(),
+            );
+            row("Duplicate faces", d.duplicate_faces.to_string());
             row(
                 "Volume",
                 d.signed_volume
@@ -213,8 +224,10 @@ fn diagnostics(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             |ui| {
                 for l in d.boundary_loops.iter().take(200) {
                     ui.label(format!(
-                        "#{}: {} edges, perimeter {:.3}",
-                        l.id, l.edge_count, l.perimeter
+                        "#{}: {} edges, perimeter {}",
+                        l.id,
+                        l.edge_count,
+                        l.perimeter.map_or("overflow".into(), |p| format!("{p:.3}"))
                     ));
                 }
                 if d.boundary_loops.len() > 200 {

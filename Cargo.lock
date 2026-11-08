@@ -2445,6 +2445,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "mf-fixtures",
+ "rayon",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
