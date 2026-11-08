@@ -7,6 +7,7 @@ mod chunked;
 mod compare;
 mod diagnostics;
 mod edit;
+mod grid;
 mod hash;
 mod ids;
 mod mesh;

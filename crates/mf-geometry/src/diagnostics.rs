@@ -1,9 +1,8 @@
 //! `mesh.inspect` diagnostics (MF-GEO-004).
 
-use std::collections::HashMap;
-
 use serde::Serialize;
 
+use crate::grid::PointGrid;
 use crate::mesh::{Aabb, Mesh};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -99,10 +98,13 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         }
     }
 
-    let mut sorted: Vec<[u64; 3]> = mesh.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
-    sorted.sort_unstable();
-    sorted.dedup();
-    let duplicate_vertices_exact = mesh.vertex_count() - sorted.len();
+    // Scoped so the sort buffer is freed before the next pass (MF-ISSUE-028).
+    let duplicate_vertices_exact = {
+        let mut sorted: Vec<[u64; 3]> = mesh.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
+        sorted.sort_unstable();
+        sorted.dedup();
+        mesh.vertex_count() - sorted.len()
+    };
 
     let boundary_loops: Vec<LoopSummary> = topo
         .boundary_loops
@@ -189,35 +191,17 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
     }
 }
 
-/// Count live vertices lying within `tolerance` of a lower-ID live vertex,
-/// using a uniform grid (cell = tolerance). The count doesn't depend on hash
-/// iteration order (MF-ISSUE-012).
+/// Count live vertices lying within `tolerance` of a lower-ID live vertex
+/// (MF-ISSUE-012). Uses the compact relative grid (MF-ISSUE-026/028).
 fn near_duplicates(mesh: &Mesh, tolerance: f64) -> usize {
     if !(tolerance > 0.0 && tolerance.is_finite()) {
         return 0;
     }
-    let cell = |p: [f64; 3]| p.map(|c| (c / tolerance).floor() as i64);
-    let mut grid: HashMap<[i64; 3], Vec<[f64; 3]>> = HashMap::new();
-    let mut count = 0;
-    for (_, p) in mesh.vertices() {
-        let c = cell(p);
-        let mut dup = false;
-        'search: for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(pts) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz])
-                        && pts.iter().any(|q| norm(sub(p, *q)) <= tolerance)
-                    {
-                        dup = true;
-                        break 'search;
-                    }
-                }
-            }
-        }
-        if dup {
-            count += 1;
-        }
-        grid.entry(c).or_default().push(p);
-    }
-    count
+    let grid = PointGrid::new(|| mesh.vertices().map(|(id, p)| (id.0, p)), tolerance);
+    mesh.vertices()
+        .filter(|&(id, p)| {
+            grid.near(p)
+                .any(|j| j < id.0 && norm(sub(p, mesh.corner_position(j))) <= tolerance)
+        })
+        .count()
 }

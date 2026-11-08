@@ -132,10 +132,17 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                     .any(|(_, v)| matches!(v, Verdict::Equivalent { .. }));
                 let input_verdict = match &input {
                     None => Some(Verdict::Failed {
-                        error: format!(
-                            "object {} is not a mesh in the replayed session",
-                            record.target
-                        ),
+                        error: if session.document().object(record.target).is_none() {
+                            format!(
+                                "the log's target object {} does not exist in the replayed session",
+                                record.target
+                            )
+                        } else {
+                            format!(
+                                "object {} is not a mesh in the replayed session",
+                                record.target
+                            )
+                        },
                     }),
                     Some(m) => {
                         let content = m.content_hash().to_hex();
@@ -193,7 +200,7 @@ fn run_and_classify(
                 .document()
                 .object(record.target)
                 .and_then(|o| o.mesh())
-                .ok_or(LogError::MissingSourceEntry(record.target))?;
+                .ok_or(LogError::TargetMissing(record.target))?;
             let actual_hash = mesh.content_hash().to_hex();
             let mismatch = |actual_hash: String| Verdict::Mismatch {
                 expected_hash: record.output_hash.clone(),

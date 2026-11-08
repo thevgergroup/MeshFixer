@@ -8,6 +8,9 @@ use crate::mesh::{GeometryError, Mesh};
 /// the base; kept faces keep their IDs. Every change is recorded, so the
 /// resulting [`Provenance`] is total by construction.
 pub struct MeshEdit {
+    /// Liveness of the input revision's faces (shared chunks, no copy):
+    /// a created face's sources must be live input faces (MF-ISSUE-023).
+    base_face_live: Bits,
     base_faces: u32,
     base_vertices: u32,
     positions: Chunked<[f64; 3]>,
@@ -27,6 +30,7 @@ impl MeshEdit {
     pub(crate) fn new(base: &Mesh) -> MeshEdit {
         let inner = base.inner();
         MeshEdit {
+            base_face_live: inner.face_live.clone(),
             base_faces: base.face_slots(),
             base_vertices: base.vertex_slots(),
             positions: inner.positions.clone(),
@@ -85,9 +89,18 @@ impl MeshEdit {
         id
     }
 
+    /// Append a face. `sources` must name faces of the input revision
+    /// (removed or kept); faces created in this edit can't be sources.
     pub fn add_face(&mut self, tri: [u32; 3], sources: Sources) -> Result<FaceId, GeometryError> {
         if let Some(&v) = tri.iter().find(|&&v| !self.is_vertex_live(VertexId(v))) {
             return Err(GeometryError::NoSuchVertex(v));
+        }
+        if let Some(f) = sources
+            .faces
+            .iter()
+            .find(|f| f.0 >= self.base_faces || !self.base_face_live.get(f.0 as usize))
+        {
+            return Err(GeometryError::InvalidSource(f.0));
         }
         let id = FaceId(self.faces.len() as u32);
         self.faces.push(tri);

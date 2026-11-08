@@ -310,6 +310,7 @@ fn operations(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context) {
                         .unit
                         .as_deref()
                         .map(|u| format!(" {u}"))
+                        // allow-swallow: no unit means no suffix
                         .unwrap_or_default();
                     ui.add(
                         egui::DragValue::new(v)

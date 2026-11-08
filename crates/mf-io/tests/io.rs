@@ -8,7 +8,7 @@ use mf_io::{Format, IoError, SourcePrecision, obj, read_path, stl, write_path};
 fn stl_binary_roundtrip() {
     let bytes = stl::write_binary(&cube(1.0)).unwrap();
     assert_eq!(bytes.len(), 84 + 50 * 12);
-    let (m, prec) = stl::read(&bytes).unwrap();
+    let (m, prec, _) = stl::read(&bytes).unwrap();
     assert_eq!(m.vertex_count(), 8);
     assert_eq!(m.triangle_count(), 12);
     assert_eq!(prec, SourcePrecision::F32);
@@ -23,7 +23,7 @@ fn stl_binary_roundtrip() {
 #[test]
 fn stl_ascii_parse() {
     let text = "solid t\n facet normal 0 0 1\n  outer loop\n   vertex 0 0 0\n   vertex 1 0 0\n   vertex 0 1 0\n  endloop\n endfacet\nendsolid t\n";
-    let (m, _) = stl::read(text.as_bytes()).unwrap();
+    let (m, _, _) = stl::read(text.as_bytes()).unwrap();
     assert_eq!(m.triangle_count(), 1);
     assert_eq!(m.to_arrays().0[1], [1.0, 0.0, 0.0]);
 }
@@ -31,7 +31,7 @@ fn stl_ascii_parse() {
 #[test]
 fn stl_ascii_write_parse() {
     let text = stl::write_ascii(&cube(2.0));
-    let (m, _) = stl::read(text.as_bytes()).unwrap();
+    let (m, _, _) = stl::read(text.as_bytes()).unwrap();
     assert_eq!(m.triangle_count(), 12);
     assert_eq!(m.vertex_count(), 8);
 }
@@ -40,7 +40,7 @@ fn stl_ascii_write_parse() {
 fn binary_with_solid_header() {
     let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
     bytes[..5].copy_from_slice(b"solid");
-    let (m, _) = stl::read(&bytes).unwrap();
+    let (m, _, _) = stl::read(&bytes).unwrap();
     assert_eq!(m.triangle_count(), 12);
 }
 
@@ -48,7 +48,7 @@ fn binary_with_solid_header() {
 fn zero_facets() {
     let mut bytes = vec![0u8; 84];
     bytes[..4].copy_from_slice(b"mesh");
-    let (m, _) = stl::read(&bytes).unwrap();
+    let (m, _, _) = stl::read(&bytes).unwrap();
     assert!(m.is_empty());
 }
 
@@ -58,7 +58,9 @@ fn truncated_errors() {
     bytes[80..84].copy_from_slice(&10_000u32.to_le_bytes());
     bytes.truncate(84 + 50 * 3);
     match stl::read(&bytes) {
-        Err(IoError::Truncated { expected, actual }) => {
+        Err(IoError::Truncated {
+            expected, actual, ..
+        }) => {
             assert_eq!(expected, 84 + 50 * 10_000);
             assert_eq!(actual, 84 + 50 * 3);
         }
@@ -222,5 +224,57 @@ fn export_skips_tombstoned_faces() {
             1,
             "{name}"
         );
+    }
+}
+
+mod stl_header_cases {
+    use super::*;
+
+    fn with_count(n: u32) -> Vec<u8> {
+        let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
+        bytes[80..84].copy_from_slice(&n.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn zero_facet_count_reads_by_size_with_warning() {
+        let (m, _, warnings) = stl::read(&with_count(0)).unwrap();
+        assert_eq!(m.triangle_count(), 12);
+        assert!(
+            warnings.iter().any(|w| w.contains("facet count is 0")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_are_ignored_with_warning() {
+        let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
+        bytes.extend_from_slice(&[0u8; 7]);
+        let (m, _, warnings) = stl::read(&bytes).unwrap();
+        assert_eq!(m.triangle_count(), 12);
+        assert!(
+            warnings.iter().any(|w| w.contains("7 trailing bytes")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn shorter_than_header_claims_is_an_error_naming_the_ambiguity() {
+        let mut bytes = with_count(20);
+        bytes.truncate(84 + 50 * 12);
+        let err = stl::read(&bytes).unwrap_err();
+        let msg = err.to_string();
+        assert!(matches!(err, IoError::Truncated { .. }), "{err:?}");
+        assert!(msg.contains("20 facets") && msg.contains("12"), "{msg}");
+    }
+
+    #[test]
+    fn solid_header_with_size_mismatch_names_the_ambiguity() {
+        let mut bytes = with_count(20);
+        bytes[..5].copy_from_slice(b"solid");
+        bytes.push(0xFF); // not UTF-8, not a valid binary size either
+        let msg = stl::read(&bytes).unwrap_err().to_string();
+        assert!(msg.contains("binary STL") && msg.contains("solid"), "{msg}");
+        assert!(!msg.contains("UTF-8"), "{msg}");
     }
 }

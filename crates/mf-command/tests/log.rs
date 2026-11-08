@@ -193,3 +193,30 @@ fn commit_does_not_force_topology_on_the_new_revision() {
         "summary and analysis are computed lazily"
     );
 }
+
+#[test]
+fn replay_names_a_missing_target_object() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = dir.path().join("s.mfx.log");
+    setup(dir.path()).save_log(&log).unwrap();
+    let path = log.join("commands.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut v: serde_json::Value = serde_json::from_str(text.lines().nth(1).unwrap()).unwrap();
+    v["target"] = serde_json::json!(99);
+    let first = text.lines().next().unwrap();
+    std::fs::write(
+        &path,
+        format!("{first}\n{}\n", serde_json::to_string(&v).unwrap()),
+    )
+    .unwrap();
+    let report = replay(&log).unwrap();
+    match &report.results[0].1 {
+        Verdict::Failed { error } => {
+            assert!(
+                error.contains("#99") && error.contains("does not exist"),
+                "{error}"
+            )
+        }
+        other => panic!("{other:?}"),
+    }
+}

@@ -1,5 +1,8 @@
 //! Headless rendering to an image, for the CLI and snapshot tests.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+
 use image::RgbaImage;
 use mf_geometry::Mesh;
 
@@ -19,19 +22,50 @@ fn create_device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
         .map_err(|e| RenderError::Device(e.to_string()))
 }
 
-/// One headless device per process, created on first use and shared by all
-/// offscreen renders. Creating and dropping devices concurrently crashes
-/// Mesa's lavapipe Vulkan driver (reproduced in CI: 3/15 runs segfaulted with
-/// per-call devices); a wgpu device is safe to share across threads.
-fn device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
-    static DEVICE: std::sync::OnceLock<Result<(wgpu::Device, wgpu::Queue), RenderError>> =
-        std::sync::OnceLock::new();
-    DEVICE.get_or_init(create_device).clone()
+/// One headless device per process, shared by all offscreen renders.
+/// Creating and dropping devices concurrently crashes Mesa's lavapipe Vulkan
+/// driver (reproduced in CI: 3/15 runs segfaulted with per-call devices); a
+/// wgpu device is safe to share across threads.
+///
+/// Only working devices are cached (MF-ISSUE-024): a failed creation is
+/// returned and retried next call, and a device that wgpu reports lost is
+/// replaced on the next call.
+pub fn shared_device() -> Result<(wgpu::Device, wgpu::Queue), RenderError> {
+    struct Shared {
+        device: wgpu::Device,
+        queue: wgpu::Queue,
+        lost: Arc<AtomicBool>,
+    }
+    static SHARED: Mutex<Option<Shared>> = Mutex::new(None);
+    // A panic while holding this lock leaves at worst a stale `Some`, which
+    // the `lost` check below handles, so a poisoned lock is safe to reuse.
+    let mut slot = SHARED
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(s) = slot.as_ref() {
+        // wgpu delivers device-lost callbacks while polling; a non-blocking
+        // poll flushes any pending notification before we decide to reuse.
+        // A failed poll also means the device is unusable.
+        let polled = s.device.poll(wgpu::PollType::Poll).is_ok();
+        if polled && !s.lost.load(Ordering::SeqCst) {
+            return Ok((s.device.clone(), s.queue.clone()));
+        }
+    }
+    let (device, queue) = create_device()?;
+    let lost = Arc::new(AtomicBool::new(false));
+    let flag = lost.clone();
+    device.set_device_lost_callback(move |_reason, _message| flag.store(true, Ordering::SeqCst));
+    *slot = Some(Shared {
+        device: device.clone(),
+        queue: queue.clone(),
+        lost,
+    });
+    Ok((device, queue))
 }
 
 /// True if a GPU adapter can be created (used to gate GPU tests).
 pub fn gpu_available() -> bool {
-    device().is_ok()
+    shared_device().is_ok()
 }
 
 /// Render `mesh` framed by a default camera.
@@ -52,7 +86,7 @@ pub fn render_image_with_chunk_limit(
     show_boundaries: bool,
     max_chunk_bytes: u64,
 ) -> Result<RgbaImage, RenderError> {
-    let (device, queue) = device()?;
+    let (device, queue) = shared_device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES)?;
     let renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
     let limit = max_chunk_bytes.min(device.limits().max_buffer_size);
@@ -107,6 +141,7 @@ pub fn read_back(
     queue.submit([encoder.finish()]);
     let (tx, rx) = std::sync::mpsc::channel();
     readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        // allow-swallow: the receiver is read right after this; a send can only fail if it was dropped
         let _ = tx.send(r);
     });
     device
