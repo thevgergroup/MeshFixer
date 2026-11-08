@@ -9,3 +9,12 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+mf-geometry.workspace = true
+blake3.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mf-fixtures.workspace = true
+tempfile.workspace = true
+blake3.workspace = true
