@@ -9,26 +9,72 @@ use crate::{IoError, SourcePrecision, significant_digits};
 const HEADER: usize = 80;
 const FACET: usize = 50;
 
-pub fn read(bytes: &[u8]) -> Result<(Mesh, SourcePrecision), IoError> {
-    if bytes.len() >= HEADER + 4 {
-        let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
-        let expected = HEADER + 4 + FACET * n;
-        if expected == bytes.len() {
-            return read_binary(&bytes[HEADER + 4..], n).map(|m| (m, SourcePrecision::F32));
+/// Read binary or ASCII STL. Returns the mesh, the source precision and any
+/// warnings (MF-ISSUE-002):
+/// - a binary header facet count of 0 (a common exporter placeholder) with a
+///   size that holds whole facets is read by size, with a warning;
+/// - bytes after the declared facets are ignored, with a warning;
+/// - a file shorter than its header declares is an error (truncation and a
+///   wrong count can't be told apart, so nothing is guessed);
+/// - a `solid` header on a file that is neither valid ASCII STL nor a
+///   size-consistent binary STL is reported as that ambiguity.
+pub fn read(bytes: &[u8]) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError> {
+    let ascii = looks_ascii(bytes);
+    let len = bytes.len();
+    let mut header = None;
+    if len >= HEADER + 4 {
+        let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as u64;
+        // u64: `50 * n` can't overflow even on 32-bit targets (MF-ISSUE-001).
+        let expected = (HEADER + 4) as u64 + FACET as u64 * n;
+        header = Some((n, expected));
+        let body = &bytes[HEADER + 4..];
+        let whole = body.len() / FACET;
+        if expected == len as u64 {
+            return read_binary(body, n as usize).map(|m| (m, SourcePrecision::F32, Vec::new()));
         }
-        if !looks_ascii(bytes) {
+        if !ascii {
+            if n == 0 && body.len().is_multiple_of(FACET) {
+                let warning = format!(
+                    "binary STL header facet count is 0; read {whole} facets from the file size"
+                );
+                return read_binary(&body[..whole * FACET], whole)
+                    .map(|m| (m, SourcePrecision::F32, vec![warning]));
+            }
+            if expected < len as u64 {
+                let extra = len as u64 - expected;
+                let warning = format!("ignored {extra} trailing bytes after {n} facets");
+                let end = (expected as usize) - (HEADER + 4);
+                return read_binary(&body[..end], n as usize)
+                    .map(|m| (m, SourcePrecision::F32, vec![warning]));
+            }
             return Err(IoError::Truncated {
-                expected,
-                actual: bytes.len(),
+                expected: expected as usize,
+                actual: len,
+                detail: format!(
+                    " (header declares {n} facets, the file holds {whole} complete facets: \
+                     it is truncated, or the header count is wrong)"
+                ),
             });
         }
-    } else if !looks_ascii(bytes) {
+    } else if !ascii {
         return Err(IoError::Truncated {
             expected: HEADER + 4,
-            actual: bytes.len(),
+            actual: len,
+            detail: " (too short for a binary STL header)".into(),
         });
     }
-    read_ascii(bytes)
+    if std::str::from_utf8(bytes).is_err()
+        && let Some((n, expected)) = header
+    {
+        return Err(IoError::Parse {
+            line: 0,
+            message: format!(
+                "binary STL with an ASCII-looking 'solid' header: its size ({len} bytes) \
+                 doesn't match its {n} declared facets ({expected} bytes), and it isn't text"
+            ),
+        });
+    }
+    read_ascii(bytes).map(|(m, p)| (m, p, Vec::new()))
 }
 
 fn looks_ascii(bytes: &[u8]) -> bool {

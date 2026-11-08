@@ -9,7 +9,6 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | ID | Sev | Title | Source | Milestone | Resolution criteria |
 |---|---|---|---|---|---|
 | MF-ISSUE-001 | S2 | Counts beyond `u32` are truncated silently | M1 review minor 1 | M2 | `Mesh::new` rejects `positions.len() > u32::MAX` and `triangles.len()*3 > u32::MAX`, and `stl::read` uses `checked_mul` on the facet count before allocating. Tests use synthetic counts, not real allocations. |
-| MF-ISSUE-002 | S3 | Misleading STL error messages | M1 review minor 2 | M2 | A binary file with a wrong facet count or trailing padding gets either a warning-and-read-by-size path or an error that names the binary/ASCII ambiguity. A `solid` header with a size mismatch reports "binary STL with ASCII-looking header", not a UTF-8 error. A fixture covers each case. |
 | MF-ISSUE-003 | S2 | Non-finite diagnostic values serialize as `null` | M1 review minor 3 (export part fixed) | M2 | Area, perimeter and volume overflow is reported explicitly (an error or `non_finite` status), never a silent `null`. Test with coordinates near 1e308. |
 | MF-ISSUE-004 | S2 | Swallowed errors | M1 review minor 4 | M2 | The CLI JSON serialization error propagates (exit 1). All import warnings are shown, not just the last. `topology.rs` `unwrap_or(0)` and the viewport's `unwrap_or_default()` are replaced by invariants that fail loudly. A grep check for `unwrap_or_default` in non-test code goes into CI with an allowlist. |
 | MF-ISSUE-005 | S3 | No-op operation still creates a revision and a full copy | M1 review minor 5 | M2 | When `remove_small_components` removes nothing, it returns a report with no new revision (or a revision sharing storage), and unreferenced vertices are kept. Test: no history entry and pointer-equal mesh. |
@@ -38,6 +37,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-002 | Misleading STL error messages | STL import returns warnings: header count 0 read by size, trailing bytes ignored (both warned); short files are errors naming the ambiguity; solid-header mismatch reported as such · tests in `io.rs::stl_header_cases` |
 | MF-ISSUE-023 | Created-then-removed face can remain a `Sources` entry of other created faces | Sources must be live faces of the input revision (`GeometryError::InvalidSource`) · test `sources_must_be_faces_of_the_input_revision` |
 | MF-ISSUE-014 | Cross-platform CI not yet run | CI run 42492436343 (PR #1): ubuntu, macOS and Windows each 84 verified passes, 0 skipped, 0 failed. Every GPU and GUI test ran on all three (lavapipe, Metal, WARP). |
 | MF-ISSUE-010 | Non-atomic export could destroy the source file | `fix(io): atomic, verified export` · tests `failed_export_leaves_existing_file_intact`, `export_replaces_existing_file_atomically` |

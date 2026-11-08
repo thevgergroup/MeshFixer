@@ -59,8 +59,13 @@ pub enum IoError {
     Io(#[from] std::io::Error),
     #[error("line {line}: {message}")]
     Parse { line: usize, message: String },
-    #[error("file is truncated: expected {expected} bytes, found {actual}")]
-    Truncated { expected: usize, actual: usize },
+    #[error("file is truncated: expected {expected} bytes, found {actual}{detail}")]
+    Truncated {
+        expected: usize,
+        actual: usize,
+        /// Extra context, starting with a space (may be empty).
+        detail: String,
+    },
     #[error(transparent)]
     Geometry(#[from] GeometryError),
     #[error("export to {path} failed: {reason} (any existing file was left unchanged)")]
@@ -84,12 +89,12 @@ pub fn read_path(path: &Path) -> Result<Imported, IoError> {
             (mesh, precision, Format::Obj, warnings)
         }
         Format::StlBinary | Format::StlAscii => {
-            let (mesh, precision) = stl::read(&bytes)?;
+            let (mesh, precision, warnings) = stl::read(&bytes)?;
             let format = match precision {
                 SourcePrecision::F32 => Format::StlBinary,
                 SourcePrecision::Decimal { .. } => Format::StlAscii,
             };
-            (mesh, precision, format, Vec::new())
+            (mesh, precision, format, warnings)
         }
     };
     Ok(Imported {
@@ -162,9 +167,14 @@ fn verify_encoded(mesh: &Mesh, bytes: &[u8], format: Format) -> Result<(), Strin
             obj::verify(text, mesh)
         }
         Format::StlAscii => {
-            let decoded = stl::read(bytes)
-                .map_err(|e| format!("verification re-read failed: {e}"))?
-                .0;
+            let (decoded, _, warnings) =
+                stl::read(bytes).map_err(|e| format!("verification re-read failed: {e}"))?;
+            if !warnings.is_empty() {
+                return Err(format!(
+                    "verification re-read warned: {}",
+                    warnings.join("; ")
+                ));
+            }
             if decoded.triangle_count() != mesh.triangle_count() {
                 return Err(format!(
                     "verification found {} triangles, expected {}",
