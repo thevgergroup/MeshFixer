@@ -125,3 +125,18 @@ fn diagnostics_serialize() {
     let v = serde_json::to_value(inspect(&cube_with_missing_face())).unwrap();
     assert_eq!(v["boundary_loops"][0]["edge_count"], 4);
 }
+
+#[test]
+fn collapsed_triangle_does_not_break_manifoldness() {
+    // A closed tetrahedron plus one face collapsed onto edge (0,1), as STL welding produces.
+    let t = mf_fixtures::tetrahedron();
+    let mut tris = t.triangles().to_vec();
+    tris.push([0, 0, 1]);
+    let m = Mesh::new(t.positions().to_vec(), tris).unwrap();
+    let d = inspect(&m);
+    assert_eq!(d.degenerate_triangles, 1);
+    assert_eq!(d.non_manifold_edges, 0);
+    assert_eq!(d.non_manifold_vertices, 0);
+    assert!(d.is_closed && d.is_manifold);
+    assert!(d.signed_volume.is_some());
+}

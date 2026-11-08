@@ -67,13 +67,18 @@ struct HalfEdge {
 
 impl Topology {
     pub fn compute(vertex_count: usize, triangles: &[[u32; 3]]) -> Topology {
+        // Faces with a repeated index (collapsed onto an edge or point) have
+        // no area and no well-defined edges. They're reported as degenerate
+        // by diagnostics and excluded here so they can't fake non-manifold
+        // edges or vertices.
+        let collapsed = |t: &[u32; 3]| t[0] == t[1] || t[1] == t[2] || t[0] == t[2];
         let mut edges: Vec<HalfEdge> = Vec::with_capacity(triangles.len() * 3);
         for (f, t) in triangles.iter().enumerate() {
+            if collapsed(t) {
+                continue;
+            }
             for i in 0..3 {
                 let (a, b) = (t[i], t[(i + 1) % 3]);
-                if a == b {
-                    continue;
-                }
                 edges.push(HalfEdge {
                     lo: a.min(b),
                     hi: a.max(b),
@@ -153,7 +158,7 @@ impl Topology {
 
         // Non-manifold vertices: more than one corner fan, or on a >2-face edge.
         let mut fans: Vec<(u32, u32)> = Vec::with_capacity(triangles.len() * 3);
-        for (f, t) in triangles.iter().enumerate() {
+        for (f, t) in triangles.iter().enumerate().filter(|(_, t)| !collapsed(t)) {
             for (c, &v) in t.iter().enumerate() {
                 fans.push((v, corners.find((f * 3 + c) as u32)));
             }
