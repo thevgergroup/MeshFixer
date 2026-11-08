@@ -9,3 +9,10 @@ allow = [
   "ISC", "Zlib", "Unicode-3.0", "BSL-1.0", "CC0-1.0", "MPL-2.0",
 ]
 confidence-threshold = 0.9
+
+# egui's bundled default fonts. OFL-1.1 and the Ubuntu Font Licence govern the
+# font files only (bundling and redistribution allowed) and place no
+# obligations on MeshFixer code. Scoped to this crate; reviewed 2026-11-08.
+[[licenses.exceptions]]
+crate = "epaint_default_fonts"
+allow = ["OFL-1.1", "Ubuntu-font-1.0"]
