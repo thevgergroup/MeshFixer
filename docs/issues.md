@@ -24,9 +24,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | MF-ISSUE-022 | S3 | Swallowed-error check is narrow | M2 review minor | M3 | The allowlist keys on file + line number range or a marker comment rather than trimmed text, and also covers `unwrap_or(0)` and `.ok()` in production code. |
 | MF-ISSUE-024 | S3 | Offscreen device cache keeps an error or lost device for the process lifetime | M2 review minor | First long-running headless use | Device loss is detected and the device recreated, or the error is surfaced per call. |
 | MF-ISSUE-025 | S2 | Cross-OS replay never exercises the `Equivalent` path | M2 review minor | M3 | The CI cross-OS job includes an operation that computes positions (fill_holes refinement). Its summary shows Exact vs Equivalent per OS. |
-| MF-ISSUE-026 | S3 | Equivalence grid degrades to O(n²) with tiny tolerance and huge coordinates | M2 review minor | M4 | Cell size is clamped relative to the bounding box. Benchmark at 1M. |
 | MF-ISSUE-027 | S3 | `Invocation` has no selection field yet | M2 review recommendation | M3 Task 1 | Frontends pass a `Selection`, which is converted to a `Target` and stored in the record. The log format is unchanged (records already carry `selection`). |
-| MF-ISSUE-028 | S3 | Near-duplicate detection holds a per-vertex hash grid (inspect peak 701 MB at 4.8M vs 577 MB for an edit) | M2 report measurements | M4 | Sort-based neighbour search or a compact grid. `inspect` peak at 5M within 10% of the edit run. |
 | MF-ISSUE-015 | S3 | No human-driven demonstration recording | M1 evidence | M1 sign-off | A screen recording of open → inspect → apply → undo → redo → export on a real machine, linked from `docs/milestones/m1.md`. |
 | MF-ISSUE-016 | S3 | Font licence texts must ship with binaries | Font exception | First binary release | Installer or About dialog includes the texts in `licenses/third-party/`. See `THIRD_PARTY_NOTICES.md`. |
 | MF-ISSUE-017 | S2 | Reference integrated-GPU hardware not available | Spec OD-2 | Before MF-RENDER-002 is declared met | Benchmarks run on a named 16 GB integrated-GPU laptop, with device info recorded. |
@@ -36,6 +34,8 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-028 | Near-duplicate detection holds a per-vertex hash grid (inspect peak 701 MB at 4.8M vs 577 MB for an edit) | Sorted-array grid (~32 B/point) instead of a hash map of vectors; sort buffers scoped · inspect peak 204 → 47 B/vertex · test `inspect_peak_per_vertex_is_bounded` |
+| MF-ISSUE-026 | Equivalence grid degrades to O(n²) with tiny tolerance and huge coordinates | Shared compact `PointGrid` keyed relative to the bounding box with clamped cell size; also fixed an i64 overflow panic in near-duplicate detection far from the origin · tests `equivalence_stays_fast_with_offset_coordinates_and_tiny_tolerance`, `inspect_far_from_origin_does_not_overflow` (RED on old code) |
 | MF-ISSUE-021 | Misleading replay/log error variants | Missing ancestor is an invariant (`expect`); a missing replay target is named (`does not exist` / `LogError::TargetMissing`) · test `replay_names_a_missing_target_object` |
 | MF-ISSUE-002 | Misleading STL error messages | STL import returns warnings: header count 0 read by size, trailing bytes ignored (both warned); short files are errors naming the ambiguity; solid-header mismatch reported as such · tests in `io.rs::stl_header_cases` |
 | MF-ISSUE-023 | Created-then-removed face can remain a `Sources` entry of other created faces | Sources must be live faces of the input revision (`GeometryError::InvalidSource`) · test `sources_must_be_faces_of_the_input_revision` |

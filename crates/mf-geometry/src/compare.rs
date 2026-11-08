@@ -4,11 +4,9 @@
 //! invariants match and every live vertex of each lies within `t` of some
 //! vertex of the other (symmetric nearest-vertex distance).
 
-use std::collections::HashMap;
-
 use serde::Serialize;
 
-use crate::diagnostics::inspect;
+use crate::grid::PointGrid;
 use crate::mesh::Mesh;
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -22,16 +20,17 @@ pub struct Equivalence {
     pub within: bool,
 }
 
+/// Topological invariants, from topology alone (no full diagnostics pass).
 fn invariants(m: &Mesh) -> (usize, usize, usize, i64, bool, usize) {
-    let d = inspect(m);
-    let euler = m.vertex_count() as i64 - m.topology().edge_count as i64 + m.face_count() as i64;
+    let t = m.topology();
+    let euler = m.vertex_count() as i64 - t.edge_count as i64 + m.face_count() as i64;
     (
-        d.triangle_count,
-        d.components,
-        d.boundary_loops.len(),
+        m.face_count(),
+        t.components.len(),
+        t.boundary_loops.len(),
         euler,
-        d.is_manifold,
-        d.inconsistent_orientation_edges,
+        t.non_manifold_edges.is_empty() && t.non_manifold_vertices == 0,
+        t.inconsistent_edges,
     )
 }
 
@@ -46,32 +45,18 @@ fn directed(a: &Mesh, b: &Mesh, tolerance: f64) -> Option<f64> {
             .all(|(_, p)| theirs.binary_search(&p.map(f64::to_bits)).is_ok());
         return all.then_some(0.0);
     }
-    // Uniform grid with cell size = tolerance: any point outside the 3×3×3
+    // Cells at least `tolerance` wide: any point outside the 3×3×3
     // neighbourhood of a cell is farther than the tolerance.
-    let cell = |p: [f64; 3]| p.map(|c| (c / tolerance).floor() as i64);
-    let mut grid: HashMap<[i64; 3], Vec<[f64; 3]>> = HashMap::new();
-    for (_, p) in b.vertices() {
-        grid.entry(cell(p)).or_default().push(p);
-    }
+    let grid = PointGrid::new(|| b.vertices().map(|(id, p)| (id.0, p)), tolerance);
     let mut worst = 0.0f64;
     for (_, p) in a.vertices() {
-        let c = cell(p);
-        let mut best = f64::INFINITY;
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                for dz in -1..=1 {
-                    if let Some(pts) = grid.get(&[c[0] + dx, c[1] + dy, c[2] + dz]) {
-                        for q in pts {
-                            let d = ((p[0] - q[0]).powi(2)
-                                + (p[1] - q[1]).powi(2)
-                                + (p[2] - q[2]).powi(2))
-                            .sqrt();
-                            best = best.min(d);
-                        }
-                    }
-                }
-            }
-        }
+        let best = grid
+            .near(p)
+            .map(|j| {
+                let q = b.corner_position(j);
+                ((p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2) + (p[2] - q[2]).powi(2)).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min);
         if best > tolerance {
             return None;
         }
