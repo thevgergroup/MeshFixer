@@ -6,6 +6,12 @@ Detailed task plans are written when each milestone starts, so they build on wha
 
 Commits are small and reference requirement IDs (e.g. `feat(io): binary STL reader [MF-IO-001]`).
 
+**Every milestone closes with:**
+- An independent whole-branch review. Its job is to challenge shortcuts that pass acceptance tests without advancing the long-term architecture (localized editing, provenance, history).
+- Green cross-platform CI. Skipped GPU tests are reported separately and never counted as passes.
+- Evidence uploaded by CI (`milestone-evidence` artifact), plus a human-driven demo recording.
+- Deferred findings logged in `docs/issues.md`, each with an ID, severity, milestone and resolution criteria.
+
 ---
 
 ## M1: Thin vertical slice
@@ -24,15 +30,18 @@ Commits are small and reference requirement IDs (e.g. `feat(io): binary STL read
 
 ## M2: Core contracts
 
-**Scope:** chunked copy-on-write storage, revision DAG with retained branches, full command records, face provenance maps, selection model and `translate`, command-log save/load/replay with `Exact`/`Equivalent`/`Mismatch`, canonical hash vs geometric-equivalence comparator, `Geometry` kind enum, strict-determinism tests at 1 and N threads, mutation-path visibility.
+**Scope:**
+- **First, memory instrumentation (MF-ISSUE-013):** a counting allocator and per-category breakdown (mesh storage, topology, import scratch, history, GPU), reported by `--metrics` and CI. The chunked storage design must be justified against these numbers before history and selections build on it.
+- Tolerance duplicate vertices (MF-ISSUE-012), and pinched-loop splitting (MF-ISSUE-007, which must close before M3).
+- Chunked copy-on-write storage, revision DAG with retained branches, full command records, face provenance maps, selection model and `translate`, command-log save/load/replay with `Exact`/`Equivalent`/`Mismatch`, canonical hash vs geometric-equivalence comparator, `Geometry` kind enum, strict-determinism tests at 1 and N threads, mutation-path visibility.
 
 **Demo:** Make several edits in the GUI, save the log, quit, then `meshfixer replay` reproduces the result and prints a per-command `Exact` report. Tamper with the log and it reports `Mismatch`. A debug view shows the DAG with an abandoned branch retained.
 
-**Gates:** MF-DOC-001/002/003/005, MF-HIST-001, MF-CMD-001/002/004/005, MF-SEL-001/002/003 (provenance-totality property tests), CI green.
+**Gates:** memory breakdown reported, with a storage model whose projected 5M-triangle working set is ≤ 400 MB (MF-GEO-002), MF-DOC-001/002/003/005, MF-HIST-001, MF-CMD-001/002/004/005, MF-SEL-001/002/003 (provenance-totality property tests), CI green.
 
 ## M3: Real, surgical repair
 
-**Scope:** `fill_holes` (minimum-weight DP triangulation plus refinement), targeted selections (component, boundary loop, face set), clickable overlays and loop picking, `untouched_outside_target` checks, the declarative YAML test runner, 3MF read/write, real scan fixture fetched by hash, and the HIST-002 re-execution test.
+**Scope:** targeted, localized editing is the point of this milestone, not whole-mesh cleanup. That means `fill_holes` on a chosen loop (minimum-weight DP triangulation plus refinement), targeted selections (component, boundary loop, face set), clickable overlays and loop picking, `untouched_outside_target` checks, the declarative YAML test runner, 3MF read/write, real scan fixture fetched by hash, and the HIST-002 re-execution test.
 
 **Demo (exit criterion 9):** Open a real scan, click one hole, fill only that hole, inspect it, undo, change `max_loop_edges` or the refinement setting, fill again, and export 3MF that opens in a slicer.
 

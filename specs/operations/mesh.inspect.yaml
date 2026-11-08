@@ -1,0 +1,15 @@
+id: mesh.inspect
+version: 1
+summary: Report mesh diagnostics (counts, components, boundary loops, manifoldness, area, volume).
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters: []
+preconditions: []
+postconditions:
+  - geometry unchanged
+effects: [read_only]
+runtime:
+  cancellable: false
+  progress: false

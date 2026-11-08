@@ -1,0 +1,20 @@
+[package]
+name = "mf-command"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mf-geometry.workspace = true
+mf-io.workspace = true
+mf-spec.workspace = true
+mf-operations.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mf-fixtures.workspace = true

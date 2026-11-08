@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thevgergroup/MeshFixer"
+
+[workspace.dependencies]
+mf-geometry = { path = "crates/mf-geometry" }
+mf-fixtures = { path = "crates/mf-fixtures" }
+mf-io = { path = "crates/mf-io" }
+mf-spec = { path = "crates/mf-spec" }
+mf-operations = { path = "crates/mf-operations" }
+mf-command = { path = "crates/mf-command" }
+mf-render = { path = "crates/mf-render" }
+
+blake3 = "1.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde-saphyr = "2.1"
+clap = { version = "4.6", features = ["string"] }
+thiserror = "2"
+glam = "0.30"
+wgpu = "30"
+bytemuck = { version = "1", features = ["derive"] }
+image = { version = "0.25", default-features = false, features = ["png"] }
+pollster = "0.4"
+eframe = { version = "0.37", default-features = false, features = ["wgpu", "default_fonts", "accesskit", "wayland", "x11"] }
+egui = "0.37"
+egui-wgpu = "0.37"
+rfd = "0.18"
+jsonschema = "0.60"
+tempfile = "3"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+unwrap_used = "warn"

@@ -1,0 +1,146 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
+use std::path::Path;
+use std::process::{Command, Output};
+
+use mf_fixtures::{cube, merge, tetrahedron, translated};
+use mf_io::{Format, write_path};
+
+fn meshfixer(args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+        .args(args)
+        .output()
+        .unwrap()
+}
+
+fn damaged(dir: &Path) -> String {
+    let p = dir.join("damaged.stl");
+    let m = merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
+    write_path(&m, &p, Format::StlBinary).unwrap();
+    p.to_str().unwrap().to_owned()
+}
+
+#[test]
+fn inspect_json_reports_components() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = meshfixer(&["inspect", &damaged(dir.path()), "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["components"], 2);
+}
+
+#[test]
+fn inspect_human_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = meshfixer(&["inspect", &damaged(dir.path())]);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("components"));
+}
+
+#[test]
+fn remove_small_writes_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let output = dir.path().join("fixed.obj");
+    let out = meshfixer(&[
+        "remove-small-components",
+        &input,
+        "-o",
+        output.to_str().unwrap(),
+        "--max-triangles",
+        "5",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let fixed = mf_io::read_path(&output).unwrap();
+    assert_eq!(mf_geometry::inspect(&fixed.mesh).components, 1);
+}
+
+#[test]
+fn help_lists_spec_params() {
+    let out = meshfixer(&["remove-small-components", "--help"]);
+    let text = String::from_utf8_lossy(&out.stdout);
+    let spec = mf_spec::builtin::get("mesh.remove_small_components").unwrap();
+    for p in &spec.parameters {
+        assert!(
+            text.contains(&p.description),
+            "missing '{}' in:\n{text}",
+            p.description
+        );
+    }
+}
+
+#[test]
+fn bad_param_exit_code_2() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let out = meshfixer(&[
+        "remove-small-components",
+        &input,
+        "-o",
+        "x.stl",
+        "--max-triangles",
+        "0",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("max_triangles"));
+}
+
+#[test]
+fn missing_file_exit_code_1() {
+    let out = meshfixer(&["inspect", "/nonexistent/file.stl"]);
+    assert_eq!(out.status.code(), Some(1));
+}
+
+#[test]
+fn render_writes_png() {
+    let dir = tempfile::tempdir().unwrap();
+    let png = dir.path().join("out.png");
+    let out = meshfixer(&[
+        "render",
+        &damaged(dir.path()),
+        "-o",
+        png.to_str().unwrap(),
+        "--width",
+        "80",
+        "--height",
+        "60",
+    ]);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("no GPU adapter") {
+        mf_fixtures::skip::gpu_unavailable("render_writes_png");
+        return;
+    }
+    assert!(out.status.success(), "{stderr}");
+    let bytes = std::fs::read(&png).unwrap();
+    assert_eq!(&bytes[1..4], b"PNG");
+}
+
+#[test]
+fn gen_fixture_damaged() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("d.stl");
+    let out = meshfixer(&[
+        "gen-fixture",
+        "damaged",
+        p.to_str().unwrap(),
+        "--triangles",
+        "20000",
+        "--seed",
+        "3",
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let d = mf_geometry::inspect(&mf_io::read_path(&p).unwrap().mesh);
+    assert!(d.components > 1 && !d.boundary_loops.is_empty());
+}

@@ -1,0 +1,118 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use mf_fixtures::{cube, merge, tetrahedron, translated};
+use mf_geometry::{Mesh, inspect};
+use mf_operations::{find, registry};
+use mf_spec::{Params, builtin};
+
+fn params(op: &str, pairs: &[(&str, &str)]) -> Params {
+    let raw: BTreeMap<String, String> = pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect();
+    builtin::get(op).unwrap().validate(&raw).unwrap()
+}
+
+#[test]
+fn parity_specs_and_impls() {
+    let specs: BTreeSet<(String, u32)> = builtin::specs()
+        .iter()
+        .map(|s| (s.id.clone(), s.version))
+        .collect();
+    let impls: BTreeSet<(String, u32)> = registry()
+        .iter()
+        .map(|o| (o.id().to_string(), o.version()))
+        .collect();
+    assert_eq!(specs, impls);
+    assert_eq!(
+        registry().len(),
+        impls.len(),
+        "duplicate implementation ids"
+    );
+}
+
+#[test]
+fn removes_island() {
+    let c = cube(1.0);
+    let input = merge(&[c.clone(), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
+    let op = find("mesh.remove_small_components").unwrap();
+    let out = op
+        .execute(&input, &params(op.id(), &[("max_triangles", "5")]))
+        .unwrap();
+    let mesh = out.mesh.unwrap();
+    assert_eq!(mesh.triangle_count(), 12);
+    assert_eq!(inspect(&mesh).components, 1);
+    assert_eq!(mesh.positions(), c.positions());
+    assert_eq!(mesh.triangles(), c.triangles());
+    assert_eq!(out.report["removed_components"], 1);
+    assert_eq!(out.report["removed_triangles"], 4);
+}
+
+#[test]
+fn kept_faces_keep_relative_order() {
+    // Island first, then cube: the cube faces must stay in order after compaction.
+    let c = translated(&cube(1.0), [5.0, 0.0, 0.0]);
+    let input = merge(&[tetrahedron(), c.clone()]);
+    let op = find("mesh.remove_small_components").unwrap();
+    let mesh = op
+        .execute(&input, &params(op.id(), &[("max_triangles", "5")]))
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert_eq!(mesh.positions(), c.positions());
+    assert_eq!(mesh.triangles(), c.triangles());
+}
+
+#[test]
+fn keep_largest_guard() {
+    let input = merge(&[tetrahedron(), translated(&cube(1.0), [5.0, 0.0, 0.0])]);
+    let op = find("mesh.remove_small_components").unwrap();
+    let kept = op
+        .execute(&input, &params(op.id(), &[("max_triangles", "50")]))
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert_eq!(kept.triangle_count(), 12);
+    let none = op
+        .execute(
+            &input,
+            &params(
+                op.id(),
+                &[("max_triangles", "50"), ("keep_largest", "false")],
+            ),
+        )
+        .unwrap()
+        .mesh
+        .unwrap();
+    assert!(none.is_empty());
+    assert_eq!(none.vertex_count(), 0);
+}
+
+#[test]
+fn input_not_mutated() {
+    let input = merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
+    let before = input.content_hash();
+    let op = find("mesh.remove_small_components").unwrap();
+    op.execute(&input, &params(op.id(), &[("max_triangles", "5")]))
+        .unwrap();
+    assert_eq!(input.content_hash(), before);
+    assert_eq!(input.triangle_count(), 16);
+}
+
+#[test]
+fn inspect_is_read_only() {
+    let op = find("mesh.inspect").unwrap();
+    let out = op.execute(&cube(1.0), &params(op.id(), &[])).unwrap();
+    assert!(out.mesh.is_none());
+    assert_eq!(out.report["components"], 1);
+    assert_eq!(out.report["is_closed"], true);
+}
+
+#[test]
+fn empty_mesh_ok() {
+    let op = find("mesh.remove_small_components").unwrap();
+    let out = op.execute(&Mesh::empty(), &params(op.id(), &[])).unwrap();
+    assert!(out.mesh.unwrap().is_empty());
+}
