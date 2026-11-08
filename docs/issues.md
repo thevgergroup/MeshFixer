@@ -24,7 +24,6 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | MF-ISSUE-020 | S3 | Tombstoned slots accumulate in long sessions | ADR-0001 | M4 | A `mesh.compact` operation that emits provenance (a slot remap) like any edit, plus a dead-slot ratio in diagnostics. |
 | MF-ISSUE-021 | S3 | Misleading replay/log error variants | M2 review minor | M3 | A missing ancestor node and a missing replay target get their own error variants. Tests cover both messages. |
 | MF-ISSUE-022 | S3 | Swallowed-error check is narrow | M2 review minor | M3 | The allowlist keys on file + line number range or a marker comment rather than trimmed text, and also covers `unwrap_or(0)` and `.ok()` in production code. |
-| MF-ISSUE-023 | S3 | Created-then-removed face can remain a `Sources` entry of other created faces | M2 review minor | M3 (before fill_holes refinement) | `MeshEdit::finish` drops or rejects dangling source references. Property test. |
 | MF-ISSUE-024 | S3 | Offscreen device cache keeps an error or lost device for the process lifetime | M2 review minor | First long-running headless use | Device loss is detected and the device recreated, or the error is surfaced per call. |
 | MF-ISSUE-025 | S2 | Cross-OS replay never exercises the `Equivalent` path | M2 review minor | M3 | The CI cross-OS job includes an operation that computes positions (fill_holes refinement). Its summary shows Exact vs Equivalent per OS. |
 | MF-ISSUE-026 | S3 | Equivalence grid degrades to O(n²) with tiny tolerance and huge coordinates | M2 review minor | M4 | Cell size is clamped relative to the bounding box. Benchmark at 1M. |
@@ -39,6 +38,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-023 | Created-then-removed face can remain a `Sources` entry of other created faces | Sources must be live faces of the input revision (`GeometryError::InvalidSource`) · test `sources_must_be_faces_of_the_input_revision` |
 | MF-ISSUE-014 | Cross-platform CI not yet run | CI run 42492436343 (PR #1): ubuntu, macOS and Windows each 84 verified passes, 0 skipped, 0 failed. Every GPU and GUI test ran on all three (lavapipe, Metal, WARP). |
 | MF-ISSUE-010 | Non-atomic export could destroy the source file | `fix(io): atomic, verified export` · tests `failed_export_leaves_existing_file_intact`, `export_replaces_existing_file_atomically` |
 | — | Binary STL export wrote `inf` for out-of-range coordinates (part of minor 3) | Same commit: `write_binary` rejects coordinates outside f32 |

@@ -21,6 +21,8 @@ pub enum GeometryError {
     NoSuchFace(u32),
     #[error("vertex {0} does not exist or was removed")]
     NoSuchVertex(u32),
+    #[error("face {0} is not a face of the input revision, so it can't be a source")]
+    InvalidSource(u32),
     #[error("face {face} still uses removed vertex {vertex}")]
     FaceUsesRemovedVertex { face: u32, vertex: u32 },
 }
