@@ -120,7 +120,9 @@ impl Topology {
         let mut faces = UnionFind::new(face_slots);
         let mut corners = UnionFind::new(face_slots * 3);
         let mut on_bad_edge = vec![false; vertex_count];
-        let mut boundary: Vec<(u32, u32)> = Vec::new(); // directed a -> b
+        // Directed boundary half-edges a -> b, with the corner IDs of a and b
+        // in their face (for fan-based pairing at pinched vertices).
+        let mut boundary: Vec<(u32, u32, u32, u32)> = Vec::new();
         let mut topo = Topology::default();
 
         // A half-edge starts at corner `c` and ends at corner `c + 1`, so the
@@ -154,7 +156,11 @@ impl Topology {
             match group.len() {
                 1 => {
                     let e = group[0];
-                    boundary.push(if e.forward { (lo, hi) } else { (hi, lo) });
+                    boundary.push(if e.forward {
+                        (lo, hi, lo_corner(&e), hi_corner(&e))
+                    } else {
+                        (hi, lo, hi_corner(&e), lo_corner(&e))
+                    });
                 }
                 2 => {
                     let (a, b) = (group[0], group[1]);
@@ -224,7 +230,7 @@ impl Topology {
         boundary.par_sort_unstable();
         let mut out_deg = vec![0u32; vertex_count];
         let mut in_deg = vec![0u32; vertex_count];
-        for &(a, b) in &boundary {
+        for &(a, b, _, _) in &boundary {
             out_deg[a as usize] += 1;
             in_deg[b as usize] += 1;
         }
@@ -234,16 +240,17 @@ impl Topology {
         };
         // Outgoing edges of v are contiguous in the sorted list.
         let out_range = |v: u32| {
-            let lo = boundary.partition_point(|&(a, _)| a < v);
-            let hi = boundary.partition_point(|&(a, _)| a <= v);
+            let lo = boundary.partition_point(|&(a, ..)| a < v);
+            let hi = boundary.partition_point(|&(a, ..)| a <= v);
             lo..hi
         };
-        let pinched_next = pinched_pairing(mesh, &boundary, &out_deg, &in_deg, &traceable);
+        let pinched_next =
+            pinched_pairing(mesh, &boundary, &out_deg, &in_deg, &traceable, &mut corners);
         const NONE: u32 = u32::MAX;
         let next_edge: Vec<u32> = boundary
             .iter()
             .enumerate()
-            .map(|(e, &(_, v))| {
+            .map(|(e, &(_, v, _, _))| {
                 if !traceable(v) {
                     NONE
                 } else if out_deg[v as usize] == 1 {
@@ -295,18 +302,25 @@ impl Topology {
     }
 }
 
-/// At each pinched boundary vertex, pair every incoming boundary edge with
-/// the next outgoing edge counter-clockwise around the vertex, measured in
-/// the tangent plane of its incident faces. Returns `(incoming edge index,
-/// outgoing edge index)` sorted by incoming index. If the geometry doesn't
-/// give a one-to-one pairing at a vertex (degenerate directions), that
-/// vertex is left out and its loops stay untraced rather than guessed.
+/// At each pinched boundary vertex (k > 1 incident fans), pair every
+/// incoming boundary edge with the outgoing edge across the same gap.
+///
+/// Fans come from the corner union-find, so the pairing is combinatorial
+/// first (review I7): each fan contributes one incoming and one outgoing
+/// boundary edge, and a fan is never paired with itself. With two fans the
+/// pairing is forced. With more, geometry is used only to order the fans
+/// around the vertex (by the angle of each fan's outgoing edge in the tangent
+/// plane), and each fan's incoming edge continues along the next fan's
+/// outgoing edge. Vertices whose fans aren't disk-like (one in, one out) are
+/// left untraced rather than guessed. Returns `(incoming edge index,
+/// outgoing edge index)` sorted by incoming index.
 fn pinched_pairing(
     mesh: &Mesh,
-    boundary: &[(u32, u32)],
+    boundary: &[(u32, u32, u32, u32)],
     out_deg: &[u32],
     in_deg: &[u32],
     traceable: &dyn Fn(u32) -> bool,
+    corners: &mut UnionFind,
 ) -> Vec<(u32, u32)> {
     let mut pinched: Vec<u32> = (0..out_deg.len() as u32)
         .filter(|&v| {
@@ -317,75 +331,97 @@ fn pinched_pairing(
         return Vec::new();
     }
     pinched.sort_unstable();
-    // Area-weighted normal of the faces around each pinched vertex.
+
+    // Per pinched vertex, its fans: (fan root, incoming edges, outgoing edges).
+    type Fan = (u32, Vec<u32>, Vec<u32>);
+    let mut fans: Vec<Vec<Fan>> = vec![Vec::new(); pinched.len()];
+    let fan_entry =
+        |k: usize, root: u32, edge: u32, outgoing: bool, fans: &mut Vec<Vec<Fan>>| {
+            let list = &mut fans[k];
+            let i = match list.iter().position(|f| f.0 == root) {
+                Some(i) => i,
+                None => {
+                    list.push((root, Vec::new(), Vec::new()));
+                    list.len() - 1
+                }
+            };
+            if outgoing {
+                list[i].2.push(edge);
+            } else {
+                list[i].1.push(edge);
+            }
+        };
+    for (e, &(a, b, ca, cb)) in boundary.iter().enumerate() {
+        if let Ok(k) = pinched.binary_search(&a) {
+            let root = corners.find(ca);
+            fan_entry(k, root, e as u32, true, &mut fans);
+        }
+        if let Ok(k) = pinched.binary_search(&b) {
+            let root = corners.find(cb);
+            fan_entry(k, root, e as u32, false, &mut fans);
+        }
+    }
+
+    // Tangent-plane normals, needed only to order three or more fans.
+    let needs_geometry: Vec<bool> = fans.iter().map(|f| f.len() > 2).collect();
     let mut normals = vec![[0.0f64; 3]; pinched.len()];
-    for (_, t) in mesh.faces() {
-        let [a, b, c] = t.map(|v| mesh.corner_position(v));
-        let n = cross(sub(b, a), sub(c, a));
-        for v in t {
-            if let Ok(k) = pinched.binary_search(&v) {
-                for i in 0..3 {
-                    normals[k][i] += n[i];
+    if needs_geometry.iter().any(|&g| g) {
+        for (_, t) in mesh.faces() {
+            let [a, b, c] = t.map(|v| mesh.corner_position(v));
+            let n = cross(sub(b, a), sub(c, a));
+            for v in t {
+                if let Ok(k) = pinched.binary_search(&v)
+                    && needs_geometry[k]
+                {
+                    for i in 0..3 {
+                        normals[k][i] += n[i];
+                    }
                 }
             }
         }
     }
+
     let mut pairs = Vec::new();
     for (k, &v) in pinched.iter().enumerate() {
-        let n = normals[k];
-        let len = dot(n, n).sqrt();
-        if len == 0.0 || !len.is_finite() {
+        let mut vertex_fans = std::mem::take(&mut fans[k]);
+        // Each fan must be disk-like at v: exactly one edge in, one out.
+        if vertex_fans.len() < 2 || vertex_fans.iter().any(|f| f.1.len() != 1 || f.2.len() != 1) {
             continue;
         }
-        let n = n.map(|x| x / len);
-        // Any unit vector perpendicular to n, then the right-handed partner.
-        let axis = if n[0].abs() < 0.9 {
-            [1.0, 0.0, 0.0]
-        } else {
-            [0.0, 1.0, 0.0]
-        };
-        let e1 = {
-            let t = cross(n, axis);
-            let l = dot(t, t).sqrt();
-            t.map(|x| x / l)
-        };
-        let e2 = cross(n, e1);
-        let p = mesh.corner_position(v);
-        let angle = |w: u32| {
-            let d = sub(mesh.corner_position(w), p);
-            dot(d, e2).atan2(dot(d, e1))
-        };
-        // Spokes: (angle, other vertex, is_outgoing, edge index).
-        let mut spokes: Vec<(f64, u32, bool, u32)> = Vec::new();
-        for (e, &(a, b)) in boundary.iter().enumerate() {
-            if a == v {
-                spokes.push((angle(b), b, true, e as u32));
-            } else if b == v {
-                spokes.push((angle(a), a, false, e as u32));
-            }
-        }
-        spokes.sort_by(|x, y| x.0.total_cmp(&y.0).then(x.1.cmp(&y.1)).then(x.2.cmp(&y.2)));
-        let m = spokes.len();
-        let mut used = vec![false; m];
-        let mut vertex_pairs = Vec::new();
-        for i in 0..m {
-            if spokes[i].2 {
+        if vertex_fans.len() > 2 {
+            let n = normals[k];
+            let len = dot(n, n).sqrt();
+            if len == 0.0 || !len.is_finite() {
                 continue;
             }
-            let found = (1..m).map(|d| (i + d) % m).find(|&j| spokes[j].2);
-            match found {
-                Some(j) if !used[j] => {
-                    used[j] = true;
-                    vertex_pairs.push((spokes[i].3, spokes[j].3));
-                }
-                _ => {
-                    vertex_pairs.clear();
-                    break;
-                }
-            }
+            let n = n.map(|x| x / len);
+            let axis = if n[0].abs() < 0.9 {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let e1 = {
+                let t = cross(n, axis);
+                let l = dot(t, t).sqrt();
+                t.map(|x| x / l)
+            };
+            let e2 = cross(n, e1);
+            let p = mesh.corner_position(v);
+            let angle = |w: u32| {
+                let d = sub(mesh.corner_position(w), p);
+                dot(d, e2).atan2(dot(d, e1))
+            };
+            // Order fans by their outgoing edge's direction; ties by vertex.
+            vertex_fans.sort_by(|x, y| {
+                let (wx, wy) = (boundary[x.2[0] as usize].1, boundary[y.2[0] as usize].1);
+                angle(wx).total_cmp(&angle(wy)).then(wx.cmp(&wy))
+            });
         }
-        if vertex_pairs.len() == out_deg[v as usize] as usize {
-            pairs.extend(vertex_pairs);
+        let m = vertex_fans.len();
+        for i in 0..m {
+            // Fan i spans counter-clockwise from its outgoing edge to its
+            // incoming edge; across the gap after it is fan i + 1's outgoing.
+            pairs.push((vertex_fans[i].1[0], vertex_fans[(i + 1) % m].2[0]));
         }
     }
     pairs.sort_unstable();

@@ -137,3 +137,104 @@ fn topology_identical_at_1_and_8_threads() {
     };
     assert_eq!(run(1), run(8));
 }
+
+/// Rotate point `p` about the axis through `o` with unit direction `k`.
+fn rotate(p: [f64; 3], o: [f64; 3], k: [f64; 3], angle: f64) -> [f64; 3] {
+    let v = [p[0] - o[0], p[1] - o[1], p[2] - o[2]];
+    let (s, c) = angle.sin_cos();
+    let dot = k[0] * v[0] + k[1] * v[1] + k[2] * v[2];
+    let cross = [
+        k[1] * v[2] - k[2] * v[1],
+        k[2] * v[0] - k[0] * v[2],
+        k[0] * v[1] - k[1] * v[0],
+    ];
+    [0, 1, 2].map(|i| o[i] + v[i] * c + cross[i] * s + k[i] * dot * (1.0 - c))
+}
+
+#[test]
+fn pinched_loops_survive_a_steeply_folded_fan() {
+    // The bowtie fixture, with everything on the lower-left side of the
+    // diagonal through (2,2) folded 150° about that diagonal. The fan
+    // structure is unchanged; only the geometry is folded.
+    let n = 4;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let flat = without(&grid(n), &[cell(1, 1), cell(2, 2) + 1]);
+    let (mut positions, triangles) = flat.to_arrays();
+    let o = [2.0, 2.0, 0.0];
+    let k = [
+        std::f64::consts::FRAC_1_SQRT_2,
+        -std::f64::consts::FRAC_1_SQRT_2,
+        0.0,
+    ];
+    for p in positions.iter_mut() {
+        if p[0] + p[1] < 4.0 - 1e-9 {
+            *p = rotate(*p, o, k, 150f64.to_radians());
+        }
+    }
+    let folded = Mesh::new(positions, triangles).unwrap();
+    let d = inspect(&folded);
+    assert_eq!(d.untraced_boundary_edges, 0, "{:?}", d.boundary_loops);
+    let mut sizes: Vec<usize> = d.boundary_loops.iter().map(|l| l.edge_count).collect();
+    sizes.sort();
+    assert_eq!(sizes, vec![3, 3, 16]);
+}
+
+#[test]
+fn each_pinched_loop_is_exactly_its_removed_triangle() {
+    let n = 6;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let base = grid(n);
+    let holes = [cell(2, 2), cell(3, 3), cell(2, 3)];
+    let m = without(&base, &holes);
+    let topo = m.topology();
+    let mut expected: Vec<Vec<u32>> = holes
+        .iter()
+        .map(|&f| {
+            let mut t = base.face(FaceId(f)).unwrap().to_vec();
+            t.sort();
+            t
+        })
+        .collect();
+    expected.sort();
+    let mut got: Vec<Vec<u32>> = topo
+        .boundary_loops
+        .iter()
+        .filter(|l| l.edge_count == 3)
+        .map(|l| {
+            let mut v = l.vertices.clone();
+            v.sort();
+            v
+        })
+        .collect();
+    got.sort();
+    assert_eq!(got, expected);
+}
+
+#[test]
+fn pinched_pairing_never_pairs_a_fan_with_itself() {
+    // Three triangular holes meeting at (3,3) (alternate fan triangles
+    // removed). Then move two vertices of one remaining fan triangle past
+    // each other so that fan's projected wedge is reversed. Topology is
+    // unchanged, so the three 3-edge holes must still be traced as such.
+    let n = 6;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let holes = [cell(2, 2), cell(3, 3), cell(2, 3)];
+    let flat = without(&grid(n), &holes);
+    let (mut positions, triangles) = flat.to_arrays();
+    let idx = |i: u32, j: u32| (j * (n + 1) + i) as usize;
+    positions[idx(4, 3)] = [3.3, 3.9, 0.2];
+    positions[idx(4, 4)] = [4.2, 3.2, -0.2];
+    let bent = Mesh::new(positions, triangles).unwrap();
+    let d = inspect(&bent);
+    let small = d
+        .boundary_loops
+        .iter()
+        .filter(|l| l.edge_count == 3)
+        .count();
+    assert_eq!(
+        (small, d.untraced_boundary_edges),
+        (3, 0),
+        "{:?}",
+        d.boundary_loops
+    );
+}

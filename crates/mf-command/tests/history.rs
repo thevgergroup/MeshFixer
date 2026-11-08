@@ -187,11 +187,16 @@ fn ten_revisions_cost_under_one_and_a_half_times_one() {
     // A body plus ten islands of distinct sizes; each command removes one more.
     let mut parts = vec![mf_fixtures::uv_sphere(100, 200)];
     for i in 0..10u32 {
-        parts.push(translated(&mf_fixtures::uv_sphere(2 + i, 3 + i), [10.0 + 5.0 * i as f64, 0.0, 0.0]));
+        parts.push(translated(
+            &mf_fixtures::uv_sphere(2 + i, 3 + i),
+            [10.0 + 5.0 * i as f64, 0.0, 0.0],
+        ));
     }
     let mut s = Session::new();
     let id = s.import(imported(merge(&parts)), "part".into());
-    let sizes: Vec<usize> = (0..10u32).map(|i| 2 * (3 + i as usize) * (1 + i as usize)).collect();
+    let sizes: Vec<usize> = (0..10u32)
+        .map(|i| 2 * (3 + i as usize) * (1 + i as usize))
+        .collect();
     for size in sizes {
         let out = s.execute(remove(id, &(size + 1).to_string())).unwrap();
         assert!(matches!(out, mf_command::CommitOutcome::NewRevision { .. }));
