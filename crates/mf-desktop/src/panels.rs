@@ -178,8 +178,7 @@ fn objects(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             )
             .clicked()
         {
-            app.active = Some(id);
-            app.camera = None;
+            app.set_active(id);
         }
     }
 }

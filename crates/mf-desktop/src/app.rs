@@ -370,12 +370,34 @@ impl MeshFixerApp {
         Some(egui::pos2(rect.left() + x as f32, rect.top() + y as f32))
     }
 
+    /// Make `id` the active object. A selection belongs to one object, so
+    /// switching to another clears it (its IDs mean nothing there).
+    pub fn set_active(&mut self, id: ObjectId) {
+        if self.active != Some(id) {
+            self.camera = None;
+            if self.selection.as_ref().is_some_and(|s| s.object != id) {
+                self.selection = None;
+                self.status = Some("Selection cleared (another object is active)".into());
+            }
+        }
+        self.active = Some(id);
+    }
+
+    /// Loop IDs the viewport highlights: only a loop selection of the active
+    /// object at the current revision.
+    pub fn highlighted_loops(&self) -> Option<Vec<u32>> {
+        let sel = self.selection.as_ref().filter(|s| {
+            s.kind == SelectionKind::BoundaryLoop
+                && Some(s.object) == self.active
+                && s.revision == self.session.current()
+        })?;
+        Some(sel.ids.clone())
+    }
+
     /// Highlight lines for the selected loops of the active mesh.
     fn highlight_lines(&mut self) -> Option<Arc<Vec<LineVertex>>> {
-        let sel = self
-            .selection
-            .clone()
-            .filter(|s| s.kind == SelectionKind::BoundaryLoop)?;
+        self.highlighted_loops()?;
+        let sel = self.selection.clone()?;
         let mesh = self.active_mesh()?.clone();
         // Topology is only read when the worker has already computed it.
         self.current_analysis()?;
@@ -416,10 +438,7 @@ impl MeshFixerApp {
                                 Some(format!("{} import warning(s)", self.warnings.len()));
                         }
                         match ids.first() {
-                            Some(&id) => {
-                                self.active = Some(id);
-                                self.camera = None;
-                            }
+                            Some(&id) => self.set_active(id),
                             None => self.error = Some("The file contains no mesh objects".into()),
                         }
                     }
