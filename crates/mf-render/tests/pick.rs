@@ -70,3 +70,33 @@ fn camera_ray_through_a_projected_point_hits_it() {
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
     assert!((0..3).all(|k| (p[k] - target[k]).abs() < 1e-6), "{p:?}");
 }
+
+#[test]
+fn loop_pick_ignores_edges_behind_the_surface() {
+    // The cube's top face is missing. Seen from below, the hole's edges
+    // still project inside the view, but the bottom face hides them.
+    let m = cube_with_missing_face();
+    let bb = m.bounding_box().unwrap();
+    let mut cam = OrbitCamera::fit(&bb);
+    let origin = DVec3::from(bb.center());
+    let size = (800.0, 600.0);
+    let topo = m.topology();
+    let hole = &topo.boundary_loops[0];
+    let a = DVec3::from(m.corner_position(hole.vertices[0]));
+    let b = DVec3::from(m.corner_position(hole.vertices[1]));
+    let mid_world = ((a + b) * 0.5).to_array();
+
+    let mid = screen_position(&cam, origin, size, mid_world).unwrap();
+    assert_eq!(
+        pick_loop(&m, &cam, origin, size, mid, 8.0),
+        Some(hole.id),
+        "visible from above"
+    );
+    cam.pitch = -60f64.to_radians();
+    let mid = screen_position(&cam, origin, size, mid_world).unwrap();
+    assert_eq!(
+        pick_loop(&m, &cam, origin, size, mid, 8.0),
+        None,
+        "hidden from below"
+    );
+}

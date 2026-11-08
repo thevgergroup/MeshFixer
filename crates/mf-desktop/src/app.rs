@@ -13,7 +13,7 @@ use mf_spec::ParamValue;
 use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::viewport::{Click, ViewOptions, Viewport};
 use crate::worker::{self, Analysis, Message};
-use mf_render::{LineVertex, loop_line_vertices, pick_loop, screen_position};
+use mf_render::{LineVertex, loop_line_vertices, screen_position};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
 pub struct MeshFixerApp {
@@ -320,20 +320,20 @@ impl MeshFixerApp {
     /// current revision's topology is ready), otherwise the clicked face's
     /// component (ray cast on a worker). Shift adds to a same-kind selection.
     pub fn click(&mut self, ctx: &egui::Context, click: Click) {
-        let (Some(object), Some(mesh), Some(cam)) =
-            (self.active, self.active_mesh().cloned(), self.camera)
-        else {
+        let (Some(mesh), Some(cam)) = (self.active_mesh().cloned(), self.camera) else {
             return;
         };
         let origin = mesh_origin(&mesh);
-        if self.current_analysis().is_some()
-            && let Some(id) = pick_loop(&mesh, &cam, origin, click.size, click.px, 8.0)
-        {
-            self.select(object, SelectionKind::BoundaryLoop, id, click.shift);
-            return;
-        }
-        let (ray_origin, dir) = cam.ray(origin, click.size, click.px);
-        worker::pick_face(&self.tx, ctx, mesh, ray_origin, dir, click.shift);
+        worker::pick(
+            &self.tx,
+            ctx,
+            mesh,
+            cam,
+            origin,
+            click.size,
+            click.px,
+            click.shift,
+        );
     }
 
     fn select(&mut self, object: ObjectId, kind: SelectionKind, id: u32, add: bool) {
@@ -461,22 +461,13 @@ impl MeshFixerApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
-            Message::Picked { mesh, face, add } => {
+            Message::Picked { mesh, picked, add } => {
                 // Ignore a pick for a revision that's no longer on screen.
                 if let (Some(object), Some(current)) = (self.active, self.active_mesh())
                     && Mesh::ptr_eq(current, &mesh)
                 {
-                    match face {
-                        Some(f) => {
-                            let component = mesh
-                                .topology()
-                                .components
-                                .iter()
-                                .position(|c| c.contains(&f.0));
-                            if let Some(c) = component {
-                                self.select(object, SelectionKind::Component, c as u32, add);
-                            }
-                        }
+                    match picked {
+                        Some((kind, id)) => self.select(object, kind, id, add),
                         None if !add => self.selection = None,
                         None => {}
                     }

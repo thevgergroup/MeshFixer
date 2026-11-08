@@ -15,6 +15,7 @@ pub struct Analysis {
 }
 use mf_io::{Format, ImportedModel, IoError};
 use mf_render::MeshVertices;
+use mf_selection::SelectionKind;
 
 pub enum Message {
     Imported(Result<ImportedModel, IoError>),
@@ -25,10 +26,10 @@ pub enum Message {
     },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
-    /// Face under a click (ray cast on a worker), for component selection.
+    /// What a click picked (see [`pick`]), for the revision it was made on.
     Picked {
         mesh: Mesh,
-        face: Option<mf_geometry::FaceId>,
+        picked: Option<(SelectionKind, u32)>,
         add: bool,
     },
 }
@@ -91,19 +92,35 @@ pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
 }
 
 /// Ray-cast pick on a worker (O(n) over faces).
-pub fn pick_face(
+/// What a click picked: a visible boundary loop near the cursor, else the
+/// component of the face under it. All O(n) work (topology, ray casts)
+/// happens here, never on the UI thread (MF-RT-001).
+#[allow(clippy::too_many_arguments)]
+pub fn pick(
     tx: &Sender<Message>,
     ctx: &eframe::egui::Context,
     mesh: Mesh,
-    origin: [f64; 3],
-    dir: [f64; 3],
+    cam: mf_render::OrbitCamera,
+    origin: glam::DVec3,
+    size: (f64, f64),
+    px: (f64, f64),
     add: bool,
 ) {
     spawn(tx, ctx, move || {
-        let face = mf_render::ray_pick(&mesh, origin, dir).map(|(f, _)| f);
-        // Warm the topology cache so the component lookup on the UI thread is cheap.
-        let _ = mesh.topology(); // allow-swallow: computed for its cache side effect
-        Message::Picked { mesh, face, add }
+        let picked = match mf_render::pick_loop(&mesh, &cam, origin, size, px, 8.0) {
+            Some(id) => Some((SelectionKind::BoundaryLoop, id)),
+            None => {
+                let (ray_origin, dir) = cam.ray(origin, size, px);
+                mf_render::ray_pick(&mesh, ray_origin, dir).and_then(|(f, _)| {
+                    mesh.topology()
+                        .components
+                        .iter()
+                        .position(|c| c.contains(&f.0))
+                        .map(|c| (SelectionKind::Component, c as u32))
+                })
+            }
+        };
+        Message::Picked { mesh, picked, add }
     });
 }
 

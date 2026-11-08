@@ -62,7 +62,8 @@ fn save(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
 }
 
 /// Click at the screen position of the midpoint of the first edge of the
-/// boundary loop containing grid vertex `v`.
+/// boundary loop containing grid vertex `v`, and wait until something is
+/// selected.
 fn click_hole(h: &mut Harness<'_, MeshFixerApp>, v: u32) {
     let mesh = h.state().active_mesh().unwrap().clone();
     let topo = mesh.topology();
@@ -91,7 +92,8 @@ fn click_hole(h: &mut Harness<'_, MeshFixerApp>, v: u32) {
         pressed: false,
         modifiers: egui::Modifiers::NONE,
     });
-    h.run_steps(3);
+    // Picking runs on a worker; wait for its result.
+    wait_until(h, "pick result", |a| a.selection.is_some());
 }
 
 #[test]
