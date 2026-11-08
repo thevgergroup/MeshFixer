@@ -20,7 +20,6 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | MF-ISSUE-011 | S3 | Ledger evidence recorded the empty doc-test line | M1 review minor 11 | M2 process | Task completion records summed test totals (CI summary script). |
 | MF-ISSUE-012 | S2 | **Spec gap:** tolerance duplicate vertices (MF-GEO-004) not implemented | M1 review | M2 | `duplicate_vertices_tolerance` in diagnostics, with tolerance relative to bbox diagonal (default 1e-6) and spatial-hash or sort based (deterministic). Added to the M2 plan. Fixture with known near-duplicates. |
 | MF-ISSUE-013 | S2 | Memory: 1.1 GB peak RSS at 4.8M triangles vs 400 MB budget | M1 report | **M2 (priority)** | A counting allocator plus a breakdown by category (mesh storage, topology, import scratch, history, GPU buffers) is reported by `--metrics` and the benchmark CI. M2's storage design is justified against these numbers before history and selections build on it. |
-| MF-ISSUE-014 | S2 | Cross-platform CI not yet run | M1 gate G1.1 | Before M1 merge | Green on ubuntu, macOS and Windows. The Linux job runs every GPU/GUI test with `MF_REQUIRE_GPU=1`. Skips on other OSes are listed in the job summary and not counted as passes. |
 | MF-ISSUE-015 | S3 | No human-driven demonstration recording | M1 evidence | M1 sign-off | A screen recording of open → inspect → apply → undo → redo → export on a real machine, linked from `docs/milestones/m1.md`. |
 | MF-ISSUE-016 | S3 | Font licence texts must ship with binaries | Font exception | First binary release | Installer or About dialog includes the texts in `licenses/third-party/`. See `THIRD_PARTY_NOTICES.md`. |
 | MF-ISSUE-017 | S2 | Reference integrated-GPU hardware not available | Spec OD-2 | Before MF-RENDER-002 is declared met | Benchmarks run on a named 16 GB integrated-GPU laptop, with device info recorded. |
@@ -30,6 +29,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-014 | Cross-platform CI not yet run | CI run 42492436343 (PR #1): ubuntu, macOS and Windows each 84 verified passes, 0 skipped, 0 failed. Every GPU and GUI test ran on all three (lavapipe, Metal, WARP). |
 | MF-ISSUE-010 | Non-atomic export could destroy the source file | `fix(io): atomic, verified export` · tests `failed_export_leaves_existing_file_intact`, `export_replaces_existing_file_atomically` |
 | — | Binary STL export wrote `inf` for out-of-range coordinates (part of minor 3) | Same commit: `write_binary` rejects coordinates outside f32 |
 | — | Volume hidden without saying why | `feat(geometry): volume_status` · test `volume_status_explains_missing_volume` |
