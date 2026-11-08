@@ -109,3 +109,39 @@ fn kind_not_in_spec_is_rejected() {
         "{err:?}"
     );
 }
+
+#[test]
+fn selection_of_filled_loop_reports_loop_closed() {
+    let mut s = Session::new();
+    let id = s.add_geometry(
+        Geometry::Mesh(mf_fixtures::cube_with_missing_face()),
+        "box".into(),
+        None,
+    );
+    let mesh = s.document().object(id).unwrap().mesh().unwrap().clone();
+    let loop_id = mesh.topology().boundary_loops[0].id;
+    let sel = Selection {
+        object: id,
+        revision: s.current(),
+        kind: SelectionKind::BoundaryLoop,
+        ids: vec![loop_id],
+    };
+    s.execute(Invocation {
+        op_id: "mesh.fill_holes".into(),
+        target: id,
+        selection: Some(sel.clone()),
+        raw_params: BTreeMap::from([("refine".to_string(), "false".to_string())]),
+    })
+    .unwrap();
+    let patch: Vec<mf_geometry::FaceId> = s.node(s.current()).unwrap().provenance[&id]
+        .created_faces
+        .iter()
+        .map(|(f, _)| *f)
+        .collect();
+    match s.translate(&sel, s.current()) {
+        mf_selection::Translation::Failed(mf_selection::TranslateError::LoopClosed { faces }) => {
+            assert_eq!(faces, patch)
+        }
+        other => panic!("{other:?}"),
+    }
+}

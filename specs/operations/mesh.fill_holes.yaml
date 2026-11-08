@@ -1,0 +1,28 @@
+id: mesh.fill_holes
+version: 1
+summary: Close holes with a minimum-weight triangulation, refined to the surrounding triangle density.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: [boundary_loop]
+parameters:
+  - name: max_loop_edges
+    type: integer
+    default: 500
+    min: 3
+    max: 5000
+    description: Largest hole (in boundary edges) to fill
+  - name: refine
+    type: bool
+    default: true
+    description: Add vertices so the patch matches the surrounding triangle density
+preconditions:
+  - target is a mesh
+  - targeted loops are traced boundary loops of at most max_loop_edges edges
+postconditions:
+  - each targeted loop is closed by a patch oriented consistently with its surroundings
+  - faces and vertices outside the targeted loops are unchanged
+effects: [geometry_changes, topology_changes]
+runtime:
+  cancellable: false
+  progress: false
