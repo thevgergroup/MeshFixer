@@ -58,6 +58,7 @@ impl MeshFixerApp {
             .iter()
             .find(|s| !s.is_read_only())
             .map(|s| s.id.clone())
+            // allow-swallow: no mutating operation registered means no default selection (empty id)
             .unwrap_or_default();
         let mut app = MeshFixerApp {
             session: Session::new(),
@@ -69,6 +70,7 @@ impl MeshFixerApp {
                 let ctx = cc.egui_ctx.clone();
                 LatestWorker::new(worker::analyze, move |msg| {
                     // The receiver only disappears when the app is closing.
+                    // allow-swallow: the receiver only disappears while the app is closing
                     let _ = tx.send(msg);
                     ctx.request_repaint();
                 })
@@ -175,6 +177,7 @@ impl MeshFixerApp {
                         .map(|p| (p.name.clone(), p.kind.default_value()))
                         .collect()
                 })
+                // allow-swallow: an operation id with no spec has no parameters (empty map)
                 .unwrap_or_default()
         })
     }

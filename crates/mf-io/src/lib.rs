@@ -136,6 +136,7 @@ pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoErro
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_nanos())
+        // allow-swallow: a clock before 1970 only affects the temp name, which also carries the pid
         .unwrap_or(0);
     let tmp = dir.join(format!(
         ".{}.mf-tmp-{}-{nanos}",
@@ -151,6 +152,7 @@ pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoErro
         std::fs::rename(&tmp, path)
     })();
     if let Err(e) = result {
+        // allow-swallow: best-effort cleanup on an error path; the original error is returned
         let _ = std::fs::remove_file(&tmp);
         return Err(fail(e.to_string()));
     }

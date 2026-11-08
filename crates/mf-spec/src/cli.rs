@@ -26,6 +26,7 @@ pub fn to_command(spec: &OperationSpec) -> Command {
             .unit
             .as_deref()
             .map(|u| format!(", unit: {u}"))
+            // allow-swallow: no unit means no help suffix
             .unwrap_or_default();
         cmd = cmd.arg(
             Arg::new(p.name.clone())

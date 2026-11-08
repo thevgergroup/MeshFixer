@@ -33,6 +33,7 @@ fn spawn(
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         // The receiver only disappears when the app is closing.
+        // allow-swallow: the receiver only disappears while the app is closing
         let _ = tx.send(f());
         ctx.request_repaint();
     });

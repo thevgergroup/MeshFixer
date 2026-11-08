@@ -88,7 +88,9 @@ pub enum LogError {
 
 /// `path` expressed relative to directory `base`, if both are absolute.
 pub(crate) fn relative_to(path: &Path, base: &Path) -> Option<PathBuf> {
+    // allow-swallow: a path that can't be canonicalized has no relative form; the caller stores it absolute
     let path = path.canonicalize().ok()?;
+    // allow-swallow: as above, for the log directory
     let base = base.canonicalize().ok()?;
     let p: Vec<Component> = path.components().collect();
     let b: Vec<Component> = base.components().collect();

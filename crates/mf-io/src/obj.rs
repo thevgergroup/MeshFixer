@@ -93,10 +93,12 @@ pub fn write(mesh: &Mesh) -> String {
     let mut index = vec![0u32; mesh.vertex_slots() as usize];
     for (n, (id, p)) in mesh.vertices().enumerate() {
         index[id.0 as usize] = n as u32 + 1;
+        // allow-swallow: writing to a String can't fail
         let _ = writeln!(s, "v {} {} {}", p[0], p[1], p[2]);
     }
     for (_, t) in mesh.faces() {
         let [a, b, c] = t.map(|v| index[v as usize]);
+        // allow-swallow: writing to a String can't fail
         let _ = writeln!(s, "f {a} {b} {c}");
     }
     s
@@ -123,6 +125,7 @@ pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
                 for c in expected {
                     let got: f64 = tok
                         .next()
+                        // allow-swallow: a parse failure becomes the positioned error on the next line
                         .and_then(|t| t.parse().ok())
                         .ok_or_else(|| format!("line {}: bad vertex", i + 1))?;
                     if got.to_bits() != c.to_bits() {
@@ -138,6 +141,7 @@ pub(crate) fn verify(text: &str, mesh: &Mesh) -> Result<(), String> {
                 for v in expected {
                     let got: u32 = tok
                         .next()
+                        // allow-swallow: a parse failure becomes the positioned error on the next line
                         .and_then(|t| t.parse().ok())
                         .ok_or_else(|| format!("line {}: bad face", i + 1))?;
                     // 0 is never a valid OBJ index (1-based), even if a

@@ -300,6 +300,7 @@ pub fn write_ascii(mesh: &Mesh) -> String {
     let mut s = String::from("solid meshfixer\n");
     for (_, t) in mesh.faces() {
         let n = facet_normal(mesh, t);
+        // allow-swallow: writing to a String can't fail
         let _ = writeln!(
             s,
             "  facet normal {} {} {}\n    outer loop",
@@ -307,6 +308,7 @@ pub fn write_ascii(mesh: &Mesh) -> String {
         );
         for i in t {
             let p = mesh.corner_position(i);
+            // allow-swallow: writing to a String can't fail
             let _ = writeln!(s, "      vertex {} {} {}", p[0], p[1], p[2]);
         }
         s.push_str("    endloop\n  endfacet\n");

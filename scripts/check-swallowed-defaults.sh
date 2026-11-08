@@ -1,17 +1,29 @@
 #!/usr/bin/env bash
-# MF-ISSUE-004: `unwrap_or_default()` in production code can hide an error
-# behind an empty value. Each remaining use must be listed, with its reason,
-# in scripts/allow-unwrap-or-default.txt as "path: trimmed source line".
+# MF-ISSUE-004/022: patterns that can hide an error behind a default value
+# (`unwrap_or_default()`, `unwrap_or(0)`, `.ok()`, `let _ =`) are allowed in
+# production code only with a reviewed reason: an `// allow-swallow: <reason>`
+# comment on the same line or on the line directly above.
+# Usage: check-swallowed-defaults.sh [dir...]   (default: crates/*/src)
 set -euo pipefail
-allow="scripts/allow-unwrap-or-default.txt"
+cd "$(dirname "$0")/.."
+dirs=("$@")
+[ ${#dirs[@]} -eq 0 ] && dirs=(crates/*/src)
 status=0
-while IFS= read -r hit; do
-  file="${hit%%:*}"
-  rest="${hit#*:}"; code="${rest#*:}"
-  code="$(echo "$code" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-  if ! grep -qxF "$file: $code" <(grep -v '^#' "$allow" | sed 's/  *# .*$//'); then
-    echo "unlisted unwrap_or_default(): $file: $code"
-    status=1
-  fi
-done < <(grep -rn "unwrap_or_default()" crates/*/src | grep -v "/tests/" || true)
+while IFS= read -r file; do
+  awk -v file="$file" '
+    function marked(s) { return s ~ /\/\/ allow-swallow: *[^ ]/ }
+    {
+      line = $0
+      code = line; sub(/\/\/.*$/, "", code)
+      if (code ~ /unwrap_or_default\(\)|unwrap_or\(0\)|\.ok\(\)|let _ =/) {
+        if (!marked(line) && !(prev ~ /^[ \t]*\/\// && marked(prev))) {
+          printf "%s:%d: unreviewed swallow: %s\n", file, NR, line
+          bad = 1
+        }
+      }
+      prev = line
+    }
+    END { exit bad }
+  ' "$file" || status=1
+done < <(find "${dirs[@]}" -name '*.rs' -not -path '*/tests/*' | sort)
 exit $status

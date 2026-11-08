@@ -111,6 +111,7 @@ fn follow(
                         .flatten()
                         .map(|&n| n as usize + 1)
                         .max()
+                        // allow-swallow: an empty remap has an empty inverse
                         .unwrap_or(0);
                     let mut inverse = vec![None; len];
                     for (old, new) in forward.iter().enumerate() {
@@ -397,6 +398,7 @@ fn resolve_loops(
             .filter_map(|e| {
                 loop_of_edge
                     .binary_search_by_key(e, |(edge, _)| *edge)
+                    // allow-swallow: binary_search's Err means 'not found', not a failure
                     .ok()
                     .map(|i| loop_of_edge[i].1)
             })

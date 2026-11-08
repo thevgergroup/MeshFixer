@@ -141,6 +141,7 @@ pub fn read_back(
     queue.submit([encoder.finish()]);
     let (tx, rx) = std::sync::mpsc::channel();
     readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        // allow-swallow: the receiver is read right after this; a send can only fail if it was dropped
         let _ = tx.send(r);
     });
     device
