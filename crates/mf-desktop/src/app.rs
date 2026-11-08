@@ -5,29 +5,28 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui;
 use mf_command::{CommitOutcome, Invocation, ObjectId, Session};
-use mf_geometry::{Diagnostics, Mesh};
+use mf_geometry::Mesh;
 use mf_io::Format;
 use mf_render::{MeshVertices, OrbitCamera};
 use mf_spec::ParamValue;
 
+use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::viewport::Viewport;
-use crate::worker::{self, Message};
-
-/// Analysis results for one mesh revision (identified by pointer, not hash,
-/// so the UI thread never does O(n) work to recognize a revision).
-pub struct Analysis {
-    pub mesh: Mesh,
-    pub diagnostics: Diagnostics,
-    pub vertices: Arc<MeshVertices>,
-}
+use crate::worker::{self, Analysis, Message};
 
 pub struct MeshFixerApp {
     pub session: Session,
     pub active: Option<ObjectId>,
     pub camera: Option<OrbitCamera>,
-    pub analysis: Option<Analysis>,
-    /// Mesh currently being analyzed, if any.
-    analyzing: Option<Mesh>,
+    /// Analyses keyed by revision identity (pointer, so recognizing a
+    /// revision is O(1) on the UI thread).
+    analyses: AnalysisCache<Analysis>,
+    analyzer: LatestWorker<Mesh>,
+    /// Last revision submitted for analysis.
+    requested: Option<Mesh>,
+    /// Vertices currently drawn. May belong to the previous revision while
+    /// the new one is analyzed; the viewport says so.
+    displayed: Option<Arc<MeshVertices>>,
     /// Label of the running import/operation/export. Blocks new commands.
     pub busy: Option<String>,
     pub selected_op: String,
@@ -50,7 +49,7 @@ impl MeshFixerApp {
             .as_ref()
             .ok_or("MeshFixer needs the wgpu renderer, but it is unavailable")?;
 
-        let (tx, rx) = channel();
+        let (tx, rx) = channel::<Message>();
         let selected_op = mf_spec::builtin::specs()
             .iter()
             .find(|s| !s.is_read_only())
@@ -60,8 +59,18 @@ impl MeshFixerApp {
             session: Session::new(),
             active: None,
             camera: None,
-            analysis: None,
-            analyzing: None,
+            analyses: AnalysisCache::new(4),
+            analyzer: {
+                let tx = tx.clone();
+                let ctx = cc.egui_ctx.clone();
+                LatestWorker::new(worker::analyze, move |msg| {
+                    // The receiver only disappears when the app is closing.
+                    let _ = tx.send(msg);
+                    ctx.request_repaint();
+                })
+            },
+            requested: None,
+            displayed: None,
             busy: None,
             selected_op,
             op_params: BTreeMap::new(),
@@ -202,23 +211,15 @@ impl MeshFixerApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
-            Message::Analyzed {
-                mesh,
-                diagnostics,
-                vertices,
-            } => {
+            Message::Analyzed { mesh, analysis } => {
                 if self
-                    .analyzing
+                    .requested
                     .as_ref()
                     .is_some_and(|m| Mesh::ptr_eq(m, &mesh))
                 {
-                    self.analyzing = None;
+                    self.requested = None;
                 }
-                self.analysis = Some(Analysis {
-                    mesh,
-                    diagnostics,
-                    vertices,
-                });
+                self.analyses.insert(mesh, analysis);
             }
             Message::Exported(result) => {
                 self.busy = None;
@@ -230,23 +231,26 @@ impl MeshFixerApp {
         }
     }
 
-    /// Start analysis when the active mesh revision changes.
-    fn refresh_analysis(&mut self, ctx: &egui::Context) {
+    /// Analysis for exactly the active revision, if it's ready.
+    pub fn current_analysis(&self) -> Option<&Analysis> {
+        self.active_mesh().and_then(|m| self.analyses.get(m))
+    }
+
+    /// Request analysis when the active revision changes.
+    fn refresh_analysis(&mut self) {
         let Some(mesh) = self.active_mesh().cloned() else {
-            self.analysis = None;
+            self.displayed = None;
             return;
         };
-        let current = self
-            .analysis
+        if let Some(a) = self.analyses.get(&mesh) {
+            self.displayed = Some(a.vertices.clone());
+        } else if !self
+            .requested
             .as_ref()
-            .is_some_and(|a| Mesh::ptr_eq(&a.mesh, &mesh));
-        let pending = self
-            .analyzing
-            .as_ref()
-            .is_some_and(|m| Mesh::ptr_eq(m, &mesh));
-        if !current && !pending {
-            self.analyzing = Some(mesh.clone());
-            worker::analyze(&self.tx, ctx, mesh);
+            .is_some_and(|m| Mesh::ptr_eq(m, &mesh))
+        {
+            self.requested = Some(mesh.clone());
+            self.analyzer.submit(mesh);
         }
         if self.camera.is_none()
             && let Some(bb) = self.active_mesh().and_then(|m| m.bounding_box())
@@ -262,8 +266,9 @@ impl MeshFixerApp {
             .map(|bb| OrbitCamera::fit(&bb));
     }
 
+    /// True while the active revision's analysis isn't ready.
     pub fn is_analyzing(&self) -> bool {
-        self.analyzing.is_some()
+        self.active_mesh().is_some() && self.current_analysis().is_none()
     }
 }
 
@@ -273,7 +278,7 @@ impl eframe::App for MeshFixerApp {
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
-        self.refresh_analysis(&ctx);
+        self.refresh_analysis();
 
         let (undo, redo, fit) = ctx.input_mut(|i| {
             let redo = i.consume_key(
@@ -298,17 +303,17 @@ impl eframe::App for MeshFixerApp {
         crate::panels::status_bar(self, ui);
         crate::panels::side_panel(self, ui);
 
-        let vertices = self
-            .analysis
-            .as_ref()
-            .filter(|a| {
-                self.active_mesh().is_some_and(|m| Mesh::ptr_eq(m, &a.mesh)) || self.is_analyzing()
-            })
-            .map(|a| a.vertices.clone());
+        let vertices = self.displayed.clone();
         let show_boundaries = self.show_boundaries;
+        let updating = self.is_analyzing();
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.viewport
-                .show(ui, &mut self.camera, vertices.as_ref(), show_boundaries);
+            self.viewport.show(
+                ui,
+                &mut self.camera,
+                vertices.as_ref(),
+                show_boundaries,
+                updating,
+            );
         });
 
         if self.busy.is_some() || self.is_analyzing() {

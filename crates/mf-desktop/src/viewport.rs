@@ -49,6 +49,7 @@ impl Viewport {
         camera: &mut Option<OrbitCamera>,
         vertices: Option<&Arc<MeshVertices>>,
         show_boundaries: bool,
+        updating: bool,
     ) {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -80,6 +81,15 @@ impl Viewport {
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
+        if updating {
+            ui.painter().text(
+                rect.left_top() + egui::vec2(8.0, 8.0),
+                egui::Align2::LEFT_TOP,
+                "Updating view…",
+                egui::FontId::proportional(14.0),
+                egui::Color32::from_rgb(255, 200, 80),
+            );
+        }
         ui.painter().text(
             rect.left_bottom() + egui::vec2(8.0, -8.0),
             egui::Align2::LEFT_BOTTOM,

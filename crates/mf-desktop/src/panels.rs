@@ -144,7 +144,8 @@ fn objects(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
 fn diagnostics(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.heading("Diagnostics");
-    let Some(analysis) = &app.analysis else {
+    // Only ever show diagnostics for the exact revision on screen.
+    let Some(analysis) = app.current_analysis() else {
         ui.weak(if app.is_analyzing() {
             "Analyzing…"
         } else {

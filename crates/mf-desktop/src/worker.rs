@@ -7,17 +7,19 @@ use std::sync::mpsc::Sender;
 
 use mf_command::{CommandError, Completed, Prepared};
 use mf_geometry::{Diagnostics, Mesh};
+
+/// Analysis results for one mesh revision.
+pub struct Analysis {
+    pub diagnostics: Diagnostics,
+    pub vertices: Arc<MeshVertices>,
+}
 use mf_io::{Format, Imported, IoError};
 use mf_render::MeshVertices;
 
 pub enum Message {
     Imported(Result<Imported, IoError>, String),
     Completed(Result<Completed, CommandError>),
-    Analyzed {
-        mesh: Mesh,
-        diagnostics: Diagnostics,
-        vertices: Arc<MeshVertices>,
-    },
+    Analyzed { mesh: Mesh, analysis: Analysis },
     Exported(Result<PathBuf, IoError>),
 }
 
@@ -50,16 +52,13 @@ pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared
     spawn(tx, ctx, move || Message::Completed(prepared.run()));
 }
 
-pub fn analyze(tx: &Sender<Message>, ctx: &eframe::egui::Context, mesh: Mesh) {
-    spawn(tx, ctx, move || {
-        let diagnostics = mf_geometry::inspect(&mesh);
-        let vertices = Arc::new(MeshVertices::build(&mesh));
-        Message::Analyzed {
-            mesh,
-            diagnostics,
-            vertices,
-        }
-    });
+/// Diagnostics and render vertices for one revision (O(n), so off the UI thread).
+pub fn analyze(mesh: Mesh) -> Message {
+    let analysis = Analysis {
+        diagnostics: mf_geometry::inspect(&mesh),
+        vertices: Arc::new(MeshVertices::build(&mesh)),
+    };
+    Message::Analyzed { mesh, analysis }
 }
 
 pub fn export(

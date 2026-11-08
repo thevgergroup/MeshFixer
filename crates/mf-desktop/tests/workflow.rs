@@ -28,9 +28,7 @@ fn wait_until(
 }
 
 fn components(app: &MeshFixerApp) -> Option<usize> {
-    let analysis = app.analysis.as_ref()?;
-    let current = app.active_mesh()?;
-    mf_geometry::Mesh::ptr_eq(&analysis.mesh, current).then_some(analysis.diagnostics.components)
+    app.current_analysis().map(|a| a.diagnostics.components)
 }
 
 fn save(harness: &mut Harness<'_, MeshFixerApp>, name: &str) {
@@ -87,7 +85,11 @@ fn open_inspect_apply_undo_redo() {
     save(&mut harness, "02-applied");
 
     harness.get_by_label("Undo").click();
-    wait_until(&mut harness, "undo", |a| components(a) == Some(before));
+    harness.step();
+    // The pre-apply revision is cached, so its diagnostics are correct at once,
+    // never the post-apply numbers carried over.
+    assert_eq!(components(harness.state()), Some(before));
+    assert!(!harness.state().is_analyzing());
     assert!(harness.state().session.can_redo());
     save(&mut harness, "03-undone");
 
