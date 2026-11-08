@@ -76,6 +76,42 @@ pub enum CommandError {
     },
     #[error("{op} can't target {kind}")]
     UnsupportedTarget { op: String, kind: String },
+    #[error("revision {0} does not exist")]
+    UnknownRevision(RevisionId),
+    #[error("the recorded selection can't be applied to revision {onto}: {reason}")]
+    Untranslatable { onto: RevisionId, reason: String },
+    #[error(
+        "the command was recorded with {op} version {recorded}, but this build has version {current}"
+    )]
+    OperationVersion {
+        op: String,
+        recorded: u32,
+        current: u32,
+    },
+}
+
+/// Why a translation can't be used to re-execute a command.
+fn untranslatable_reason(t: &Translation) -> String {
+    match t {
+        Translation::Mapped(_) | Translation::Partial { .. } => "it translated".into(),
+        Translation::Ambiguous { candidates } => {
+            format!("it is ambiguous between {candidates:?}")
+        }
+        Translation::Failed(e) => match e {
+            TranslateError::NoPath => "the revisions aren't connected".into(),
+            TranslateError::ObjectMissing => "the object doesn't exist there".into(),
+            TranslateError::AllLost { lost } => {
+                format!("every selected element was removed ({lost:?})")
+            }
+            TranslateError::LoopClosed { faces } => {
+                format!("the boundary loop was closed (by {} faces)", faces.len())
+            }
+            TranslateError::KindNotTranslatable => "its kind can't be translated".into(),
+            TranslateError::NotInSource { ids } => {
+                format!("{ids:?} aren't elements of the selection's own revision")
+            }
+        },
+    }
 }
 
 /// A validated command, ready to run on any thread.
@@ -379,13 +415,26 @@ impl Session {
     pub fn prepare(&self, inv: Invocation) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(&inv.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
-        let op = mf_operations::find(&inv.op_id)
-            .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
         let params = spec.validate(&inv.raw_params)?;
+        self.prepare_validated(&inv.op_id, inv.target, inv.selection, params)
+    }
+
+    /// As [`Session::prepare`], with parameters already validated.
+    fn prepare_validated(
+        &self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        params: Params,
+    ) -> Result<Prepared, CommandError> {
+        let spec = mf_spec::builtin::get(op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
+        let op = mf_operations::find(op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
         let object = self
             .document()
-            .object(inv.target)
-            .ok_or(CommandError::UnknownObject(inv.target))?;
+            .object(target)
+            .ok_or(CommandError::UnknownObject(target))?;
         let kind = object.geometry.kind().as_str();
         let unsupported = || CommandError::UnsupportedGeometry {
             op: spec.id.clone(),
@@ -397,7 +446,7 @@ impl Session {
         // Every Phase 0 operation is a mesh operation; the spec check above
         // guarantees the object is a mesh here.
         let input = object.mesh().ok_or_else(unsupported)?.clone();
-        let target_spec = match &inv.selection {
+        let target_spec = match &selection {
             None if spec.target.whole_object => Target::WholeObject,
             None => {
                 return Err(CommandError::UnsupportedTarget {
@@ -406,10 +455,10 @@ impl Session {
                 });
             }
             Some(sel) => {
-                if sel.object != inv.target {
+                if sel.object != target {
                     return Err(CommandError::SelectionMismatch {
                         selection: sel.object,
-                        target: inv.target,
+                        target,
                     });
                 }
                 if sel.revision != self.cursor {
@@ -433,11 +482,11 @@ impl Session {
         };
         Ok(Prepared {
             base_revision: self.cursor,
-            target: inv.target,
+            target,
             op,
             input,
             target_spec,
-            selection: inv.selection,
+            selection,
             params,
         })
     }
@@ -537,6 +586,58 @@ impl Session {
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
         let completed = self.prepare(inv)?.run()?;
         self.commit(completed)
+    }
+
+    /// Run a recorded command again on another revision (MF-HIST-002): the
+    /// same operation and parameters, with its selection translated to
+    /// `onto` (MF-SEL-003). A translation that keeps some or all of the
+    /// selection proceeds; anything else is an error naming why. On success
+    /// the cursor is on the new revision (a child of `onto`); on failure it
+    /// hasn't moved.
+    pub fn reexecute(
+        &mut self,
+        record: &CommandRecord,
+        onto: RevisionId,
+    ) -> Result<CommitOutcome, CommandError> {
+        if self.node(onto).is_none() {
+            return Err(CommandError::UnknownRevision(onto));
+        }
+        let op = mf_operations::find(&record.op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(record.op_id.clone()))?;
+        if op.version() != record.op_version {
+            return Err(CommandError::OperationVersion {
+                op: record.op_id.clone(),
+                recorded: record.op_version,
+                current: op.version(),
+            });
+        }
+        let selection = match &record.selection {
+            None => None,
+            Some(sel) => match self.translate(sel, onto) {
+                Translation::Mapped(s) | Translation::Partial { mapped: s, .. } => Some(s),
+                other => {
+                    return Err(CommandError::Untranslatable {
+                        onto,
+                        reason: untranslatable_reason(&other),
+                    });
+                }
+            },
+        };
+        let back = self.cursor;
+        self.checkout(onto);
+        let result = self
+            .prepare_validated(
+                &record.op_id,
+                record.target,
+                selection,
+                record.params.clone(),
+            )
+            .and_then(Prepared::run)
+            .and_then(|c| self.commit(c));
+        if result.is_err() {
+            self.checkout(back);
+        }
+        result
     }
 
     pub fn can_undo(&self) -> bool {
