@@ -440,3 +440,53 @@ mod refinement {
         assert_eq!(run(1), run(8));
     }
 }
+
+#[test]
+fn max_loop_edges_is_capped_where_the_triangulation_stays_interactive() {
+    // The DP is O(n³) time and O(n²) memory: 1000 edges is ~2.5 s and
+    // ~50 MB; 5000 would be minutes and over a gigabyte, uncancellable.
+    let spec = builtin::get("mesh.fill_holes").unwrap();
+    let raw = |v: &str| BTreeMap::from([("max_loop_edges".to_string(), v.to_string())]);
+    assert!(spec.validate(&raw("1000")).is_ok());
+    assert!(spec.validate(&raw("1001")).is_err());
+
+    // A 1000-edge hole fills well within that budget.
+    let n = 1000;
+    let ring: Vec<[f64; 3]> = (0..n)
+        .map(|k| {
+            let a = std::f64::consts::TAU * k as f64 / n as f64;
+            [a.cos(), a.sin(), 0.0]
+        })
+        .collect();
+    let outer: Vec<[f64; 3]> = (0..n)
+        .map(|k| [ring[k][0] * 2.0, ring[k][1] * 2.0, 0.0])
+        .collect();
+    // Annulus: ring k → outer k, a hole of exactly n edges in the middle.
+    let mut positions = ring.clone();
+    positions.extend(outer);
+    let mut tris = Vec::new();
+    for k in 0..n as u32 {
+        let k1 = (k + 1) % n as u32;
+        let (r0, r1, o0, o1) = (k, k1, k + n as u32, k1 + n as u32);
+        tris.push([r0, o0, o1]);
+        tris.push([r0, o1, r1]);
+    }
+    let m = Mesh::new(positions, tris).unwrap();
+    let hole = m
+        .topology()
+        .boundary_loops
+        .iter()
+        .find(|l| l.edge_count == n && l.vertices.iter().all(|&v| v < n as u32))
+        .unwrap()
+        .id;
+    let start = std::time::Instant::now();
+    let (out, _, _) = fill(
+        &m,
+        Target::Loops(vec![hole]),
+        &[("max_loop_edges", "1000"), ("refine", "false")],
+    )
+    .unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(out.topology().boundary_loops.len(), 1, "only the outer rim");
+    assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}

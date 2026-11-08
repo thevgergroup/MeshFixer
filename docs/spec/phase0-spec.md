@@ -1,4 +1,6 @@
-# MeshFixer Phase 0 Engineering Spec (v0.2)
+# MeshFixer Phase 0 Engineering Spec (v0.3)
+
+v0.3 (2026-11-08, M3 review): MF-OP-002 corrected to Liepa's ordering (worst dihedral, then area); it now states the whole-object reporting behaviour, the 1000-edge cap and the untriangulable case.
 
 Status: Approved for implementation · 2026-11-08
 Licence: MIT OR Apache-2.0 · Dev machine: Apple M2 Max, 32 GB, macOS
@@ -185,7 +187,7 @@ Selections bound to one revision are never applied to another without translatio
 3. `mesh.fill_holes` (target: object, meaning all loops up to a size limit, or chosen boundary loops)
 4. `mesh.simplify` (stretch goal)
 
-**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing area then worst dihedral, after Liepa 2003). It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. Loops above `max_loop_edges` (default 500) fail with a structured error naming the loop; they're never silently skipped or fan-filled. Fairing (smooth curvature blending) is a stretch goal.
+**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing worst dihedral then area, after Liepa 2003). It never uses a chord that is already a mesh edge, or a zero-area triangle. It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. A selected loop that can't be filled (above `max_loop_edges`, default 500 and at most 1000; self-touching; or untriangulable, such as a collinear slit) fails with a structured error naming the loop. A whole-object run fills the rest and lists each such loop by ID and reason in its report. No loop is ever silently skipped or fan-filled. Fairing (smooth curvature blending) is a stretch goal.
 *Accept:*
 - On procedural holes, the patch's mean edge length is within ±25% of the boundary's mean, and no patch triangle has a minimum angle below 5°.
 - On the real scan fixture, every targeted loop closes, the result is manifold around each patch, and an offscreen render is captured for review.

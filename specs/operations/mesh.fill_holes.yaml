@@ -10,7 +10,8 @@ parameters:
     type: integer
     default: 500
     min: 3
-    max: 5000
+    # The triangulation is O(n³) time, O(n²) memory: ~2.5 s at 1000 edges.
+    max: 1000
     description: Largest hole (in boundary edges) to fill
   - name: refine
     type: bool
