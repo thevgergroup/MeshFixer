@@ -98,6 +98,10 @@ jobs:
         run: scripts/fetch-fixtures.sh
       - name: Real scan before/after renders
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-operations --test real_scan
+      - name: Surgical GUI frames (select hole, fill, undo, refill)
+        run: |
+          mkdir -p evidence/surgical
+          MF_ARTIFACTS=$PWD/evidence/surgical cargo test -p mf-desktop --test surgical
       - uses: actions/upload-artifact@v7
         with:
           name: milestone-evidence
@@ -108,6 +112,7 @@ jobs:
           target/release/meshfixer gen-fixture damaged xos/scan.stl --triangles 200000 --seed 5
           target/release/meshfixer run xos/scan.stl \
             --op mesh.remove_small_components --param max_triangles=100 \
+            --op mesh.fill_holes --param refine=true \
             --save-log xos/session.mfx.log -o xos/linux-result.stl
           target/release/meshfixer replay xos/session.mfx.log
       - uses: actions/upload-artifact@v7
@@ -117,7 +122,9 @@ jobs:
 
   replay-cross-os:
     # MF-CMD-005 cross-platform level: a log written on Linux must replay on
-    # macOS and Windows as Exact or Equivalent (the summary says which).
+    # macOS and Windows as Exact or Equivalent (the summary says which). The
+    # log includes a refined fill_holes, which computes new vertex positions
+    # (MF-ISSUE-025).
     needs: evidence
     strategy:
       fail-fast: false

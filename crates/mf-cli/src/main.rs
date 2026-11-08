@@ -77,7 +77,7 @@ fn input_arg() -> Arg {
     Arg::new("input")
         .required(true)
         .value_parser(clap::value_parser!(PathBuf))
-        .help("Input mesh (.stl or .obj)")
+        .help("Input mesh (.stl, .obj or .3mf)")
 }
 
 fn output_arg() -> Arg {
@@ -86,14 +86,14 @@ fn output_arg() -> Arg {
         .long("output")
         .required(true)
         .value_parser(clap::value_parser!(PathBuf))
-        .help("Output mesh (.stl or .obj)")
+        .help("Output mesh (.stl, .obj or .3mf)")
 }
 
 fn output_positional() -> Arg {
     Arg::new("output")
         .required(true)
         .value_parser(clap::value_parser!(PathBuf))
-        .help("Output mesh (.stl or .obj)")
+        .help("Output mesh (.stl, .obj or .3mf)")
 }
 
 fn cli() -> Command {
