@@ -5,6 +5,7 @@
 //! MF-CMD-001). Exit codes: 0 success, 1 I/O or operation error, 2 usage or
 //! parameter error.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -171,6 +172,48 @@ fn cli() -> Command {
                     .value_parser(clap::value_parser!(u64)),
             ),
     );
+    cmd = cmd
+        .subcommand(
+            Command::new("run")
+                .about("Run a sequence of operations, optionally saving a command log")
+                .arg(input_arg())
+                .arg(output_arg())
+                .arg(
+                    Arg::new("op")
+                        .long("op")
+                        .action(clap::ArgAction::Append)
+                        .help("Operation id (repeatable, run in order)"),
+                )
+                .arg(
+                    Arg::new("param")
+                        .long("param")
+                        .action(clap::ArgAction::Append)
+                        .help("name=value for the preceding --op (repeatable)"),
+                )
+                .arg(
+                    Arg::new("save-log")
+                        .long("save-log")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Write the command log to this directory (<name>.mfx.log)"),
+                ),
+        )
+        .subcommand(
+            Command::new("replay")
+                .about("Replay a command log and verify every command's output")
+                .arg(
+                    Arg::new("log")
+                        .required(true)
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Command log directory"),
+                )
+                .arg(
+                    Arg::new("output")
+                        .short('o')
+                        .long("output")
+                        .value_parser(clap::value_parser!(PathBuf))
+                        .help("Export the replayed result of the first object"),
+                ),
+        );
     for spec in mf_spec::builtin::specs()
         .iter()
         .filter(|s| !s.is_read_only())
@@ -279,6 +322,127 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
     Ok(())
 }
 
+/// `--op` and `--param` values in command-line order, params grouped under
+/// the op before them.
+/// One `--op` with its `--param`s.
+type Step = (String, BTreeMap<String, String>);
+
+fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
+    let ops: Vec<(usize, String)> = match (m.indices_of("op"), m.get_many::<String>("op")) {
+        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
+        _ => Vec::new(),
+    };
+    let params: Vec<(usize, String)> = match (m.indices_of("param"), m.get_many::<String>("param"))
+    {
+        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
+        _ => Vec::new(),
+    };
+    if ops.is_empty() {
+        return Err(Failure::Usage("run needs at least one --op".into()));
+    }
+    let mut seq: Vec<Step> = Vec::new();
+    for (idx, op) in &ops {
+        let next = ops
+            .iter()
+            .map(|(i, _)| *i)
+            .find(|i| i > idx)
+            .unwrap_or(usize::MAX);
+        let mut raw = BTreeMap::new();
+        for (pi, p) in params.iter().filter(|(pi, _)| pi > idx && *pi < next) {
+            let (k, v) = p.split_once('=').ok_or_else(|| {
+                Failure::Usage(format!("--param '{p}' (position {pi}) must be name=value"))
+            })?;
+            raw.insert(k.to_owned(), v.to_owned());
+        }
+        seq.push((op.clone(), raw));
+    }
+    let first_op = ops[0].0;
+    if let Some((_, p)) = params.iter().find(|(pi, _)| *pi < first_op) {
+        return Err(Failure::Usage(format!(
+            "--param '{p}' comes before any --op"
+        )));
+    }
+    Ok(seq)
+}
+
+fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
+    let input = m
+        .get_one::<PathBuf>("input")
+        .ok_or_else(|| Failure::Usage("missing input".into()))?;
+    let output = m
+        .get_one::<PathBuf>("output")
+        .ok_or_else(|| Failure::Usage("missing output".into()))?;
+    let format = Format::from_path(output).ok_or_else(|| {
+        Failure::Usage(format!("unsupported output format: {}", output.display()))
+    })?;
+    let seq = op_sequence(m)?;
+    // Validate every step before touching files.
+    for (op, raw) in &seq {
+        let spec = mf_spec::builtin::get(op)
+            .ok_or_else(|| Failure::Usage(format!("unknown operation '{op}'")))?;
+        spec.validate(raw)
+            .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
+    }
+    let (mut session, id) = open(input, metrics)?;
+    for (op, raw) in seq {
+        let outcome = metrics.record("operation", || {
+            session.execute(Invocation {
+                op_id: op.clone(),
+                target: id,
+                raw_params: raw,
+            })
+        })?;
+        match outcome {
+            CommitOutcome::NewRevision { report } => eprintln!("{op}: {report}"),
+            CommitOutcome::NoChange { report } => eprintln!("{op}: no change ({report})"),
+            CommitOutcome::Report(report) => eprintln!("{op}: {report}"),
+        }
+    }
+    if let Some(dir) = m.get_one::<PathBuf>("save-log") {
+        session
+            .save_log(dir)
+            .map_err(|e| Failure::Runtime(e.to_string()))?;
+        eprintln!("saved command log to {}", dir.display());
+    }
+    let mesh = session
+        .document()
+        .object(id)
+        .and_then(|o| o.mesh())
+        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+    metrics.structures(mesh);
+    metrics.record("export", || mf_io::write_path(mesh, output, format))?;
+    Ok(())
+}
+
+fn replay_log(m: &ArgMatches) -> Result<(), Failure> {
+    let dir = m
+        .get_one::<PathBuf>("log")
+        .ok_or_else(|| Failure::Usage("missing log".into()))?;
+    let report = mf_command::replay(dir).map_err(|e| Failure::Runtime(e.to_string()))?;
+    for (id, verdict) in &report.results {
+        println!("command {}: {verdict:?}", id.0);
+    }
+    if let Some(out) = m.get_one::<PathBuf>("output") {
+        let format = Format::from_path(out).ok_or_else(|| {
+            Failure::Usage(format!("unsupported output format: {}", out.display()))
+        })?;
+        let mesh = report
+            .session
+            .document()
+            .objects()
+            .first()
+            .and_then(|o| o.mesh())
+            .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
+        mf_io::write_path(mesh, out, format)?;
+    }
+    if report.all_verified() {
+        println!("all {} command(s) verified", report.results.len());
+        Ok(())
+    } else {
+        Err(Failure::Runtime("replay did not reproduce the log".into()))
+    }
+}
+
 fn run_operation(
     spec: &mf_spec::OperationSpec,
     m: &ArgMatches,
@@ -328,6 +492,8 @@ fn main() -> ExitCode {
         Some(("inspect", m)) => inspect(m, &mut metrics),
         Some(("render", m)) => render(m),
         Some(("gen-fixture", m)) => gen_fixture(m),
+        Some(("run", m)) => run_sequence(m, &mut metrics),
+        Some(("replay", m)) => replay_log(m),
         Some((name, m)) => match mf_spec::builtin::specs()
             .iter()
             .find(|s| mf_spec::cli::subcommand_name(s) == name)

@@ -37,6 +37,9 @@ pub struct CommandRecord {
     pub input_hash: String,
     pub output_revision: RevisionId,
     pub output_hash: String,
+    /// Geometry summary of the output, used to classify a replay whose
+    /// hash differs as `Equivalent` or `Mismatch` (MF-CMD-004).
+    pub output_summary: GeometrySummary,
     /// Commands that produced this command's inputs (empty if an import did).
     pub depends_on: Vec<CommandId>,
     pub affected_objects: Vec<ObjectId>,
@@ -58,4 +61,69 @@ pub struct ImportRecord {
 
 pub fn platform() -> String {
     format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
+}
+
+/// Compact description of a mesh revision: topological invariants plus
+/// extent and area. Enough to tell "same geometry, different bits" (another
+/// platform's floating point) from "different result".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GeometrySummary {
+    pub faces: usize,
+    pub vertices: usize,
+    pub components: usize,
+    pub boundary_loops: usize,
+    pub euler: i64,
+    /// `[min, max]`, `None` for an empty mesh.
+    pub bbox: Option<[[f64; 3]; 2]>,
+    pub surface_area: Option<f64>,
+}
+
+impl GeometrySummary {
+    pub fn of(mesh: &mf_geometry::Mesh) -> GeometrySummary {
+        let d = mf_geometry::inspect(mesh);
+        GeometrySummary {
+            faces: d.triangle_count,
+            vertices: d.vertex_count,
+            components: d.components,
+            boundary_loops: d.boundary_loops.len(),
+            euler: mesh.vertex_count() as i64 - mesh.topology().edge_count as i64
+                + mesh.face_count() as i64,
+            bbox: d.bounding_box.map(|b| [b.min, b.max]),
+            surface_area: d.surface_area,
+        }
+    }
+
+    /// Largest coordinate or relative-area deviation, if the invariants
+    /// match exactly; `None` if they don't.
+    pub fn deviation(&self, other: &GeometrySummary) -> Option<f64> {
+        let same = self.faces == other.faces
+            && self.vertices == other.vertices
+            && self.components == other.components
+            && self.boundary_loops == other.boundary_loops
+            && self.euler == other.euler;
+        if !same {
+            return None;
+        }
+        let bbox = match (self.bbox, other.bbox) {
+            (Some(a), Some(b)) => (0..2)
+                .flat_map(|i| (0..3).map(move |k| (i, k)))
+                .map(|(i, k)| (a[i][k] - b[i][k]).abs())
+                .fold(0.0, f64::max),
+            (None, None) => 0.0,
+            _ => return None,
+        };
+        let area = match (self.surface_area, other.surface_area) {
+            (Some(a), Some(b)) => (a - b).abs() / a.abs().max(f64::MIN_POSITIVE),
+            (None, None) => 0.0,
+            _ => return None,
+        };
+        Some(bbox.max(area))
+    }
+
+    /// Scale for tolerances: the bounding-box diagonal.
+    pub fn diagonal(&self) -> f64 {
+        self.bbox.map_or(0.0, |[a, b]| {
+            ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2) + (b[2] - a[2]).powi(2)).sqrt()
+        })
+    }
 }

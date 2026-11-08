@@ -174,3 +174,73 @@ fn metrics_json_written() {
     assert!(v["structures"]["topology"].as_u64().unwrap() > 0);
     assert!(v["peak_heap"].as_u64().unwrap() > 0);
 }
+
+#[test]
+fn run_saves_log_and_replay_verifies_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let log = dir.path().join("s.mfx.log");
+    let out_path = dir.path().join("out.stl");
+    let out = meshfixer(&[
+        "run",
+        &input,
+        "--op",
+        "mesh.remove_small_components",
+        "--param",
+        "max_triangles=5",
+        "--op",
+        "mesh.remove_small_components",
+        "--param",
+        "max_triangles=2",
+        "--param",
+        "keep_largest=true",
+        "--save-log",
+        log.to_str().unwrap(),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(out_path.exists());
+    let replayed = meshfixer(&["replay", log.to_str().unwrap()]);
+    assert!(
+        replayed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&replayed.stderr)
+    );
+    let text = String::from_utf8_lossy(&replayed.stdout);
+    assert!(text.contains("Exact"), "{text}");
+
+    // Tampering makes replay fail with exit code 1.
+    let commands = log.join("commands.jsonl");
+    let t = std::fs::read_to_string(&commands).unwrap();
+    std::fs::write(
+        &commands,
+        t.replace("\"max_triangles\":5", "\"max_triangles\":3"),
+    )
+    .unwrap();
+    let tampered = meshfixer(&["replay", log.to_str().unwrap()]);
+    assert_eq!(
+        tampered.status.code(),
+        Some(1),
+        "{}",
+        String::from_utf8_lossy(&tampered.stdout)
+    );
+}
+
+#[test]
+fn run_rejects_param_before_any_op() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = meshfixer(&[
+        "run",
+        &damaged(dir.path()),
+        "--param",
+        "max_triangles=5",
+        "-o",
+        "x.stl",
+    ]);
+    assert_eq!(out.status.code(), Some(2));
+}

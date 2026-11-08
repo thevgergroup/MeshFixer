@@ -11,7 +11,7 @@ use serde::Serialize;
 pub mod obj;
 pub mod stl;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub enum Format {
     StlBinary,
     StlAscii,

@@ -9,7 +9,8 @@ use mf_selection::{Selection, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
 use crate::record::{
-    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, platform,
+    AffectedSummary, CommandId, CommandRecord, CommandStatus, GeometrySummary, ImportRecord,
+    platform,
 };
 
 /// A request to run an operation, as issued by any frontend.
@@ -65,6 +66,7 @@ impl Prepared {
             .change
             .as_ref()
             .map(|(m, _)| m.content_hash().to_hex());
+        let output_summary = output.change.as_ref().map(|(m, _)| GeometrySummary::of(m));
         let kept = output
             .change
             .as_ref()
@@ -78,6 +80,7 @@ impl Prepared {
             output,
             input_hash,
             output_hash,
+            output_summary,
             kept,
             duration: start.elapsed(),
         })
@@ -93,6 +96,7 @@ pub struct Completed {
     pub output: OpOutput,
     input_hash: String,
     output_hash: Option<String>,
+    output_summary: Option<GeometrySummary>,
     kept: u64,
     pub duration: Duration,
 }
@@ -316,6 +320,9 @@ impl Session {
             input_hash: c.input_hash,
             output_revision: RevisionId(self.nodes.len() as u64),
             output_hash: c.output_hash.unwrap_or_default(),
+            output_summary: c
+                .output_summary
+                .expect("a change always has an output summary"),
             depends_on: self
                 .producer(c.target, input_revision)
                 .into_iter()
