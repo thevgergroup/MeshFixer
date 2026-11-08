@@ -282,7 +282,9 @@ pub mod skip {
                 .create(true)
                 .append(true)
                 .open(log)
-                .and_then(|mut f| writeln!(f, "{test}"));
+                // One write per line: parallel tests append to the same file, and
+                // writeln! may split the name and the newline into two writes.
+                .and_then(|mut f| f.write_all(format!("{test}\n").as_bytes()));
             if let Err(e) = written {
                 panic!("could not record skip of {test} in {}: {e}", log.display());
             }
