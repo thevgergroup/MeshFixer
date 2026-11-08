@@ -22,7 +22,6 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | MF-ISSUE-019 | S3 | Topology construction scratch is 468 MB at 4.8M triangles | ADR-0001 measurements | M4 | Topology build peak ≤ 150 MB at 5M (packed `u64` edge keys, no separate fan array), measured with `--metrics`. |
 | MF-ISSUE-020 | S3 | Tombstoned slots accumulate in long sessions | ADR-0001 | M4 | A `mesh.compact` operation that emits provenance (a slot remap) like any edit, plus a dead-slot ratio in diagnostics. |
 | MF-ISSUE-022 | S3 | Swallowed-error check is narrow | M2 review minor | M3 | The allowlist keys on file + line number range or a marker comment rather than trimmed text, and also covers `unwrap_or(0)` and `.ok()` in production code. |
-| MF-ISSUE-024 | S3 | Offscreen device cache keeps an error or lost device for the process lifetime | M2 review minor | First long-running headless use | Device loss is detected and the device recreated, or the error is surfaced per call. |
 | MF-ISSUE-025 | S2 | Cross-OS replay never exercises the `Equivalent` path | M2 review minor | M3 | The CI cross-OS job includes an operation that computes positions (fill_holes refinement). Its summary shows Exact vs Equivalent per OS. |
 | MF-ISSUE-027 | S3 | `Invocation` has no selection field yet | M2 review recommendation | M3 Task 1 | Frontends pass a `Selection`, which is converted to a `Target` and stored in the record. The log format is unchanged (records already carry `selection`). |
 | MF-ISSUE-015 | S3 | No human-driven demonstration recording | M1 evidence | M1 sign-off | A screen recording of open → inspect → apply → undo → redo → export on a real machine, linked from `docs/milestones/m1.md`. |
@@ -34,6 +33,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-024 | Offscreen device cache keeps an error or lost device for the process lifetime | `offscreen::shared_device` caches only live devices: creation errors are returned and retried, and a device reported lost (callback or failed poll) is replaced · test `device_loss.rs::render_recovers_after_the_shared_device_is_lost` |
 | MF-ISSUE-028 | Near-duplicate detection holds a per-vertex hash grid (inspect peak 701 MB at 4.8M vs 577 MB for an edit) | Sorted-array grid (~32 B/point) instead of a hash map of vectors; sort buffers scoped · inspect peak 204 → 47 B/vertex · test `inspect_peak_per_vertex_is_bounded` |
 | MF-ISSUE-026 | Equivalence grid degrades to O(n²) with tiny tolerance and huge coordinates | Shared compact `PointGrid` keyed relative to the bounding box with clamped cell size; also fixed an i64 overflow panic in near-duplicate detection far from the origin · tests `equivalence_stays_fast_with_offset_coordinates_and_tiny_tolerance`, `inspect_far_from_origin_does_not_overflow` (RED on old code) |
 | MF-ISSUE-021 | Misleading replay/log error variants | Missing ancestor is an invariant (`expect`); a missing replay target is named (`does not exist` / `LogError::TargetMissing`) · test `replay_names_a_missing_target_object` |
