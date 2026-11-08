@@ -1025,6 +1025,13 @@ dependencies = [
 [[package]]
 name = "mf-operations"
 version = "0.0.1"
+dependencies = [
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-spec",
+ "serde_json",
+ "thiserror",
+]
 
 [[package]]
 name = "mf-render"
