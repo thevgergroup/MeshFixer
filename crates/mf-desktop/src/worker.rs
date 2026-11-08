@@ -19,9 +19,18 @@ use mf_render::MeshVertices;
 pub enum Message {
     Imported(Result<ImportedModel, IoError>),
     Completed(Box<Result<Completed, CommandError>>),
-    Analyzed { mesh: Mesh, analysis: Analysis },
+    Analyzed {
+        mesh: Mesh,
+        analysis: Analysis,
+    },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
+    /// Face under a click (ray cast on a worker), for component selection.
+    Picked {
+        mesh: Mesh,
+        face: Option<mf_geometry::FaceId>,
+        add: bool,
+    },
 }
 
 fn spawn(
@@ -78,6 +87,23 @@ pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
                 })
                 .map_err(|e| e.to_string()),
         )
+    });
+}
+
+/// Ray-cast pick on a worker (O(n) over faces).
+pub fn pick_face(
+    tx: &Sender<Message>,
+    ctx: &eframe::egui::Context,
+    mesh: Mesh,
+    origin: [f64; 3],
+    dir: [f64; 3],
+    add: bool,
+) {
+    spawn(tx, ctx, move || {
+        let face = mf_render::ray_pick(&mesh, origin, dir).map(|(f, _)| f);
+        // Warm the topology cache so the component lookup on the UI thread is cheap.
+        let _ = mesh.topology(); // allow-swallow: computed for its cache side effect
+        Message::Picked { mesh, face, add }
     });
 }
 

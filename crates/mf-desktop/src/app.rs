@@ -11,8 +11,10 @@ use mf_render::{MeshVertices, OrbitCamera};
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::viewport::Viewport;
+use crate::viewport::{Click, Viewport};
 use crate::worker::{self, Analysis, Message};
+use mf_render::{LineVertex, loop_line_vertices, pick_loop, screen_position};
+use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
 pub struct MeshFixerApp {
     pub session: Session,
@@ -38,6 +40,11 @@ pub struct MeshFixerApp {
     pub warnings: Vec<String>,
     /// Lines of the last replay report, shown in a window.
     pub replay_report: Option<Vec<String>>,
+    /// What the next operation targets, bound to the current revision. It is
+    /// translated after every history move (MF-SEL-003).
+    pub selection: Option<Selection>,
+    /// Highlight lines for the selected loops, with what they were built for.
+    highlight: Option<(Arc<Vec<LineVertex>>, Selection, Mesh)>,
     pub viewport: Viewport,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -85,6 +92,8 @@ impl MeshFixerApp {
             status: None,
             warnings: Vec::new(),
             replay_report: None,
+            selection: None,
+            highlight: None,
             viewport: Viewport::new(render_state.clone()),
             tx,
             rx,
@@ -143,7 +152,7 @@ impl MeshFixerApp {
     /// Jump to any revision in the DAG, including an abandoned branch.
     pub fn checkout(&mut self, id: mf_command::RevisionId) {
         if self.busy.is_none() && self.session.checkout(id) {
-            self.sync_active();
+            self.after_history_move();
         }
     }
 
@@ -214,15 +223,34 @@ impl MeshFixerApp {
     }
 
     /// Validate on the UI thread, run on a worker, commit when it returns.
+    /// The selection, if the operation's spec accepts its kind; otherwise the
+    /// operation runs on the whole object (the panel says which).
+    pub fn selection_for(&self, op_id: &str) -> Option<Selection> {
+        let sel = self.selection.as_ref()?;
+        let spec = mf_spec::builtin::get(op_id)?;
+        let kind = match sel.kind {
+            SelectionKind::Faces => "face_set",
+            SelectionKind::Component => "component",
+            SelectionKind::BoundaryLoop => "boundary_loop",
+            SelectionKind::Object => return Some(sel.clone()),
+        };
+        spec.target
+            .kinds
+            .iter()
+            .any(|k| k == kind)
+            .then(|| sel.clone())
+    }
+
     pub fn apply(&mut self, ctx: &egui::Context, op_id: String) {
         let Some(target) = self.active else { return };
+        let selection = self.selection_for(&op_id);
         let raw_params = self
             .params_for(&op_id)
             .iter()
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
         match self.session.prepare(Invocation {
-            selection: None,
+            selection,
             op_id: op_id.clone(),
             target,
             raw_params,
@@ -238,15 +266,131 @@ impl MeshFixerApp {
     pub fn undo(&mut self) {
         if self.busy.is_none() {
             self.session.undo();
-            self.sync_active();
+            self.after_history_move();
         }
     }
 
     pub fn redo(&mut self) {
         if self.busy.is_none() {
             self.session.redo();
-            self.sync_active();
+            self.after_history_move();
         }
+    }
+
+    fn after_history_move(&mut self) {
+        self.sync_active();
+        self.retarget_selection();
+    }
+
+    /// Translate the selection to the current revision (MF-SEL-003). A loop
+    /// that was filled clears it with a message; anything not mappable clears
+    /// it with the reason. Never applied to a revision it wasn't translated to.
+    fn retarget_selection(&mut self) {
+        let Some(sel) = self.selection.take() else {
+            return;
+        };
+        let current = self.session.current();
+        if sel.revision == current {
+            self.selection = Some(sel);
+            return;
+        }
+        match self.session.translate(&sel, current) {
+            Translation::Mapped(m) => self.selection = Some(m),
+            Translation::Partial { mapped, lost } => {
+                self.status = Some(format!("Selection partly lost ({} element(s))", lost.len()));
+                self.selection = Some(mapped);
+            }
+            Translation::Failed(TranslateError::LoopClosed { faces }) => {
+                self.status = Some(format!(
+                    "Hole filled ({} faces); selection cleared",
+                    faces.len()
+                ));
+            }
+            Translation::Failed(e) => self.status = Some(format!("Selection cleared: {e:?}")),
+            Translation::Ambiguous { candidates } => {
+                self.status = Some(format!(
+                    "Selection is now ambiguous between {candidates:?}; cleared"
+                ))
+            }
+        }
+    }
+
+    /// Select what's under a click: a boundary loop within 8 px (when the
+    /// current revision's topology is ready), otherwise the clicked face's
+    /// component (ray cast on a worker). Shift adds to a same-kind selection.
+    pub fn click(&mut self, ctx: &egui::Context, click: Click) {
+        let (Some(object), Some(mesh), Some(cam)) =
+            (self.active, self.active_mesh().cloned(), self.camera)
+        else {
+            return;
+        };
+        let origin = mesh_origin(&mesh);
+        if self.current_analysis().is_some()
+            && let Some(id) = pick_loop(&mesh, &cam, origin, click.size, click.px, 8.0)
+        {
+            self.select(object, SelectionKind::BoundaryLoop, id, click.shift);
+            return;
+        }
+        let (ray_origin, dir) = cam.ray(origin, click.size, click.px);
+        worker::pick_face(&self.tx, ctx, mesh, ray_origin, dir, click.shift);
+    }
+
+    fn select(&mut self, object: ObjectId, kind: SelectionKind, id: u32, add: bool) {
+        let revision = self.session.current();
+        match self.selection.as_mut() {
+            Some(sel)
+                if add && sel.kind == kind && sel.object == object && sel.revision == revision =>
+            {
+                if !sel.ids.contains(&id) {
+                    sel.ids.push(id);
+                    sel.ids.sort_unstable();
+                }
+            }
+            _ => {
+                self.selection = Some(Selection {
+                    object,
+                    revision,
+                    kind,
+                    ids: vec![id],
+                })
+            }
+        }
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// Where a world point appears in the window (for overlays and tests).
+    pub fn screen_point(&self, world: [f64; 3]) -> Option<egui::Pos2> {
+        let (rect, cam, mesh) = (self.viewport.last_rect?, self.camera?, self.active_mesh()?);
+        let size = (rect.width() as f64, rect.height() as f64);
+        let (x, y) = screen_position(&cam, mesh_origin(mesh), size, world)?;
+        Some(egui::pos2(rect.left() + x as f32, rect.top() + y as f32))
+    }
+
+    /// Highlight lines for the selected loops of the active mesh.
+    fn highlight_lines(&mut self) -> Option<Arc<Vec<LineVertex>>> {
+        let sel = self
+            .selection
+            .clone()
+            .filter(|s| s.kind == SelectionKind::BoundaryLoop)?;
+        let mesh = self.active_mesh()?.clone();
+        // Topology is only read when the worker has already computed it.
+        self.current_analysis()?;
+        if let Some((lines, for_sel, for_mesh)) = &self.highlight
+            && *for_sel == sel
+            && Mesh::ptr_eq(for_mesh, &mesh)
+        {
+            return Some(lines.clone());
+        }
+        let origin = self
+            .displayed
+            .as_ref()
+            .map_or(mesh_origin(&mesh), |v| v.origin);
+        let lines = Arc::new(loop_line_vertices(&mesh, origin, &sel.ids));
+        self.highlight = Some((lines.clone(), sel, mesh));
+        Some(lines)
     }
 
     /// Keep `active` pointing at an object that exists in the current document.
@@ -284,14 +428,38 @@ impl MeshFixerApp {
             Message::Completed(result) => {
                 self.busy = None;
                 match (*result).and_then(|c| self.session.commit(c)) {
-                    Ok(CommitOutcome::NewRevision { report })
-                    | Ok(CommitOutcome::Report(report)) => {
+                    Ok(CommitOutcome::NewRevision { report }) => {
+                        self.status = Some(report.to_string());
+                        self.retarget_selection();
+                    }
+                    Ok(CommitOutcome::Report(report)) => {
                         self.status = Some(report.to_string());
                     }
                     Ok(CommitOutcome::NoChange { report }) => {
                         self.status = Some(format!("Nothing to change: {report}"));
                     }
                     Err(e) => self.error = Some(e.to_string()),
+                }
+            }
+            Message::Picked { mesh, face, add } => {
+                // Ignore a pick for a revision that's no longer on screen.
+                if let (Some(object), Some(current)) = (self.active, self.active_mesh())
+                    && Mesh::ptr_eq(current, &mesh)
+                {
+                    match face {
+                        Some(f) => {
+                            let component = mesh
+                                .topology()
+                                .components
+                                .iter()
+                                .position(|c| c.contains(&f.0));
+                            if let Some(c) = component {
+                                self.select(object, SelectionKind::Component, c as u32, add);
+                            }
+                        }
+                        None if !add => self.selection = None,
+                        None => {}
+                    }
                 }
             }
             Message::Analyzed { mesh, analysis } => {
@@ -372,18 +540,22 @@ impl eframe::App for MeshFixerApp {
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
         let typing = ctx.memory(|m| m.focused().is_some());
-        let (undo, redo, fit) = ctx.input_mut(|i| {
+        let (undo, redo, fit, escape) = ctx.input_mut(|i| {
             if typing {
-                return (false, false, false);
+                return (false, false, false, false);
             }
+            let escape = i.key_pressed(egui::Key::Escape);
             let redo = i.consume_key(
                 egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
                 egui::Key::Z,
             );
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
             let fit = i.key_pressed(egui::Key::F);
-            (undo, redo, fit)
+            (undo, redo, fit, escape)
         });
+        if escape {
+            self.clear_selection();
+        }
         if redo {
             self.redo();
         } else if undo {
@@ -407,19 +579,34 @@ impl eframe::App for MeshFixerApp {
         };
         let show_boundaries = self.show_boundaries;
         let updating = self.is_analyzing();
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.viewport.show(
-                ui,
-                &mut self.camera,
-                vertices.as_ref(),
-                show_boundaries,
-                updating,
-                placeholder,
-            );
-        });
+        let highlight = self.highlight_lines();
+        let click = egui::CentralPanel::no_frame()
+            .show(ui, |ui| {
+                self.viewport.show(
+                    ui,
+                    &mut self.camera,
+                    vertices.as_ref(),
+                    show_boundaries,
+                    highlight.as_ref(),
+                    updating,
+                    placeholder,
+                )
+            })
+            .inner;
+        if let Some(c) = click
+            && self.busy.is_none()
+        {
+            self.click(&ctx, c);
+        }
 
         if self.busy.is_some() || self.is_analyzing() {
             ctx.request_repaint();
         }
     }
+}
+
+/// The local origin the renderer and picking use for a mesh.
+fn mesh_origin(mesh: &Mesh) -> glam::DVec3 {
+    mesh.bounding_box()
+        .map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()))
 }

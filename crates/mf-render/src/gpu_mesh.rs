@@ -100,6 +100,52 @@ pub fn chunk_ranges(count: u32, stride: u64, max_bytes: u64, primitive: u32) -> 
         .collect()
 }
 
+/// A separately uploaded line set (selection highlight). Changing the
+/// selection uploads only this, never the mesh buffers (MF-RENDER-003).
+pub struct GpuLines {
+    pub(crate) chunks: Vec<(wgpu::Buffer, u32)>,
+}
+
+impl GpuLines {
+    pub fn upload(device: &wgpu::Device, lines: &[LineVertex]) -> GpuLines {
+        let max = device.limits().max_buffer_size;
+        let stride = std::mem::size_of::<LineVertex>() as u64;
+        let chunks = chunk_ranges(lines.len() as u32, stride, max, 2)
+            .into_iter()
+            .map(|r| {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mf highlight lines"),
+                    contents: bytemuck::cast_slice(&lines[r.start as usize..r.end as usize]),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                (buffer, r.len() as u32)
+            })
+            .collect();
+        GpuLines { chunks }
+    }
+}
+
+/// Line-list vertices for the given boundary loops (by ID), relative to `origin`.
+pub fn loop_line_vertices(mesh: &Mesh, origin: DVec3, loop_ids: &[u32]) -> Vec<LineVertex> {
+    let mut out = Vec::new();
+    for l in mesh
+        .topology()
+        .boundary_loops
+        .iter()
+        .filter(|l| loop_ids.contains(&l.id))
+    {
+        let n = l.vertices.len();
+        for k in 0..n {
+            for v in [l.vertices[k], l.vertices[(k + 1) % n]] {
+                out.push(LineVertex {
+                    position: local(mesh.corner_position(v), origin),
+                });
+            }
+        }
+    }
+    out
+}
+
 /// GPU buffers for one mesh revision, split into chunks under the device's
 /// maximum buffer size.
 pub struct GpuMesh {

@@ -16,6 +16,8 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+mf-selection.workspace = true
+glam.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
@@ -28,6 +30,7 @@ rfd.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+mf-selection.workspace = true
 mf-spec.workspace = true
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
 mf-fixtures.workspace = true

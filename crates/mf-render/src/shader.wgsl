@@ -41,3 +41,9 @@ fn vs_line(@location(0) position: vec3<f32>) -> @builtin(position) vec4<f32> {
 fn fs_line() -> @location(0) vec4<f32> {
     return vec4<f32>(1.0, 0.55, 0.05, 1.0);
 }
+
+// Selected boundary loops.
+@fragment
+fn fs_highlight() -> @location(0) vec4<f32> {
+    return vec4<f32>(0.1, 0.9, 1.0, 1.0);
+}

@@ -2427,11 +2427,13 @@ version = "0.0.1"
 dependencies = [
  "eframe",
  "egui_kittest",
+ "glam",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-render",
+ "mf-selection",
  "mf-spec",
  "rfd",
  "serde_json",
