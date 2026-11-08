@@ -63,6 +63,8 @@ pub enum IoError {
     Truncated { expected: usize, actual: usize },
     #[error(transparent)]
     Geometry(#[from] GeometryError),
+    #[error("export to {path} failed: {reason} (any existing file was left unchanged)")]
+    Export { path: PathBuf, reason: String },
     #[error("unsupported file format: {0}")]
     UnsupportedFormat(PathBuf),
 }
@@ -102,13 +104,76 @@ pub fn read_path(path: &Path) -> Result<Imported, IoError> {
     })
 }
 
+/// Export `mesh`, never leaving a partial file behind.
+///
+/// The file is encoded in memory, re-parsed to verify it, written to a temp
+/// file in the same directory, flushed to disk, and renamed over `path`.
+/// If any step fails, an existing file at `path` is left unchanged.
 pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoError> {
+    let fail = |reason: String| IoError::Export {
+        path: path.to_owned(),
+        reason,
+    };
     let bytes = match format {
-        Format::StlBinary => stl::write_binary(mesh),
+        Format::StlBinary => stl::write_binary(mesh).map_err(fail)?,
         Format::StlAscii => stl::write_ascii(mesh).into_bytes(),
         Format::Obj => obj::write(mesh).into_bytes(),
     };
-    std::fs::write(path, bytes)?;
+    verify_encoded(mesh, &bytes, format).map_err(fail)?;
+
+    let dir = match path.parent() {
+        Some(d) if !d.as_os_str().is_empty() => d.to_owned(),
+        _ => PathBuf::from("."),
+    };
+    let name = path
+        .file_name()
+        .ok_or_else(|| fail("output path has no file name".into()))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = dir.join(format!(
+        ".{}.mf-tmp-{}-{nanos}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| -> std::io::Result<()> {
+        use std::io::Write;
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(&bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, path)
+    })();
+    if let Err(e) = result {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(fail(e.to_string()));
+    }
+    Ok(())
+}
+
+/// Re-parse encoded bytes and check they describe the same mesh.
+fn verify_encoded(mesh: &Mesh, bytes: &[u8], format: Format) -> Result<(), String> {
+    let decoded = match format {
+        Format::StlBinary | Format::StlAscii => stl::read(bytes).map(|(m, _)| m),
+        Format::Obj => std::str::from_utf8(bytes)
+            .map_err(|e| IoError::Parse {
+                line: 0,
+                message: e.to_string(),
+            })
+            .and_then(|t| obj::read(t).map(|(m, _, _)| m)),
+    }
+    .map_err(|e| format!("verification re-read failed: {e}"))?;
+    if decoded.triangle_count() != mesh.triangle_count() {
+        return Err(format!(
+            "verification found {} triangles, expected {}",
+            decoded.triangle_count(),
+            mesh.triangle_count()
+        ));
+    }
+    if format == Format::Obj && decoded.positions() != mesh.positions() {
+        return Err("verification found different vertex positions".into());
+    }
     Ok(())
 }
 

@@ -6,7 +6,7 @@ use mf_io::{Format, IoError, SourcePrecision, obj, read_path, stl, write_path};
 
 #[test]
 fn stl_binary_roundtrip() {
-    let bytes = stl::write_binary(&cube(1.0));
+    let bytes = stl::write_binary(&cube(1.0)).unwrap();
     assert_eq!(bytes.len(), 84 + 50 * 12);
     let (m, prec) = stl::read(&bytes).unwrap();
     assert_eq!(m.vertex_count(), 8);
@@ -38,7 +38,7 @@ fn stl_ascii_write_parse() {
 
 #[test]
 fn binary_with_solid_header() {
-    let mut bytes = stl::write_binary(&cube(1.0));
+    let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
     bytes[..5].copy_from_slice(b"solid");
     let (m, _) = stl::read(&bytes).unwrap();
     assert_eq!(m.triangle_count(), 12);
@@ -54,7 +54,7 @@ fn zero_facets() {
 
 #[test]
 fn truncated_errors() {
-    let mut bytes = stl::write_binary(&cube(1.0));
+    let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
     bytes[80..84].copy_from_slice(&10_000u32.to_le_bytes());
     bytes.truncate(84 + 50 * 3);
     match stl::read(&bytes) {
@@ -145,4 +145,44 @@ fn read_write_paths() {
     ));
     assert_eq!(Format::from_path("A.STL".as_ref()), Some(Format::StlBinary));
     let _ = Mesh::empty();
+}
+
+fn files_in(dir: &std::path::Path) -> Vec<String> {
+    let mut v: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    v.sort();
+    v
+}
+
+#[test]
+fn failed_export_leaves_existing_file_intact() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("scan.stl");
+    std::fs::write(&p, b"ORIGINAL").unwrap();
+    // 1e300 doesn't fit in f32: a binary STL of this would contain inf.
+    let bad = Mesh::new(
+        vec![[0.0; 3], [1e300, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .unwrap();
+    let err = write_path(&bad, &p, Format::StlBinary).unwrap_err();
+    assert!(matches!(err, IoError::Export { .. }), "{err:?}");
+    assert_eq!(std::fs::read(&p).unwrap(), b"ORIGINAL");
+    assert_eq!(
+        files_in(dir.path()),
+        vec!["scan.stl"],
+        "no temp files left behind"
+    );
+}
+
+#[test]
+fn export_replaces_existing_file_atomically() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("out.obj");
+    std::fs::write(&p, b"OLD").unwrap();
+    write_path(&cube(1.0), &p, Format::Obj).unwrap();
+    assert_eq!(read_path(&p).unwrap().mesh.triangle_count(), 12);
+    assert_eq!(files_in(dir.path()), vec!["out.obj"]);
 }

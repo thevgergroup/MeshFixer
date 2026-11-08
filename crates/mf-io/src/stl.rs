@@ -158,7 +158,17 @@ fn facet_normal(m: &Mesh, t: [u32; 3]) -> [f32; 3] {
     }
 }
 
-pub fn write_binary(mesh: &Mesh) -> Vec<u8> {
+/// Binary STL stores `f32`. Coordinates that don't fit are an error, never `inf`.
+pub fn write_binary(mesh: &Mesh) -> Result<Vec<u8>, String> {
+    if let Some(v) = mesh
+        .positions()
+        .iter()
+        .position(|p| p.iter().any(|&c| !(c as f32).is_finite()))
+    {
+        return Err(format!(
+            "vertex {v} has a coordinate outside the 32-bit float range binary STL can store"
+        ));
+    }
     let mut out = Vec::with_capacity(HEADER + 4 + FACET * mesh.triangle_count());
     let mut header = [b' '; HEADER];
     let tag = b"MeshFixer binary STL";
@@ -176,7 +186,7 @@ pub fn write_binary(mesh: &Mesh) -> Vec<u8> {
         }
         out.extend_from_slice(&0u16.to_le_bytes());
     }
-    out
+    Ok(out)
 }
 
 pub fn write_ascii(mesh: &Mesh) -> String {
