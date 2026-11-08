@@ -62,7 +62,7 @@ fn outer_normals(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<Vec<[f64; 3]>> {
 
 /// Per loop: the target edge length at each loop vertex (mean length of its
 /// existing edges), and the existing edges between loop vertices in local
-/// indices (so refinement never duplicates one).
+/// indices (so neither triangulation nor refinement duplicates one).
 type LoopContext = (Vec<Vec<f64>>, Vec<BTreeSet<(usize, usize)>>);
 
 fn loop_context(mesh: &Mesh, loops: &[&BoundaryLoop]) -> LoopContext {
@@ -184,11 +184,7 @@ impl Operation for FillHoles {
         }
 
         let normals = outer_normals(input, &fill);
-        let context = if refine {
-            Some(loop_context(input, &fill))
-        } else {
-            None
-        };
+        let (sigma, existing) = loop_context(input, &fill);
         let mut edit = input.edit();
         let mut filled = Vec::new();
         for (li, (l, outer)) in fill.iter().zip(&normals).enumerate() {
@@ -197,13 +193,27 @@ impl Operation for FillHoles {
                 .iter()
                 .map(|&v| input.corner_position(v))
                 .collect();
+            let Some(tris) = triangulate::triangulate(&points, outer, &existing[li]) else {
+                if matches!(target, Target::Loops(_)) {
+                    return Err(failed(
+                        "loop_untriangulable",
+                        format!(
+                            "loop {} cannot be closed without adding a face to an existing edge (the result would be non-manifold)",
+                            l.id
+                        ),
+                    ));
+                }
+                skipped
+                    .push(json!({"id": l.id, "edges": l.edge_count, "reason": "untriangulable"}));
+                continue;
+            };
             let mut patch = refine::Patch {
                 n_boundary: points.len(),
                 sigma: Vec::new(),
-                tris: triangulate::triangulate(&points, outer),
+                tris,
                 positions: points,
             };
-            if let Some((sigma, existing)) = &context {
+            if refine {
                 patch.sigma = sigma[li].clone();
                 patch.refine(&existing[li]);
             }

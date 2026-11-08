@@ -17,6 +17,7 @@ thiserror.workspace = true
 
 [dev-dependencies]
 mf-io.workspace = true
+mf-render.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 jsonschema.workspace = true

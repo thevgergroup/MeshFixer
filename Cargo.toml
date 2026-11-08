@@ -46,3 +46,15 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+
+# The geometry hot paths are optimised even in test builds so tests on real
+# scans (1M triangles) run in seconds, not minutes. Debug assertions and
+# overflow checks stay on.
+[profile.dev.package.mf-geometry]
+opt-level = 2
+
+[profile.dev.package.mf-io]
+opt-level = 2
+
+[profile.dev.package.mf-operations]
+opt-level = 2

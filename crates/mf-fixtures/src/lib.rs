@@ -251,7 +251,32 @@ pub mod skip {
             !require,
             "GPU required (MF_REQUIRE_GPU=1) but no adapter is available for {test}"
         );
-        eprintln!("SKIPPED: {test}: no GPU adapter available");
+        record(test, "no GPU adapter available", log);
+    }
+
+    /// Call when a fetched fixture is missing. `MF_REQUIRE_FIXTURES=1`
+    /// makes that a failure.
+    pub fn fixture_missing(test: &str, fixture: &Path) {
+        let require = std::env::var("MF_REQUIRE_FIXTURES").is_ok_and(|v| v == "1");
+        let log = std::env::var_os("MF_SKIP_LOG");
+        record_fixture_skip(test, fixture, require, log.as_deref().map(Path::new));
+    }
+
+    pub fn record_fixture_skip(test: &str, fixture: &Path, require: bool, log: Option<&Path>) {
+        assert!(
+            !require,
+            "fixture required (MF_REQUIRE_FIXTURES=1) but {} is missing for {test}; run scripts/fetch-fixtures.sh",
+            fixture.display()
+        );
+        let reason = format!(
+            "fixture {} not fetched (scripts/fetch-fixtures.sh)",
+            fixture.display()
+        );
+        record(test, &reason, log);
+    }
+
+    fn record(test: &str, reason: &str, log: Option<&Path>) {
+        eprintln!("SKIPPED: {test}: {reason}");
         if let Some(log) = log {
             let written = std::fs::OpenOptions::new()
                 .create(true)
@@ -261,6 +286,29 @@ pub mod skip {
             if let Err(e) = written {
                 panic!("could not record skip of {test} in {}: {e}", log.display());
             }
+        }
+    }
+}
+
+/// Real scans fetched by `scripts/fetch-fixtures.sh` (hash-verified, listed
+/// in `fixtures/manifest.txt`, sources and licences in `fixtures/SOURCES.md`).
+pub mod real {
+    use std::path::PathBuf;
+
+    /// Where fetched fixtures live (git-ignored).
+    pub fn dir() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../fixtures/real")
+    }
+
+    /// Path of fixture `name` (its file name in `fixtures/real`), or `None`
+    /// after recording a skip for `test` if it hasn't been fetched.
+    pub fn path(name: &str, test: &str) -> Option<PathBuf> {
+        let path = dir().join(name);
+        if path.is_file() {
+            Some(path)
+        } else {
+            super::skip::fixture_missing(test, &path);
+            None
         }
     }
 }

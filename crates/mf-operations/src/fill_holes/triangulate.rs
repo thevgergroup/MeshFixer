@@ -4,6 +4,11 @@
 //! adjacent triangles, total area), compared lexicographically: avoid folds
 //! first, then prefer small area. Dihedrals include the existing faces
 //! across the boundary edges, so the patch meets its surroundings smoothly.
+//!
+//! A chord between two loop vertices that are already joined by a mesh edge
+//! is never used: that edge would gain a third face (non-manifold).
+
+use std::collections::BTreeSet;
 
 /// Weight of a (partial) triangulation.
 #[derive(Clone, Copy, PartialEq)]
@@ -71,10 +76,18 @@ fn dihedral(n1: [f64; 3], n2: [f64; 3]) -> f64 {
 /// `outer[k]` is the unit normal of the existing face across boundary edge
 /// `k → k+1` (`k = n-1` is the closing edge `n-1 → 0`).
 ///
+/// `existing` holds the pairs `(i, j)`, `i < j`, of loop vertices already
+/// joined by a mesh edge; those chords are excluded.
+///
 /// Returns triangles as index triples into `p`, emitted as `[m, i, j]` so
 /// each boundary edge `k → k+1` appears reversed (`k+1 → k`): the patch is
-/// oriented consistently with the faces it meets.
-pub fn triangulate(p: &[[f64; 3]], outer: &[[f64; 3]]) -> Vec<[usize; 3]> {
+/// oriented consistently with the faces it meets. `None` when every
+/// triangulation would reuse an existing edge.
+pub fn triangulate(
+    p: &[[f64; 3]],
+    outer: &[[f64; 3]],
+    existing: &BTreeSet<(usize, usize)>,
+) -> Option<Vec<[usize; 3]>> {
     let n = p.len();
     assert!(n >= 3 && outer.len() == n);
     // w[i][j], choice[i][j] for 0 <= i < j < n.
@@ -97,6 +110,10 @@ pub fn triangulate(p: &[[f64; 3]], outer: &[[f64; 3]]) -> Vec<[usize; 3]> {
     for len in 2..n {
         for i in 0..n - len {
             let j = i + len;
+            // (0, n-1) is the closing boundary edge, not a chord.
+            if len < n - 1 && existing.contains(&(i, j)) {
+                continue;
+            }
             let mut best = Weight::INFINITE;
             let mut best_m = usize::MAX;
             let mut best_n = [0.0; 3];
@@ -131,6 +148,9 @@ pub fn triangulate(p: &[[f64; 3]], outer: &[[f64; 3]]) -> Vec<[usize; 3]> {
             tri_normal[idx(i, j)] = best_n;
         }
     }
+    if choice[idx(0, n - 1)] == usize::MAX {
+        return None;
+    }
     let mut out = Vec::with_capacity(n - 2);
     let mut stack = vec![(0usize, n - 1)];
     while let Some((i, j)) = stack.pop() {
@@ -142,5 +162,60 @@ pub fn triangulate(p: &[[f64; 3]], outer: &[[f64; 3]]) -> Vec<[usize; 3]> {
         stack.push((i, m));
         stack.push((m, j));
     }
-    out
+    Some(out)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may panic on failure
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::*;
+
+    const UP: [f64; 3] = [0.0, 0.0, 1.0];
+
+    fn chords(tris: &[[usize; 3]]) -> BTreeSet<(usize, usize)> {
+        let mut out = BTreeSet::new();
+        for t in tris {
+            for k in 0..3 {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                out.insert((a.min(b), a.max(b)));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn a_chord_that_is_already_a_mesh_edge_is_never_used() {
+        // A unit square: both diagonals are equally good. Forbid whichever
+        // one is chosen freely; the other must be used instead.
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let free = chords(&triangulate(&p, &[UP; 4], &BTreeSet::new()).unwrap());
+        let (used, other) = if free.contains(&(0, 2)) {
+            ((0, 2), (1, 3))
+        } else {
+            ((1, 3), (0, 2))
+        };
+        assert!(free.contains(&used));
+        let tris = triangulate(&p, &[UP; 4], &BTreeSet::from([used])).unwrap();
+        assert!(!chords(&tris).contains(&used), "{tris:?}");
+        assert!(chords(&tris).contains(&other));
+    }
+
+    #[test]
+    fn no_triangulation_when_every_chord_exists() {
+        let p = [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ];
+        let existing = BTreeSet::from([(0, 2), (1, 3)]);
+        assert!(triangulate(&p, &[UP; 4], &existing).is_none());
+    }
 }

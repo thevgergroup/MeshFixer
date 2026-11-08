@@ -1,0 +1,5 @@
+# Real scan fixtures, fetched by scripts/fetch-fixtures.sh into fixtures/real/.
+# Sources and licences: fixtures/SOURCES.md. Any hash mismatch is a hard error.
+#
+# name  archive_sha256  archive_member  member_sha256  url
+archaeopteryx.obj  87ff968b527bf093c69a739ab712f8adaba7743a5b9bcf211853f89461bafcb8  USNM_PAL_509743_archaeopteryx_999k.obj  8f484483d2a4fe1c7863f7aa19f2f8381b59d9ae333df7a3c62764126031b85d  https://3d-api.si.edu/content/document/3d_package:391660da-7c49-499c-91f5-88a298686c09/resources/USNM_PAL_509743-full_resolution-obj_std.zip

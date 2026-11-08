@@ -5,3 +5,4 @@
 /artifacts/
 *.profraw
 /.superpowers/
+/fixtures/real/
