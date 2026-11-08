@@ -20,6 +20,7 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
             let mut s = Session::new();
             let id = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture".into(), None);
             s.execute(Invocation {
+                selection: None,
                 op_id: op.id().into(),
                 target: id,
                 raw_params: BTreeMap::new(),

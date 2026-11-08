@@ -185,6 +185,7 @@ fn run_and_classify(
     record: &crate::record::CommandRecord,
 ) -> Result<Verdict, LogError> {
     let inv = Invocation {
+        selection: record.selection.clone(),
         op_id: record.op_id.clone(),
         target: record.target,
         raw_params: record

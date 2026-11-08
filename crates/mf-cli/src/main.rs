@@ -13,6 +13,7 @@ use clap::{Arg, ArgMatches, Command};
 use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, Session};
 use mf_io::{Format, IoError};
 use mf_metrics::{CountingAlloc, Phase, measure};
+use mf_selection::{Selection, SelectionKind};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -190,6 +191,7 @@ fn cli() -> Command {
                         .action(clap::ArgAction::Append)
                         .help("name=value for the preceding --op (repeatable)"),
                 )
+                .arg(select_arg(true))
                 .arg(
                     Arg::new("save-log")
                         .long("save-log")
@@ -221,7 +223,8 @@ fn cli() -> Command {
         cmd = cmd.subcommand(
             mf_spec::cli::to_command(spec)
                 .arg(input_arg())
-                .arg(output_arg()),
+                .arg(output_arg())
+                .arg(select_arg(false)),
         );
     }
     cmd
@@ -253,6 +256,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
         metrics.structures(&mesh);
     }
     let inv = Invocation {
+        selection: None,
         op_id: "mesh.inspect".into(),
         target: id,
         raw_params: Default::default(),
@@ -322,10 +326,60 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
     Ok(())
 }
 
-/// `--op` and `--param` values in command-line order, params grouped under
-/// the op before them.
-/// One `--op` with its `--param`s.
-type Step = (String, BTreeMap<String, String>);
+/// A `--select kind:ids` value: `loop:3,4`, `component:1`, `faces:10,11`.
+type Select = (SelectionKind, Vec<u32>);
+
+fn parse_select(s: &str) -> Result<Select, Failure> {
+    let usage = || {
+        Failure::Usage(format!(
+            "--select '{s}' must be loop:<ids>, component:<ids> or faces:<ids> (ids comma-separated)"
+        ))
+    };
+    let (kind, ids) = s.split_once(':').ok_or_else(usage)?;
+    let kind = match kind {
+        "loop" => SelectionKind::BoundaryLoop,
+        "component" => SelectionKind::Component,
+        "faces" => SelectionKind::Faces,
+        _ => return Err(usage()),
+    };
+    let ids = ids
+        .split(',')
+        .map(|t| t.trim().parse::<u32>().map_err(|_| usage()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((kind, ids))
+}
+
+fn select_arg(repeatable: bool) -> Arg {
+    let arg = Arg::new("select")
+        .long("select")
+        .help("Target part of the object: loop:<ids>, component:<ids> or faces:<ids> (ids from the imported mesh)");
+    if repeatable {
+        arg.action(clap::ArgAction::Append)
+    } else {
+        arg
+    }
+}
+
+/// Bind a parsed `--select` to the session's current revision.
+fn selection_for(
+    session: &Session,
+    object: ObjectId,
+    select: &Option<Select>,
+) -> Option<Selection> {
+    select.as_ref().map(|(kind, ids)| Selection {
+        object,
+        revision: session.current(),
+        kind: *kind,
+        ids: ids.clone(),
+    })
+}
+
+/// One `--op` with the `--param`s and optional `--select` that follow it.
+struct Step {
+    op: String,
+    raw: BTreeMap<String, String>,
+    select: Option<Select>,
+}
 
 fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     let ops: Vec<(usize, String)> = match (m.indices_of("op"), m.get_many::<String>("op")) {
@@ -340,6 +394,11 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     if ops.is_empty() {
         return Err(Failure::Usage("run needs at least one --op".into()));
     }
+    let selects: Vec<(usize, String)> =
+        match (m.indices_of("select"), m.get_many::<String>("select")) {
+            (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
+            _ => Vec::new(),
+        };
     let mut seq: Vec<Step> = Vec::new();
     for (idx, op) in &ops {
         let next = ops
@@ -354,13 +413,30 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
             })?;
             raw.insert(k.to_owned(), v.to_owned());
         }
-        seq.push((op.clone(), raw));
+        let mine: Vec<&String> = selects
+            .iter()
+            .filter(|(si, _)| si > idx && *si < next)
+            .map(|(_, v)| v)
+            .collect();
+        if mine.len() > 1 {
+            return Err(Failure::Usage(format!(
+                "--op {op} has more than one --select"
+            )));
+        }
+        let select = mine.first().map(|v| parse_select(v)).transpose()?;
+        seq.push(Step {
+            op: op.clone(),
+            raw,
+            select,
+        });
     }
     let first_op = ops[0].0;
-    if let Some((_, p)) = params.iter().find(|(pi, _)| *pi < first_op) {
-        return Err(Failure::Usage(format!(
-            "--param '{p}' comes before any --op"
-        )));
+    if let Some((_, p)) = params
+        .iter()
+        .chain(selects.iter())
+        .find(|(pi, _)| *pi < first_op)
+    {
+        return Err(Failure::Usage(format!("'{p}' comes before any --op")));
     }
     Ok(seq)
 }
@@ -377,16 +453,18 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
     })?;
     let seq = op_sequence(m)?;
     // Validate every step before touching files.
-    for (op, raw) in &seq {
+    for Step { op, raw, .. } in &seq {
         let spec = mf_spec::builtin::get(op)
             .ok_or_else(|| Failure::Usage(format!("unknown operation '{op}'")))?;
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
     }
     let (mut session, id) = open(input, metrics)?;
-    for (op, raw) in seq {
+    for Step { op, raw, select } in seq {
+        let selection = selection_for(&session, id, &select);
         let outcome = metrics.record("operation", || {
             session.execute(Invocation {
+                selection,
                 op_id: op.clone(),
                 target: id,
                 raw_params: raw,
@@ -457,14 +535,20 @@ fn run_operation(
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
-    // Validate parameters before touching the filesystem.
+    // Validate parameters and selection before touching the filesystem.
+    let select = m
+        .get_one::<String>("select")
+        .map(|s| parse_select(s))
+        .transpose()?;
     let raw_params = mf_spec::cli::raw_params(spec, m);
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
     let (mut session, id) = open(input, metrics)?;
+    let selection = selection_for(&session, id, &select);
     let outcome = metrics.record("operation", || {
         session.execute(Invocation {
+            selection,
             op_id: spec.id.clone(),
             target: id,
             raw_params,

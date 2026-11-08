@@ -2385,6 +2385,7 @@ dependencies = [
  "mf-io",
  "mf-metrics",
  "mf-render",
+ "mf-selection",
  "mf-spec",
  "serde_json",
  "tempfile",

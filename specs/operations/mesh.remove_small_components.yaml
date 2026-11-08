@@ -4,7 +4,7 @@ summary: Delete disconnected islands smaller than a triangle-count threshold.
 geometry_kinds: [mesh]
 target:
   whole_object: true
-  kinds: []
+  kinds: [component]
 parameters:
   - name: max_triangles
     type: integer

@@ -5,7 +5,7 @@ use mf_document::{Document, Geometry, Object, ObjectId, RevisionId};
 use mf_geometry::{Mesh, Provenance};
 use mf_io::{Imported, SourceInfo};
 use mf_operations::{OpError, OpOutput, Operation, Target};
-use mf_selection::{Selection, Step, TranslateError, Translation};
+use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
 use crate::record::{
@@ -17,7 +17,32 @@ use crate::record::{
 pub struct Invocation {
     pub op_id: String,
     pub target: ObjectId,
+    /// What part of the object to act on; `None` is the whole object. Must be
+    /// bound to the current revision (translate it first).
+    pub selection: Option<Selection>,
     pub raw_params: BTreeMap<String, String>,
+}
+
+/// The operation target a selection describes.
+pub fn target_of(sel: &Selection) -> Target {
+    match sel.kind {
+        SelectionKind::Object => Target::WholeObject,
+        SelectionKind::Faces => {
+            Target::Faces(sel.ids.iter().map(|&f| mf_geometry::FaceId(f)).collect())
+        }
+        SelectionKind::Component => Target::Components(sel.ids.clone()),
+        SelectionKind::BoundaryLoop => Target::Loops(sel.ids.clone()),
+    }
+}
+
+/// Name of a selection kind in operation specs' `target.kinds`.
+fn spec_kind(kind: SelectionKind) -> Option<&'static str> {
+    match kind {
+        SelectionKind::Object => None,
+        SelectionKind::Faces => Some("face_set"),
+        SelectionKind::Component => Some("component"),
+        SelectionKind::BoundaryLoop => Some("boundary_loop"),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +61,20 @@ pub enum CommandError {
     StaleInput { expected: u64, actual: u64 },
     #[error("{op} does not support {kind} geometry")]
     UnsupportedGeometry { op: String, kind: String },
+    #[error("the selection is for object {selection}, but the command targets {target}")]
+    SelectionMismatch {
+        selection: ObjectId,
+        target: ObjectId,
+    },
+    #[error(
+        "the selection is bound to revision {selection}, but the document is at {current}; translate it first"
+    )]
+    StaleSelection {
+        selection: RevisionId,
+        current: RevisionId,
+    },
+    #[error("{op} can't target {kind}")]
+    UnsupportedTarget { op: String, kind: String },
 }
 
 /// A validated command, ready to run on any thread.
@@ -44,7 +83,8 @@ pub struct Prepared {
     target: ObjectId,
     op: &'static dyn Operation,
     input: Mesh,
-    selection: Target,
+    target_spec: Target,
+    selection: Option<Selection>,
     params: Params,
 }
 
@@ -59,7 +99,7 @@ impl Prepared {
         let start = Instant::now();
         let output = self
             .op
-            .execute(&self.input, &self.selection, &self.params)?;
+            .execute(&self.input, &self.target_spec, &self.params)?;
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6).
         let input_hash = self.input.content_hash().to_hex();
@@ -77,6 +117,7 @@ impl Prepared {
             target: self.target,
             op_id: self.op.id(),
             op_version: self.op.version(),
+            selection: self.selection,
             params: self.params,
             output,
             input_hash,
@@ -93,6 +134,7 @@ pub struct Completed {
     pub target: ObjectId,
     pub op_id: &'static str,
     pub op_version: u32,
+    pub selection: Option<Selection>,
     pub params: Params,
     pub output: OpOutput,
     input_hash: String,
@@ -278,12 +320,47 @@ impl Session {
         // Every Phase 0 operation is a mesh operation; the spec check above
         // guarantees the object is a mesh here.
         let input = object.mesh().ok_or_else(unsupported)?.clone();
+        let target_spec = match &inv.selection {
+            None if spec.target.whole_object => Target::WholeObject,
+            None => {
+                return Err(CommandError::UnsupportedTarget {
+                    op: spec.id.clone(),
+                    kind: "the whole object".into(),
+                });
+            }
+            Some(sel) => {
+                if sel.object != inv.target {
+                    return Err(CommandError::SelectionMismatch {
+                        selection: sel.object,
+                        target: inv.target,
+                    });
+                }
+                if sel.revision != self.cursor {
+                    return Err(CommandError::StaleSelection {
+                        selection: sel.revision,
+                        current: self.cursor,
+                    });
+                }
+                let allowed = match spec_kind(sel.kind) {
+                    None => spec.target.whole_object,
+                    Some(k) => spec.target.kinds.iter().any(|x| x == k),
+                };
+                if !allowed {
+                    return Err(CommandError::UnsupportedTarget {
+                        op: spec.id.clone(),
+                        kind: spec_kind(sel.kind).unwrap_or("the whole object").into(),
+                    });
+                }
+                target_of(sel)
+            }
+        };
         Ok(Prepared {
             base_revision: self.cursor,
             target: inv.target,
             op,
             input,
-            selection: Target::WholeObject,
+            target_spec,
+            selection: inv.selection,
             params,
         })
     }
@@ -340,7 +417,7 @@ impl Session {
             op_id: c.op_id.to_owned(),
             op_version: c.op_version,
             target: c.target,
-            selection: None,
+            selection: c.selection.clone(),
             params: c.params.clone(),
             input_revision,
             input_hash: c.input_hash,

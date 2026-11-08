@@ -16,26 +16,57 @@ impl Operation for RemoveSmallComponents {
     }
 
     fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError> {
-        if *target != Target::WholeObject {
-            return Err(unsupported_target(self.id(), target));
-        }
         let max_triangles = params.get_int("max_triangles")?.max(0) as usize;
         let keep_largest = params.get_bool("keep_largest")?;
         let topo = input.topology();
 
-        let mut keep_face = vec![false; input.face_slots() as usize];
+        // Which components are candidates: all of them, or the selected ones.
+        // A selected component is removed only if it is under the threshold;
+        // otherwise that's an error naming it, never a silent no-op.
+        // `keep_largest` applies to whole-object runs only: an explicit
+        // selection already says which component to remove.
+        let candidates: Vec<usize> = match target {
+            Target::WholeObject => (0..topo.components.len())
+                .filter(|&i| !(keep_largest && i == 0))
+                .filter(|&i| topo.components[i].len() < max_triangles)
+                .collect(),
+            Target::Components(ids) => {
+                let mut picked = Vec::new();
+                for &c in ids {
+                    let comp = topo
+                        .components
+                        .get(c as usize)
+                        .ok_or_else(|| OpError::Failed {
+                            code: "invalid_target",
+                            message: format!("component {c} does not exist"),
+                        })?;
+                    if comp.len() >= max_triangles {
+                        return Err(OpError::Failed {
+                            code: "component_too_large",
+                            message: format!(
+                                "component {c} has {} triangles, not fewer than max_triangles {max_triangles}",
+                                comp.len()
+                            ),
+                        });
+                    }
+                    picked.push(c as usize);
+                }
+                picked.sort_unstable();
+                picked.dedup();
+                picked
+            }
+            other => return Err(unsupported_target(self.id(), other)),
+        };
+
+        let mut keep_face = vec![true; input.face_slots() as usize];
         let mut removed_components = 0;
         let mut removed_triangles = 0;
-        // Components are ordered largest first, so index 0 is the largest.
-        for (i, comp) in topo.components.iter().enumerate() {
-            if comp.len() >= max_triangles || (keep_largest && i == 0) {
-                for &f in comp {
-                    keep_face[f as usize] = true;
-                }
-            } else {
-                removed_components += 1;
-                removed_triangles += comp.len();
+        for &i in &candidates {
+            for &f in &topo.components[i] {
+                keep_face[f as usize] = false;
             }
+            removed_components += 1;
+            removed_triangles += topo.components[i].len();
         }
 
         let report = json!({

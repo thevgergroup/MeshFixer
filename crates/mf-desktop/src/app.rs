@@ -191,6 +191,7 @@ impl MeshFixerApp {
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
         match self.session.prepare(Invocation {
+            selection: None,
             op_id: op_id.clone(),
             target,
             raw_params,

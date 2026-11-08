@@ -30,6 +30,7 @@ fn damaged() -> Mesh {
 
 fn remove(target: ObjectId, max: &str) -> Invocation {
     Invocation {
+        selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,
         raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),

@@ -244,3 +244,74 @@ fn run_rejects_param_before_any_op() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn select_arg_parses_and_reaches_the_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("three.stl");
+    let m = merge(&[
+        cube(1.0),
+        translated(&tetrahedron(), [5.0, 0.0, 0.0]),
+        translated(&tetrahedron(), [9.0, 0.0, 0.0]),
+    ]);
+    write_path(&m, &input, Format::StlBinary).unwrap();
+    let out = dir.path().join("out.stl");
+    let log = dir.path().join("s.mfx.log");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.remove_small_components",
+        "--param",
+        "max_triangles=5",
+        "--select",
+        "component:1",
+        "--save-log",
+        log.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let after = mf_io::read_path(&out).unwrap().mesh;
+    assert_eq!(
+        after.topology().components.len(),
+        2,
+        "only component 1 removed"
+    );
+    let commands = std::fs::read_to_string(log.join("commands.jsonl")).unwrap();
+    assert!(commands.contains("\"kind\":\"component\""), "{commands}");
+
+    // The single-operation subcommand accepts it too.
+    let out2 = dir.path().join("out2.stl");
+    let r = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        out2.to_str().unwrap(),
+        "--max-triangles",
+        "5",
+        "--select",
+        "component:2",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(
+        mf_io::read_path(&out2)
+            .unwrap()
+            .mesh
+            .topology()
+            .components
+            .len(),
+        2
+    );
+
+    // Malformed selections are usage errors.
+    let bad = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        "x.stl",
+        "--select",
+        "bogus",
+    ]);
+    assert_eq!(bad.status.code(), Some(2));
+}

@@ -13,6 +13,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+mf-selection.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
