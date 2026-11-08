@@ -1,3 +1,5 @@
+# Pinned so local and CI clippy agree (new lints land with every stable release).
+# Use rustup's cargo: Homebrew's `rust` package ignores this file.
 [toolchain]
-channel = "stable"
+channel = "1.99.1"
 components = ["rustfmt", "clippy"]

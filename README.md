@@ -10,4 +10,6 @@ cargo run -p mf-cli -- inspect model.stl # CLI
 cargo test --workspace
 ```
 
+The toolchain is pinned in `rust-toolchain.toml` (Rust 1.99.1) so local clippy matches CI. Install Rust with rustup. Homebrew's `rust` package ignores the pin.
+
 Licensed under either of MIT or Apache-2.0 at your option.

@@ -26,7 +26,7 @@ jobs:
       MF_SKIP_LOG: ${{ github.workspace }}/skipped-tests.txt
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -61,7 +61,7 @@ jobs:
       MF_REQUIRE_GPU: "1"
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev mesa-vulkan-drivers
       - run: cargo build --release -p mf-cli

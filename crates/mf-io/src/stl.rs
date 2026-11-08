@@ -40,7 +40,7 @@ fn looks_ascii(bytes: &[u8]) -> bool {
 
 fn read_binary(body: &[u8], n: usize) -> Result<Mesh, IoError> {
     let mut corners: Vec<[f32; 3]> = Vec::with_capacity(n * 3);
-    for facet in body.chunks_exact(FACET) {
+    for facet in body.as_chunks::<FACET>().0 {
         for v in 0..3 {
             let off = 12 + v * 12;
             let f = |k: usize| {
