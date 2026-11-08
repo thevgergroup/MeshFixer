@@ -202,3 +202,54 @@ fn faces_follow_a_compaction_remap_both_ways() {
     }
     let _ = (compact, prov);
 }
+
+fn three_pinched_holes() -> Mesh {
+    let n = 6;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let mut e = mf_fixtures::grid(n).edit();
+    for f in [cell(2, 2), cell(3, 3), cell(2, 3)] {
+        e.remove_face(FaceId(f)).unwrap();
+    }
+    e.finish().unwrap().0
+}
+
+#[test]
+fn pinched_loop_selection_maps_to_itself() {
+    let m = three_pinched_holes();
+    for l in m.topology().boundary_loops.iter() {
+        let s = sel(SelectionKind::BoundaryLoop, vec![l.id]);
+        match resolve(&s, &m, &m, &[], RevisionId(1)) {
+            Translation::Mapped(mapped) => assert_eq!(mapped.ids, vec![l.id]),
+            other => panic!("loop {} -> {other:?}", l.id),
+        }
+    }
+}
+
+#[test]
+fn multi_component_selection_maps_each_component() {
+    let m = merge(&[cube(1.0), translated(&cube(1.0), [3.0, 0.0, 0.0])]);
+    let s = sel(SelectionKind::Component, vec![0, 1]);
+    match resolve(&s, &m, &m, &[], RevisionId(1)) {
+        Translation::Mapped(mapped) => assert_eq!(mapped.ids, vec![0, 1]),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn face_ids_must_exist_in_the_source_revision() {
+    let (before, after, prov) = remove_island();
+    // 99 never existed; 13 is dead in `after`.
+    let s = sel(SelectionKind::Faces, vec![0, 99]);
+    assert!(matches!(
+        resolve(&s, &before, &after, &[Step::Forward(&prov)], RevisionId(2)),
+        Translation::Failed(TranslateError::NotInSource { ids }) if ids == vec![99]
+    ));
+    let s = Selection {
+        revision: RevisionId(2),
+        ..sel(SelectionKind::Faces, vec![13])
+    };
+    assert!(matches!(
+        resolve(&s, &after, &before, &[Step::Backward(&prov)], RevisionId(1)),
+        Translation::Failed(TranslateError::NotInSource { .. })
+    ));
+}

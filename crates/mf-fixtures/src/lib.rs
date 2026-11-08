@@ -264,3 +264,24 @@ pub mod skip {
         }
     }
 }
+
+/// A flat (n+1)×(n+1) vertex grid in z=0, two CCW triangles per cell.
+/// Cell (i, j) has faces `2*(j*n+i)` (lower-right) and `2*(j*n+i)+1`
+/// (upper-left); vertex (i, j) is `j*(n+1)+i`.
+pub fn grid(n: u32) -> Mesh {
+    let mut positions = Vec::new();
+    for j in 0..=n {
+        for i in 0..=n {
+            positions.push([i as f64, j as f64, 0.0]);
+        }
+    }
+    let v = |i: u32, j: u32| j * (n + 1) + i;
+    let mut tris = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            tris.push([v(i, j), v(i + 1, j), v(i + 1, j + 1)]);
+            tris.push([v(i, j), v(i + 1, j + 1), v(i, j + 1)]);
+        }
+    }
+    Mesh::new(positions, tris).expect("valid")
+}

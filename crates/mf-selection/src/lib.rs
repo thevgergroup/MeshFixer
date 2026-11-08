@@ -49,6 +49,10 @@ pub enum TranslateError {
         faces: Vec<FaceId>,
     },
     KindNotTranslatable,
+    /// These IDs don't name live elements of the selection's own revision.
+    NotInSource {
+        ids: Vec<u32>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -209,6 +213,15 @@ pub fn resolve(
             Translation::Mapped(at(sel, to, SelectionKind::Object, Vec::new()))
         }
         SelectionKind::Faces => {
+            let missing: Vec<u32> = sel
+                .ids
+                .iter()
+                .copied()
+                .filter(|&f| !from_mesh.is_face_live(FaceId(f)))
+                .collect();
+            if !missing.is_empty() {
+                return Translation::Failed(TranslateError::NotInSource { ids: missing });
+            }
             let (mapped, lost) = translate_faces(&sel.ids, steps);
             if mapped.is_empty() {
                 return Translation::Failed(TranslateError::AllLost { lost });
@@ -220,6 +233,59 @@ pub fn resolve(
     }
 }
 
+/// How one selected component or loop resolved at the destination.
+enum Part {
+    One(u32),
+    Partial(u32, Vec<u32>),
+    Many(Vec<u32>),
+    Gone(TranslateError),
+}
+
+/// Combine per-element results: any ambiguity makes the whole selection
+/// ambiguous; elements that are gone are reported as lost; if everything
+/// is gone, the first reason is returned.
+fn combine(
+    sel: &Selection,
+    to: RevisionId,
+    kind: SelectionKind,
+    parts: Vec<(u32, Part)>,
+) -> Translation {
+    let mut mapped = BTreeSet::new();
+    let mut lost = BTreeSet::new();
+    let mut ambiguous = BTreeSet::new();
+    let mut first_failure = None;
+    for (source, part) in parts {
+        match part {
+            Part::One(id) => {
+                mapped.insert(id);
+            }
+            Part::Partial(id, l) => {
+                mapped.insert(id);
+                lost.extend(l);
+            }
+            Part::Many(c) => ambiguous.extend(c),
+            Part::Gone(e) => {
+                lost.insert(source);
+                first_failure.get_or_insert(e);
+            }
+        }
+    }
+    if !ambiguous.is_empty() {
+        return Translation::Ambiguous {
+            candidates: ambiguous.into_iter().collect(),
+        };
+    }
+    if mapped.is_empty() {
+        return Translation::Failed(first_failure.unwrap_or(TranslateError::AllLost {
+            lost: lost.into_iter().collect(),
+        }));
+    }
+    outcome(
+        at(sel, to, kind, mapped.into_iter().collect()),
+        lost.into_iter().collect(),
+    )
+}
+
 fn resolve_components(
     sel: &Selection,
     from_mesh: &Mesh,
@@ -228,19 +294,6 @@ fn resolve_components(
     to: RevisionId,
 ) -> Translation {
     let from_topo = from_mesh.topology();
-    let mut faces = Vec::new();
-    for &c in &sel.ids {
-        match from_topo.components.get(c as usize) {
-            Some(comp) => faces.extend_from_slice(comp),
-            None => return Translation::Failed(TranslateError::KindNotTranslatable),
-        }
-    }
-    let (mapped, _) = translate_faces(&faces, steps);
-    if mapped.is_empty() {
-        return Translation::Failed(TranslateError::AllLost {
-            lost: sel.ids.clone(),
-        });
-    }
     let to_topo = to_mesh.topology();
     let mut component_of = vec![u32::MAX; to_mesh.face_slots() as usize];
     for (i, comp) in to_topo.components.iter().enumerate() {
@@ -248,31 +301,46 @@ fn resolve_components(
             component_of[f as usize] = i as u32;
         }
     }
-    let candidates: BTreeSet<u32> = mapped
-        .iter()
-        .filter_map(|&f| {
-            component_of
-                .get(f as usize)
-                .copied()
-                .filter(|&c| c != u32::MAX)
-        })
-        .collect();
-    match candidates.len() {
-        0 => Translation::Failed(TranslateError::AllLost {
-            lost: sel.ids.clone(),
-        }),
-        1 => Translation::Mapped(at(
-            sel,
-            to,
-            SelectionKind::Component,
-            candidates.into_iter().collect(),
-        )),
-        _ => Translation::Ambiguous {
-            candidates: candidates.into_iter().collect(),
-        },
+    let mut parts = Vec::new();
+    for &c in &sel.ids {
+        let Some(faces) = from_topo.components.get(c as usize) else {
+            return Translation::Failed(TranslateError::NotInSource { ids: vec![c] });
+        };
+        let (mapped, _) = translate_faces(faces, steps);
+        let candidates: BTreeSet<u32> = mapped
+            .iter()
+            .filter_map(|&f| {
+                component_of
+                    .get(f as usize)
+                    .copied()
+                    .filter(|&c| c != u32::MAX)
+            })
+            .collect();
+        let part = match candidates.len() {
+            0 => Part::Gone(TranslateError::AllLost { lost: vec![c] }),
+            1 => Part::One(*candidates.first().expect("exactly one candidate")),
+            _ => Part::Many(candidates.into_iter().collect()),
+        };
+        parts.push((c, part));
     }
+    combine(sel, to, SelectionKind::Component, parts)
 }
 
+/// Follow one vertex ID through `steps`; `None` if it was removed.
+fn follow_vertex(v: u32, steps: &[Step]) -> Option<u32> {
+    let (alive, _) = translate_vertices(&[v], steps);
+    alive.first().copied()
+}
+
+fn directed_edges(vertices: &[u32]) -> Vec<(u32, u32)> {
+    let n = vertices.len();
+    (0..n)
+        .map(|k| (vertices[k], vertices[(k + 1) % n]))
+        .collect()
+}
+
+/// Loops are matched on directed boundary edges, not shared vertices: at a
+/// pinch vertex several loops share a vertex but never an edge (review I1).
 fn resolve_loops(
     sel: &Selection,
     from_mesh: &Mesh,
@@ -281,59 +349,93 @@ fn resolve_loops(
     to: RevisionId,
 ) -> Translation {
     let from_topo = from_mesh.topology();
-    let mut vertices = Vec::new();
-    for &l in &sel.ids {
-        match from_topo.boundary_loops.iter().find(|b| b.id == l) {
-            Some(b) => vertices.extend_from_slice(&b.vertices),
-            None => return Translation::Failed(TranslateError::KindNotTranslatable),
-        }
-    }
-    let (alive, lost) = translate_vertices(&vertices, steps);
-    let wanted: BTreeSet<u32> = alive.iter().copied().collect();
     let to_topo = to_mesh.topology();
-    let candidates: Vec<u32> = to_topo
+    let mut loop_of_edge: Vec<((u32, u32), u32)> = to_topo
         .boundary_loops
         .iter()
-        .filter(|b| b.vertices.iter().any(|v| wanted.contains(v)))
-        .map(|b| b.id)
+        .flat_map(|l| {
+            directed_edges(&l.vertices)
+                .into_iter()
+                .map(move |e| (e, l.id))
+        })
         .collect();
-    match candidates.as_slice() {
-        [] => {
-            // The loop no longer exists: report the created faces that use
-            // its vertices, i.e. the faces that closed it.
-            let mut faces: Vec<FaceId> = steps
-                .iter()
-                .filter_map(|s| match s {
-                    Step::Forward(p) => Some(p),
-                    Step::Backward(_) => None,
-                })
-                .flat_map(|p| p.created_faces.iter().map(|(f, _)| *f))
-                .filter(|&f| {
-                    to_mesh
-                        .face(f)
-                        .is_some_and(|t| t.iter().any(|v| wanted.contains(v)))
-                })
-                .collect();
-            faces.sort_unstable();
-            faces.dedup();
-            Translation::Failed(TranslateError::LoopClosed { faces })
-        }
-        [one] => {
-            let same = to_topo
-                .boundary_loops
-                .iter()
-                .find(|b| b.id == *one)
-                .is_some_and(|b| b.vertices.iter().copied().collect::<BTreeSet<_>>() == wanted);
-            let mapped = at(sel, to, SelectionKind::BoundaryLoop, vec![*one]);
-            if same && lost.is_empty() {
-                Translation::Mapped(mapped)
-            } else {
-                // The loop changed shape; `lost` names removed loop vertices.
-                Translation::Partial { mapped, lost }
+    loop_of_edge.sort_unstable();
+    let edges_of = |id: u32| -> BTreeSet<(u32, u32)> {
+        to_topo
+            .boundary_loops
+            .iter()
+            .find(|l| l.id == id)
+            .map(|l| directed_edges(&l.vertices).into_iter().collect())
+            .expect("candidate loops come from this topology")
+    };
+    let mut parts = Vec::new();
+    for &l in &sel.ids {
+        let Some(source) = from_topo.boundary_loops.iter().find(|b| b.id == l) else {
+            return Translation::Failed(TranslateError::NotInSource { ids: vec![l] });
+        };
+        let mut lost_vertices = Vec::new();
+        let mut mapped_edges = BTreeSet::new();
+        for (a, b) in directed_edges(&source.vertices) {
+            match (follow_vertex(a, steps), follow_vertex(b, steps)) {
+                (Some(x), Some(y)) => {
+                    mapped_edges.insert((x, y));
+                }
+                (x, y) => {
+                    if x.is_none() {
+                        lost_vertices.push(a);
+                    }
+                    if y.is_none() {
+                        lost_vertices.push(b);
+                    }
+                }
             }
         }
-        many => Translation::Ambiguous {
-            candidates: many.to_vec(),
-        },
+        lost_vertices.sort_unstable();
+        lost_vertices.dedup();
+        let candidates: BTreeSet<u32> = mapped_edges
+            .iter()
+            .filter_map(|e| {
+                loop_of_edge
+                    .binary_search_by_key(e, |(edge, _)| *edge)
+                    .ok()
+                    .map(|i| loop_of_edge[i].1)
+            })
+            .collect();
+        let part = match candidates.len() {
+            0 => {
+                // The loop no longer exists: report the created faces that
+                // use its surviving vertices, i.e. the faces that closed it.
+                let wanted: BTreeSet<u32> =
+                    mapped_edges.iter().flat_map(|&(a, b)| [a, b]).collect();
+                let mut faces: Vec<FaceId> = steps
+                    .iter()
+                    .filter_map(|s| match s {
+                        Step::Forward(p) => Some(p),
+                        Step::Backward(_) => None,
+                    })
+                    .flat_map(|p| p.created_faces.iter().map(|(f, _)| *f))
+                    .filter(|&f| {
+                        to_mesh
+                            .face(f)
+                            .is_some_and(|t| t.iter().any(|v| wanted.contains(v)))
+                    })
+                    .collect();
+                faces.sort_unstable();
+                faces.dedup();
+                Part::Gone(TranslateError::LoopClosed { faces })
+            }
+            1 => {
+                let id = *candidates.first().expect("exactly one candidate");
+                if edges_of(id) == mapped_edges && lost_vertices.is_empty() {
+                    Part::One(id)
+                } else {
+                    // The loop changed shape; report the removed vertices.
+                    Part::Partial(id, lost_vertices)
+                }
+            }
+            _ => Part::Many(candidates.into_iter().collect()),
+        };
+        parts.push((l, part));
     }
+    combine(sel, to, SelectionKind::BoundaryLoop, parts)
 }

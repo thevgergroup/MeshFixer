@@ -335,22 +335,21 @@ fn pinched_pairing(
     // Per pinched vertex, its fans: (fan root, incoming edges, outgoing edges).
     type Fan = (u32, Vec<u32>, Vec<u32>);
     let mut fans: Vec<Vec<Fan>> = vec![Vec::new(); pinched.len()];
-    let fan_entry =
-        |k: usize, root: u32, edge: u32, outgoing: bool, fans: &mut Vec<Vec<Fan>>| {
-            let list = &mut fans[k];
-            let i = match list.iter().position(|f| f.0 == root) {
-                Some(i) => i,
-                None => {
-                    list.push((root, Vec::new(), Vec::new()));
-                    list.len() - 1
-                }
-            };
-            if outgoing {
-                list[i].2.push(edge);
-            } else {
-                list[i].1.push(edge);
+    let fan_entry = |k: usize, root: u32, edge: u32, outgoing: bool, fans: &mut Vec<Vec<Fan>>| {
+        let list = &mut fans[k];
+        let i = match list.iter().position(|f| f.0 == root) {
+            Some(i) => i,
+            None => {
+                list.push((root, Vec::new(), Vec::new()));
+                list.len() - 1
             }
         };
+        if outgoing {
+            list[i].2.push(edge);
+        } else {
+            list[i].1.push(edge);
+        }
+    };
     for (e, &(a, b, ca, cb)) in boundary.iter().enumerate() {
         if let Ok(k) = pinched.binary_search(&a) {
             let root = corners.find(ca);
