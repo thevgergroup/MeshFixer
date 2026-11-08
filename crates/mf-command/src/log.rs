@@ -69,6 +69,8 @@ pub enum LogError {
     },
     #[error("log references source for object {0}, which the manifest doesn't list")]
     MissingSourceEntry(ObjectId),
+    #[error("object {0} vanished from the replayed session after its command ran")]
+    TargetMissing(ObjectId),
     #[error("replay allocated object {actual}, but the log expected {expected}")]
     ObjectIdMismatch {
         expected: ObjectId,

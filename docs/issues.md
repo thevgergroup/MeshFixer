@@ -21,7 +21,6 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 | MF-ISSUE-013 | S2 | Memory: 1.1 GB peak RSS at 4.8M triangles vs 400 MB budget | M1 report | **M2 (priority)** | A counting allocator plus a breakdown by category (mesh storage, topology, import scratch, history, GPU buffers) is reported by `--metrics` and the benchmark CI. M2's storage design is justified against these numbers before history and selections build on it. |
 | MF-ISSUE-019 | S3 | Topology construction scratch is 468 MB at 4.8M triangles | ADR-0001 measurements | M4 | Topology build peak ≤ 150 MB at 5M (packed `u64` edge keys, no separate fan array), measured with `--metrics`. |
 | MF-ISSUE-020 | S3 | Tombstoned slots accumulate in long sessions | ADR-0001 | M4 | A `mesh.compact` operation that emits provenance (a slot remap) like any edit, plus a dead-slot ratio in diagnostics. |
-| MF-ISSUE-021 | S3 | Misleading replay/log error variants | M2 review minor | M3 | A missing ancestor node and a missing replay target get their own error variants. Tests cover both messages. |
 | MF-ISSUE-022 | S3 | Swallowed-error check is narrow | M2 review minor | M3 | The allowlist keys on file + line number range or a marker comment rather than trimmed text, and also covers `unwrap_or(0)` and `.ok()` in production code. |
 | MF-ISSUE-024 | S3 | Offscreen device cache keeps an error or lost device for the process lifetime | M2 review minor | First long-running headless use | Device loss is detected and the device recreated, or the error is surfaced per call. |
 | MF-ISSUE-025 | S2 | Cross-OS replay never exercises the `Equivalent` path | M2 review minor | M3 | The CI cross-OS job includes an operation that computes positions (fill_holes refinement). Its summary shows Exact vs Equivalent per OS. |
@@ -37,6 +36,7 @@ Severity: **S1** data loss or wrong geometry · **S2** wrong or misleading resul
 
 | ID | Title | Closed by |
 |---|---|---|
+| MF-ISSUE-021 | Misleading replay/log error variants | Missing ancestor is an invariant (`expect`); a missing replay target is named (`does not exist` / `LogError::TargetMissing`) · test `replay_names_a_missing_target_object` |
 | MF-ISSUE-002 | Misleading STL error messages | STL import returns warnings: header count 0 read by size, trailing bytes ignored (both warned); short files are errors naming the ambiguity; solid-header mismatch reported as such · tests in `io.rs::stl_header_cases` |
 | MF-ISSUE-023 | Created-then-removed face can remain a `Sources` entry of other created faces | Sources must be live faces of the input revision (`GeometryError::InvalidSource`) · test `sources_must_be_faces_of_the_input_revision` |
 | MF-ISSUE-014 | Cross-platform CI not yet run | CI run 42492436343 (PR #1): ubuntu, macOS and Windows each 84 verified passes, 0 skipped, 0 failed. Every GPU and GUI test ran on all three (lavapipe, Metal, WARP). |
