@@ -72,12 +72,34 @@ fn not_3mf(message: String) -> IoError {
     IoError::Parse { line: 0, message }
 }
 
-fn line_of(text: &str, offset: u64) -> usize {
-    text.as_bytes()[..(offset as usize).min(text.len())]
-        .iter()
-        .filter(|&&b| b == b'\n')
-        .count()
-        + 1
+/// 1-based line of byte offsets into `text`, for offsets that only grow:
+/// each call counts newlines since the previous one, so a whole read stays
+/// linear in the file size.
+struct LineCounter<'a> {
+    text: &'a [u8],
+    offset: usize,
+    line: usize,
+}
+
+impl<'a> LineCounter<'a> {
+    fn new(text: &'a str) -> Self {
+        LineCounter {
+            text: text.as_bytes(),
+            offset: 0,
+            line: 1,
+        }
+    }
+
+    fn line_at(&mut self, offset: u64) -> usize {
+        let offset = (offset as usize).min(self.text.len());
+        debug_assert!(offset >= self.offset, "offsets must not decrease");
+        self.line += self.text[self.offset..offset]
+            .iter()
+            .filter(|&&b| b == b'\n')
+            .count();
+        self.offset = offset;
+        self.line
+    }
 }
 
 /// An attribute's decoded value. A malformed attribute or value is an error
@@ -162,13 +184,14 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     let mut saw_build = false;
     let mut digits = 0u8;
     let mut reader = quick_xml::Reader::from_str(&text);
+    let mut lines = LineCounter::new(&text);
     loop {
         let pos = reader.buffer_position();
+        let line = lines.line_at(pos);
         let event = reader.read_event().map_err(|e| IoError::Parse {
-            line: line_of(&text, pos),
+            line,
             message: format!("3MF model XML: {e}"),
         })?;
-        let line = line_of(&text, pos);
         let parse_err = |message: String| IoError::Parse { line, message };
         let number = |e: &BytesStart, name: &str, digits: &mut u8| -> Result<f64, IoError> {
             let raw = attr(e, name).map_err(parse_err)?.ok_or_else(|| {

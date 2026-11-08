@@ -146,3 +146,26 @@ fn malformed_attribute_is_an_error_not_a_default() {
         ),
     }
 }
+
+#[test]
+fn threemf_read_is_linear_in_file_size() {
+    // Locating each XML event by counting newlines from the start of the
+    // file made reading quadratic: minutes for a 200k-triangle export.
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![obj("sphere", uv_sphere(150, 300), threemf::IDENTITY)],
+    };
+    let bytes = threemf::write(&model).unwrap();
+    let start = std::time::Instant::now();
+    let (back, _) = threemf::read(&bytes).unwrap();
+    let elapsed = start.elapsed();
+    assert_eq!(
+        back.objects[0].mesh.face_count(),
+        model.objects[0].mesh.face_count()
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "reading {} triangles took {elapsed:?}",
+        model.objects[0].mesh.face_count()
+    );
+}
