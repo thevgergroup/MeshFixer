@@ -9,6 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+rayon.workspace = true
 mf-geometry.workspace = true
 blake3.workspace = true
 serde.workspace = true
@@ -18,3 +19,5 @@ thiserror.workspace = true
 mf-fixtures.workspace = true
 tempfile.workspace = true
 blake3.workspace = true
+mf-metrics.workspace = true
+rayon.workspace = true

@@ -2,6 +2,7 @@
 //! the `solid` prefix, because many binary exporters write `solid` headers.
 
 use mf_geometry::Mesh;
+use rayon::slice::ParallelSliceMut;
 
 use crate::{IoError, SourcePrecision, significant_digits};
 
@@ -38,20 +39,77 @@ fn looks_ascii(bytes: &[u8]) -> bool {
     bytes[start..].starts_with(b"solid")
 }
 
+/// Corner `c`'s coordinates, read straight from the facet bytes.
+fn corner(body: &[u8], c: usize) -> [f32; 3] {
+    let off = (c / 3) * FACET + 12 + (c % 3) * 12;
+    let f = |k: usize| {
+        let o = off + k * 4;
+        f32::from_le_bytes([body[o], body[o + 1], body[o + 2], body[o + 3]])
+    };
+    // `+ 0.0` folds -0.0 into 0.0 so they weld together.
+    [f(0) + 0.0, f(1) + 0.0, f(2) + 0.0]
+}
+
+/// Weld binary STL corners on exactly equal positions, vertices in
+/// first-occurrence order. Works from the file bytes without copying the
+/// corners: peak scratch is ~24 bytes per triangle plus ~12 per vertex
+/// (ADR-0001 measurements).
 fn read_binary(body: &[u8], n: usize) -> Result<Mesh, IoError> {
-    let mut corners: Vec<[f32; 3]> = Vec::with_capacity(n * 3);
-    for facet in body.as_chunks::<FACET>().0 {
-        for v in 0..3 {
-            let off = 12 + v * 12;
-            let f = |k: usize| {
-                let o = off + k * 4;
-                f32::from_le_bytes([facet[o], facet[o + 1], facet[o + 2], facet[o + 3]])
-            };
-            corners.push([f(0), f(1), f(2)]);
+    let corners = n * 3;
+    let key = |c: u32| corner(body, c as usize).map(f32::to_bits);
+    let mut order: Vec<u32> = (0..corners as u32).collect();
+    // Parallel, and still deterministic: (key, corner) is a total order.
+    order.par_sort_unstable_by_key(|&c| (key(c), c));
+
+    // Group sorted corners; each group's first corner is its leader
+    // (smallest corner index, since the sort key includes it).
+    let mut triangles: Vec<[u32; 3]> = vec![[0; 3]; n];
+    let mut leaders: Vec<u32> = Vec::new();
+    let mut prev = None;
+    for &c in &order {
+        let k = key(c);
+        if prev != Some(k) {
+            leaders.push(c);
+            prev = Some(k);
         }
+        triangles[c as usize / 3][c as usize % 3] = leaders.len() as u32 - 1;
     }
-    let corners: Vec<[f64; 3]> = corners.iter().map(|c| c.map(f64::from)).collect();
-    weld(&corners)
+    drop(order);
+
+    // Vertex IDs in first-occurrence order = groups sorted by leader.
+    let mut by_leader: Vec<u32> = (0..leaders.len() as u32).collect();
+    by_leader.sort_unstable_by_key(|&g| leaders[g as usize]);
+    let mut vertex_of_group = vec![0u32; leaders.len()];
+    let mut positions = Vec::with_capacity(leaders.len());
+    for (v, &g) in by_leader.iter().enumerate() {
+        vertex_of_group[g as usize] = v as u32;
+        positions.push(corner(body, leaders[g as usize] as usize).map(f64::from));
+    }
+    drop(by_leader);
+    drop(leaders);
+    for t in &mut triangles {
+        *t = t.map(|g| vertex_of_group[g as usize]);
+    }
+    Ok(Mesh::new(positions, triangles)?)
+}
+
+/// Structural check of encoded binary STL: size, facet count and finite
+/// coordinates. Cheaper than a full re-import, and enough because the bytes
+/// came from a valid mesh.
+pub(crate) fn verify_binary(bytes: &[u8], triangles: usize) -> Result<(), String> {
+    let expected = HEADER + 4 + FACET * triangles;
+    if bytes.len() != expected {
+        return Err(format!("encoded {} bytes, expected {expected}", bytes.len()));
+    }
+    let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as usize;
+    if n != triangles {
+        return Err(format!("header says {n} facets, expected {triangles}"));
+    }
+    let body = &bytes[HEADER + 4..];
+    if (0..n * 3).any(|c| corner(body, c).iter().any(|x| !x.is_finite())) {
+        return Err("encoded a non-finite coordinate".into());
+    }
+    Ok(())
 }
 
 fn read_ascii(bytes: &[u8]) -> Result<(Mesh, SourcePrecision), IoError> {

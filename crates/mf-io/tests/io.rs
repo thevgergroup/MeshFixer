@@ -186,3 +186,14 @@ fn export_replaces_existing_file_atomically() {
     assert_eq!(read_path(&p).unwrap().mesh.triangle_count(), 12);
     assert_eq!(files_in(dir.path()), vec!["out.obj"]);
 }
+
+#[test]
+fn stl_weld_identical_at_1_and_8_threads() {
+    let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(50_000, 4));
+    let bytes = stl::write_binary(&mesh).unwrap();
+    let run = |threads| {
+        let pool = rayon::ThreadPoolBuilder::new().num_threads(threads).build().unwrap();
+        pool.install(|| stl::read(&bytes).unwrap().0.content_hash())
+    };
+    assert_eq!(run(1), run(8));
+}

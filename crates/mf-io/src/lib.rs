@@ -155,7 +155,8 @@ pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoErro
 /// Re-parse encoded bytes and check they describe the same mesh.
 fn verify_encoded(mesh: &Mesh, bytes: &[u8], format: Format) -> Result<(), String> {
     let decoded = match format {
-        Format::StlBinary | Format::StlAscii => stl::read(bytes).map(|(m, _)| m),
+        Format::StlBinary => return stl::verify_binary(bytes, mesh.triangle_count()),
+        Format::StlAscii => stl::read(bytes).map(|(m, _)| m),
         Format::Obj => std::str::from_utf8(bytes)
             .map_err(|e| IoError::Parse {
                 line: 0,

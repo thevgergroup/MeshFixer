@@ -2447,6 +2447,8 @@ dependencies = [
  "blake3",
  "mf-fixtures",
  "mf-geometry",
+ "mf-metrics",
+ "rayon",
  "serde",
  "tempfile",
  "thiserror 2.0.21",

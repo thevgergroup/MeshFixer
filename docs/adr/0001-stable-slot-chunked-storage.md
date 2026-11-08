@@ -28,3 +28,14 @@ The 1.1 GB figure from M1 came almost entirely from transient scratch:
 4. **remove_small output:** `Vec` growth overshoot (192 MB instead of ~110 MB).
 
 Items 1 and 2 are addressed in Task 2, and item 4 by `MeshEdit` in Task 3. Item 3 is tracked: topology scratch can drop to roughly a third by keying half-edges as `u64` and using in-place union-find (MF-ISSUE-019).
+
+### After Task 2 (import weld rewrite, structural export verification)
+
+| 4.8M tri | Before | After |
+|---|---|---|
+| import peak | 1017 MB | **374 MB** (file 230 MB + ~144 MB scratch) |
+| import wall time | 1.93 s | 1.77 s (parallel sort, deterministic: `stl_weld_identical_at_1_and_8_threads`) |
+| export peak | 1017 MB | **230 MB** (the encoded bytes; the binary STL check is structural) |
+| process peak, remove-small run | 1383 MB | 802 MB |
+
+The remaining large transient is topology construction (468 MB), tracked as MF-ISSUE-019.
