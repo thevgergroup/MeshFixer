@@ -485,10 +485,11 @@ impl MeshFixerApp {
                     faces.len()
                 ));
             }
-            Translation::Failed(e) => self.status = Some(format!("Selection cleared: {e:?}")),
+            Translation::Failed(e) => self.status = Some(selection_lost(&e)),
             Translation::Ambiguous { candidates } => {
                 self.status = Some(format!(
-                    "Selection is now ambiguous between {candidates:?}; cleared"
+                    "Selection cleared: it could now be any of {} parts",
+                    candidates.len()
                 ))
             }
         }
@@ -1300,6 +1301,19 @@ fn transformed_bounds(bb: &Aabb, model: &glam::DMat4) -> Aabb {
     out.expect("a bounding box has 8 corners")
 }
 
+/// Why a selection couldn't follow a history move, in plain words.
+fn selection_lost(e: &TranslateError) -> String {
+    let why = match e {
+        TranslateError::NoPath => "that step is on another branch",
+        TranslateError::ObjectMissing => "its object doesn't exist at this step",
+        TranslateError::AllLost { .. } => "what was selected doesn't exist at this step",
+        TranslateError::LoopClosed { .. } => "the hole is closed at this step",
+        TranslateError::KindNotTranslatable => "this kind of selection can't follow history",
+        TranslateError::NotInSource { .. } => "it named elements that don't exist",
+    };
+    format!("Selection cleared: {why}")
+}
+
 /// How much bigger than the target `F` frames, so its surroundings show.
 const FRAME_CONTEXT: f64 = 2.5;
 
@@ -1349,4 +1363,29 @@ fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
         out.max[k] = out.max[k].max(b.max[k]);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The status line explains a lost selection in words, never a debug dump.
+    #[test]
+    fn lost_selection_is_explained_in_plain_words() {
+        for e in [
+            TranslateError::NoPath,
+            TranslateError::ObjectMissing,
+            TranslateError::AllLost { lost: vec![1] },
+            TranslateError::LoopClosed { faces: vec![] },
+            TranslateError::KindNotTranslatable,
+            TranslateError::NotInSource { ids: vec![2] },
+        ] {
+            let text = selection_lost(&e);
+            assert!(text.starts_with("Selection cleared: "), "{text}");
+            assert!(
+                !text.contains('{') && !text.contains('[') && !text.contains("Lost"),
+                "{text}"
+            );
+        }
+    }
 }
