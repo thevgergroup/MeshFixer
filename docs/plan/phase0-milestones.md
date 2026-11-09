@@ -1,6 +1,6 @@
 # Phase 0 Milestones
 
-Spec: `docs/spec/phase0-spec.md` (v0.4). Each milestone ends with a **demonstration**, **pass/fail gates** and **evidence**: a screen recording, benchmark JSON with device info, and a sample model, stored in `artifacts/<milestone>/` and summarized in `docs/milestones/<milestone>.md`. A milestone isn't closed by passing tests alone.
+Spec: `docs/spec/phase0-spec.md` (v0.5). Each milestone ends with a **demonstration**, **pass/fail gates** and **evidence**: a screen recording, benchmark JSON with device info, and a sample model, stored in `artifacts/<milestone>/` and summarized in `docs/milestones/<milestone>.md`. A milestone isn't closed by passing tests alone.
 
 Detailed task plans are written when each milestone starts, so they build on what the previous milestone taught us. M1: `docs/superpowers/plans/2026-11-08-m1-vertical-slice.md`.
 
