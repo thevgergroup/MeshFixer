@@ -37,9 +37,10 @@ pub fn vector_area(m: &Mesh, vertices: &[u32]) -> f64 {
 /// its exact position; and each new face's edges end up with exactly two
 /// faces, so the patch meets the input without adding a non-manifold edge.
 /// The one exception is a hole whose rim runs along an edge that was
-/// already non-manifold (a tangled edge, MF-ISSUE-047): the patch adds its
-/// single face there like on any rim edge, and such edges are counted in
-/// the `Ok` value. `before_edges` is [`edge_faces`] of `before`. The first
+/// already non-manifold in the input (three or more faces, a tangled edge,
+/// MF-ISSUE-047): the patch adds its single face there like on any rim
+/// edge, and such edges are counted in the `Ok` value. A clean two-face
+/// edge that gains a face is a violation. `before_edges` is [`edge_faces`] of `before`. The first
 /// violation is returned by name.
 pub fn untouched_outside(
     before: &Mesh,
@@ -85,7 +86,7 @@ pub fn untouched_outside(
     let mut tangled_rim = 0;
     for (e, n) in &added {
         let before = before_edges.get(e).copied().unwrap_or(0);
-        if before >= 2 && *n == 1 {
+        if before >= 3 && *n == 1 {
             tangled_rim += 1;
             continue;
         }

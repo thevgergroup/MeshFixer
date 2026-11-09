@@ -4,6 +4,10 @@ use serde_json::json;
 
 use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
+/// `mesh.remove_small_components`. "Small" is an absolute triangle count
+/// (default 100), so on a multi-part design or unwelded triangle soup the
+/// defaults delete most of the model (MF-ISSUE-052: the Verlan dress loses
+/// 1,050 of its 1,100 parts, the OpenRC soup 2,207 of 2,208 pieces).
 pub struct RemoveSmallComponents;
 
 impl Operation for RemoveSmallComponents {

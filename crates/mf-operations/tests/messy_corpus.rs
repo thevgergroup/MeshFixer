@@ -469,6 +469,9 @@ struct RemoveSmallResult {
     outcome: Outcome,
     timing: Option<Timing>,
     removed_components: Option<Value>,
+    /// Share of the model's triangles the defaults removed; over 10% is
+    /// flagged as MF-ISSUE-052 in `unsupported`.
+    removed_triangle_share: Option<f64>,
     /// Every remaining component has at least `max_triangles` triangles or
     /// is the largest.
     postcondition: Option<bool>,
@@ -582,6 +585,7 @@ fn remove_small(mesh: &Mesh) -> RemoveSmallResult {
         outcome: Outcome::Ok,
         timing: Some(timing(&phase, n)),
         removed_components: None,
+        removed_triangle_share: None,
         postcondition: None,
         after: None,
     };
@@ -590,6 +594,8 @@ fn remove_small(mesh: &Mesh) -> RemoveSmallResult {
         Ok(Err(e)) => res.outcome = op_outcome(&e, timed_out, phase.wall_s),
         Ok(Ok(out)) => {
             res.removed_components = Some(out.report.clone());
+            let removed = out.report["removed_triangles"].as_u64().unwrap_or(0);
+            res.removed_triangle_share = Some(removed as f64 / n.max(1) as f64);
             let after = match &out.change {
                 Some((after, _)) => after,
                 None => mesh,
@@ -735,6 +741,27 @@ fn run_model(m: &Model, max_loop_edges: usize) -> ModelResult {
         .map(|f| f.skipped.clone())
         .unwrap_or_default();
     res.unsupported = unsupported(&d, m, &skipped);
+    let share = res
+        .remove_small_components
+        .as_ref()
+        .and_then(|r| r.removed_triangle_share);
+    let pieces = res
+        .remove_small_components
+        .as_ref()
+        .and_then(|r| r.removed_components.as_ref())
+        .map_or(0, |r| r["removed_components"].as_u64().unwrap_or(0)) as usize;
+    let most_pieces = d.components > 1 && 2 * pieces > d.components;
+    if let Some(share) = share.filter(|&s| s > 0.1 || most_pieces) {
+        res.unsupported.push(json!({
+            "damage": format!(
+                "remove_small_components defaults delete {pieces} of {} pieces, {:.0}% of the triangles (multi-part design or unwelded soup)",
+                d.components,
+                100.0 * share
+            ),
+            "count": res.remove_small_components.as_ref().unwrap().removed_components.as_ref().unwrap()["removed_triangles"],
+            "issue": "MF-ISSUE-052",
+        }));
+    }
     res
 }
 
@@ -972,4 +999,53 @@ fn messy_results_are_recorded() {
         assert!(v["unsupported"].is_array(), "{}", m.file);
     }
     eprintln!("messy-model results: {}", path.display());
+}
+
+/// Two faces on edge (0, 1) (a third if `tangled`), and two faces that
+/// leave edges (0, 4) and (4, 1) open: closing the hole 0-1-4 with one
+/// face adds a face on (0, 1) and completes (0, 4) and (4, 1).
+fn hinge(tangled: bool) -> Mesh {
+    let mut positions = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.5, 1.0, 0.0],
+        [0.5, -1.0, 0.0],
+        [0.5, 0.0, 1.0],
+        [-0.5, 0.0, 1.0],
+        [1.5, 0.0, 1.0],
+    ];
+    let mut triangles = vec![[0, 1, 2], [1, 0, 3], [0, 4, 5], [4, 1, 6]];
+    if tangled {
+        positions.push([0.5, 0.0, -1.0]);
+        triangles.push([0, 1, 7]);
+    }
+    Mesh::new(positions, triangles).unwrap()
+}
+
+/// Closes hole 0-1-4 with one face.
+fn close_hinge(m: &Mesh) -> (Mesh, mf_geometry::Provenance) {
+    let mut e = m.edit();
+    e.add_face([1, 0, 4], mf_geometry::Sources::default())
+        .unwrap();
+    e.finish().unwrap()
+}
+
+#[test]
+fn untouched_outside_rejects_a_clean_edge_made_non_manifold() {
+    // 2 → 3 faces: the fill made a clean edge non-manifold. A violation.
+    let clean = hinge(false);
+    let (after, prov) = close_hinge(&clean);
+    let err = untouched_outside(&clean, &edge_faces(&clean), &after, &prov).unwrap_err();
+    assert!(
+        err.contains("has 3 faces after the fill (2 before)"),
+        "{err}"
+    );
+    // 3 → 4 faces: the rim ran along an edge already tangled in the input
+    // (MF-ISSUE-047); counted, not a violation.
+    let tangled = hinge(true);
+    let (after, prov) = close_hinge(&tangled);
+    assert_eq!(
+        untouched_outside(&tangled, &edge_faces(&tangled), &after, &prov),
+        Ok(1)
+    );
 }
