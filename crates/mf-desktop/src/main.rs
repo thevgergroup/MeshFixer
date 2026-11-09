@@ -7,7 +7,11 @@ static ALLOC: CountingAlloc = CountingAlloc;
 
 /// `meshfixer-desktop [--threads N] [file]`.
 fn parse_args() -> Result<(Settings, Option<std::path::PathBuf>), String> {
-    let mut settings = Settings::default();
+    let mut settings = Settings {
+        // People opening a scan are asked for its unit (MF-ISSUE-045).
+        unit_prompt: true,
+        ..Settings::default()
+    };
     let mut initial = None;
     let mut args = std::env::args_os().skip(1);
     while let Some(arg) = args.next() {

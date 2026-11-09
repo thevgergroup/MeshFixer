@@ -1,6 +1,8 @@
 id: mesh.remove_small_components
-version: 1
-summary: Delete disconnected islands smaller than a triangle-count threshold.
+# Version 2 adds max_relative_size (MF-ISSUE-052). Version 1 records replay
+# with max_relative_size 100: no relative limit, exactly as they ran.
+version: 2
+summary: Delete disconnected islands smaller than a triangle-count threshold and a share of the largest piece.
 geometry_kinds: [mesh]
 target:
   whole_object: true
@@ -11,6 +13,16 @@ parameters:
     default: 100
     min: 1
     description: Remove components with fewer triangles than this
+  - name: max_relative_size
+    type: float
+    # A design made of many small parts (a dress of 1,100 parts, unwelded
+    # triangle soup) has pieces far above 1% of its largest one; the specks
+    # around a scan are far below it.
+    default: 1.0
+    min: 0.0
+    max: 100.0
+    unit: "%"
+    description: Only remove pieces no bigger than this share of the largest piece's triangles (whole-object runs; chosen pieces are always removed)
   - name: keep_largest
     type: bool
     default: true
@@ -18,7 +30,7 @@ parameters:
 preconditions:
   - target is a mesh
 postconditions:
-  - every remaining component has at least max_triangles triangles, or is the largest
+  - on a whole-object run, every remaining component has at least max_triangles triangles, more than max_relative_size percent of the largest component's triangles, or is the largest
   - kept faces are unchanged and keep their relative order
 effects: [geometry_changes, topology_changes]
 runtime:

@@ -40,7 +40,7 @@ fn remove_island(s: &mut Session, id: ObjectId) {
     s.execute(invocation(
         id,
         "mesh.remove_small_components",
-        &[("max_triangles", "5")],
+        &[("max_triangles", "5"), ("max_relative_size", "100")],
     ))
     .unwrap();
 }

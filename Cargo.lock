@@ -2449,6 +2449,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-operations",
  "mf-render",
  "mf-runtime",
  "mf-selection",

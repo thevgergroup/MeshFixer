@@ -6,6 +6,7 @@ pub mod app;
 pub mod defects;
 pub mod framing;
 pub mod gpu;
+pub mod import_dialog;
 pub mod metrics;
 mod panels;
 pub mod theme;

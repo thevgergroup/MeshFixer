@@ -24,7 +24,10 @@ fn remove_with(target: ObjectId, selection: Option<Selection>, max: &str) -> Inv
         op_id: "mesh.remove_small_components".into(),
         target,
         selection,
-        raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),
+        raw_params: BTreeMap::from([
+            ("max_triangles".to_string(), max.to_string()),
+            ("max_relative_size".to_string(), "100".to_string()),
+        ]),
     }
 }
 

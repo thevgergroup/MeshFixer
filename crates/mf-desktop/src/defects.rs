@@ -60,6 +60,9 @@ pub struct Defects {
     /// The object's size along the world axes, after its transform
     /// (document units); `None` for an empty mesh.
     pub world_size: Option<[f64; 3]>,
+    /// Every piece's size, indexed so "Remove loose pieces" can preview
+    /// any thresholds in O(log n) (MF-ISSUE-052).
+    pub pieces: mf_operations::ComponentSizes,
     /// (loop id, is a crack, index in `holes` or `cracks`), sorted by id.
     loop_index: Vec<(u32, bool, usize)>,
     /// Where each defect is, for framing it: `places.holes[i]` is
@@ -263,6 +266,9 @@ pub fn classify(
     out.loop_index.sort_unstable_by_key(|(id, ..)| *id);
     // Components are ordered largest first: the first is the model.
     out.main_body_triangles = topo.components.first().map_or(0, Vec::len);
+    out.pieces = mf_operations::ComponentSizes::new(
+        &topo.components.iter().map(Vec::len).collect::<Vec<_>>(),
+    );
     for (i, c) in topo.components.iter().enumerate().skip(1) {
         let place = faces_place(mesh, c, &world, &cofactor);
         out.places.loose.push(place);
@@ -576,6 +582,19 @@ fn hole_detail(edges: usize, perimeter: Option<f64>, units: Unit) -> String {
         Some(p) => format!("{edges} · {} {} perimeter", measure(p), unit_symbol(units)),
         None => format!("{edges} · perimeter too large to measure"),
     }
+}
+
+/// A count with thousands separators: "1,050".
+pub fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// "1 triangle", "12 triangles".

@@ -53,6 +53,8 @@ fn remove_small_writes_output() {
         output.to_str().unwrap(),
         "--max-triangles",
         "5",
+        "--max-relative-size",
+        "100",
     ]);
     assert!(
         out.status.success(),
@@ -216,6 +218,8 @@ fn run_saves_log_and_replay_verifies_it() {
         "mesh.remove_small_components",
         "--param",
         "max_triangles=5",
+        "--param",
+        "max_relative_size=100",
         "--op",
         "mesh.remove_small_components",
         "--param",
@@ -373,6 +377,8 @@ fn run_on_3mf_keeps_every_object() {
         out.to_str().unwrap(),
         "--max-triangles",
         "5",
+        "--max-relative-size",
+        "100",
     ]);
     assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
     let back = mf_io::read_model(&out).unwrap();
@@ -636,4 +642,84 @@ fn sigint_cancels_and_writes_no_output() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(left, ["big.stl"], "temp files left behind: {left:?}");
+}
+
+/// `--units` says what a unitless file's numbers measure (MF-ISSUE-045):
+/// the document records it and 3MF output writes it.
+#[test]
+fn units_flag_sets_the_unit_written_to_3mf() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "remove-small-components",
+        &input,
+        "-o",
+        out.to_str().unwrap(),
+        "--units",
+        "m",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(!stderr.contains("no units"), "{stderr}");
+    assert_eq!(
+        mf_io::read_model(&out).unwrap().unit,
+        mf_io::threemf::Unit::Meter
+    );
+}
+
+/// Without `--units`, a unitless input is read as millimetres, and the
+/// warning says so and how to change it.
+#[test]
+fn unitless_input_without_units_is_read_as_millimetres_with_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "remove-small-components",
+        &input,
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        stderr.contains("warning:")
+            && stderr.contains("no units")
+            && stderr.contains("millimetres")
+            && stderr.contains("--units"),
+        "{stderr}"
+    );
+    assert_eq!(
+        mf_io::read_model(&out).unwrap().unit,
+        mf_io::threemf::Unit::Millimeter
+    );
+}
+
+/// A 3MF says its own unit: `--units` on one is a usage error, not a
+/// silent override.
+#[test]
+fn units_flag_on_a_3mf_is_a_usage_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    mf_io::write_model_path(
+        &mf_io::threemf::Model {
+            unit: mf_io::threemf::Unit::Millimeter,
+            objects: vec![mf_io::threemf::ModelObject {
+                name: "a".into(),
+                mesh: cube(1.0),
+                transform: mf_io::threemf::IDENTITY,
+            }],
+        },
+        &input,
+    )
+    .unwrap();
+    let r = meshfixer(&["inspect", input.to_str().unwrap(), "--units", "cm"]);
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(String::from_utf8_lossy(&r.stderr).contains("--units"));
 }

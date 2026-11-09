@@ -163,12 +163,12 @@ fn small_components_are_tinted_and_clickable() {
     wait_until(&mut h, "small-piece tint", |a| {
         piece
             .iter()
-            .all(|&f| state(a, f) & FaceStates::SMALL_COMPONENT != 0)
+            .all(|&f| state(a, f) & FaceStates::LOOSE_PIECE != 0)
     });
     assert!(
         topo.components[0]
             .iter()
-            .all(|&f| state(h.state(), f) & FaceStates::SMALL_COMPONENT == 0),
+            .all(|&f| state(h.state(), f) & FaceStates::LOOSE_PIECE == 0),
         "the model isn't tinted"
     );
 
@@ -235,7 +235,7 @@ fn every_loose_piece_is_listed_and_tinted() {
     wait_until(&mut h, "loose-piece tint", |a| {
         piece
             .iter()
-            .all(|&f| state(a, f) & FaceStates::SMALL_COMPONENT != 0)
+            .all(|&f| state(a, f) & FaceStates::LOOSE_PIECE != 0)
     });
 }
 

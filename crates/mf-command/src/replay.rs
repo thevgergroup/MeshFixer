@@ -116,15 +116,16 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                     });
                 }
             }
-            Event::Command(record) => {
-                let available = mf_operations::find(&record.op_id).map(|o| o.version());
-                if let Some(v) = available
-                    && v != record.op_version
+            Event::Command(mut record) => {
+                // An earlier version's record replays with the parameters
+                // that make this version do what it did (or not at all).
+                if let Some(op) = mf_operations::find(&record.op_id)
+                    && !op.upgrade_params(record.op_version, &mut record.params)
                 {
                     return Err(LogError::VersionMismatch {
                         op: record.op_id,
                         recorded: record.op_version,
-                        available: v,
+                        available: op.version(),
                     });
                 }
                 // Check the input before running: an output comparison is

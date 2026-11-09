@@ -30,6 +30,9 @@ pub const SELECTED_FACE_STRENGTH: f32 = 0.6;
 pub const HOVER_FACE_STRENGTH: f32 = 0.85;
 pub const LOOSE_PIECE_STRENGTH: f32 = 0.6;
 pub const RECENT_REPAIR_STRENGTH: f32 = 0.45;
+/// Faces around a hole (View ▸ Show hole overview): the hole colour, low
+/// alpha, so a model with hundreds of holes shows where they are.
+pub const HOLE_NEIGHBOURHOOD_STRENGTH: f32 = 0.3;
 /// Faces next to a tangled edge: a light red, so the red edge line stays
 /// the strongest mark.
 pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.35;
@@ -75,7 +78,8 @@ pub fn palette() -> mf_render::Palette {
         boundary_width: BOUNDARY_WIDTH,
         overlay_width: OVERLAY_WIDTH,
         tints: mf_render::FaceTints {
-            small_component: tint(LOOSE_PIECE, LOOSE_PIECE_STRENGTH),
+            loose_piece: tint(LOOSE_PIECE, LOOSE_PIECE_STRENGTH),
+            hole_neighbourhood: tint(HOLE, HOLE_NEIGHBOURHOOD_STRENGTH),
             non_manifold_adj: tint(NON_MANIFOLD, NON_MANIFOLD_FACE_STRENGTH),
             recent_repair: tint(RECENT_REPAIR, RECENT_REPAIR_STRENGTH),
             selected: tint(SELECTED, SELECTED_FACE_STRENGTH),

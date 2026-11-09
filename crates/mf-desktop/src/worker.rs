@@ -248,6 +248,19 @@ pub struct StateInputs {
     pub recent: Arc<[u32]>,
     /// Faces at a non-manifold edge (from the analysis).
     pub tangled: Arc<[u32]>,
+    /// While "Remove loose pieces" is open, only the pieces it would
+    /// remove are tinted as loose (MF-ISSUE-052); `None`: every piece but
+    /// the main body.
+    pub loose_limit: Option<LooseLimit>,
+}
+
+/// Which pieces "Remove loose pieces" would remove: every piece but the
+/// main body up to `max_size` triangles (`None`: none of them), and the
+/// main body too if `main`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LooseLimit {
+    pub max_size: Option<usize>,
+    pub main: bool,
 }
 
 /// The face states of `mesh` for `inputs`: selection, hover, loose pieces
@@ -263,8 +276,24 @@ pub fn face_states(
     let mut flagged: Vec<(u32, u8)> = Vec::new();
     let mut set = |faces: &[u32], bit: u8| flagged.extend(faces.iter().map(|&f| (f, bit)));
     // Components are ordered largest first: the first is the main body.
-    for c in topo.components.iter().skip(1) {
-        set(c, FaceStates::SMALL_COMPONENT);
+    match inputs.loose_limit {
+        None => {
+            for c in topo.components.iter().skip(1) {
+                set(c, FaceStates::LOOSE_PIECE);
+            }
+        }
+        Some(limit) => {
+            for (i, c) in topo.components.iter().enumerate() {
+                let candidate = if i == 0 {
+                    limit.main
+                } else {
+                    limit.max_size.is_some_and(|m| c.len() <= m)
+                };
+                if candidate {
+                    set(c, FaceStates::LOOSE_PIECE);
+                }
+            }
+        }
     }
     set(&inputs.tangled, FaceStates::NON_MANIFOLD_ADJ);
     set(&inputs.recent, FaceStates::RECENT_REPAIR);
@@ -349,7 +378,9 @@ pub struct Overlay {
 }
 
 pub enum Message {
-    Imported(Result<ImportedModel, IoError>),
+    /// An import's result, with the model's size along each axis (the
+    /// union of its objects' bounds; `None` when it has no vertices).
+    Imported(Result<(ImportedModel, Option<[f64; 3]>), IoError>),
     Completed(Box<Result<Completed, CommandError>>),
     Analyzed {
         mesh: Mesh,
@@ -569,7 +600,10 @@ impl Workers {
 
     pub fn import(&self, path: PathBuf, ctx: RunContext) {
         self.spawn_job("import", move || {
-            Message::Imported(mf_io::read_model_with(&path, &ctx))
+            Message::Imported(mf_io::read_model_with(&path, &ctx).map(|model| {
+                let extent = model_extent(&model);
+                (model, extent)
+            }))
         });
     }
 
@@ -840,6 +874,20 @@ impl Workers {
             Message::Exported(result.map(|()| path))
         });
     }
+}
+
+/// The size along each axis of every object of `model` placed by its
+/// transform; `None` with no vertices. O(n): on the import worker.
+fn model_extent(model: &ImportedModel) -> Option<[f64; 3]> {
+    let mut out: Option<(glam::DVec3, glam::DVec3)> = None;
+    for o in &model.objects {
+        let m = mf_render::model_matrix(&o.transform);
+        for (_, p) in o.mesh.vertices() {
+            let w = m.transform_point3(glam::DVec3::from(p));
+            out = Some(out.map_or((w, w), |(lo, hi)| (lo.min(w), hi.max(w))));
+        }
+    }
+    out.map(|(lo, hi)| (hi - lo).to_array())
 }
 
 /// The largest hole the fill operation can take (its `max_loop_edges` limit).

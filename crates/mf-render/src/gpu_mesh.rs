@@ -382,15 +382,17 @@ impl FaceStates {
     /// Part of the current selection (cyan).
     pub const SELECTED: u8 = 1;
     /// A loose piece: not connected to the model's main body (amber).
-    pub const SMALL_COMPONENT: u8 = 2;
+    pub const LOOSE_PIECE: u8 = 2;
     /// What the pointer is over (light).
     pub const HOVER: u8 = 4;
     /// Touches a non-manifold (tangled) edge (red).
     pub const NON_MANIFOLD_ADJ: u8 = 8;
     /// Made by one of the last few commands (green).
     pub const RECENT_REPAIR: u8 = 16;
+    /// Within one ring of a hole (the hole overview: a faint hole tint).
+    pub const HOLE_NEIGHBOURHOOD: u8 = 32;
     /// Every flag.
-    pub const ALL: u8 = 31;
+    pub const ALL: u8 = 63;
 
     /// No face flagged: what a freshly uploaded [`GpuMesh`] holds. O(chunks).
     pub fn empty(mesh: &Mesh) -> FaceStates {

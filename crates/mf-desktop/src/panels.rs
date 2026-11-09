@@ -7,8 +7,11 @@ use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
 
 use crate::app::{MeshFixerApp, Tool, TreeItem};
-use crate::defects::{Defect, count, defect_copy, measure, unit_symbol};
+use crate::defects::{Defect, count, defect_copy, measure, thousands, unit_symbol};
 use crate::theme;
+
+/// What an empty document says, in the tree and the 3D view.
+pub const EMPTY_STATE: &str = "Open a mesh (Cmd+O) or drop a file here";
 
 /// Panel widths (points). With the bottom bar, they leave the 3D view at
 /// least 60% of a 1440×900 window.
@@ -22,7 +25,10 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 let idle = app.busy.is_none();
-                if ui.add_enabled(idle, egui::Button::new("Open…")).clicked() {
+                if ui
+                    .add_enabled(idle, egui::Button::new("Open…").shortcut_text("Cmd+O"))
+                    .clicked()
+                {
                     app.open_dialog();
                     ui.close();
                 }
@@ -335,6 +341,44 @@ fn history_tree(app: &MeshFixerApp, ui: &mut egui::Ui) -> Option<mf_command::Rev
         }
     }
     clicked
+}
+
+/// Apply's question before a large removal (MF-ISSUE-052): plain words,
+/// and a choice. Esc keeps the pieces.
+pub fn confirm_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    let Some(message) = app.confirmation().map(str::to_owned) else {
+        return;
+    };
+    let mut answer = None;
+    egui::Window::new("Remove these pieces?")
+        .collapsible(false)
+        .resizable(false)
+        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+        .show(ctx, |ui| {
+            ui.set_max_width(360.0);
+            ui.label(&message);
+            ui.add_space(6.0);
+            ui.horizontal(|ui| {
+                if ui.button("Remove them").clicked() {
+                    answer = Some(true);
+                }
+                if ui
+                    .button("Keep them")
+                    .on_hover_text(
+                        "Esc; raise Max relative size or lower Max triangles to remove fewer",
+                    )
+                    .clicked()
+                {
+                    answer = Some(false);
+                }
+            });
+        });
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        answer = Some(false);
+    }
+    if let Some(go) = answer {
+        app.confirm(go);
+    }
 }
 
 /// The last replay's per-command verdicts.
@@ -704,7 +748,7 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .collect();
     if objects.is_empty() {
-        ui.weak("Open a mesh with File > Open");
+        ui.weak(EMPTY_STATE);
     }
     for (id, name, tris) in objects {
         let active = app.active == Some(id);
@@ -1166,6 +1210,20 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                 ui.end_row();
             }
         });
+    if tool.selection.is_none()
+        && let Some(p) = app.removal_preview()
+    {
+        let share = 100.0 * p.triangles as f64 / p.of_triangles.max(1) as f64;
+        ui.label(
+            RichText::new(format!(
+                "Removes {} of {} pieces ({share:.1}% of triangles)",
+                thousands(p.pieces),
+                thousands(p.of_pieces)
+            ))
+            .color(theme::TEXT_MUTED),
+        )
+        .on_hover_text("Tinted in the view: the pieces Apply would remove");
+    }
     ui.horizontal(|ui| {
         let can_apply = app.busy.is_none() && app.active.is_some();
         if ui

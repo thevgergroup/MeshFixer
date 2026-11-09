@@ -86,7 +86,7 @@ They are defined once, in `theme.rs`, and used by the panels and the renderer al
 | `HOVER` | light `#E8EEF5` | what the pointer is over | the outline (loops, edges) or glow (pieces: strength 0.85 and barely shaded, so it reads near-white at any angle) of the defect under the pointer, in the tree or in the 3D view (where a tooltip gives its size); widget hover outlines |
 | `HOLE` | orange `#FF8020` | an open boundary (hole) | every boundary outline in the view; the Holes header |
 | `CRACK` | magenta `#E646D2` | a narrow crack (edges almost touch) | crack outlines; the Narrow cracks header |
-| `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | tint of every loose piece (every piece but the main body: the same set the tree lists, whatever its size); the Loose pieces header |
+| `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | tint of every loose piece (every piece but the main body: the same set the tree lists, whatever its size); while "Remove loose pieces" is open, only the pieces its Apply would remove (state bit `LOOSE_PIECE`); the Loose pieces header |
 | `NON_MANIFOLD` | red `#EB3434` | a tangled (non-manifold) edge | tangled-edge lines, and a light red tint (strength 0.35) on the faces that meet at them; the Non-manifold edges header |
 | `RECENT_REPAIR` | green `#50CD78` | faces made by the last 3 commands on the active object | a tint, toggled by View ▸ Highlight recent repairs or the legend (on by default) |
 | inactive object | desaturated (saturation 0, brightness 0.55) | not the active object | the whole object, outlines included |
@@ -129,7 +129,7 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
 | non-manifold | "Tangled edge" | "Tangled edge · 3 faces" | "More than two faces share this edge · 3 faces" | "Select the faces involved" |
 | over cap | "Very large opening" | "Very large opening · 1500 edges · 88.0 mm" | (as hole) | "Needs the large-hole method (not yet available)" |
 
-- **Measurements** are in the document's units: mm when a file has none (STL, OBJ), or µm, cm, in, ft or m from a 3MF. They are given to three significant figures (12.4, 3.41, 0.500), and as whole numbers from 100 up. A perimeter that overflowed reads "perimeter too large to measure".
+- **Measurements** are in the document's units: the unit chosen when a unitless file (STL, OBJ) was opened (see "Units" below), or µm, cm, in, ft or m from a 3MF. They are given to three significant figures (12.4, 3.41, 0.500), and as whole numbers from 100 up. A perimeter that overflowed reads "perimeter too large to measure".
 - **Classification** runs on the analysis worker, never the UI thread (MF-RT-001):
   - A boundary loop is a **narrow crack** when its vector area is below the degenerate-area threshold `inspect` and fill_holes use (1e-12 × bounding-box diagonal²).
   - A loop with more edges than fill_holes can take (the spec's `max_loop_edges` maximum, 1000) is **over cap**.
@@ -137,6 +137,18 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
   - Each non-manifold edge is a **tangled edge**, listed with the faces that share it.
 - **Numbering:** "Hole N" counts holes in the tree's order.
 - **Operation names** come from `defects::operation_label` and use the same words in Properties and the history breadcrumb: Fill hole / Fill holes (n) / Fill all holes, and Remove piece / Remove pieces (n) / Remove loose pieces.
+
+## Units (MF-ISSUE-045)
+
+STL and OBJ files don't say what their numbers measure. Opening one asks, in a dialog titled "Units for <file>": one radio row per unit, each giving the model's size read that way, with millimetres alongside ("Metres · 0.495 × 0.410 × 0.300 m (495 × 410 × 300 mm)"). The unit that makes the model between 10 mm and 2 m is preselected, trying millimetres, metres, centimetres and inches in that order (millimetres if none does), so a scan in metres opens at metre scale. Import records the choice in the document and 3MF export writes it; Cancel or Esc opens nothing. 3MF files carry their unit and aren't asked about. Without the prompt (tests, the CLI without `--units mm|cm|m|in`) a unitless file reads as millimetres, with a warning saying so.
+
+## Removing loose pieces safely (MF-ISSUE-052)
+
+"Remove loose pieces" (the whole object) only removes a piece that is under **Max triangles** *and* no bigger than **Max relative size** (default 1%) of the largest piece, so a design made of many parts keeps them. While the tool is open, Properties says what Apply would do ("Removes 1,050 of 1,100 pieces (6.4% of triangles)") and the view tints just those pieces. If that is more than half of the pieces or more than 10% of the triangles, Apply asks first: "This would delete 1,050 of 1,100 parts of 'verlan dress'. These may be part of the design, not debris." with **Remove them** and **Keep them** (Esc keeps them).
+
+## Messages
+
+Every error ends with what to do next ("…Split it in another tool, or ask us to raise the limit."; "…Choose another location and try again."). An empty document says how to start: "Open a mesh (Cmd+O) or drop a file here" (the bundled fonts have no ⌘ glyph). A file dropped on the window opens, one at a time.
 
 ## Metrics (View ▸ Metrics)
 

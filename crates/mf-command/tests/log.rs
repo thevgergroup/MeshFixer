@@ -23,10 +23,40 @@ fn setup(dir: &Path) -> Session {
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target: id,
-        raw_params: BTreeMap::from([("max_triangles".into(), "5".into())]),
+        // Every piece but the largest under 5 triangles, however big the
+        // largest is.
+        raw_params: BTreeMap::from([
+            ("max_triangles".into(), "5".into()),
+            ("max_relative_size".into(), "100".into()),
+        ]),
     })
     .unwrap();
     s
+}
+
+/// A record made by version 1 of remove_small_components (before
+/// `max_relative_size` existed) replays exactly: it runs with no relative
+/// limit, as it did then (MF-ISSUE-052).
+#[test]
+fn version_1_records_replay_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let s = setup(dir.path());
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let path = log.join("commands.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"op_version\":2"), "{text}");
+    assert!(text.contains("\"max_relative_size\":100.0,"), "{text}");
+    let v1 = text
+        .replace("\"op_version\":2", "\"op_version\":1")
+        .replace("\"max_relative_size\":100.0,", "");
+    std::fs::write(&path, v1).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::Exact),
+        "{:?}",
+        report.results
+    );
 }
 
 #[test]

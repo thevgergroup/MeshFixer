@@ -154,6 +154,27 @@ fn input_arg() -> Arg {
         .help("Input mesh (.stl, .obj or .3mf)")
 }
 
+/// `--units`: what a unitless input's (STL, OBJ) numbers measure
+/// (MF-ISSUE-045). Without it they're read as millimetres, with a warning.
+fn units_arg() -> Arg {
+    Arg::new("units")
+        .long("units")
+        .value_parser(["mm", "cm", "m", "in"])
+        .help("Units of an STL or OBJ input (default: mm, with a warning)")
+}
+
+/// The unit `--units` names, if given.
+fn units_of(m: &ArgMatches) -> Option<mf_io::threemf::Unit> {
+    use mf_io::threemf::Unit;
+    m.get_one::<String>("units").map(|u| match u.as_str() {
+        "cm" => Unit::Centimeter,
+        "m" => Unit::Meter,
+        "in" => Unit::Inch,
+        "mm" => Unit::Millimeter,
+        other => unreachable!("--units only accepts mm, cm, m or in, not {other}"),
+    })
+}
+
 fn output_arg() -> Arg {
     Arg::new("output")
         .short('o')
@@ -202,6 +223,7 @@ fn cli() -> Command {
             Command::new("inspect")
                 .about("Report mesh diagnostics")
                 .arg(input_arg())
+                .arg(units_arg())
                 .arg(
                     Arg::new("json")
                         .long("json")
@@ -364,6 +386,7 @@ fn cli() -> Command {
             Command::new("run")
                 .about("Run a sequence of operations, optionally saving a command log")
                 .arg(input_arg())
+                .arg(units_arg())
                 .arg(output_arg())
                 .arg(
                     Arg::new("op")
@@ -409,6 +432,7 @@ fn cli() -> Command {
         cmd = cmd.subcommand(
             mf_spec::cli::to_command(spec)
                 .arg(input_arg())
+                .arg(units_arg())
                 .arg(output_arg())
                 .arg(select_arg(false)),
         );
@@ -419,10 +443,26 @@ fn cli() -> Command {
 /// Import every object of the file; commands act on the first one.
 fn open(
     path: &Path,
+    units: Option<mf_io::threemf::Unit>,
     metrics: &mut Metrics,
     ctx: &RunContext,
 ) -> Result<(Session, ObjectId), Failure> {
-    let model = metrics.record("import", || mf_io::read_model_with(path, ctx))?;
+    let unitless = !matches!(Format::from_path(path), Some(Format::ThreeMf) | None);
+    if units.is_some() && !unitless {
+        return Err(Failure::Usage(format!(
+            "--units is for STL and OBJ files; {} says its own unit",
+            path.display()
+        )));
+    }
+    let mut model = metrics.record("import", || mf_io::read_model_with(path, ctx))?;
+    match units {
+        Some(u) => model.unit = u,
+        None if unitless => eprintln!(
+            "warning: {} has no units; read as millimetres (use --units mm|cm|m|in to say otherwise)",
+            path.display()
+        ),
+        None => {}
+    }
     let mut session = Session::new();
     let (ids, warnings) = session.import_model(model);
     for w in &warnings {
@@ -495,7 +535,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<()
     let path = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let (mut session, id) = open(path, metrics, ctx)?;
+    let (mut session, id) = open(path, units_of(m), metrics, ctx)?;
     if let Some(mesh) = session.document().object(id).and_then(|o| o.mesh()) {
         let mesh = mesh.clone();
         metrics.record("topology", || mesh.topology_with(ctx))?;
@@ -1069,7 +1109,7 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
     }
-    let (mut session, id) = open(input, metrics, ctx)?;
+    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
     let import = session.current();
     for Step { op, raw, select } in seq {
         let selection = selection_for(&session, id, import, &select)?;
@@ -1153,7 +1193,7 @@ fn run_operation(
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
-    let (mut session, id) = open(input, metrics, ctx)?;
+    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
     let selection = selection_for(&session, id, session.current(), &select)?;
     let outcome = metrics.record("operation", || {
         execute(

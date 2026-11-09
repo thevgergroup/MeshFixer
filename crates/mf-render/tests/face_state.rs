@@ -175,7 +175,7 @@ fn state_bits_tint_the_right_faces() {
     assert!(small.iter().all(|&f| (f as usize) / CHUNK == 2));
     let mut bits = flags(&mesh, selected, FaceStates::SELECTED);
     for f in small {
-        bits[f as usize] |= FaceStates::SMALL_COMPONENT;
+        bits[f as usize] |= FaceStates::LOOSE_PIECE;
     }
     let states = FaceStates::from_face_flags(&mesh, &bits);
 
@@ -208,7 +208,7 @@ fn state_bits_tint_the_right_faces() {
             &queue,
             &gpu,
             &cam,
-            all & !u32::from(FaceStates::SMALL_COMPONENT),
+            all & !u32::from(FaceStates::LOOSE_PIECE),
         );
         let a = pixel(&image, &cam, at_small);
         assert!(!amber(a), "limit {limit}: hidden tint: {a:?}");

@@ -42,7 +42,10 @@ fn removes_island() {
         .execute(
             &input,
             &mf_operations::Target::WholeObject,
-            &params(op.id(), &[("max_triangles", "5")]),
+            &params(
+                op.id(),
+                &[("max_triangles", "5"), ("max_relative_size", "100")],
+            ),
             &mf_operations::RunContext::none(),
         )
         .unwrap();
@@ -64,7 +67,10 @@ fn kept_faces_keep_relative_order() {
         .execute(
             &input,
             &mf_operations::Target::WholeObject,
-            &params(op.id(), &[("max_triangles", "5")]),
+            &params(
+                op.id(),
+                &[("max_triangles", "5"), ("max_relative_size", "100")],
+            ),
             &mf_operations::RunContext::none(),
         )
         .unwrap()
@@ -82,7 +88,10 @@ fn keep_largest_guard() {
         .execute(
             &input,
             &mf_operations::Target::WholeObject,
-            &params(op.id(), &[("max_triangles", "50")]),
+            &params(
+                op.id(),
+                &[("max_triangles", "50"), ("max_relative_size", "100")],
+            ),
             &mf_operations::RunContext::none(),
         )
         .unwrap()
@@ -96,7 +105,11 @@ fn keep_largest_guard() {
             &mf_operations::Target::WholeObject,
             &params(
                 op.id(),
-                &[("max_triangles", "50"), ("keep_largest", "false")],
+                &[
+                    ("max_triangles", "50"),
+                    ("max_relative_size", "100"),
+                    ("keep_largest", "false"),
+                ],
             ),
             &mf_operations::RunContext::none(),
         )
@@ -116,7 +129,10 @@ fn input_not_mutated() {
     op.execute(
         &input,
         &mf_operations::Target::WholeObject,
-        &params(op.id(), &[("max_triangles", "5")]),
+        &params(
+            op.id(),
+            &[("max_triangles", "5"), ("max_relative_size", "100")],
+        ),
         &mf_operations::RunContext::none(),
     )
     .unwrap();
@@ -171,7 +187,10 @@ mod edit_based {
             .execute(
                 &input,
                 &Target::WholeObject,
-                &params(op.id(), &[("max_triangles", "5")]),
+                &params(
+                    op.id(),
+                    &[("max_triangles", "5"), ("max_relative_size", "100")],
+                ),
                 &mf_operations::RunContext::none(),
             )
             .unwrap();

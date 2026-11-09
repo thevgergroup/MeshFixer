@@ -17,7 +17,8 @@ use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::defects::{Defect, operation_label};
+use crate::defects::{Defect, operation_label, thousands};
+use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
 use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
@@ -45,6 +46,11 @@ pub struct Settings {
     /// Replaces the analysis of each revision (`None`: the real one). For
     /// tests, which inject failures through it.
     pub analyze: Option<worker::AnalyzeFn>,
+    /// Ask for the unit of a unitless file (STL, OBJ) when it's opened
+    /// (MF-ISSUE-045): the app as people launch it does. Off, such a file
+    /// reads as millimetres with a warning saying so, as the CLI does
+    /// without `--units` (tests and scripted use).
+    pub unit_prompt: bool,
 }
 
 /// How the running job (the one the status bar shows) can be stopped.
@@ -67,6 +73,13 @@ pub struct Tool {
     /// Parameters the target decides (hidden from the panel): an explicit
     /// target already says which hole or piece, so size limits follow it.
     pub fixed: BTreeMap<String, ParamValue>,
+}
+
+/// An Apply waiting for the user's go-ahead (MF-ISSUE-052).
+#[derive(Debug, Clone)]
+struct Confirm {
+    tool: Tool,
+    message: String,
 }
 
 /// A camera move waiting for the bounds it needs (computed on workers).
@@ -313,6 +326,12 @@ pub struct MeshFixerApp {
     /// Shares the workers' upload totals.
     gpu_totals: worker::Gpu,
     rx: Receiver<Message>,
+    /// Asks for the unit of unitless files ([`Settings::unit_prompt`]).
+    ask_units: bool,
+    /// A unitless file read and waiting for its unit.
+    unit_prompt: Option<UnitPrompt>,
+    /// An Apply waiting for confirmation.
+    confirm: Option<Confirm>,
 }
 
 impl MeshFixerApp {
@@ -454,6 +473,9 @@ impl MeshFixerApp {
             workers,
             gpu_totals,
             rx,
+            ask_units: settings.unit_prompt,
+            unit_prompt: None,
+            confirm: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -498,7 +520,67 @@ impl MeshFixerApp {
                 // document and the newly imported object can be off screen.
                 self.fit_camera();
             }
-            None => self.error = Some("The file contains no mesh objects".into()),
+            None => {
+                self.error = Some(
+                    "The file contains no mesh objects. Open a file with at least one mesh \
+                     (STL, OBJ or 3MF)."
+                        .into(),
+                )
+            }
+        }
+    }
+
+    /// A file was read: a unitless one (STL, OBJ) asks for its unit first
+    /// (MF-ISSUE-045) when the app asks; otherwise it's added now. Without
+    /// the prompt it reads as millimetres, with a warning saying so.
+    fn imported(&mut self, mut model: ImportedModel, extent: Option<[f64; 3]>) {
+        if model.source.format == Format::ThreeMf {
+            self.import_model(model);
+            return;
+        }
+        match extent {
+            Some(extent) if self.ask_units => {
+                let name = model
+                    .source
+                    .path
+                    .file_name()
+                    .map_or_else(|| "the file".into(), |n| n.to_string_lossy().into_owned());
+                self.unit_prompt = Some(UnitPrompt::new(name, extent, model));
+            }
+            _ => {
+                model.warnings.push(format!(
+                    "{} has no units; read as millimetres",
+                    model.source.path.display()
+                ));
+                self.import_model(model);
+            }
+        }
+    }
+
+    /// The unitless file waiting for its unit, if one is.
+    pub fn unit_prompt(&self) -> Option<&UnitPrompt> {
+        self.unit_prompt.as_ref()
+    }
+
+    /// Show the unit dialog while a file waits for its unit, and act on
+    /// the answer.
+    fn unit_dialog(&mut self, ctx: &egui::Context) {
+        let Some(prompt) = self.unit_prompt.as_mut() else {
+            return;
+        };
+        match crate::import_dialog::show(prompt, ctx) {
+            None => {}
+            Some(true) => {
+                if let Some(prompt) = self.unit_prompt.take() {
+                    self.import_model(prompt.into_model());
+                }
+            }
+            Some(false) => {
+                if let Some(prompt) = self.unit_prompt.take() {
+                    self.workers.discard(prompt);
+                }
+                self.status = Some("Import cancelled: nothing opened".into());
+            }
         }
     }
 
@@ -576,7 +658,11 @@ impl MeshFixerApp {
         };
         match self.save_log_to(&path) {
             Ok(()) => self.status = Some(format!("Saved command log {}", path.display())),
-            Err(e) => self.error = Some(format!("Saving command log failed: {e}")),
+            Err(e) => {
+                self.error = Some(format!(
+                    "Saving the command log failed: {e}. Choose another folder and try again."
+                ))
+            }
         }
     }
 
@@ -596,15 +682,25 @@ impl MeshFixerApp {
     }
 
     pub fn export_dialog(&mut self) {
-        let Some(mesh) = self.active_mesh().cloned() else {
+        if self.active_mesh().is_none() {
             return;
-        };
+        }
         let Some(path) = rfd::FileDialog::new()
             .add_filter("3MF (all objects)", &["3mf"])
             .add_filter("Binary STL", &["stl"])
             .add_filter("OBJ", &["obj"])
             .save_file()
         else {
+            return;
+        };
+        self.export_to(path);
+    }
+
+    /// Export to `path`, in the format its extension names: 3MF writes
+    /// every object with its transform and the document's unit; STL and
+    /// OBJ write the active object.
+    pub fn export_to(&mut self, path: PathBuf) {
+        let Some(mesh) = self.active_mesh().cloned() else {
             return;
         };
         match Format::from_path(&path) {
@@ -614,14 +710,23 @@ impl MeshFixerApp {
                     self.workers
                         .export(worker::ExportJob::Model(model), path, run);
                 }
-                Err(e) => self.error = Some(e),
+                Err(e) => {
+                    self.error = Some(format!(
+                        "Can't export a 3MF: {e}. Export the mesh objects one at a time as STL or OBJ."
+                    ))
+                }
             },
             Some(format) => {
                 let run = self.start_job(format!("Exporting {}", path.display()), true);
                 self.workers
                     .export(worker::ExportJob::Mesh(mesh, format), path, run);
             }
-            None => self.error = Some(format!("Unsupported export format: {}", path.display())),
+            None => {
+                self.error = Some(format!(
+                    "Can't export to {}: use a .3mf, .stl or .obj file name",
+                    path.display()
+                ))
+            }
         }
     }
 
@@ -766,8 +871,55 @@ impl MeshFixerApp {
         Vec::new()
     }
 
-    /// Validate on the UI thread, run on a worker, commit when it returns.
+    /// Apply, unless it would remove more than half of the pieces or more
+    /// than 10% of the triangles (MF-ISSUE-052): then it asks first
+    /// ([`Self::confirmation`]).
     pub fn apply(&mut self, tool: &Tool) {
+        if tool.op_id == "mesh.remove_small_components"
+            && tool.selection.is_none()
+            && let Some(p) = self.removal_preview()
+            && p.needs_confirmation()
+        {
+            let name = self
+                .active
+                .and_then(|id| self.session.document().object(id))
+                .map_or_else(String::new, |o| o.name.clone());
+            let share = 100.0 * p.triangles as f64 / p.of_triangles.max(1) as f64;
+            let triangles = if 10 * p.triangles > p.of_triangles {
+                format!(", {share:.0}% of its triangles")
+            } else {
+                String::new()
+            };
+            self.confirm = Some(Confirm {
+                tool: tool.clone(),
+                message: format!(
+                    "This would delete {} of {} parts of '{name}'{triangles}. \
+                     These may be part of the design, not debris.",
+                    thousands(p.pieces),
+                    thousands(p.of_pieces),
+                ),
+            });
+            return;
+        }
+        self.run_tool(tool);
+    }
+
+    /// The question Apply is waiting on, if any.
+    pub fn confirmation(&self) -> Option<&str> {
+        self.confirm.as_ref().map(|c| c.message.as_str())
+    }
+
+    /// Answer the question Apply asked: go ahead, or leave it.
+    pub fn confirm(&mut self, go: bool) {
+        if let Some(c) = self.confirm.take()
+            && go
+        {
+            self.run_tool(&c.tool);
+        }
+    }
+
+    /// Validate on the UI thread, run on a worker, commit when it returns.
+    fn run_tool(&mut self, tool: &Tool) {
         let Some(target) = self.active else { return };
         let mut params = self.params_for(&tool.op_id).clone();
         params.extend(tool.fixed.clone());
@@ -785,7 +937,12 @@ impl MeshFixerApp {
                 let run = self.start_job(format!("{}…", tool.label), true);
                 self.workers.run(prepared, run);
             }
-            Err(e) => self.error = Some(e.to_string()),
+            Err(e) => {
+                self.error = Some(format!(
+                    "{} can't run: {e}. Change the settings and Apply again.",
+                    tool.label
+                ))
+            }
         }
     }
 
@@ -1227,14 +1384,14 @@ impl MeshFixerApp {
             Message::Imported(result) => {
                 let too_late = self.finish_job();
                 match result {
-                    Ok(model) => {
-                        self.import_model(model);
+                    Ok((model, extent)) => {
+                        self.imported(model, extent);
                         if too_late {
                             self.status = Some(TOO_LATE.into());
                         }
                     }
                     Err(IoError::Cancelled) => self.status = Some(CANCELLED.into()),
-                    Err(e) => self.error = Some(format!("Import failed: {e}")),
+                    Err(e) => self.error = Some(import_failed(&e)),
                 }
             }
             Message::Completed(result) => {
@@ -1262,7 +1419,12 @@ impl MeshFixerApp {
                         self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
-                    Err(e) => self.error = Some(e.to_string()),
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "The operation failed: {e}. Nothing was changed; try other settings \
+                             or another target."
+                        ))
+                    }
                 }
             }
             Message::Hovered {
@@ -1310,7 +1472,10 @@ impl MeshFixerApp {
                     self.hover_picks.in_flight = false;
                     self.hover_picks.sent = None;
                 }
-                self.error = Some(format!("Internal error in {what}: {message}"));
+                self.error = Some(format!(
+                    "Internal error in {what}: {message}. Save the command log (File ▸ Save \
+                     Command Log) and report it."
+                ));
             }
             Message::Picked {
                 object,
@@ -1392,7 +1557,7 @@ impl MeshFixerApp {
                 }
                 self.error = Some(format!(
                     "Couldn't analyse this object, so its defects can't be shown \
-                     (internal error: {message})"
+                     (internal error: {message}). Undo the last step, or open the file again."
                 ));
                 self.analysis_failed = Some((mesh, transform));
             }
@@ -1412,7 +1577,12 @@ impl MeshFixerApp {
                 self.finish_job();
                 match result {
                     Ok(lines) => self.replay_report = Some(lines),
-                    Err(e) => self.error = Some(format!("Replay failed: {e}")),
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "Replay failed: {e}. Check the log's source files are where they were \
+                             when it was saved."
+                        ))
+                    }
                 }
             }
             Message::Exported(result) => {
@@ -1423,7 +1593,11 @@ impl MeshFixerApp {
                     }
                     Ok(path) => self.status = Some(format!("Exported {}", path.display())),
                     Err(IoError::Cancelled) => self.status = Some(CANCELLED_EXPORT.into()),
-                    Err(e) => self.error = Some(format!("Export failed: {e}")),
+                    Err(e) => {
+                        self.error = Some(format!(
+                            "Export failed: {e}. Choose another location and try again."
+                        ))
+                    }
                 }
             }
         }
@@ -2040,7 +2214,61 @@ impl MeshFixerApp {
                 .analyses
                 .get(mesh)
                 .map_or_else(|| Arc::from([]), |a| a.tangled_faces.clone()),
+            loose_limit: self.loose_limit(),
         }
+    }
+
+    /// The whole-object "Remove loose pieces" tool's thresholds, while it
+    /// is open in Properties (nothing targeted): (max triangles, max share
+    /// of the largest piece in %, keep the largest).
+    fn removal_thresholds(&self) -> Option<(usize, f64, bool)> {
+        const OP: &str = "mesh.remove_small_components";
+        if self.tool.as_deref() != Some(OP) || !self.targeted_tools().is_empty() {
+            return None;
+        }
+        let spec = mf_spec::builtin::get(OP)?;
+        let value = |name: &str| {
+            self.op_params
+                .get(OP)
+                .and_then(|p| p.get(name).cloned())
+                .or_else(|| {
+                    spec.parameters
+                        .iter()
+                        .find(|p| p.name == name)
+                        .map(|p| p.kind.default_value())
+                })
+        };
+        match (
+            value("max_triangles")?,
+            value("max_relative_size")?,
+            value("keep_largest")?,
+        ) {
+            (ParamValue::Int(t), ParamValue::Float(r), ParamValue::Bool(k)) => {
+                Some((t.max(0) as usize, r, k))
+            }
+            _ => None,
+        }
+    }
+
+    /// What Apply on the open "Remove loose pieces" tool would remove from
+    /// the active object (MF-ISSUE-052). O(log pieces): asked every frame.
+    pub fn removal_preview(&self) -> Option<mf_operations::RemovalPreview> {
+        let (max, share, keep) = self.removal_thresholds()?;
+        let a = self.current_analysis()?;
+        Some(a.defects.pieces.preview(max, share, keep))
+    }
+
+    /// Which pieces the open "Remove loose pieces" tool would remove, for
+    /// the view's tint.
+    fn loose_limit(&self) -> Option<worker::LooseLimit> {
+        let (max, share, keep) = self.removal_thresholds()?;
+        let pieces = &self.current_analysis()?.defects.pieces;
+        let all = pieces.preview(max, share, keep);
+        let rest = pieces.preview(max, share, true);
+        Some(worker::LooseLimit {
+            max_size: pieces.candidate_limit(max, share),
+            main: all.pieces > rest.pieces,
+        })
     }
 
     /// True if a defect overlay switched on by `on` is drawn (View ▸ Show
@@ -2055,10 +2283,7 @@ impl MeshFixerApp {
         [
             (s.selection, FaceStates::SELECTED),
             (s.hover, FaceStates::HOVER),
-            (
-                self.defect_shown(s.loose_pieces),
-                FaceStates::SMALL_COMPONENT,
-            ),
+            (self.defect_shown(s.loose_pieces), FaceStates::LOOSE_PIECE),
             (
                 self.defect_shown(s.non_manifold),
                 FaceStates::NON_MANIFOLD_ADJ,
@@ -2113,6 +2338,7 @@ impl MeshFixerApp {
                 hover: on.then_some(OverlayTarget::Object),
                 recent: Arc::from([]),
                 tangled: Arc::from([]),
+                loose_limit: None,
             };
             if render.wants_states(&inputs) {
                 self.state_seq += 1;
@@ -2424,7 +2650,39 @@ impl MeshFixerApp {
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
         // …and to an open popup or menu.
-        let typing = ctx.memory(|m| m.focused().is_some()) || egui::Popup::is_any_open(&ctx);
+        let typing = ctx.memory(|m| m.focused().is_some())
+            || egui::Popup::is_any_open(&ctx)
+            || self.unit_prompt.is_some()
+            || self.confirm.is_some();
+        // A file dropped on the window opens, as File ▸ Open does; so does
+        // Cmd/Ctrl+O.
+        let (dropped, open) = ctx.input_mut(|i| {
+            let dropped: Vec<PathBuf> = i
+                .raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_owned())
+                .collect();
+            (
+                dropped,
+                !typing && i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
+            )
+        });
+        if self.busy.is_none() {
+            if let Some(path) = dropped.first().cloned() {
+                if dropped.len() > 1 {
+                    self.error = Some(format!(
+                        "{} files were dropped; MeshFixer opens one at a time, so only {} was \
+                         opened. Drop the others one by one.",
+                        dropped.len(),
+                        path.display()
+                    ));
+                }
+                self.open(path);
+            } else if open {
+                self.open_dialog();
+            }
+        }
         let (undo, redo, frame, home, escape, zoom) = ctx.input_mut(|i| {
             if typing {
                 return (false, false, false, false, false, 0);
@@ -2491,6 +2749,8 @@ impl MeshFixerApp {
         crate::panels::properties_panel(self, ui);
         crate::panels::replay_window(self, &ctx);
         crate::panels::controls_window(self, &ctx);
+        self.unit_dialog(&ctx);
+        crate::panels::confirm_window(self, &ctx);
         self.refresh_metrics();
         crate::panels::metrics_window(self, &ctx);
         self.refresh_overlays();
@@ -2501,7 +2761,7 @@ impl MeshFixerApp {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
             Some(_) if self.analysis_failed_for_active() => "Couldn't analyse this object",
             Some(_) => "Analyzing…",
-            None => "Open a mesh with File > Open (STL, OBJ or 3MF)",
+            None => crate::panels::EMPTY_STATE,
         };
         let show_boundaries = self.defect_shown(self.shown.holes);
         let updating = self.is_analyzing();
@@ -2609,6 +2869,29 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
                 None => raw,
             }
         }
+    }
+}
+
+/// Why an import failed, and what to do about it.
+fn import_failed(e: &IoError) -> String {
+    match e {
+        IoError::LimitExceeded {
+            what: "declared triangle count",
+            limit,
+            ..
+        } => format!(
+            "This file is larger than MeshFixer currently opens ({} M triangles). Split it in \
+             another tool, or ask us to raise the limit.",
+            limit / 1_000_000
+        ),
+        IoError::LimitExceeded { what, limit, found } => format!(
+            "This file is larger than MeshFixer currently opens (its {what} is {found}, over \
+             the limit of {limit}). Split it in another tool, or ask us to raise the limit."
+        ),
+        e => format!(
+            "Import failed: {e}. Check that the file opens in another program, or export it \
+             again from the program that made it."
+        ),
     }
 }
 
@@ -2747,6 +3030,27 @@ mod tests {
         let big = serde_json::json!({ "values": (0..1000).collect::<Vec<_>>() });
         let text = plain_report("mesh.inspect", &big);
         assert!(text.chars().count() <= 161 && text.ends_with('…'), "{text}");
+    }
+
+    /// A file over the import limit says so in plain words, with what to
+    /// do next (Task 12 copy pass).
+    #[test]
+    fn import_errors_say_what_to_do_next() {
+        let big = IoError::LimitExceeded {
+            what: "declared triangle count",
+            limit: 50_000_000,
+            found: 80_000_000,
+        };
+        assert_eq!(
+            import_failed(&big),
+            "This file is larger than MeshFixer currently opens (50 M triangles). Split it in \
+             another tool, or ask us to raise the limit."
+        );
+        let other = IoError::Parse {
+            line: 3,
+            message: "bad vertex".into(),
+        };
+        assert!(import_failed(&other).ends_with("from the program that made it."));
     }
 
     /// The status line explains a lost selection in words, never a debug dump.

@@ -142,6 +142,9 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
     harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
+    // Most of the pieces: it asks first (MF-ISSUE-052).
+    harness.run_steps(2);
+    harness.get_by_label("Remove them").click();
     harness.step();
     wait_shown(&mut harness, "branch");
     assert_ne!(harness.state().session.current(), a);

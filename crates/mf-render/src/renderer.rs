@@ -54,7 +54,9 @@ pub struct SelectionCue {
 /// otherwise later tints in this list draw over earlier ones.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaceTints {
-    pub small_component: [f32; 4],
+    pub loose_piece: [f32; 4],
+    /// Faces around a hole (the hole overview): drawn under every other tint.
+    pub hole_neighbourhood: [f32; 4],
     pub non_manifold_adj: [f32; 4],
     pub recent_repair: [f32; 4],
     pub selected: [f32; 4],
@@ -74,7 +76,8 @@ impl Palette {
         boundary_width: 1.0,
         overlay_width: 1.0,
         tints: FaceTints {
-            small_component: [1.0, 0.78, 0.16, 0.6],
+            loose_piece: [1.0, 0.78, 0.16, 0.6],
+            hole_neighbourhood: [1.0, 0.5, 0.13, 0.25],
             non_manifold_adj: [0.92, 0.2, 0.2, 0.35],
             recent_repair: [0.31, 0.8, 0.47, 0.45],
             selected: [0.16, 0.82, 1.0, 0.6],
@@ -101,7 +104,7 @@ struct SceneUniforms {
     /// Render target size in pixels (x, y), for screen-space line widths.
     viewport: [f32; 4],
     /// [`FaceTints`], in its order.
-    tints: [[f32; 4]; 5],
+    tints: [[f32; 4]; 6],
     /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity.
     cue: [f32; 4],
 }
@@ -448,11 +451,12 @@ impl MeshRenderer {
             inactive: [p.inactive_saturation, p.inactive_brightness, 0.0, 0.0],
             viewport: [size.0 as f32, size.1 as f32, 0.0, 0.0],
             tints: [
-                p.tints.small_component,
+                p.tints.loose_piece,
                 p.tints.non_manifold_adj,
                 p.tints.recent_repair,
                 p.tints.selected,
                 p.tints.hover,
+                p.tints.hole_neighbourhood,
             ],
             cue: [self.cue.emphasis.clamp(0.0, 1.0), p.xray_opacity, 0.0, 0.0],
         };

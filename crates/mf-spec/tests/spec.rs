@@ -77,7 +77,7 @@ fn params_serialize_as_json_map() {
     let p = spec.validate(&raw(&[])).unwrap();
     assert_eq!(
         serde_json::to_value(&p).unwrap(),
-        serde_json::json!({"keep_largest": true, "max_triangles": 100})
+        serde_json::json!({"keep_largest": true, "max_relative_size": 1.0, "max_triangles": 100})
     );
 }
 

@@ -634,7 +634,8 @@ impl Session {
         }
         let op = mf_operations::find(&record.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(record.op_id.clone()))?;
-        if op.version() != record.op_version {
+        let mut params = record.params.clone();
+        if !op.upgrade_params(record.op_version, &mut params) {
             return Err(CommandError::OperationVersion {
                 op: record.op_id.clone(),
                 recorded: record.op_version,
@@ -656,12 +657,7 @@ impl Session {
         let back = self.cursor;
         self.checkout(onto);
         let result = self
-            .prepare_validated(
-                &record.op_id,
-                record.target,
-                selection,
-                record.params.clone(),
-            )
+            .prepare_validated(&record.op_id, record.target, selection, params)
             .and_then(|p| p.run(&RunContext::none()))
             .and_then(|c| self.commit(c));
         if result.is_err() {

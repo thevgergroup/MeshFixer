@@ -63,7 +63,7 @@ fn upstream(s: &mut Session, id: ObjectId, import: RevisionId, max: &str) -> Rev
         "mesh.remove_small_components",
         id,
         None,
-        &[("max_triangles", max)],
+        &[("max_triangles", max), ("max_relative_size", "100")],
     ))
     .unwrap();
     s.current()

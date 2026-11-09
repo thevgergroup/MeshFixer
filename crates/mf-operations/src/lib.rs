@@ -18,6 +18,8 @@ pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
 mod remove_small;
 
+pub use remove_small::{ComponentSizes, RemovalPreview, removal_preview};
+
 /// What an operation acts on. Phase 0 M2 operations accept only
 /// `WholeObject`; the targeted variants exist now so M3's surgical operations
 /// don't change the signature (MF-OP-003).
@@ -65,6 +67,15 @@ impl From<Cancelled> for OpError {
 pub trait Operation: Send + Sync {
     fn id(&self) -> &'static str;
     fn version(&self) -> u32;
+    /// Makes `params`, recorded by version `recorded` of this operation,
+    /// the parameters that make this version do exactly what that one did
+    /// (a parameter added since gets the value that means "as before").
+    /// Returns false for a version it can't replay: the caller reports a
+    /// version mismatch rather than guess. The default replays only its own
+    /// version.
+    fn upgrade_params(&self, recorded: u32, _params: &mut Params) -> bool {
+        recorded == self.version()
+    }
     /// Runs the operation. Long work checks `ctx` for cancellation at least
     /// every 100 ms (MF-RT-002) and reports progress through it (MF-RT-003).
     /// A cancelled run returns [`OpError::Cancelled`], never a partial

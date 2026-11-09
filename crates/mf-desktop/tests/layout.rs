@@ -474,8 +474,18 @@ fn lots_of_unused_space_suggests_compacting() {
 
     h.get_by_label("Remove loose pieces").click();
     h.run();
+    // A tetrahedron is a third of the cube: no relative limit here.
+    h.state_mut()
+        .params_for("mesh.remove_small_components")
+        .insert(
+            "max_relative_size".into(),
+            mf_spec::ParamValue::Float(100.0),
+        );
+    h.run();
     let before = h.state().session.current();
     h.get_by_label("Apply").click();
+    h.run();
+    h.get_by_label("Remove them").click();
     wait_until(&mut h, "remove + analysis", |a| {
         a.session.current() != before
             && a.current_analysis()

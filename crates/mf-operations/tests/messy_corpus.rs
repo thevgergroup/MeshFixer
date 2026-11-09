@@ -577,6 +577,7 @@ fn remove_small(mesh: &Mesh) -> RemoveSmallResult {
     let spec = builtin::get("mesh.remove_small_components").unwrap();
     let params = spec.validate(&BTreeMap::new()).unwrap();
     let max_triangles = params.get_int("max_triangles").unwrap() as usize;
+    let max_relative = params.get_float("max_relative_size").unwrap();
     let op = find("mesh.remove_small_components").unwrap();
     let (r, phase, timed_out) = guarded("remove_small_components", |ctx| {
         op.execute(mesh, &Target::WholeObject, &params, ctx)
@@ -602,7 +603,13 @@ fn remove_small(mesh: &Mesh) -> RemoveSmallResult {
             };
             let sizes: Vec<usize> = after.topology().components.iter().map(Vec::len).collect();
             let largest = sizes.iter().copied().max().unwrap_or(0);
-            res.postcondition = Some(sizes.iter().all(|&s| s >= max_triangles || s == largest));
+            // The largest before the run sets the relative limit.
+            let before = mesh.topology().components.first().map_or(0, Vec::len);
+            res.postcondition = Some(sizes.iter().all(|&s| {
+                s >= max_triangles
+                    || s as f64 * 100.0 > max_relative * before as f64
+                    || s == largest
+            }));
             res.after = Some(summary(&inspect(after)));
         }
     }

@@ -11,11 +11,12 @@ struct Scene {
     // Render target size in pixels (xy).
     viewport: vec4<f32>,
     // Face-state tints (renderer.rs `FaceTints`): rgb, a = strength.
-    tint_small_component: vec4<f32>,
+    tint_loose_piece: vec4<f32>,
     tint_non_manifold_adj: vec4<f32>,
     tint_recent_repair: vec4<f32>,
     tint_selected: vec4<f32>,
     tint_hover: vec4<f32>,
+    tint_hole_neighbourhood: vec4<f32>,
     // The selection cue (renderer.rs `SelectionCue`): x: emphasis (the
     // pulse after framing, 0–1), y: x-ray opacity.
     cue: vec4<f32>,
@@ -47,10 +48,11 @@ struct Draw {
 
 // gpu_mesh.rs `FaceStates` flags.
 const SELECTED: u32 = 1u;
-const SMALL_COMPONENT: u32 = 2u;
+const LOOSE_PIECE: u32 = 2u;
 const HOVER: u32 = 4u;
 const NON_MANIFOLD_ADJ: u32 = 8u;
 const RECENT_REPAIR: u32 = 16u;
+const HOLE_NEIGHBOURHOOD: u32 = 32u;
 
 struct SurfaceOut {
     @builtin(position) clip: vec4<f32>,
@@ -85,7 +87,8 @@ fn base_color(front: bool, state: u32) -> vec3<f32> {
     if ((state & HOVER) != 0u) {
         return tint(rgb, state, HOVER, scene.tint_hover);
     }
-    rgb = tint(rgb, state, SMALL_COMPONENT, scene.tint_small_component);
+    rgb = tint(rgb, state, HOLE_NEIGHBOURHOOD, scene.tint_hole_neighbourhood);
+    rgb = tint(rgb, state, LOOSE_PIECE, scene.tint_loose_piece);
     rgb = tint(rgb, state, NON_MANIFOLD_ADJ, scene.tint_non_manifold_adj);
     rgb = tint(rgb, state, RECENT_REPAIR, scene.tint_recent_repair);
     return rgb;

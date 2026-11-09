@@ -83,6 +83,9 @@ fn open_inspect_apply_undo_redo() {
     harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
+    // Taking 20 of 21 pieces asks first (MF-ISSUE-052).
+    harness.run_steps(2);
+    harness.get_by_label("Remove them").click();
     wait_until(&mut harness, "operation + re-analysis", |a| {
         a.session.history_labels().len() == 3 && components(a).is_some_and(|c| c < before)
     });
@@ -119,6 +122,8 @@ fn open_inspect_apply_undo_redo() {
         .params_for("mesh.remove_small_components")
         .insert("max_triangles".into(), mf_spec::ParamValue::Int(6));
     harness.get_by_label("Apply").click();
+    harness.run_steps(2);
+    harness.get_by_label("Remove them").click();
     wait_until(&mut harness, "branch apply", |a| {
         a.session.current() != base && components(a).is_some()
     });
