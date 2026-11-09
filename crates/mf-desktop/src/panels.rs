@@ -566,16 +566,7 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 if main_body {
                     ui.label(RichText::new("Main body").strong().size(16.0));
                     if let Some(a) = analysis {
-                        let tris = a.diagnostics.triangle_count
-                            - a.defects
-                                .loose
-                                .iter()
-                                .map(|d| match d {
-                                    Defect::LoosePiece { triangles, .. } => *triangles,
-                                    _ => 0,
-                                })
-                                .sum::<usize>();
-                        ui.label(count(tris, "triangle"));
+                        ui.label(count(a.defects.main_body_triangles, "triangle"));
                     }
                 } else {
                     ui.label(RichText::new(selection_title(&sel, n)).strong().size(16.0));
@@ -608,13 +599,14 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     };
     let d = &a.diagnostics;
     ui.label(count(d.triangle_count, "triangle"));
-    if let Some(bb) = d.bounding_box {
+    // Size along the world axes, after the object's transform.
+    if let Some(size) = a.defects.world_size {
         let u = unit_symbol(units);
         ui.label(format!(
             "{} × {} × {} {u}",
-            measure(bb.max[0] - bb.min[0]),
-            measure(bb.max[1] - bb.min[1]),
-            measure(bb.max[2] - bb.min[2])
+            measure(size[0]),
+            measure(size[1]),
+            measure(size[2])
         ));
     }
     let problems = a.defects.holes.len()
@@ -660,7 +652,7 @@ fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context)
     for tool in &tools {
         let open = targeted || app.tool.as_deref() == Some(&tool.op_id);
         if targeted {
-            ui.label(RichText::new(&tool.label).size(15.0).color(theme::SELECTED));
+            ui.label(RichText::new(&tool.label).size(15.0).strong());
         } else if ui
             .add(
                 egui::Button::new(&tool.label)

@@ -21,8 +21,11 @@ use crate::defects::{Defect, Defects};
 pub struct Analysis {
     pub diagnostics: Diagnostics,
     pub vertices: Arc<MeshVertices>,
-    /// The tree's defect categories (docs/design/visual-language.md).
-    pub defects: Defects,
+    /// The object transform the measurements were made with.
+    pub transform: [f64; 12],
+    /// The tree's defect categories (docs/design/visual-language.md),
+    /// shared so the panels never copy them per frame.
+    pub defects: Arc<Defects>,
     /// Defect overlays in the 3D view, relative to `vertices.origin`.
     pub layers: DefectLayers,
 }
@@ -68,7 +71,7 @@ pub enum Message {
     Completed(Box<Result<Completed, CommandError>>),
     Analyzed {
         mesh: Mesh,
-        analysis: Analysis,
+        analysis: Box<Analysis>,
     },
     /// Render vertices for an inactive object (MF-ISSUE-042). The active
     /// object's vertices come from `Analyzed` instead.
@@ -141,16 +144,18 @@ fn fill_cap() -> usize {
 
 /// Diagnostics, defects and render vertices for one revision (O(n), so off
 /// the UI thread).
-pub fn analyze(mesh: Mesh) -> Message {
+/// Measurements are made after the object's `transform`.
+pub fn analyze((mesh, transform): (Mesh, [f64; 12])) -> Message {
     let diagnostics = mf_geometry::inspect(&mesh);
-    let vertices = Arc::new(MeshVertices::build(&mesh));
-    let defects = crate::defects::classify(&mesh, &diagnostics, fill_cap());
-    let origin = vertices.origin;
+    let defects = crate::defects::classify(&mesh, &diagnostics, &transform, fill_cap());
     let crack_ids: Vec<u32> = defects
         .cracks
         .iter()
         .filter_map(|d| d.selection().map(|(_, id)| id))
         .collect();
+    // Cracks get only the crack colour: no hole outline under them.
+    let vertices = Arc::new(MeshVertices::build_skipping(&mesh, &crack_ids));
+    let origin = vertices.origin;
     let tangled: Vec<[u32; 2]> = defects
         .tangled
         .iter()
@@ -175,10 +180,14 @@ pub fn analyze(mesh: Mesh) -> Message {
     let analysis = Analysis {
         diagnostics,
         vertices,
-        defects,
+        transform,
+        defects: Arc::new(defects),
         layers,
     };
-    Message::Analyzed { mesh, analysis }
+    Message::Analyzed {
+        mesh,
+        analysis: Box::new(analysis),
+    }
 }
 
 /// Build an overlay on a worker: O(target) to O(n) (a large component, or
@@ -483,6 +492,38 @@ mod tests {
             fov_y: 40f64.to_radians(),
             radius: distance,
         }
+    }
+
+    /// A narrow crack is drawn only in the crack colour (fix round 1, P3):
+    /// the hole-coloured boundary outline leaves its loop out, and the crack
+    /// layer carries it.
+    #[test]
+    fn cracks_are_not_outlined_in_the_hole_colour() {
+        let plate = mf_fixtures::plate_with_defects();
+        let identity = mf_io::threemf::IDENTITY;
+        let Message::Analyzed { analysis, .. } = analyze((plate, identity)) else {
+            panic!("analyze answers with Analyzed");
+        };
+        let edges = |list: &[Defect]| -> usize {
+            list.iter()
+                .map(|d| match d {
+                    Defect::Hole { edges, .. }
+                    | Defect::OverCap { edges, .. }
+                    | Defect::Crack { edges, .. } => *edges,
+                    _ => 0,
+                })
+                .sum()
+        };
+        assert_eq!(analysis.defects.cracks.len(), 1);
+        assert_eq!(
+            analysis.vertices.lines.len(),
+            2 * edges(&analysis.defects.holes),
+            "only holes get the hole outline"
+        );
+        assert_eq!(
+            analysis.layers.cracks.len(),
+            2 * edges(&analysis.defects.cracks)
+        );
     }
 
     /// A click near a loop edge that another object's solid face hides

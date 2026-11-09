@@ -48,9 +48,24 @@ pub fn surface_vertices(mesh: &Mesh, origin: DVec3) -> Vec<SurfaceVertex> {
 
 /// Line-list vertices for every traced boundary loop edge.
 pub fn boundary_line_vertices(mesh: &Mesh, origin: DVec3) -> Vec<LineVertex> {
+    boundary_line_vertices_skipping(mesh, origin, &[])
+}
+
+/// As [`boundary_line_vertices`], leaving out the loops in `skip` (by ID;
+/// for example narrow cracks, which are drawn in their own colour).
+pub fn boundary_line_vertices_skipping(
+    mesh: &Mesh,
+    origin: DVec3,
+    skip: &[u32],
+) -> Vec<LineVertex> {
     let pos = |v: u32| mesh.corner_position(v);
     let mut out = Vec::new();
-    for l in &mesh.topology().boundary_loops {
+    for l in mesh
+        .topology()
+        .boundary_loops
+        .iter()
+        .filter(|l| !skip.contains(&l.id))
+    {
         let n = l.vertices.len();
         for k in 0..n {
             for v in [l.vertices[k], l.vertices[(k + 1) % n]] {
@@ -79,6 +94,12 @@ pub struct MeshVertices {
 
 impl MeshVertices {
     pub fn build(mesh: &Mesh) -> MeshVertices {
+        MeshVertices::build_skipping(mesh, &[])
+    }
+
+    /// As [`MeshVertices::build`], without boundary outlines for the loops
+    /// in `skip` (by ID).
+    pub fn build_skipping(mesh: &Mesh, skip: &[u32]) -> MeshVertices {
         let bounds = mesh.bounding_box();
         let origin = bounds
             .map(|b| DVec3::from(b.center()))
@@ -88,7 +109,7 @@ impl MeshVertices {
             origin,
             triangle_count: mesh.triangle_count(),
             surface: surface_vertices(mesh, origin),
-            lines: boundary_line_vertices(mesh, origin),
+            lines: boundary_line_vertices_skipping(mesh, origin, skip),
         }
     }
 }

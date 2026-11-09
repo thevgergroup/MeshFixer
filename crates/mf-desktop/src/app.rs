@@ -69,9 +69,9 @@ pub struct MeshFixerApp {
     /// Analyses keyed by revision identity (pointer, so recognizing a
     /// revision is O(1) on the UI thread).
     analyses: AnalysisCache<Analysis>,
-    analyzer: LatestWorker<Mesh>,
+    analyzer: LatestWorker<(Mesh, [f64; 12])>,
     /// Last revision submitted for analysis.
-    requested: Option<Mesh>,
+    requested: Option<(Mesh, [f64; 12])>,
     /// Vertices currently drawn for the active object, tagged with the
     /// exact mesh revision they were built for. May belong to the previous
     /// revision of the active object while the new one is analyzed (the
@@ -544,6 +544,7 @@ impl MeshFixerApp {
                     return;
                 };
                 self.selection = None;
+                self.status = None;
                 self.inspected = Some(Inspected {
                     object,
                     mesh,
@@ -563,6 +564,7 @@ impl MeshFixerApp {
         else {
             return;
         };
+        self.status = None;
         self.selection = Some(Selection {
             object,
             revision: self.session.current(),
@@ -582,6 +584,8 @@ impl MeshFixerApp {
 
     fn select(&mut self, object: ObjectId, kind: SelectionKind, id: u32, add: bool) {
         self.inspected = None;
+        // A status about an earlier target would contradict the new one.
+        self.status = None;
         let revision = self.session.current();
         match self.selection.as_mut() {
             Some(sel)
@@ -604,6 +608,9 @@ impl MeshFixerApp {
     }
 
     pub fn clear_selection(&mut self) {
+        if self.selection.is_some() || self.inspected.is_some() {
+            self.status = None;
+        }
         self.selection = None;
         self.inspected = None;
     }
@@ -759,11 +766,11 @@ impl MeshFixerApp {
                 if self
                     .requested
                     .as_ref()
-                    .is_some_and(|m| Mesh::ptr_eq(m, &mesh))
+                    .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == analysis.transform)
                 {
                     self.requested = None;
                 }
-                self.analyses.insert(mesh, analysis);
+                self.analyses.insert(mesh, *analysis);
             }
             Message::Replayed(result) => {
                 self.busy = None;
@@ -784,24 +791,36 @@ impl MeshFixerApp {
 
     /// Analysis for exactly the active revision, if it's ready.
     pub fn current_analysis(&self) -> Option<&Analysis> {
-        self.active_mesh().and_then(|m| self.analyses.get(m))
+        let object = self.session.document().object(self.active?)?;
+        self.analysis_for(object.mesh()?, &object.transform)
+    }
+
+    /// The analysis of `mesh` measured at `transform`, if it's ready.
+    fn analysis_for(&self, mesh: &Mesh, transform: &[f64; 12]) -> Option<&Analysis> {
+        self.analyses
+            .get(mesh)
+            .filter(|a| a.transform == *transform)
     }
 
     /// Request analysis when the active revision changes.
     fn refresh_analysis(&mut self) {
-        let Some(mesh) = self.active_mesh().cloned() else {
+        let active = self
+            .active
+            .and_then(|id| self.session.document().object(id));
+        let Some((mesh, transform)) = active.and_then(|o| Some((o.mesh()?.clone(), o.transform)))
+        else {
             self.displayed = None;
             return;
         };
-        if let Some(a) = self.analyses.get(&mesh) {
+        if let Some(a) = self.analysis_for(&mesh, &transform) {
             self.displayed = Some((mesh.clone(), a.vertices.clone()));
         } else if !self
             .requested
             .as_ref()
-            .is_some_and(|m| Mesh::ptr_eq(m, &mesh))
+            .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == transform)
         {
-            self.requested = Some(mesh.clone());
-            self.analyzer.submit(mesh);
+            self.requested = Some((mesh.clone(), transform));
+            self.analyzer.submit((mesh, transform));
         }
         if self.camera.is_none() && self.view_request.is_none() {
             self.view_request = Some(ViewRequest::Reset);
@@ -879,7 +898,7 @@ impl MeshFixerApp {
     fn object_bounds(&self, o: &mf_command::Object) -> Option<Option<Aabb>> {
         let mesh = o.mesh()?;
         let vertices = if Some(o.id) == self.active {
-            &self.analyses.get(mesh)?.vertices
+            &self.analysis_for(mesh, &o.transform)?.vertices
         } else {
             let (for_mesh, v) = self.object_vertices.get(&o.id)?;
             if !Mesh::ptr_eq(for_mesh, mesh) {
@@ -1045,10 +1064,20 @@ impl MeshFixerApp {
     /// build on a worker when it changes.
     fn refresh_overlays(&mut self, ctx: &egui::Context) {
         let selection = self.target_overlay_request();
-        let hover = self.hover.clone().and_then(|(object, target)| {
-            let mesh = self.session.document().object(object)?.mesh()?.clone();
-            Some((object, mesh, target))
-        });
+        // Hovering the target itself (the pointer is still on the row just
+        // clicked) shows it as selected, not hovered.
+        let hover = self
+            .hover
+            .clone()
+            .filter(|(object, target)| {
+                !selection
+                    .as_ref()
+                    .is_some_and(|(o, _, t)| o == object && t == target)
+            })
+            .and_then(|(object, target)| {
+                let mesh = self.session.document().object(object)?.mesh()?.clone();
+                Some((object, mesh, target))
+            });
         let recent = self.show_recent_repairs.then(|| {
             let object = self.active?;
             let mesh = self.active_mesh()?.clone();
@@ -1090,7 +1119,7 @@ impl MeshFixerApp {
     }
 
     /// The 3D view's overlays, bottom to top (theme.rs gives each its colour).
-    fn view_layers(&self) -> Vec<ViewLayer> {
+    pub fn view_layers(&self) -> Vec<ViewLayer> {
         let mut layers = Vec::new();
         let faces =
             |object, faces: &Arc<Vec<mf_render::SurfaceVertex>>, color, strength| ViewLayer {

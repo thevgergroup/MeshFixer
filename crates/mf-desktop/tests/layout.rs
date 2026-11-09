@@ -205,6 +205,101 @@ fn history_breadcrumb_jumps_to_a_revision() {
     assert_eq!(h.state().session.current(), filled);
 }
 
+/// Click the tree row of the first one-cell (3-edge) hole and return it.
+fn click_small_hole_row(h: &mut Harness<'_, MeshFixerApp>) -> egui::Pos2 {
+    let number = h
+        .state()
+        .current_analysis()
+        .unwrap()
+        .defects
+        .holes
+        .iter()
+        .find_map(|d| match d {
+            mf_desktop::defects::Defect::Hole {
+                number, edges: 3, ..
+            } => Some(*number),
+            _ => None,
+        })
+        .expect("a 3-edge hole");
+    let pos = h
+        .get_by_label(&format!("Hole {number}: small opening"))
+        .rect()
+        .center();
+    h.event(egui::Event::PointerMoved(pos));
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    pos
+}
+
+/// A new target clears a status that described an earlier one (fix round
+/// 1, I1): the status line never contradicts the screen.
+#[test]
+fn selecting_a_target_clears_a_stale_status() {
+    require_gpu!("selecting_a_target_clears_a_stale_status");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(two_hole_grid(dir.path()));
+    h.state_mut().status = Some("Hole filled (10 faces); selection cleared".into());
+    click_small_hole_row(&mut h);
+    assert!(h.state().selection.is_some());
+    assert_eq!(h.state().status, None);
+    h.get_by_label("Ready");
+}
+
+/// Right after a click the pointer is still on the row, so hover and
+/// selection name the same hole: it must show the selection colour, not
+/// the hover outline (fix round 1, I2).
+#[test]
+fn hover_does_not_hide_the_selection() {
+    require_gpu!("hover_does_not_hide_the_selection");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(two_hole_grid(dir.path()));
+    click_small_hole_row(&mut h);
+    wait_until(&mut h, "selection overlay", |a| {
+        a.view_layers()
+            .iter()
+            .any(|l| l.color == mf_desktop::theme::SELECTED)
+    });
+    let colors: Vec<_> = h.state().view_layers().iter().map(|l| l.color).collect();
+    assert!(
+        !colors.contains(&mf_desktop::theme::HOVER),
+        "hover drawn over the selection: {colors:?}"
+    );
+}
+
+/// Cyan means "selected" only (fix round 1, P2): with a hole selected, the
+/// Properties panel (which has no selected widget) has no cyan in it.
+#[test]
+fn properties_use_the_selection_colour_for_nothing() {
+    require_gpu!("properties_use_the_selection_colour_for_nothing");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(two_hole_grid(dir.path()));
+    click_small_hole_row(&mut h);
+    h.get_by_label("Fill hole");
+    let props = h.get_by_label("Properties & Tools").rect();
+    let image = h.render().unwrap();
+    let c = mf_desktop::theme::SELECTED;
+    let cyan = (props.left() as u32..WINDOW.0 as u32)
+        .flat_map(|x| (props.top() as u32..props.top() as u32 + 400).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+            let p = image.get_pixel(x, y).0;
+            (0..3).all(|k| (i32::from(p[k]) - i32::from([c.r(), c.g(), c.b()][k])).abs() < 40)
+        })
+        .count();
+    assert_eq!(cyan, 0, "{cyan} cyan pixels in Properties");
+}
+
 /// The breadcrumb step labelled `label` (below the 3D view; a tool of the
 /// same name may also be in the Properties panel).
 fn crumb_rect(h: &Harness<'_, MeshFixerApp>, label: &str) -> (egui::Rect, Option<bool>) {
@@ -326,7 +421,27 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
     assert_eq!((wheeled.yaw, wheeled.pitch), (panned.yaw, panned.pitch));
     assert_ne!(wheeled.target, panned.target, "zoom is towards the cursor");
 
-    // F frames everything again; Home resets the view.
+    // F with nothing selected frames everything, keeping the orientation:
+    // the document's centre comes back to the middle of the view.
+    h.event(egui::Event::Key {
+        key: egui::Key::F,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.run();
+    let framed = h.state().camera.unwrap();
+    assert_eq!((framed.yaw, framed.pitch), (wheeled.yaw, wheeled.pitch));
+    let centre = h.state().screen_point([3.0, 3.0, 0.0]).unwrap();
+    let view = h.state().viewport.last_rect.unwrap();
+    assert!(
+        (centre - view.center()).length() < 2.0,
+        "F centres the document: {centre:?} vs {:?}",
+        view.center()
+    );
+
+    // Home resets the view.
     h.event(egui::Event::Key {
         key: egui::Key::Home,
         physical_key: None,

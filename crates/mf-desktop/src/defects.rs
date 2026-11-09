@@ -40,14 +40,24 @@ pub enum Defect {
     },
 }
 
-/// Every defect of one mesh revision, by tree category.
+/// Every defect of one mesh revision, by tree category, plus what the
+/// panels show about the object. Built on the analysis worker so the UI
+/// thread only reads it (MF-RT-001).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Defects {
     /// Holes, including ones too large to fill (`OverCap`).
     pub holes: Vec<Defect>,
     pub cracks: Vec<Defect>,
+    /// Loose pieces: `loose[i]` is component `i + 1`.
     pub loose: Vec<Defect>,
     pub tangled: Vec<Defect>,
+    /// Triangles in the model's main body (the largest component).
+    pub main_body_triangles: usize,
+    /// The object's size along the world axes, after its transform
+    /// (document units); `None` for an empty mesh.
+    pub world_size: Option<[f64; 3]>,
+    /// (loop id, is a crack, index in `holes` or `cracks`), sorted by id.
+    loop_index: Vec<(u32, bool, usize)>,
 }
 
 /// The words for one defect: what it is, what it measures, what to do.
@@ -73,42 +83,60 @@ impl Defect {
 }
 
 impl Defects {
-    /// The defect a selected loop or component is, if any.
+    /// The defect a selected loop or component is, if any. O(log n).
     pub fn find(&self, kind: SelectionKind, id: u32) -> Option<&Defect> {
-        let hit = |d: &&Defect| d.selection() == Some((kind, id));
         match kind {
-            SelectionKind::BoundaryLoop => self.holes.iter().chain(&self.cracks).find(hit),
-            SelectionKind::Component => self.loose.iter().find(hit),
+            SelectionKind::BoundaryLoop => {
+                let i = self
+                    .loop_index
+                    .binary_search_by_key(&id, |(l, ..)| *l)
+                    // allow-swallow: a loop missing from the index is not a defect (None is the answer)
+                    .ok()?;
+                let (_, crack, at) = self.loop_index[i];
+                if crack {
+                    self.cracks.get(at)
+                } else {
+                    self.holes.get(at)
+                }
+            }
+            SelectionKind::Component => self.loose.get((id as usize).checked_sub(1)?),
             SelectionKind::Faces | SelectionKind::Object => None,
         }
     }
 }
 
 /// Sort `mesh`'s defects into the tree's categories. O(n log n); run it on a
-/// worker. `fill_cap` is the largest hole the fill operation can take;
-/// bigger ones are [`Defect::OverCap`]. A loop is a narrow crack when its
-/// vector area is below the degenerate-area threshold `inspect` and
-/// fill_holes use (1e-12 × bounding-box diagonal²): its edges almost touch.
-pub fn classify(mesh: &Mesh, diagnostics: &Diagnostics, fill_cap: usize) -> Defects {
+/// worker. Measurements (perimeters, size) are in document units after the
+/// object's `transform` (3MF row order). `fill_cap` is the largest hole the
+/// fill operation can take; bigger ones are [`Defect::OverCap`]. A loop is a
+/// narrow crack when its vector area is below the degenerate-area threshold
+/// `inspect` and fill_holes use (1e-12 × bounding-box diagonal², in object
+/// space like theirs): its edges almost touch.
+pub fn classify(
+    mesh: &Mesh,
+    diagnostics: &Diagnostics,
+    transform: &[f64; 12],
+    fill_cap: usize,
+) -> Defects {
     let topo = mesh.topology();
+    let model = mf_render::model_matrix(transform);
+    let linear = glam::DMat3::from_mat4(model);
     let diag = diagnostics.bounding_box.map_or(0.0, |b| b.diagonal());
     let min_area = 1e-12 * diag * diag;
-    let mut perimeters: Vec<(u32, Option<f64>)> = diagnostics
-        .boundary_loops
-        .iter()
-        .map(|l| (l.id, l.perimeter))
-        .collect();
-    perimeters.sort_unstable_by_key(|(id, _)| *id);
-    // `inspect` summarises every traced loop of this same topology, so a
-    // missing one is a bug, not an unknown perimeter.
-    let perimeter = |id: u32| match perimeters.binary_search_by_key(&id, |(i, _)| *i) {
-        Ok(i) => perimeters[i].1,
-        Err(_) => panic!("inspect has no summary for boundary loop {id}"),
+    // Perimeter after the transform; `None` if it overflowed.
+    let perimeter = |vertices: &[u32]| {
+        let p = |v: u32| glam::DVec3::from(mesh.corner_position(v));
+        let n = vertices.len();
+        let total: f64 = (0..n)
+            .map(|k| (linear * (p(vertices[(k + 1) % n]) - p(vertices[k]))).length())
+            .sum();
+        total.is_finite().then_some(total)
     };
 
     let mut out = Defects::default();
     for l in &topo.boundary_loops {
         if vector_area(mesh, &l.vertices) < min_area {
+            out.loop_index.push((l.id, true, out.cracks.len()));
             out.cracks.push(Defect::Crack {
                 loop_id: l.id,
                 edges: l.edge_count,
@@ -116,7 +144,8 @@ pub fn classify(mesh: &Mesh, diagnostics: &Diagnostics, fill_cap: usize) -> Defe
             continue;
         }
         let number = out.holes.len() + 1;
-        let (loop_id, edges, perimeter) = (l.id, l.edge_count, perimeter(l.id));
+        let (loop_id, edges, perimeter) = (l.id, l.edge_count, perimeter(&l.vertices));
+        out.loop_index.push((l.id, false, out.holes.len()));
         out.holes.push(if edges > fill_cap {
             Defect::OverCap {
                 number,
@@ -133,7 +162,9 @@ pub fn classify(mesh: &Mesh, diagnostics: &Diagnostics, fill_cap: usize) -> Defe
             }
         });
     }
+    out.loop_index.sort_unstable_by_key(|(id, ..)| *id);
     // Components are ordered largest first: the first is the model.
+    out.main_body_triangles = topo.components.first().map_or(0, Vec::len);
     out.loose = topo
         .components
         .iter()
@@ -162,7 +193,18 @@ pub fn classify(mesh: &Mesh, diagnostics: &Diagnostics, fill_cap: usize) -> Defe
             .map(|(edge, faces)| Defect::Tangled { edge, faces })
             .collect();
     }
+    out.world_size = world_size(mesh, &model);
     out
+}
+
+/// Size along the world axes of every vertex placed by `model`.
+fn world_size(mesh: &Mesh, model: &glam::DMat4) -> Option<[f64; 3]> {
+    let mut points = mesh
+        .vertices()
+        .map(|(_, p)| (*model * glam::DVec3::from(p).extend(1.0)).truncate());
+    let first = points.next()?;
+    let (lo, hi) = points.fold((first, first), |(lo, hi), p| (lo.min(p), hi.max(p)));
+    Some((hi - lo).to_array())
 }
 
 /// |½ Σ pᵢ × pᵢ₊₁| about the first vertex: ~0 for a slit.
@@ -298,8 +340,87 @@ pub fn operation_label(op_id: &str, target: Option<(SelectionKind, usize)>) -> O
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may panic on failure
 mod tests {
     use super::*;
+
+    const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+
+    /// A 6×6 unit grid with the lower-right triangle of cell (1, 1) removed:
+    /// its open rim (24 edges) and a 3-edge hole of perimeter 2 + √2.
+    fn holed_grid() -> Mesh {
+        let n = 6;
+        let mut e = mf_fixtures::grid(n).edit();
+        e.remove_face(mf_geometry::FaceId(2 * (n + 1))).unwrap();
+        e.finish().unwrap().0
+    }
+
+    fn hole_perimeter(d: &Defects, edges: usize) -> f64 {
+        d.holes
+            .iter()
+            .find_map(|h| match h {
+                Defect::Hole {
+                    edges: e,
+                    perimeter,
+                    ..
+                } if *e == edges => *perimeter,
+                _ => None,
+            })
+            .unwrap()
+    }
+
+    /// Measurements are in document units *after* the object's transform
+    /// (fix round 1, I3): a 3MF object scaled ×2 has holes twice as long.
+    #[test]
+    fn measurements_follow_the_object_transform() {
+        let mesh = holed_grid();
+        let diagnostics = mf_geometry::inspect(&mesh);
+        let plain = classify(&mesh, &diagnostics, &IDENTITY, 1000);
+        assert!((hole_perimeter(&plain, 3) - (2.0 + 2f64.sqrt())).abs() < 1e-9);
+
+        // Scale x by 2, y by 3 (column-vector linear part, 3MF row order).
+        let scaled = [2.0, 0.0, 0.0, 0.0, 3.0, 0.0, 0.0, 0.0, 1.0, 5.0, 0.0, 0.0];
+        let d = classify(&mesh, &diagnostics, &scaled, 1000);
+        // Legs 2 and 3, hypotenuse √13.
+        let expected = 2.0 + 3.0 + 13f64.sqrt();
+        assert!(
+            (hole_perimeter(&d, 3) - expected).abs() < 1e-9,
+            "{} vs {expected}",
+            hole_perimeter(&d, 3)
+        );
+        // The rim: 6 cells × (2 + 3) × 2 sides.
+        assert!((hole_perimeter(&d, 24) - 60.0).abs() < 1e-9);
+        // The object's size is measured in world axes too.
+        let size = d.world_size.unwrap();
+        assert!(
+            (size[0] - 12.0).abs() < 1e-9 && (size[1] - 18.0).abs() < 1e-9 && size[2].abs() < 1e-9,
+            "{size:?}"
+        );
+    }
+
+    /// The panel's per-frame work is O(1) per row (fix round 1, I4): the
+    /// main body's size is computed on the worker, and a selected loop or
+    /// component finds its defect without scanning the lists.
+    #[test]
+    fn main_body_and_lookups_are_precomputed() {
+        let mesh = mf_fixtures::merge(&[
+            holed_grid(),
+            mf_fixtures::translated(&mf_fixtures::cube(1.0), [20.0, 0.0, 0.0]),
+        ]);
+        let d = classify(&mesh, &mf_geometry::inspect(&mesh), &IDENTITY, 1000);
+        assert_eq!(d.main_body_triangles, 71);
+        assert_eq!(d.loose.len(), 1);
+        for h in d.holes.iter().chain(&d.loose) {
+            let (kind, id) = h.selection().unwrap();
+            assert_eq!(d.find(kind, id), Some(h));
+        }
+        assert_eq!(
+            d.find(SelectionKind::Component, 0),
+            None,
+            "the main body isn't a defect"
+        );
+        assert_eq!(d.find(SelectionKind::BoundaryLoop, 999), None);
+    }
 
     fn copy(d: Defect) -> (String, String, String) {
         let c = defect_copy(&d, Unit::Millimeter);

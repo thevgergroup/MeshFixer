@@ -178,6 +178,39 @@ fn on_screen(h: &Harness<'_, MeshFixerApp>, object: usize, local: [f64; 3]) -> e
         .expect("the point projects on screen")
 }
 
+/// After F, the target is framed: the centre of its box lands in the middle
+/// of the view, and (for a target with an outward side) the camera looks at
+/// it from outside, not from inside the model.
+fn assert_framed(h: &Harness<'_, MeshFixerApp>, vertices: &[u32], outward_from: Option<[f64; 3]>) {
+    let app = h.state();
+    let object = app.session.document().object(app.active.unwrap()).unwrap();
+    let mesh = object.mesh().unwrap();
+    let model = mf_render::model_matrix(&object.transform);
+    let mut lo = glam::DVec3::splat(f64::INFINITY);
+    let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+    for &v in vertices {
+        let p = glam::DVec3::from(mesh.corner_position(v));
+        lo = lo.min(p);
+        hi = hi.max(p);
+    }
+    let centre = (model * ((lo + hi) * 0.5).extend(1.0)).truncate();
+    let view = app.viewport.last_rect.unwrap();
+    let on_screen = app.screen_point(centre.to_array()).unwrap();
+    assert!(
+        (on_screen - view.center()).length() < view.height() * 0.02,
+        "the target is centred: {on_screen:?} vs {:?}",
+        view.center()
+    );
+    if let Some(inside) = outward_from {
+        let inside = (model * glam::DVec3::from(inside).extend(1.0)).truncate();
+        let cam = app.camera.unwrap();
+        assert!(
+            (centre - inside).dot(cam.eye() - cam.target) > 0.0,
+            "the camera looks at the target from outside"
+        );
+    }
+}
+
 #[test]
 fn checkpoint_a_walkthrough() {
     if !mf_render::offscreen::gpu_available() {
@@ -294,8 +327,22 @@ fn checkpoint_a_walkthrough() {
     h.get_by_label("Fill hole");
     rec.still(&mut h, "11-hole-selected-properties", 2.0);
     hover(&mut h, view.right_top() + egui::vec2(-4.0, 4.0));
+    let before_f = h.state().camera.unwrap();
     key(&mut h, egui::Key::F);
-    wait_until(&mut h, "framed on the hole", |a| a.camera.is_some());
+    wait_until(&mut h, "framed on the hole", |a| a.camera != Some(before_f));
+    let hole_vertices = {
+        let app = h.state();
+        let id = app.selection.as_ref().unwrap().ids[0];
+        let topo = app.active_mesh().unwrap().topology();
+        topo.boundary_loops
+            .iter()
+            .find(|l| l.id == id)
+            .unwrap()
+            .vertices
+            .clone()
+    };
+    // The scan is a sphere about its local origin: outside is away from it.
+    assert_framed(&h, &hole_vertices, Some([0.0, 0.0, 0.0]));
     rec.still(&mut h, "12-framed-selection", 2.5);
 
     // 5. Fill it: the breadcrumb gains the step, the patch is tinted green.
@@ -319,8 +366,21 @@ fn checkpoint_a_walkthrough() {
         .center();
     click_at(&mut h, piece);
     h.get_by_label("Remove piece");
+    let before_f = h.state().camera.unwrap();
     key(&mut h, egui::Key::F);
-    wait_until(&mut h, "framed on the piece", |a| a.camera.is_some());
+    wait_until(&mut h, "framed on the piece", |a| {
+        a.camera != Some(before_f)
+    });
+    let piece_vertices: Vec<u32> = {
+        let app = h.state();
+        let id = app.selection.as_ref().unwrap().ids[0];
+        let mesh = app.active_mesh().unwrap();
+        mesh.topology().components[id as usize]
+            .iter()
+            .flat_map(|&f| mesh.face(mf_geometry::FaceId(f)).unwrap())
+            .collect()
+    };
+    assert_framed(&h, &piece_vertices, None);
     hover(&mut h, view.right_top() + egui::vec2(-4.0, 4.0));
     rec.still(&mut h, "14-loose-piece-properties", 2.5);
     let before = h.state().session.current();
