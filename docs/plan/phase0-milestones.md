@@ -57,6 +57,15 @@ Commits are small and reference requirement IDs (e.g. `feat(io): binary STL read
 
 ## M5: Architecture validation and Phase 0 exit
 
+**Repair tools for messy models** (added 2026-11-09 at the owner's request; planned as one group because they share edge-level surgery and provenance):
+- unzip non-manifold ("tangled") edges, MF-ISSUE-047;
+- fix flipped faces, MF-ISSUE-018;
+- stitch or weld narrow cracks, MF-ISSUE-032;
+- remove degenerate and duplicate faces, MF-ISSUE-048;
+- detect self-intersections, MF-ISSUE-049.
+
+Each is targetable (selection, or the whole object), keeps `untouched_outside_target`, and is measured on the M4 messy-model collection.
+
 **Scope:** `meshfixer schema --mcp` with a golden CLI/MCP consistency test, the spec-propagation test (add a parameter, see it in all three interfaces), a cross-OS equivalence CI job, `simplify` (stretch goal), and the exit report.
 
 **Demo:** Run through all nine exit criteria end to end in one recording.

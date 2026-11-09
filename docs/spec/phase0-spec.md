@@ -1,6 +1,6 @@
 # MeshFixer Phase 0 Engineering Spec (v0.4)
 
-v0.4 (2026-11-08, M4 Checkpoint A): fairing is required (MF-OP-002, fill styles). Many-hole handling is MF-RENDER-006. Sculpting and carving are captured as Phase 1 requirements (§11a), which Phase 0 must not block.
+v0.4 (2026-11-08, M4 Checkpoint A): fairing is required (MF-OP-002, fill styles). Many-hole handling is MF-RENDER-006. Sculpting and carving are captured as Phase 1 requirements (§11a), which Phase 0 must not block. The owner also approved (2026-11-09) the §2 dependency change from M4 Task 4: `mf-geometry` may depend on `mf-runtime`, so topology can be built cancellably.
 
 v0.3 (2026-11-08, M3 review): MF-OP-002 corrected to Liepa's ordering (worst dihedral, then area); it now states the whole-object reporting behaviour, the 1000-edge cap and the untriangulable case.
 

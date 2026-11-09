@@ -33,6 +33,11 @@ The project owner approved this plan with changes, which are folded into the tas
 - **Performance is measured as the user experiences it:** CPU and GPU frame time and presentation, reported as p50/p95/p99. Memory is broken down into mesh storage, topology, scratch peak, GPU allocations and process RSS. No narrow benchmark may hide a poor real-world experience.
 - **The final demo is an acceptance gate and a usability review.** It runs on a normal laptop-sized window (1440×900 points) with ordinary mouse and trackpad controls. The owner runs it themselves from a demo build, sample files and instructions. The question it answers: could someone who has used Meshmixer or Fusion inspect and repair an imported model without an engineer guiding them?
 - **A deliberate visual and interaction language** (Task 2) covers panel arrangement, hierarchy, colours for selection, defects and repairs, contextual tools, and history navigation.
+- **Checkpoint B feedback (2026-11-09):**
+  - Double-click any side-panel item to frame and highlight it (Task 8a, done before Task 9).
+  - Real-world messy-model collection (Task 11a).
+  - The M5 repair-tool group is recorded in the milestones (MF-ISSUE-018/032/047/048/049).
+  - The spec §2 change from Task 4 (`mf-geometry` → `mf-runtime`) is approved.
 - **Checkpoint A feedback (approved 2026-11-08):**
   - Navigation without a mouse wheel (Task 2a, done before Task 3).
   - Handling models with many holes (added to Task 12).
@@ -365,6 +370,46 @@ The project owner approved this plan with changes, which are folded into the tas
   - `truncated_inputs_never_panic` (every prefix of each seed file)
 - [ ] **Step 2–4:** FAIL → implement → PASS. Then run each fuzz target locally for 10 minutes; fix and add a regression test for every crash found.
 - [ ] **Step 5:** Commit `test(io): fuzz targets per reader; bounded decompression and declared sizes [MF-IO-002]`.
+
+### Task 11a: Real-world messy-model collection (owner request, 2026-11-09)
+
+**Goal:** a straight answer to "how well do we handle non-watertight and non-manifold models?", from real files rather than generated damage alone.
+
+**Files:** `fixtures/manifest.txt` and `fixtures/SOURCES.md` (new entries), `scripts/fetch-fixtures.sh` (unchanged format), `crates/mf-operations/tests/messy_corpus.rs` (new), the evidence job.
+
+**Behaviour:**
+- **Models:**
+  - 10–20 freely licensed models (CC0, CC-BY or public domain; no non-commercial or share-alike licences), fetched by SHA-256 like the Archaeopteryx.
+  - Each one records its source URL, licence, author, size and why it was chosen.
+  - Between them they must cover:
+    - open sculpts with many holes;
+    - non-manifold edges and vertices;
+    - flipped or inconsistent orientation;
+    - many loose pieces;
+    - duplicate and degenerate faces;
+    - self-intersecting exports;
+    - unwelded (triangle-soup) STL;
+    - a large model of at least 5M triangles.
+  - A good source is Thingi10K (each model there has its own licence), filtered by licence and by defect flags. The owner's own problem files are added when supplied.
+- **For every model:**
+  1. Import it.
+  2. Analyse it (diagnostics, defect classification, topology).
+  3. `fill_holes` on the whole object, with each fill style once Task 12a lands.
+  4. `remove_small_components`.
+  5. A targeted fill of the largest fillable hole, asserting `untouched_outside_target`.
+- **Gate:** no panic, no hang and no silent fallback. Every outcome is either success or a named error.
+- **Evidence:** a per-model results table goes into `artifacts/m4/messy/results.json` and the M4 report. It records diagnostics before and after, holes filled or refused (with reasons), times, peak memory, and anything unsupported (pointing to the M5 repair tools).
+- **Budgets:** per-model time budgets are recorded, not gated, in M4. They become gates in M5.
+- **CI:** the collection is fetched and cached on Linux (`MF_REQUIRE_FIXTURES=1`), and its tests are in the serial list if they're heavy.
+
+- [ ] **Step 1:** Choose and verify the models. Download them, check their licences, and run `meshfixer inspect` on each, keeping only the ones that show the intended damage. Write `SOURCES.md` entries.
+- [ ] **Step 2: Tests:**
+  - `every_messy_model_imports_and_analyses`
+  - `every_messy_model_fills_or_refuses_by_name`
+  - `targeted_fill_on_messy_models_is_untouched_outside`
+  - `messy_results_are_recorded`
+- [ ] **Step 3–4:** FAIL → fix what the collection exposes. Each real bug found gets an issue and a regression test. → PASS.
+- [ ] **Step 5:** Commit `test: real-world messy-model collection fetched by hash; robustness results`.
 
 ### Task 12: Interaction quality: defect browser, framing, units (MF-RENDER-005 UX, MF-ISSUE-041/045)
 
