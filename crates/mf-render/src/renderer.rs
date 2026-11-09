@@ -1,5 +1,5 @@
 use bytemuck::{Pod, Zeroable};
-use glam::{DMat4, DVec3, Vec4};
+use glam::{DMat3, DMat4, DVec3, Mat4, Vec4};
 
 use crate::camera::OrbitCamera;
 use crate::gpu_mesh::{GpuLines, GpuMesh, LineVertex, SurfaceVertex};
@@ -15,6 +15,11 @@ struct SceneUniforms {
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct DrawUniforms {
     model: [[f32; 4]; 4],
+    /// Inverse-transpose of `model`'s linear (3x3) part, for normals: the
+    /// model matrix itself is only correct for normals under a rotation or
+    /// uniform scale, not a non-uniform scale or shear (both legal in a
+    /// 3MF transform). The translation column is unused padding.
+    normal_matrix: [[f32; 4]; 4],
     /// Colour multiplier (RGB) applied in the fragment shader; inactive
     /// objects are dimmed. Alpha is unused.
     tint: [f32; 4],
@@ -266,6 +271,7 @@ impl MeshRenderer {
             let model = shifted_model(item.model, item.mesh.origin, world_origin);
             let u = DrawUniforms {
                 model: model.to_cols_array_2d(),
+                normal_matrix: normal_matrix(item.model).to_cols_array_2d(),
                 tint: [item.tint, item.tint, item.tint, 1.0],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
@@ -297,6 +303,8 @@ impl MeshRenderer {
             let shifted = shifted_model(model, mesh_origin, world_origin);
             let u = DrawUniforms {
                 model: shifted.to_cols_array_2d(),
+                // Highlight lines don't shade by normal.
+                normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
                 tint: [1.0, 1.0, 1.0, 1.0],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
@@ -319,4 +327,24 @@ impl MeshRenderer {
 fn shifted_model(model: DMat4, mesh_origin: DVec3, world_origin: DVec3) -> glam::Mat4 {
     (DMat4::from_translation(-world_origin) * model * DMat4::from_translation(mesh_origin))
         .as_mat4()
+}
+
+/// Inverse-transpose of `model`'s linear (3x3) part, computed in `f64`
+/// before the cast to the GPU's `f32`. A rotation or uniform scale needs no
+/// correction (the model matrix itself is already its own inverse-transpose
+/// up to a scalar), but a non-uniform scale or shear — both legal in a 3MF
+/// transform — tilts normals unless they go through this instead. The
+/// translation never affects a direction, so only the 3x3 part matters;
+/// the result is padded into a `Mat4` to keep the uniform layout simple.
+fn normal_matrix(model: DMat4) -> Mat4 {
+    let linear = DMat3::from_mat4(model);
+    // A singular linear part (e.g. a transform that collapses a whole axis)
+    // has no meaningful normal transform; falling back to the identity
+    // keeps shading stable rather than propagating NaN/Inf into the frame.
+    let it = if linear.determinant().abs() > 1e-18 {
+        linear.inverse().transpose()
+    } else {
+        DMat3::IDENTITY
+    };
+    Mat4::from_mat3(it.as_mat3())
 }

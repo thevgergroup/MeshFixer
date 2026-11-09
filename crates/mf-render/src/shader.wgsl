@@ -7,6 +7,10 @@ struct Scene {
 struct Draw {
     // Object space (relative to the mesh's local origin) to the camera's frame.
     model: mat4x4<f32>,
+    // Inverse-transpose of model's 3x3 linear part, for normals (correct
+    // under non-uniform scale or shear, not just rotation). Translation
+    // column is unused padding.
+    normal_matrix: mat4x4<f32>,
     // Colour multiplier; inactive objects are dimmed. Alpha is unused.
     tint: vec4<f32>,
 };
@@ -23,9 +27,10 @@ struct SurfaceOut {
 fn vs_surface(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> SurfaceOut {
     var out: SurfaceOut;
     out.clip = scene.view_proj * draw.model * vec4<f32>(position, 1.0);
-    // The model matrix may mirror (negative determinant); normals only
-    // rotate/scale, so the 3x3 part is enough (MF-ISSUE-042).
-    out.normal = (draw.model * vec4<f32>(normal, 0.0)).xyz;
+    // Normals need the inverse-transpose of the linear part, not the model
+    // matrix itself, to stay correct under non-uniform scale or shear
+    // (MF-ISSUE-042).
+    out.normal = (draw.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
     return out;
 }
 

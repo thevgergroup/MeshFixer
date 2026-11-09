@@ -26,9 +26,15 @@ pub struct MeshFixerApp {
     analyzer: LatestWorker<Mesh>,
     /// Last revision submitted for analysis.
     requested: Option<Mesh>,
-    /// Vertices currently drawn for the active object. May belong to the
-    /// previous revision while the new one is analyzed; the viewport says so.
-    displayed: Option<Arc<MeshVertices>>,
+    /// Vertices currently drawn for the active object, tagged with the
+    /// exact mesh revision they were built for. May belong to the previous
+    /// revision of the active object while the new one is analyzed (the
+    /// viewport's `updating` flag says so); switching to a *different*
+    /// active object before its own analysis returns must not keep
+    /// showing this, or the old object's geometry would be drawn at the
+    /// new object's transform in full colour, and the old object would
+    /// vanish instead (MF-ISSUE-042 review I4).
+    displayed: Option<(Mesh, Arc<MeshVertices>)>,
     /// Render-only vertices for every object that isn't active
     /// (MF-ISSUE-042): the viewport still draws them, dimmed, at their
     /// transform. Keyed by object id; the `Mesh` says which revision the
@@ -436,10 +442,16 @@ impl MeshFixerApp {
         {
             return Some(lines.clone());
         }
-        let origin = self
-            .displayed
-            .as_ref()
-            .map_or(mesh_origin(&mesh), |v| v.origin);
+        // Use the exact origin the active mesh is actually displayed with,
+        // when `displayed` is this same mesh; otherwise a freshly-computed
+        // one for `mesh` itself, never a stale other object's or other
+        // revision's (MF-ISSUE-042 review ⚠️: the viewport's `shifted_model`
+        // shifts the highlight by this same origin, so a mismatch here
+        // would draw the highlight in the wrong place).
+        let origin = match &self.displayed {
+            Some((for_mesh, v)) if Mesh::ptr_eq(for_mesh, &mesh) => v.origin,
+            _ => mesh_origin(&mesh),
+        };
         let lines = Arc::new(loop_line_vertices(&mesh, origin, &sel.ids));
         self.highlight = Some((lines.clone(), sel, mesh));
         Some(lines)
@@ -466,7 +478,15 @@ impl MeshFixerApp {
                                 Some(format!("{} import warning(s)", self.warnings.len()));
                         }
                         match ids.first() {
-                            Some(&id) => self.set_active(id),
+                            Some(&id) => {
+                                self.set_active(id);
+                                // Refit even into a non-empty document
+                                // (MF-ISSUE-042 review I5): otherwise the
+                                // camera keeps framing the old document and
+                                // the newly imported object can be off
+                                // screen.
+                                self.fit_camera();
+                            }
                             None => self.error = Some("The file contains no mesh objects".into()),
                         }
                     }
@@ -495,13 +515,19 @@ impl MeshFixerApp {
                 picked,
                 add,
             } => {
-                // Ignore a pick for a revision that's no longer on screen.
+                // Ignore a pick for a revision that's no longer on screen,
+                // and a miss reported against no mesh at all (the clicked
+                // active object had none to begin with).
                 let current = self
                     .session
                     .document()
                     .object(object)
                     .and_then(|o| o.mesh());
-                if current.is_some_and(|m| Mesh::ptr_eq(m, &mesh)) {
+                let is_current = match (&mesh, current) {
+                    (Some(m), Some(current)) => Mesh::ptr_eq(current, m),
+                    _ => false,
+                };
+                if is_current {
                     match picked {
                         Some((kind, id)) => {
                             // A hit on another object makes it active
@@ -568,7 +594,7 @@ impl MeshFixerApp {
             return;
         };
         if let Some(a) = self.analyses.get(&mesh) {
-            self.displayed = Some(a.vertices.clone());
+            self.displayed = Some((mesh.clone(), a.vertices.clone()));
         } else if !self
             .requested
             .as_ref()
@@ -621,16 +647,22 @@ impl MeshFixerApp {
 
     /// Every object the viewport should draw this frame: the active one
     /// (its vertices come from the full analysis, so they can lag one
-    /// revision behind while it's running) plus every other object whose
-    /// render vertices are ready (MF-ISSUE-042).
-    fn object_views(&self) -> Vec<ObjectView> {
+    /// revision behind while it's running, but never another object's)
+    /// plus every other object whose render vertices are ready
+    /// (MF-ISSUE-042).
+    pub fn object_views(&self) -> Vec<ObjectView> {
         let doc = self.session.document();
         doc.objects()
             .iter()
             .filter_map(|o| {
                 let active = Some(o.id) == self.active;
                 let vertices = if active {
-                    self.displayed.clone()?
+                    // `displayed` may still hold a previously active
+                    // object's vertices for one frame, until its own
+                    // analysis returns (review I4): never draw those at
+                    // this object's transform.
+                    let (for_mesh, v) = self.displayed.as_ref()?;
+                    Mesh::ptr_eq(for_mesh, o.mesh()?).then(|| v.clone())?
                 } else {
                     self.object_vertices.get(&o.id)?.1.clone()
                 };

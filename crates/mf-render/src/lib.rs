@@ -17,7 +17,9 @@ pub use gpu_mesh::{
     GpuLines, GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices,
     chunk_ranges, loop_line_vertices, surface_vertices,
 };
-pub use pick::{pick_loop, ray_pick, screen_position};
+pub use pick::{
+    LoopEdgeCandidate, edge_occluded, loop_edge_candidates, pick_loop, ray_pick, screen_position,
+};
 pub use renderer::{DrawItem, MeshRenderer, RenderTargetFormat};
 pub use target::RenderTarget;
 pub use transform::model_matrix;

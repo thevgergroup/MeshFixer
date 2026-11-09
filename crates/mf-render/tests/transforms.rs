@@ -83,9 +83,13 @@ fn transformed_objects_render_where_their_transform_puts_them() {
     };
 
     let size = (320.0, 240.0);
-    let left_center = mf_render::screen_position(&cam, origin, size, [-3.0, 0.0, 0.0]).unwrap();
-    let right_center = mf_render::screen_position(&cam, origin, size, [3.0, 0.0, 0.0]).unwrap();
-    let gap_center = mf_render::screen_position(&cam, origin, size, [0.0, 0.0, 0.0]).unwrap();
+    // Projected centres of each cube (its own centre, (0.5,0.5,0.5), plus
+    // the translation), not corners: a corner sits on a silhouette edge,
+    // where MSAA/anti-aliasing can blend it towards the background colour
+    // even when the cube is drawn correctly.
+    let left_center = mf_render::screen_position(&cam, origin, size, [-2.5, 0.5, 0.5]).unwrap();
+    let right_center = mf_render::screen_position(&cam, origin, size, [3.5, 0.5, 0.5]).unwrap();
+    let gap_center = mf_render::screen_position(&cam, origin, size, [0.5, 0.5, 0.5]).unwrap();
 
     let px = |p: (f64, f64)| img.get_pixel(p.0 as u32, p.1 as u32).0;
     assert_ne!(
@@ -173,8 +177,84 @@ fn mirrored_object_renders_and_picks() {
         offscreen::BACKGROUND_RGBA,
         "a mirrored cube must still render"
     );
+    // `cull_mode` is `None`, so a wrong front-face winding would still
+    // render *something* at the centre pixel, just tinted as a back face
+    // (shader.wgsl: base colour (0.62, 0.30, 0.30) vs front's (0.70, 0.72,
+    // 0.76)). The green channel discriminates clearly either way (shading
+    // is a common scalar multiplier on all three channels, so the ratio to
+    // red is shade-invariant): a front face has green >= red, a
+    // (wrongly shaded) back face has green well under red.
+    let (r, g) = (center[0] as f32, center[1] as f32);
+    assert!(
+        g >= r * 0.9,
+        "the mirrored cube's near face must shade as front-facing, not back-facing: {center:?}"
+    );
     // Picking: ray straight down onto the (mirrored) top face, which in
     // world space sits over x in [-1, 0].
     let hit = ray_pick(&m, &model, [-0.3, 0.6, 5.0], [0.0, 0.0, -1.0]).unwrap();
     assert!((hit.1 - 4.0).abs() < 1e-9, "{hit:?}");
+}
+
+/// A flat quad in the z=0 plane (unit square, normal (0,0,1)).
+fn unit_quad() -> mf_geometry::Mesh {
+    mf_geometry::Mesh::new(
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        vec![[0, 1, 2], [0, 2, 3]],
+    )
+    .expect("valid")
+}
+
+/// A non-uniform shear (z' = z + k*x) must tilt shaded normals by its
+/// inverse-transpose, not its own linear part: a flat quad transformed by
+/// the shear's model matrix must shade identically to the same quad with
+/// its vertices pre-sheared by hand (whose flat-shaded normal is the
+/// geometric ground truth), because both describe the same triangles in
+/// world space.
+#[test]
+fn shading_under_shear_matches_the_inverse_transpose_normal() {
+    let k = 0.6;
+    // 3MF row-major: row0=(1,0,0) row1=(0,1,0) row2=(k,0,1), i.e. z' = z + k*x
+    // under the row-vector convention p' = p * M.
+    let shear: [f64; 12] = [1.0, 0.0, k, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let model = model_matrix(&shear);
+
+    let quad = unit_quad();
+    let (positions, triangles) = quad.to_arrays();
+    let world_bb = mf_geometry::Aabb {
+        min: [0.0, 0.0, 0.0],
+        max: [1.0, 1.0, k],
+    };
+    let cam = OrbitCamera::fit(&world_bb);
+
+    // Render A: the flat quad, placed by the shear's model matrix (exercises
+    // the shader's normal matrix).
+    let Some(sheared_by_gpu) = gpu_or_skip(
+        "shading_under_shear_matches_the_inverse_transpose_normal",
+        offscreen::render_objects(&[(&quad, model)], &cam, 64, 48, false),
+    ) else {
+        return;
+    };
+
+    // Render B: the same triangles, pre-sheared on the CPU and drawn with
+    // an identity model. Flat shading derives its normal from the triangle
+    // geometry, so this is the geometric ground truth for what the
+    // triangles' normal should be after the shear.
+    let sheared_positions: Vec<[f64; 3]> = positions
+        .iter()
+        .map(|p| [p[0], p[1], p[2] + k * p[0]])
+        .collect();
+    let pre_sheared = mf_geometry::Mesh::new(sheared_positions, triangles).expect("valid");
+    let sheared_by_hand =
+        offscreen::render_objects(&[(&pre_sheared, DMat4::IDENTITY)], &cam, 64, 48, false)
+            .expect("a device that rendered once renders again");
+
+    assert_eq!(
+        sheared_by_gpu, sheared_by_hand,
+        "a shear tilts shaded normals by the inverse-transpose of its linear part"
+    );
 }
