@@ -884,7 +884,7 @@ fn every_messy_model_fills_or_refuses_by_name() {
             for reason in f.skipped.keys() {
                 assert!(
                     // fairing_did_not_converge: a smooth/curvature solve
-                    // that ran out of iterations (MF-ISSUE-053), named.
+                    // that failed (named, never a flat patch instead).
                     [
                         "too_large",
                         "self_touching",

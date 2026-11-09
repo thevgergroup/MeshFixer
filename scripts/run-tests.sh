@@ -41,6 +41,9 @@ timing=(
   # select_defect sometimes outlasts Harness::run's step budget when the
   # whole browser file runs in parallel (passes alone; seen in Task 12a).
   "mf-desktop browser intentional_openings_survive_edits_and_are_excluded_from_fill_all"
+  # Fairing the largest holes (MF-ISSUE-053): seconds of single-threaded
+  # solve, timed, with a 100 ms checkpoint gate.
+  "mf-operations fill_holes large_holes_fair_quickly"
   # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"

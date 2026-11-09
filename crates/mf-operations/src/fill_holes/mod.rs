@@ -249,9 +249,11 @@ impl Operation for FillHoles {
                 format!("fill_style '{word}' is not flat, smooth or curvature"),
             )
         })?;
-        // Fairing moves the vertices refinement added; without them a
-        // patch has nothing to move.
-        let fair = refine && style != Style::Flat;
+        // Fairing moves the vertices refinement adds, so a non-flat style
+        // always refines (asking for smooth without refinement would
+        // otherwise be a flat patch in disguise).
+        let fair = style != Style::Flat;
+        let refine = refine || fair;
         let last_stage = if fair {
             "fairing"
         } else if refine {
@@ -420,7 +422,7 @@ impl Operation for FillHoles {
 
         // Fairing: each patch solved on its own, single-threaded, so the
         // result doesn't depend on how loops were spread over threads.
-        let mut fairing: Vec<Option<Result<usize, fairing::NotConverged>>> =
+        let mut fairing: Vec<Option<Result<fairing::Faired, fairing::Failed>>> =
             vec![None; patches.len()];
         if fair {
             done.store(0, Ordering::Relaxed);
@@ -458,8 +460,8 @@ impl Operation for FillHoles {
                     return Err(failed(
                         "fairing_did_not_converge",
                         format!(
-                            "loop {} could not be shaped to the surface around it ({word} fill: the solve stopped at relative residual {:e} after {} iterations); try another fill style",
-                            l.id, e.residual, e.iterations
+                            "loop {} could not be shaped to the surface around it ({word} fill: {e}); try another fill style",
+                            l.id
                         ),
                     ));
                 }
@@ -504,14 +506,15 @@ impl Operation for FillHoles {
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;
             }
             let mut entry = json!({"id": l.id, "edges": l.edge_count, "faces": patch.tris.len()});
-            if let Some(Ok(iterations)) = faired {
-                entry["fairing_iterations"] = json!(iterations);
+            if let Some(Ok(f)) = faired {
+                entry["faired_vertices"] = json!(f.vertices);
             }
             filled.push(entry);
         }
         let report = json!({
             "filled_loops": filled,
             "skipped_loops": skipped,
+            "refined": refine,
         });
         if filled.is_empty() {
             ctx.progress.report(last_stage, 1.0);
@@ -526,6 +529,7 @@ impl Operation for FillHoles {
         let report = json!({
             "filled_loops": report["filled_loops"],
             "skipped_loops": report["skipped_loops"],
+            "refined": refine,
             "created_faces": prov.created_faces.len(),
             "created_vertices": prov.created_vertices.len(),
         });

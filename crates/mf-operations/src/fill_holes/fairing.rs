@@ -10,15 +10,22 @@
 //!
 //! Writing Δ = D⁻¹K (K the weighted graph Laplacian, symmetric; D the
 //! diagonal E_i / 2), the equations scaled by D at each row are
-//! N (D⁻¹N)^(m−1) x = 0 with N = −K, a symmetric matrix that is positive
-//! definite on the interior once the rim is fixed: so a conjugate gradient
-//! solve, preconditioned by its diagonal (Jacobi), one coordinate at a
-//! time. Everything runs single-threaded per patch over vertices and edges
-//! in a fixed order, with plain IEEE arithmetic (+ − × ÷ √, no fused
+//! N (D⁻¹N)^(m−1) x = 0 with N = −K: restricted to the interior, a
+//! symmetric positive definite matrix S. It is assembled explicitly and
+//! solved directly (MF-ISSUE-053: Jacobi-preconditioned CG needed minutes
+//! on the largest holes): a fill-reducing ordering (approximate minimum
+//! degree, from `faer`, integer-only and deterministic), then a
+//! supernodal sparse Cholesky factorisation and a solve per coordinate,
+//! checked against the operator itself and refined once if needed.
+//!
+//! The numeric work is our own scalar code, run single-threaded per patch
+//! in a fixed order with plain IEEE arithmetic (+ − × ÷ √, no fused
 //! multiply-add), so the result is bit-identical on every machine and at
-//! every thread count.
+//! every thread count; faer's SIMD kernels would choose a vector width per
+//! CPU and with it a summation order.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use mf_geometry::Mesh;
 use mf_runtime::{Cancelled, RunContext};
@@ -58,15 +65,43 @@ impl Style {
     }
 }
 
-/// Relative residual a solve must reach.
+/// Relative residual a solve must reach (‖S x − b‖ ≤ this × ‖b‖).
 const TOLERANCE: f64 = 1e-10;
 
-/// A solve that didn't reach [`TOLERANCE`] within its iteration budget
-/// (4 × the patch's interior vertex count).
+/// Why a patch couldn't be faired. Named (`fairing_did_not_converge`) and
+/// never replaced by a flat patch.
 #[derive(Debug, Clone, PartialEq)]
-pub struct NotConverged {
-    pub iterations: usize,
-    pub residual: f64,
+pub enum Failed {
+    /// A pivot of the Cholesky factorisation was not positive (`row` in
+    /// the factorisation's order).
+    NotPositiveDefinite { row: usize, pivot: f64 },
+    /// The solve produced a NaN or an infinity.
+    NotFinite,
+    /// Still above [`TOLERANCE`] after one step of refinement.
+    Residual(f64),
+}
+
+impl fmt::Display for Failed {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Failed::NotPositiveDefinite { row, pivot } => write!(
+                f,
+                "factorisation failed: matrix not positive definite at row {row} (pivot {pivot:e})"
+            ),
+            Failed::NotFinite => write!(f, "solution not finite"),
+            Failed::Residual(r) => write!(
+                f,
+                "relative residual {r:e} after refinement, above the {TOLERANCE:e} required"
+            ),
+        }
+    }
+}
+
+/// A faired patch: how many vertices moved and the factor's size.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Faired {
+    pub vertices: usize,
+    pub factor_nonzeros: usize,
 }
 
 /// The patch as a local graph: its own vertices first (boundary, then
@@ -139,46 +174,13 @@ impl Graph {
             self.apply_n(scratch, out);
         }
     }
-
-    /// The operator's diagonal at vertex `i`.
-    fn diagonal(&self, power: usize, i: usize) -> f64 {
-        // c = N e_i, nonzero on i and its neighbours (sorted, i included).
-        let mut c: Vec<(usize, f64)> = self.adjacency[i].iter().map(|&(j, w)| (j, -w)).collect();
-        let at = c.partition_point(|&(j, _)| j < i);
-        c.insert(at, (i, self.weight_sum[i]));
-        match power {
-            // e_iᵀ N D⁻¹ N e_i = Σ_k c_k² / D_k.
-            2 => c.iter().map(|&(k, ck)| ck * ck * self.inv_area[k]).sum(),
-            // e_iᵀ N D⁻¹ N D⁻¹ N e_i = aᵀ N a with a = D⁻¹ c.
-            _ => {
-                let a: Vec<(usize, f64)> = c
-                    .iter()
-                    .map(|&(k, ck)| (k, self.inv_area[k] * ck))
-                    .collect();
-                let value = |v: usize| {
-                    a.binary_search_by_key(&v, |&(k, _)| k)
-                        .map_or(0.0, |x| a[x].1)
-                };
-                a.iter()
-                    .map(|&(k, ak)| {
-                        let mut na = self.weight_sum[k] * ak;
-                        for &(l, w) in &self.adjacency[k] {
-                            na -= w * value(l);
-                        }
-                        ak * na
-                    })
-                    .sum()
-            }
-        }
-    }
 }
 
 /// Fair `patch` in place: its interior vertices (`n_boundary..`) solve
 /// Δ^m x = 0 with everything else fixed. `ring` lists the existing faces
 /// around the hole in mesh vertex IDs (those touching the rim, and for
 /// `curvature` those touching the ring around it too); `rim` is the loop's
-/// mesh vertex IDs, `patch.positions[..n_boundary]` in order. Returns the
-/// most iterations any coordinate's solve took.
+/// mesh vertex IDs, `patch.positions[..n_boundary]` in order.
 pub fn fair(
     patch: &mut Patch,
     rim: &[u32],
@@ -186,13 +188,16 @@ pub fn fair(
     mesh: &Mesh,
     style: Style,
     ctx: &RunContext,
-) -> Result<Result<usize, NotConverged>, Cancelled> {
+) -> Result<Result<Faired, Failed>, Cancelled> {
     let power = style.power();
     let nb = patch.n_boundary;
     let np = patch.positions.len();
     let interior = np - nb;
     if power == 0 || interior == 0 {
-        return Ok(Ok(0));
+        return Ok(Ok(Faired {
+            vertices: 0,
+            factor_nonzeros: 0,
+        }));
     }
 
     // Local graph: the patch, then ring vertices in order of first use.
@@ -223,7 +228,7 @@ pub fn fair(
     ctx.checkpoint()?;
     let graph = Graph::new(&positions, &edges);
 
-    // Solve about the rim's centroid, so the tolerance is relative to the
+    // Solve about the rim's centroid, so the residual is relative to the
     // hole's own extent rather than its distance from the origin.
     let mut centre = [0.0; 3];
     for p in &positions[..nb] {
@@ -235,25 +240,584 @@ pub fn fair(
     let mut x: [Vec<f64>; 3] =
         [0, 1, 2].map(|c| positions[nb..np].iter().map(|p| p[c] - centre[c]).collect());
 
-    // From the refined (flat) patch. Starting Δ³ from the Δ² solution was
-    // tried: it saved under 1% of the Δ³ iterations, for the cost of a
-    // whole Δ² solve.
-    let iterations = match solve(&graph, power, &positions, &centre, nb, &mut x, ctx)? {
+    let factor_nonzeros = match solve(&graph, power, &positions, &centre, nb, &mut x, ctx)? {
         Ok(k) => k,
         Err(e) => return Ok(Err(e)),
     };
-    // Only once every coordinate has converged.
+    // Only once every coordinate has solved.
     for (c, solution) in x.iter().enumerate() {
         for (k, &v) in solution.iter().enumerate() {
             patch.positions[nb + k][c] = v + centre[c];
         }
     }
-    Ok(Ok(iterations))
+    Ok(Ok(Faired {
+        vertices: interior,
+        factor_nonzeros,
+    }))
 }
 
-/// Solve Δ^power x = 0 for the interior (`nb..` of the patch's vertices),
-/// each coordinate from the given `x` (centred on `centre`). Returns the
-/// most iterations a coordinate took.
+impl Graph {
+    /// Rows of R · D⁻¹ for each needed row, where R is given row-wise as
+    /// sparse (column, value) lists: out row i = Σ_k N_ik d_k R_k.
+    /// Columns are interior indices; rows are local vertices. Rows whose
+    /// `keep` is false are left empty. Accumulates through a dense scratch
+    /// in a fixed order, so the sums are deterministic.
+    fn times_n(
+        &self,
+        r: &[Vec<(usize, f64)>],
+        scale: bool,
+        keep: &[bool],
+        width: usize,
+        ctx: &RunContext,
+    ) -> Result<Vec<Vec<(usize, f64)>>, Cancelled> {
+        let mut acc = vec![0.0; width];
+        let mut seen = vec![false; width];
+        let mut out = vec![Vec::new(); r.len()];
+        for (i, row) in out.iter_mut().enumerate() {
+            if i % 256 == 0 {
+                ctx.checkpoint()?;
+            }
+            if !keep[i] {
+                continue;
+            }
+            let mut cols: Vec<usize> = Vec::new();
+            let mut add = |k: usize, w: f64| {
+                let d = if scale { self.inv_area[k] } else { 1.0 };
+                for &(j, v) in &r[k] {
+                    if !seen[j] {
+                        seen[j] = true;
+                        cols.push(j);
+                    }
+                    acc[j] += w * (d * v);
+                }
+            };
+            add(i, self.weight_sum[i]);
+            for &(k, w) in &self.adjacency[i] {
+                add(k, -w);
+            }
+            cols.sort_unstable();
+            *row = cols
+                .iter()
+                .map(|&j| {
+                    let v = acc[j];
+                    acc[j] = 0.0;
+                    seen[j] = false;
+                    (j, v)
+                })
+                .collect();
+        }
+        Ok(out)
+    }
+}
+
+/// S = N (D⁻¹N)^(power−1) restricted to the interior (`nb..np`), as rows
+/// of (interior column, value) with columns ascending.
+fn assemble(
+    graph: &Graph,
+    power: usize,
+    nb: usize,
+    np: usize,
+    ctx: &RunContext,
+) -> Result<Vec<Vec<(usize, f64)>>, Cancelled> {
+    let n = graph.adjacency.len();
+    let interior = np - nb;
+    // R = N[:, I]: column j of N for interior j.
+    let mut r: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+    for j in nb..np {
+        r[j].push((j - nb, graph.weight_sum[j]));
+        for &(i, w) in &graph.adjacency[j] {
+            r[i].push((j - nb, -w));
+        }
+    }
+    for row in &mut r {
+        row.sort_unstable_by_key(|&(j, _)| j);
+    }
+    // Each further factor needs rows one ring nearer the patch: compute
+    // the rows within (power − 1 − step) rings of the interior.
+    let mut near = vec![false; n];
+    near[nb..np].fill(true);
+    let mut rings = vec![near];
+    for step in 1..power {
+        let prev = &rings[step - 1];
+        let mut next = prev.clone();
+        for (i, on) in prev.iter().enumerate() {
+            if *on {
+                for &(k, _) in &graph.adjacency[i] {
+                    next[k] = true;
+                }
+            }
+        }
+        rings.push(next);
+    }
+    for step in 1..power {
+        r = graph.times_n(&r, true, &rings[power - 1 - step], interior, ctx)?;
+    }
+    Ok(r.drain(nb..np).collect())
+}
+
+const NONE: usize = usize::MAX;
+
+/// Elimination tree and column counts (strictly below the diagonal) of the
+/// Cholesky factor of a symmetric matrix given by its upper triangle by
+/// columns (`upper[k]` = rows i < k of column k). After Davis's LDL.
+fn etree(upper: &[Vec<usize>], ctx: &RunContext) -> Result<(Vec<usize>, Vec<usize>), Cancelled> {
+    let n = upper.len();
+    let mut parent = vec![NONE; n];
+    let mut flag = vec![NONE; n];
+    let mut below = vec![0usize; n];
+    for k in 0..n {
+        if k % 1024 == 0 {
+            ctx.checkpoint()?;
+        }
+        flag[k] = k;
+        for &i0 in &upper[k] {
+            let mut i = i0;
+            while flag[i] != k {
+                if parent[i] == NONE {
+                    parent[i] = k;
+                }
+                below[i] += 1;
+                flag[i] = k;
+                i = parent[i];
+            }
+        }
+    }
+    Ok((parent, below))
+}
+
+/// A postorder of a forest given by `parent` (children visited in
+/// increasing order), so every subtree is a contiguous range.
+fn postorder(parent: &[usize]) -> Vec<usize> {
+    let n = parent.len();
+    let mut head = vec![NONE; n];
+    let mut next = vec![NONE; n];
+    // Push children in decreasing order so the lists come out increasing.
+    for j in (0..n).rev() {
+        if parent[j] != NONE {
+            next[j] = head[parent[j]];
+            head[parent[j]] = j;
+        }
+    }
+    let mut order = Vec::with_capacity(n);
+    let mut stack = Vec::new();
+    for root in (0..n).filter(|&j| parent[j] == NONE) {
+        stack.push(root);
+        while let Some(&top) = stack.last() {
+            let child = head[top];
+            if child == NONE {
+                stack.pop();
+                order.push(top);
+            } else {
+                head[top] = next[child];
+                stack.push(child);
+            }
+        }
+    }
+    order
+}
+
+/// The lower part of C = A Bᵀ, where A is rows `p1..p1 + h` and B rows
+/// `p1..p1 + cw` of the column-major block `l` (`m` rows; its first `w`
+/// columns): C[r][c] = Σ_t l[p1 + r][t] · l[p1 + c][t] for r ≥ c, into
+/// `out` (h × cw, column-major; entries above the diagonal are not
+/// written). Each entry is summed over t in increasing order from 0, by
+/// element-wise column updates the compiler may vectorise without
+/// reordering any sum. (4×4 register tiles were tried: slower here, the
+/// work being bound by reading the block.)
+fn lower_product(l: &[f64], m: usize, w: usize, p1: usize, h: usize, cw: usize, out: &mut [f64]) {
+    for c in 0..cw {
+        let dst = &mut out[c * h + c..(c + 1) * h];
+        dst.fill(0.0);
+        for t in 0..w {
+            let a = l[t * m + p1 + c];
+            let src = &l[t * m + p1 + c..t * m + p1 + h];
+            for (d, sv) in dst.iter_mut().zip(src) {
+                *d += sv * a;
+            }
+        }
+    }
+}
+
+/// Relaxed supernodes (after CHOLMOD): merge a fundamental supernode into
+/// its parent when the parent follows it directly, at the cost of a few
+/// explicit zeros, so the dense kernels work on bigger blocks. Returns the
+/// first column of each merged supernode, then n.
+fn relax(fundamental: &[usize], parent: &[usize], below: &[usize]) -> Vec<usize> {
+    // (first column, width, rows, explicit zeros)
+    let mut merged: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for w in fundamental.windows(2) {
+        let (f, end) = (w[0], w[1]);
+        let mut cur = (f, end - f, below[f] + 1, 0usize);
+        while let Some(&prev) = merged.last() {
+            let last = prev.0 + prev.1 - 1;
+            if parent[last] != cur.0 {
+                break;
+            }
+            let width = prev.1 + cur.1;
+            let rows = prev.1 + cur.2;
+            let zeros = prev.3 + cur.3 + prev.1 * (prev.1 + cur.2 - prev.2);
+            let share = zeros as f64 / (width * rows) as f64;
+            // CHOLMOD's defaults. (Fundamental supernodes only, or other
+            // limits, measured within ±10% on a 1000-edge hole.)
+            let ok = width <= 4
+                || (width <= 16 && share < 0.8)
+                || (width <= 48 && share < 0.1)
+                || share < 0.05;
+            if !ok {
+                break;
+            }
+            merged.pop();
+            cur = (prev.0, width, rows, zeros);
+        }
+        merged.push(cur);
+    }
+    let mut first: Vec<usize> = merged.iter().map(|m| m.0).collect();
+    // `fundamental` ends with n (the column count).
+    first.push(fundamental[fundamental.len() - 1]);
+    first
+}
+
+/// A supernodal Cholesky factorisation L Lᵀ of P S Pᵀ (P: a fill-reducing
+/// ordering, then an elimination-tree postorder). Left-looking: each
+/// supernode (a run of columns sharing one row structure) is a dense
+/// column-major block, updated by its descendants in a fixed order. The
+/// dense kernels are element-wise column updates (`a[r] -= b[r] * c`), so
+/// the compiler may vectorise them without changing any sum's order.
+struct Cholesky {
+    /// perm[new] = old.
+    perm: Vec<usize>,
+    /// First column of each supernode (and n at the end).
+    first: Vec<usize>,
+    /// Row structure of each supernode (sorted; starts with its columns).
+    rows: Vec<Vec<usize>>,
+    /// Dense blocks, rows.len() × width, column-major.
+    blocks: Vec<Vec<f64>>,
+}
+
+impl Cholesky {
+    fn factor(
+        s: &[Vec<(usize, f64)>],
+        ctx: &RunContext,
+    ) -> Result<Result<Cholesky, Failed>, Cancelled> {
+        let n = s.len();
+        let upper_of = |inv: &[usize]| -> Vec<Vec<usize>> {
+            let mut upper = vec![Vec::new(); n];
+            for (old_i, row) in s.iter().enumerate() {
+                let i = inv[old_i];
+                for &(old_j, _) in row {
+                    let j = inv[old_j];
+                    if i < j {
+                        upper[j].push(i);
+                    }
+                }
+            }
+            upper
+        };
+        let invert = |perm: &[usize]| {
+            let mut inv = vec![0; n];
+            for (new, &old) in perm.iter().enumerate() {
+                inv[old] = new;
+            }
+            inv
+        };
+        let amd = amd_order(s);
+        ctx.checkpoint()?;
+        let upper = upper_of(&invert(&amd));
+        ctx.checkpoint()?;
+        let (parent0, below0) = etree(&upper, ctx)?;
+        drop(upper);
+        // Renumber in postorder: the tree and counts carry over.
+        let post = postorder(&parent0);
+        let post_inv = invert(&post);
+        let perm: Vec<usize> = post.iter().map(|&k| amd[k]).collect();
+        let inv = invert(&perm);
+        let mut parent = vec![NONE; n];
+        let mut below = vec![0; n];
+        for (new, &old) in post.iter().enumerate() {
+            parent[new] = match parent0[old] {
+                NONE => NONE,
+                p => post_inv[p],
+            };
+            below[new] = below0[old];
+        }
+        ctx.checkpoint()?;
+
+        // Fundamental supernodes: j joins j−1's when j−1's only child
+        // path continues into j with one row fewer below.
+        let mut children = vec![0u32; n];
+        for &p in &parent {
+            if p != NONE {
+                children[p] += 1;
+            }
+        }
+        let mut fundamental = vec![0];
+        for j in 1..n {
+            let joins = parent[j - 1] == j && below[j - 1] == below[j] + 1 && children[j] == 1;
+            if !joins {
+                fundamental.push(j);
+            }
+        }
+        fundamental.push(n);
+        let first = relax(&fundamental, &parent, &below);
+        let count = first.len() - 1;
+        let mut snode_of = vec![0; n];
+        for sn in 0..count {
+            snode_of[first[sn]..first[sn + 1]].fill(sn);
+        }
+
+        // Lower triangle of C = P S Pᵀ by columns, rows ascending.
+        let mut lower: Vec<Vec<(usize, f64)>> = vec![Vec::new(); n];
+        for (old_i, row) in s.iter().enumerate() {
+            let i = inv[old_i];
+            for &(old_j, v) in row {
+                let j = inv[old_j];
+                if i >= j {
+                    lower[j].push((i, v));
+                }
+            }
+        }
+        for col in &mut lower {
+            col.sort_unstable_by_key(|&(i, _)| i);
+        }
+        ctx.checkpoint()?;
+
+        // Row structures: the supernode's own entries and its children's
+        // rows below its first column (children come first: postorder).
+        let mut rows: Vec<Vec<usize>> = vec![Vec::new(); count];
+        let mut mark = vec![NONE; n];
+        let mut kids: Vec<Vec<usize>> = vec![Vec::new(); count];
+        for sn in 0..count {
+            let last = first[sn + 1] - 1;
+            if parent[last] != NONE {
+                kids[snode_of[parent[last]]].push(sn);
+            }
+        }
+        for sn in 0..count {
+            if sn % 256 == 0 {
+                ctx.checkpoint()?;
+            }
+            let (f, end) = (first[sn], first[sn + 1]);
+            let mut r: Vec<usize> = (f..end).collect();
+            for &i in &r {
+                mark[i] = sn;
+            }
+            for col in &lower[f..end] {
+                for &(i, _) in col {
+                    if mark[i] != sn {
+                        mark[i] = sn;
+                        r.push(i);
+                    }
+                }
+            }
+            for &k in &kids[sn] {
+                for &i in &rows[k] {
+                    if i >= f && mark[i] != sn {
+                        mark[i] = sn;
+                        r.push(i);
+                    }
+                }
+            }
+            r.sort_unstable();
+            rows[sn] = r;
+        }
+        drop(kids);
+        ctx.checkpoint()?;
+
+        // Numeric, left-looking. `link[J]` lists the supernodes whose next
+        // rows fall in J, with `cursor[K]` the position of that next row.
+        let mut blocks: Vec<Vec<f64>> = Vec::with_capacity(count);
+        let mut link_head = vec![NONE; count];
+        let mut link_next = vec![NONE; count];
+        let mut cursor = vec![0usize; count];
+        let mut pos = vec![0usize; n];
+        let mut update: Vec<f64> = Vec::new();
+        for sn in 0..count {
+            ctx.checkpoint()?;
+            let (f, end) = (first[sn], first[sn + 1]);
+            let w = end - f;
+            let r = &rows[sn];
+            let m = r.len();
+            for (p, &i) in r.iter().enumerate() {
+                pos[i] = p;
+            }
+            let mut block = vec![0.0; m * w];
+            for (c, col) in lower[f..end].iter().enumerate() {
+                for &(i, v) in col {
+                    block[c * m + pos[i]] += v;
+                }
+            }
+            // Updates from each descendant K, in list order.
+            let mut k = link_head[sn];
+            link_head[sn] = NONE;
+            while k != NONE {
+                let next_k = link_next[k];
+                let rk = &rows[k];
+                let mk = rk.len();
+                let wk = first[k + 1] - first[k];
+                let p1 = cursor[k];
+                let mut p2 = p1;
+                while p2 < mk && rk[p2] < end {
+                    p2 += 1;
+                }
+                // C = L_K[p1.., :] · L_K[p1..p2, :]ᵀ, then subtract into
+                // the block at the matching rows and columns.
+                let (h, cw) = (mk - p1, p2 - p1);
+                update.clear();
+                update.resize(h * cw, 0.0);
+                let lk = &blocks[k];
+                lower_product(lk, mk, wk, p1, h, cw, &mut update);
+                for c in 0..cw {
+                    let col = rk[p1 + c] - f;
+                    let dst = &mut block[col * m..(col + 1) * m];
+                    for (rr, u) in update[c * h + c..(c + 1) * h].iter().enumerate() {
+                        dst[pos[rk[p1 + c + rr]]] -= u;
+                    }
+                }
+                cursor[k] = p2;
+                if p2 < mk {
+                    let target = snode_of[rk[p2]];
+                    link_next[k] = link_head[target];
+                    link_head[target] = k;
+                }
+                k = next_k;
+                ctx.checkpoint()?;
+            }
+            // Dense Cholesky of the block: left-looking in panels of four
+            // columns (each panel first takes the earlier columns' update
+            // through the tiled product, then is factored on its own).
+            let mut jb = 0;
+            while jb < w {
+                ctx.checkpoint()?;
+                let bw = (w - jb).min(4);
+                let h = m - jb;
+                if jb > 0 {
+                    update.clear();
+                    update.resize(h * bw, 0.0);
+                    lower_product(&block, m, jb, jb, h, bw, &mut update);
+                    for c in 0..bw {
+                        let col = &mut block[(jb + c) * m + jb..(jb + c + 1) * m];
+                        for (rr, u) in update[c * h..(c + 1) * h].iter().enumerate().skip(c) {
+                            col[rr] -= u;
+                        }
+                    }
+                }
+                for j in jb..jb + bw {
+                    let d = block[j * m + j];
+                    if !(d > 0.0 && d.is_finite()) {
+                        return Ok(Err(Failed::NotPositiveDefinite {
+                            row: f + j,
+                            pivot: d,
+                        }));
+                    }
+                    let d = d.sqrt();
+                    block[j * m + j] = d;
+                    for v in &mut block[j * m + j + 1..(j + 1) * m] {
+                        *v /= d;
+                    }
+                    for c in j + 1..jb + bw {
+                        let a = block[j * m + c];
+                        let (left, right) = block.split_at_mut(c * m);
+                        let src = &left[j * m + c..(j + 1) * m];
+                        for (dv, sv) in right[c..m].iter_mut().zip(src) {
+                            *dv -= sv * a;
+                        }
+                    }
+                }
+                jb += bw;
+            }
+            blocks.push(block);
+            cursor[sn] = w;
+            if w < m {
+                let target = snode_of[r[w]];
+                link_next[sn] = link_head[target];
+                link_head[target] = sn;
+            }
+        }
+        Ok(Ok(Cholesky {
+            perm,
+            first,
+            rows,
+            blocks,
+        }))
+    }
+
+    fn nonzeros(&self) -> usize {
+        self.blocks.iter().map(Vec::len).sum()
+    }
+
+    /// x = S⁻¹ b.
+    fn solve(&self, b: &[f64]) -> Vec<f64> {
+        let n = b.len();
+        let mut x: Vec<f64> = self.perm.iter().map(|&old| b[old]).collect();
+        let count = self.rows.len();
+        for sn in 0..count {
+            let (f, w) = (self.first[sn], self.first[sn + 1] - self.first[sn]);
+            let (r, l) = (&self.rows[sn], &self.blocks[sn]);
+            let m = r.len();
+            for j in 0..w {
+                let xj = x[f + j] / l[j * m + j];
+                x[f + j] = xj;
+                for p in j + 1..m {
+                    x[r[p]] -= l[j * m + p] * xj;
+                }
+            }
+        }
+        for sn in (0..count).rev() {
+            let (f, w) = (self.first[sn], self.first[sn + 1] - self.first[sn]);
+            let (r, l) = (&self.rows[sn], &self.blocks[sn]);
+            let m = r.len();
+            for j in (0..w).rev() {
+                let mut xj = x[f + j];
+                for p in j + 1..m {
+                    xj -= l[j * m + p] * x[r[p]];
+                }
+                x[f + j] = xj / l[j * m + j];
+            }
+        }
+        let mut out = vec![0.0; n];
+        for (new, &old) in self.perm.iter().enumerate() {
+            out[old] = x[new];
+        }
+        out
+    }
+}
+
+/// Approximate minimum degree ordering of S's pattern (faer's AMD: integer
+/// only, no randomness, so the same pattern always gives the same order).
+fn amd_order(s: &[Vec<(usize, f64)>]) -> Vec<usize> {
+    use faer::dyn_stack::{MemBuffer, MemStack};
+    use faer::sparse::SymbolicSparseColMat;
+    use faer::sparse::linalg::amd;
+    let n = s.len();
+    let mut col_ptr = Vec::with_capacity(n + 1);
+    let mut row_idx = Vec::new();
+    col_ptr.push(0usize);
+    for row in s {
+        // S is symmetric: its rows are its columns.
+        row_idx.extend(row.iter().map(|&(j, _)| j));
+        col_ptr.push(row_idx.len());
+    }
+    let nnz = row_idx.len();
+    let pattern = SymbolicSparseColMat::new_checked(n, n, col_ptr, None, row_idx);
+    let mut perm = vec![0usize; n];
+    let mut perm_inv = vec![0usize; n];
+    let mut buffer = MemBuffer::new(amd::order_scratch::<usize>(n, nnz));
+    match amd::order(
+        &mut perm,
+        &mut perm_inv,
+        pattern.as_ref(),
+        amd::Control::default(),
+        MemStack::new(&mut buffer),
+    ) {
+        Ok(_) => perm,
+        // Only an index overflow, impossible at fill_holes' sizes (at most
+        // ~60k unknowns): the natural order is correct, just slower.
+        Err(e) => panic!("AMD ordering failed on a {n}×{n} fairing matrix: {e:?}"),
+    }
+}
+
+/// Solve S x = b for each coordinate (b = −S_IF x_F, the fixed vertices'
+/// pull), verify against the operator, refine once if needed.
 fn solve(
     graph: &Graph,
     power: usize,
@@ -262,28 +826,21 @@ fn solve(
     nb: usize,
     x: &mut [Vec<f64>; 3],
     ctx: &RunContext,
-) -> Result<Result<usize, NotConverged>, Cancelled> {
+) -> Result<Result<usize, Failed>, Cancelled> {
     let interior = x[0].len();
     let np = nb + interior;
     let n = positions.len();
-    let mut inv_diag = Vec::with_capacity(interior);
-    for i in nb..np {
-        let d = graph.diagonal(power, i);
-        if !(d > 0.0 && d.is_finite()) {
-            return Ok(Err(NotConverged {
-                iterations: 0,
-                residual: f64::NAN,
-            }));
-        }
-        inv_diag.push(1.0 / d);
-    }
-    let max_iterations = 4 * interior;
-    let mut most = 0;
+    let s = assemble(graph, power, nb, np, ctx)?;
+    ctx.checkpoint()?;
+    let chol = match Cholesky::factor(&s, ctx)? {
+        Ok(f) => f,
+        Err(e) => return Ok(Err(e)),
+    };
+    ctx.checkpoint()?;
     let mut full = vec![0.0; n];
     let mut out = vec![0.0; n];
     let mut scratch = vec![0.0; n];
     for (c, xc) in x.iter_mut().enumerate() {
-        // b = −(S x_F) at the interior rows, x_F the fixed coordinates.
         for (f, p) in full.iter_mut().zip(positions) {
             *f = p[c] - centre[c];
         }
@@ -297,83 +854,37 @@ fn solve(
             xc.fill(0.0);
             continue;
         }
-        let mut matvec = |v: &[f64], into: &mut [f64]| {
+        let mut residual = |v: &[f64]| -> Vec<f64> {
             full.fill(0.0);
             full[nb..np].copy_from_slice(v);
             graph.apply(power, &full, &mut out, &mut scratch);
-            into.copy_from_slice(&out[nb..np]);
+            b.iter().zip(&out[nb..np]).map(|(bi, si)| bi - si).collect()
         };
-        match conjugate_gradient(&mut matvec, &b, b_norm, &inv_diag, xc, max_iterations, ctx)? {
-            Ok(k) => most = most.max(k),
-            Err(e) => return Ok(Err(e)),
+        let mut sol = chol.solve(&b);
+        let mut r = residual(&sol);
+        if norm(&r) > TOLERANCE * b_norm {
+            // One step of iterative refinement.
+            let fix = chol.solve(&r);
+            for (s, f) in sol.iter_mut().zip(&fix) {
+                *s += f;
+            }
+            r = residual(&sol);
         }
+        if !sol.iter().all(|v| v.is_finite()) {
+            return Ok(Err(Failed::NotFinite));
+        }
+        let rel = norm(&r) / b_norm;
+        if rel.is_nan() || rel > TOLERANCE {
+            return Ok(Err(Failed::Residual(rel)));
+        }
+        *xc = sol;
+        ctx.checkpoint()?;
     }
-    Ok(Ok(most))
-}
-
-fn dot(a: &[f64], b: &[f64]) -> f64 {
-    a.iter().zip(b).map(|(x, y)| x * y).sum()
+    Ok(Ok(chol.nonzeros()))
 }
 
 fn norm(a: &[f64]) -> f64 {
-    dot(a, a).sqrt()
-}
-
-/// Jacobi-preconditioned conjugate gradient for S x = b from the given x,
-/// to ‖r‖ ≤ [`TOLERANCE`] ‖b‖ within `max_iterations`.
-fn conjugate_gradient(
-    matvec: &mut impl FnMut(&[f64], &mut [f64]),
-    b: &[f64],
-    b_norm: f64,
-    inv_diag: &[f64],
-    x: &mut [f64],
-    max_iterations: usize,
-    ctx: &RunContext,
-) -> Result<Result<usize, NotConverged>, Cancelled> {
-    let n = b.len();
-    let mut r = vec![0.0; n];
-    matvec(x, &mut r);
-    for (ri, &bi) in r.iter_mut().zip(b) {
-        *ri = bi - *ri;
-    }
-    let goal = TOLERANCE * b_norm;
-    let mut residual = norm(&r);
-    let mut z: Vec<f64> = r.iter().zip(inv_diag).map(|(r, d)| r * d).collect();
-    let mut p = z.clone();
-    let mut rz = dot(&r, &z);
-    let mut sp = vec![0.0; n];
-    for k in 0..max_iterations {
-        if residual <= goal {
-            return Ok(Ok(k));
-        }
-        if !residual.is_finite() {
-            break;
-        }
-        ctx.checkpoint()?;
-        matvec(&p, &mut sp);
-        let alpha = rz / dot(&p, &sp);
-        for i in 0..n {
-            x[i] += alpha * p[i];
-            r[i] -= alpha * sp[i];
-        }
-        residual = norm(&r);
-        for i in 0..n {
-            z[i] = r[i] * inv_diag[i];
-        }
-        let rz_next = dot(&r, &z);
-        let beta = rz_next / rz;
-        rz = rz_next;
-        for i in 0..n {
-            p[i] = z[i] + beta * p[i];
-        }
-    }
-    if residual <= goal {
-        return Ok(Ok(max_iterations));
-    }
-    Ok(Err(NotConverged {
-        iterations: max_iterations,
-        residual: residual / b_norm,
-    }))
+    a.iter().map(|x| x * x).sum::<f64>().sqrt()
 }
 
 #[cfg(test)]
@@ -382,58 +893,57 @@ mod tests {
 
     use super::*;
 
-    /// A 1-D chain Laplacian (tridiagonal 2, −1) of size n: SPD.
-    fn chain(v: &[f64], out: &mut [f64]) {
-        let n = v.len();
-        for i in 0..n {
-            let left = if i > 0 { v[i - 1] } else { 0.0 };
-            let right = if i + 1 < n { v[i + 1] } else { 0.0 };
-            out[i] = 2.0 * v[i] - left - right;
-        }
+    /// A 1-D chain Laplacian (tridiagonal 2, −1) of size n, as rows.
+    fn chain(n: usize) -> Vec<Vec<(usize, f64)>> {
+        (0..n)
+            .map(|i| {
+                let mut row = Vec::new();
+                if i > 0 {
+                    row.push((i - 1, -1.0));
+                }
+                row.push((i, 2.0));
+                if i + 1 < n {
+                    row.push((i + 1, -1.0));
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn times(s: &[Vec<(usize, f64)>], x: &[f64]) -> Vec<f64> {
+        s.iter()
+            .map(|row| row.iter().map(|&(j, v)| v * x[j]).sum())
+            .collect()
     }
 
     #[test]
-    fn conjugate_gradient_solves_an_spd_system() {
-        let n = 50;
-        let b = vec![1.0; n];
-        let mut x = vec![0.0; n];
-        let it = conjugate_gradient(
-            &mut chain,
-            &b,
-            norm(&b),
-            &vec![0.5; n],
-            &mut x,
-            4 * n,
-            &RunContext::none(),
-        )
-        .unwrap()
-        .unwrap();
-        assert!(it <= n + 5, "{it} iterations");
-        let mut r = vec![0.0; n];
-        chain(&x, &mut r);
-        let err: f64 = r.iter().map(|v| (v - 1.0).abs()).fold(0.0, f64::max);
-        assert!(err < 1e-8, "{err}");
+    fn cholesky_solves_an_spd_system() {
+        let s = chain(50);
+        let b: Vec<f64> = (0..50).map(|i| (i % 7) as f64 - 3.0).collect();
+        let ldl = Cholesky::factor(&s, &RunContext::none()).unwrap().unwrap();
+        let x = ldl.solve(&b);
+        let r = times(&s, &x);
+        let err = r
+            .iter()
+            .zip(&b)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0, f64::max);
+        assert!(err < 1e-10, "{err}");
     }
 
-    /// Out of iterations: a named failure with the residual reached, never
-    /// a quietly unfinished answer.
+    /// A matrix that isn't positive definite fails by name, at its row.
     #[test]
-    fn conjugate_gradient_reports_not_converging() {
-        let n = 50;
-        let b = vec![1.0; n];
-        let mut x = vec![0.0; n];
-        let e = conjugate_gradient(
-            &mut chain,
-            &b,
-            norm(&b),
-            &vec![0.5; n],
-            &mut x,
-            3,
-            &RunContext::none(),
-        )
-        .unwrap()
-        .unwrap_err();
-        assert_eq!(e.iterations, 3);
-        assert!(e.residual > TOLERANCE, "{e:?}");
+    fn cholesky_names_a_non_positive_pivot() {
+        let mut s = chain(5);
+        s[3][1].1 = -2.0; // diagonal of row 3
+        let e = Cholesky::factor(&s, &RunContext::none())
+            .unwrap()
+            .err()
+            .unwrap();
+        assert!(matches!(e, Failed::NotPositiveDefinite { .. }), "{e:?}");
+        assert!(
+            e.to_string().contains("not positive definite at row"),
+            "{e}"
+        );
     }
 }

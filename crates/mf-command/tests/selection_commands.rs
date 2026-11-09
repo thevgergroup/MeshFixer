@@ -133,7 +133,10 @@ fn selection_of_filled_loop_reports_loop_closed() {
         op_id: "mesh.fill_holes".into(),
         target: id,
         selection: Some(sel.clone()),
-        raw_params: BTreeMap::from([("refine".to_string(), "false".to_string())]),
+        raw_params: BTreeMap::from([
+            ("refine".to_string(), "false".to_string()),
+            ("fill_style".to_string(), "flat".to_string()),
+        ]),
     })
     .unwrap();
     let patch: Vec<mf_geometry::FaceId> = s.node(s.current()).unwrap().provenance[&id]

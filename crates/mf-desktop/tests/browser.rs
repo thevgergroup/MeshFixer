@@ -859,3 +859,72 @@ fn fill_style_choice_changes_the_patch() {
         "flat {flat:.3} mm, smooth {smooth:.3} mm"
     );
 }
+
+/// MF-OP-002 (Task 12a review I1): Smooth and Curvature always refine, so
+/// Properties shows Refine checked and greyed out, with a note saying why;
+/// with Flat it is the user's choice again.
+#[test]
+fn smooth_styles_show_refine_as_always_on() {
+    require_gpu!("smooth_styles_show_refine_as_always_on");
+    let mut h = opened(three_holes());
+    h.get_by_label("Fill all holes").click();
+    h.run_steps(2);
+    let note = "Smooth and Curvature always add points so the patch can curve";
+    let refine = |h: &Harness<'static, MeshFixerApp>| {
+        let node = h.get_by_label("Refine");
+        let n = node.accesskit_node();
+        (n.is_disabled(), n.toggled())
+    };
+    // Smooth, preselected: always on, disabled, explained.
+    assert_eq!(
+        refine(&h),
+        (true, Some(egui::accesskit::Toggled::True)),
+        "Refine with Smooth"
+    );
+    h.get_by_label(note);
+    // Even if the setting underneath says off.
+    h.state_mut()
+        .params_for("mesh.fill_holes")
+        .insert("refine".into(), mf_spec::ParamValue::Bool(false));
+    h.run_steps(2);
+    assert_eq!(refine(&h), (true, Some(egui::accesskit::Toggled::True)));
+    h.get_by_label("Curvature-matched").click();
+    h.run_steps(2);
+    assert!(refine(&h).0, "Refine with Curvature");
+    h.get_by_label(note);
+    // Flat: the user's own setting, enabled, no note.
+    h.get_by_label("Flat").click();
+    h.run_steps(2);
+    assert_eq!(refine(&h), (false, Some(egui::accesskit::Toggled::False)));
+    assert!(h.query_by_label(note).is_none());
+}
+
+/// The batch fill (Fill all holes up to a size) uses the style chosen in
+/// its options, here a non-default one, as one command.
+#[test]
+fn batch_fill_uses_the_chosen_style() {
+    require_gpu!("batch_fill_uses_the_chosen_style");
+    let mut h = opened(three_hundred_holes());
+    h.get_by_label("Fill all holes").click();
+    h.run_steps(2);
+    h.get_by_label("Curvature-matched").click();
+    h.run_steps(2);
+    let rev = h.state().session.current();
+    h.get_by_label("Apply").click();
+    wait_until(&mut h, "the batch fill", |a| {
+        a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+    });
+    let s = &h.state().session;
+    assert_eq!(
+        s.node(s.current()).unwrap().parent,
+        Some(rev),
+        "one command"
+    );
+    let record = s.records_to_current().pop().unwrap();
+    assert_eq!(
+        record.params.0["fill_style"],
+        mf_spec::ParamValue::Text("curvature".into())
+    );
+    // The 300 holes and the 292-edge rim (under the 500-edge default).
+    assert_eq!(record.selection.unwrap().ids.len(), 301);
+}

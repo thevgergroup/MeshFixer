@@ -35,7 +35,8 @@ fn fill(
     Ok((mesh, prov, out.report))
 }
 
-const NO_REFINE: &[(&str, &str)] = &[("refine", "false")];
+/// The bare triangulation: flat (a non-flat style always refines).
+const NO_REFINE: &[(&str, &str)] = &[("refine", "false"), ("fill_style", "flat")];
 
 /// MF-OP-003: every input face keeps its ID and indices; every input vertex
 /// keeps its position bit-for-bit.
@@ -153,7 +154,11 @@ fn loop_too_large_fails_by_name() {
     let err = fill(
         &m,
         Target::Loops(vec![id]),
-        &[("refine", "false"), ("max_loop_edges", "3")],
+        &[
+            ("refine", "false"),
+            ("max_loop_edges", "3"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap_err();
     match err {
@@ -174,7 +179,11 @@ fn whole_object_reports_skipped_loops() {
     let (out, _, report) = fill(
         &m,
         Target::WholeObject,
-        &[("refine", "false"), ("max_loop_edges", "10")],
+        &[
+            ("refine", "false"),
+            ("max_loop_edges", "10"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap();
     assert_eq!(report["filled_loops"].as_array().unwrap().len(), 2);
@@ -355,7 +364,20 @@ mod refinement {
             "hole has {} edges",
             hole.edge_count
         );
-        let (out, prov, _) = fill(&m, Target::Loops(vec![hole.id]), &[("refine", "true")]).unwrap();
+        // Every fill style: fairing moves vertices, so the quality limits
+        // hold after it too (MF-OP-002).
+        for style in ["flat", "smooth", "curvature"] {
+            check_density(&m, &hole, style);
+        }
+    }
+
+    fn check_density(m: &Mesh, hole: &mf_geometry::BoundaryLoop, style: &str) {
+        let (out, prov, _) = fill(
+            m,
+            Target::Loops(vec![hole.id]),
+            &[("refine", "true"), ("fill_style", style)],
+        )
+        .unwrap();
         assert!(
             !prov.created_vertices.is_empty(),
             "refinement added vertices"
@@ -387,7 +409,10 @@ mod refinement {
                 }
             }
             let angle = min_angle_deg(&out, t);
-            assert!(angle >= 5.0, "patch triangle {f:?} has a {angle:.2}° angle");
+            assert!(
+                angle >= 5.0,
+                "{style}: patch triangle {f:?} has a {angle:.2}° angle"
+            );
         }
         let patch_mean: f64 = interior
             .iter()
@@ -401,21 +426,21 @@ mod refinement {
             .map(|(f, _)| min_angle_deg(&out, out.face(*f).unwrap()))
             .fold(180.0, f64::min);
         eprintln!(
-            "hole {} edges: {} patch faces, {} new vertices, edge ratio {ratio:.3}, min angle {worst_angle:.1}°",
+            "{style}: hole {} edges: {} patch faces, {} new vertices, edge ratio {ratio:.3}, min angle {worst_angle:.1}°",
             hole.edge_count,
             prov.created_faces.len(),
             prov.created_vertices.len()
         );
         assert!(
             (0.75..=1.25).contains(&ratio),
-            "patch/boundary edge length ratio {ratio:.3}"
+            "{style}: patch/boundary edge length ratio {ratio:.3}"
         );
         let d = inspect(&out);
         assert!(
             d.is_manifold && d.inconsistent_orientation_edges == 0,
             "{d:?}"
         );
-        assert_untouched_outside_target(&m, &out);
+        assert_untouched_outside_target(m, &out);
     }
 
     #[test]
@@ -424,7 +449,11 @@ mod refinement {
         let (_, prov, _) = fill(
             &m,
             Target::WholeObject,
-            &[("refine", "false"), ("max_loop_edges", "200")],
+            &[
+                ("refine", "false"),
+                ("max_loop_edges", "200"),
+                ("fill_style", "flat"),
+            ],
         )
         .unwrap();
         assert!(prov.created_vertices.is_empty());
@@ -491,7 +520,11 @@ fn max_loop_edges_is_capped_where_the_triangulation_stays_interactive() {
     let (out, _, _) = fill(
         &m,
         Target::Loops(vec![hole]),
-        &[("max_loop_edges", "1000"), ("refine", "false")],
+        &[
+            ("max_loop_edges", "1000"),
+            ("refine", "false"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap();
     let elapsed = start.elapsed();
@@ -505,7 +538,12 @@ mod fairing {
     use super::*;
 
     /// A unit UV sphere with its north cap (everything within 30° of the
-    /// pole) removed: one round hole of exactly 44 edges.
+    /// pole) removed: one round hole of exactly 44 edges. The 2% / 1%
+    /// limits (MF-OP-002) are sensitive to the cap angle: the continuous
+    /// Δ² solution (a paraboloid matching height and slope at the rim)
+    /// overshoots the sphere by ≈ 1.04% of the radius at 30° and ≈ 2.0% at
+    /// 35°, so a change in refinement density can move the measured value
+    /// by a few tenths of a percent without fairing being wrong.
     fn capped_sphere() -> Mesh {
         let base = uv_sphere(36, 44);
         let cut = 30f64.to_radians().cos() - 1e-9;
@@ -627,19 +665,108 @@ mod fairing {
         }
     }
 
-    /// The report says how hard each solve worked.
+    /// The report says how many vertices each patch's fairing moved.
     #[test]
-    fn fairing_reports_its_iterations() {
+    fn fairing_reports_the_vertices_it_moved() {
         let m = capped_sphere();
-        let (_, _, report) = fill(&m, Target::WholeObject, &[("fill_style", "smooth")]).unwrap();
-        let it = report["filled_loops"][0]["fairing_iterations"].as_u64();
-        assert!(it.is_some_and(|n| n > 0), "{report}");
+        let (_, prov, report) = fill(&m, Target::WholeObject, &[("fill_style", "smooth")]).unwrap();
+        let n = report["filled_loops"][0]["faired_vertices"].as_u64();
+        assert_eq!(n, Some(prov.created_vertices.len() as u64), "{report}");
         let (_, _, report) = fill(&m, Target::WholeObject, &[("fill_style", "flat")]).unwrap();
         assert!(
-            report["filled_loops"][0]
-                .get("fairing_iterations")
-                .is_none(),
+            report["filled_loops"][0].get("faired_vertices").is_none(),
             "{report}"
         );
+    }
+
+    /// A non-flat style always refines: a smooth fill asked for without
+    /// refinement still gets new vertices to shape (never a flat patch in
+    /// disguise), and the report says refinement was applied.
+    #[test]
+    fn smooth_styles_always_refine() {
+        let m = capped_sphere();
+        for style in ["smooth", "curvature"] {
+            let (with, _, report_with) =
+                fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+            let (without, prov, report) = fill(
+                &m,
+                Target::WholeObject,
+                &[("fill_style", style), ("refine", "false")],
+            )
+            .unwrap();
+            assert!(!prov.created_vertices.is_empty(), "{style}");
+            assert_eq!(with.content_hash(), without.content_hash(), "{style}");
+            assert_eq!(report["refined"], true, "{style}: {report}");
+            assert_eq!(report_with["refined"], true, "{style}");
+        }
+        let (_, prov, report) = fill(
+            &m,
+            Target::WholeObject,
+            &[("fill_style", "flat"), ("refine", "false")],
+        )
+        .unwrap();
+        assert!(prov.created_vertices.is_empty());
+        assert_eq!(report["refined"], false, "{report}");
+    }
+
+    /// A unit sphere with a polar cap (z > 0.7) cut off: one round hole of
+    /// `edges` boundary edges, refined to thousands of new vertices.
+    fn big_cap(edges: u32) -> Mesh {
+        let base = uv_sphere(edges / 2, edges);
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            if t.iter().all(|&v| base.corner_position(v)[2] > 0.7) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        e.finish().unwrap().0
+    }
+
+    /// MF-ISSUE-053: fairing the largest holes the limit allows (500 and
+    /// 1000 edges; ~12,700 and ~52,400 new vertices) by a direct solve.
+    /// Was minutes with Jacobi-CG, and curvature didn't converge at all.
+    /// Measured on the M2 Max, fairing over the flat fill: 500 edges
+    /// ≈ 0.05 s smooth, ≈ 0.12 s curvature; 1000 edges ≈ 0.5 s smooth,
+    /// ≈ 1.2 s curvature (the 3·10⁹ multiply-adds of its factorisation).
+    /// Gated at 1 s for 500 edges and 3 s for 1000 (CI runners are slower).
+    /// The run still checks for cancellation at least every 100 ms
+    /// (MF-RT-002).
+    #[test]
+    fn large_holes_fair_quickly() {
+        let run = |m: &Mesh, style: &str| {
+            let p = params(&[("fill_style", style), ("max_loop_edges", "1000")]);
+            let (ctx, probe) = mf_operations::RunContext::instrumented();
+            let start = std::time::Instant::now();
+            let out = find("mesh.fill_holes")
+                .unwrap()
+                .execute(m, &Target::WholeObject, &p, &ctx)
+                .unwrap();
+            let took = start.elapsed();
+            assert_eq!(
+                out.report["skipped_loops"],
+                serde_json::json!([]),
+                "{style}"
+            );
+            (took, probe.max_gap())
+        };
+        let mut failures = Vec::new();
+        for (edges, limit) in [(500, 1.0), (1000, 3.0)] {
+            let m = big_cap(edges);
+            let (flat, _) = run(&m, "flat");
+            for style in ["smooth", "curvature"] {
+                let (took, gap) = run(&m, style);
+                let fairing = took.saturating_sub(flat);
+                eprintln!(
+                    "{edges}-edge hole, {style}: {took:?} ({fairing:?} over flat {flat:?}), longest checkpoint gap {gap:?}"
+                );
+                if fairing.as_secs_f64() >= limit {
+                    failures.push(format!("{edges} edges {style}: fairing took {fairing:?}"));
+                }
+                if gap > std::time::Duration::from_millis(100) {
+                    failures.push(format!("{edges} edges {style}: checkpoint gap {gap:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
     }
 }

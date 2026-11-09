@@ -1576,6 +1576,9 @@ fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 }
 
+/// Why Refine is on and greyed out for a smooth or curvature fill.
+const REFINE_FORCED: &str = "Smooth and Curvature always add points so the patch can curve";
+
 fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
     let Some(spec) = mf_spec::builtin::get(&tool.op_id) else {
         ui.label(format!("Unknown operation {}", tool.op_id));
@@ -1591,6 +1594,10 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
     );
     let batch = tool.op_id == "mesh.fill_holes" && tool.selection.is_none();
     let values = app.params_for(&tool.op_id);
+    // A fill that isn't flat always refines (MF-OP-002): it needs the
+    // added points to curve.
+    let refine_forced = tool.op_id == "mesh.fill_holes"
+        && matches!(values.get("fill_style"), Some(ParamValue::Text(s)) if s != "flat");
     // The batch fill's size limit: a slider on its own line, as wide as
     // the panel allows (a wider grid would widen the panel).
     let limit = spec.parameters.iter().find(|p| p.name == "max_loop_edges");
@@ -1650,6 +1657,20 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                                 .suffix(suffix),
                         )
                         .on_hover_text(&p.description);
+                    }
+                    (ParamKind::Bool { .. }, ParamValue::Bool(_))
+                        if refine_forced && p.name == "refine" =>
+                    {
+                        ui.label("");
+                        ui.add_enabled(false, egui::Checkbox::new(&mut true, &name))
+                            .on_disabled_hover_text(&p.description);
+                        ui.end_row();
+                        ui.label("");
+                        ui.label(
+                            RichText::new(REFINE_FORCED)
+                                .color(theme::TEXT_MUTED)
+                                .small(),
+                        );
                     }
                     (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
                         ui.label("");

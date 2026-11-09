@@ -132,9 +132,9 @@ fn select_hole_fill_undo_refill() {
     // 2. Fill only that hole (no refinement). Properties offers the one
     // operation valid for a hole, already open.
     h.get_by_label("Fill hole");
-    h.state_mut()
-        .params_for("mesh.fill_holes")
-        .insert("refine".into(), ParamValue::Bool(false));
+    let params = h.state_mut().params_for("mesh.fill_holes");
+    params.insert("refine".into(), ParamValue::Bool(false));
+    params.insert("fill_style".into(), ParamValue::Text("flat".into()));
     h.run_steps(2);
     let before = h.state().session.current();
     h.get_by_label("Apply").click();

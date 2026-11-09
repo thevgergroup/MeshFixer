@@ -44,6 +44,11 @@ tempfile = "3"
 ctrlc = "3.5"
 libc = "0.2"
 sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# The fill-reducing (AMD) ordering for the fairing solve (MF-OP-002,
+# MF-ISSUE-053; owner-approved 2026-11-09). Integer-only; the numeric
+# factorisation is our own scalar code, so results stay bit-identical
+# across CPUs (faer's SIMD kernels pick a width per machine).
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
@@ -61,6 +66,9 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.mf-operations]
+opt-level = 2
+
+[profile.dev.package.faer]
 opt-level = 2
 
 # Picking (the BVH build and its ray casts, MF-RENDER-004) runs in tests

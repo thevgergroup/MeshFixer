@@ -194,7 +194,7 @@ fn real_scan_holes_fill_smoothly() {
         .filter(|l| l.edge_count <= 500)
         .map(|l| (l.id, l.edge_count))
         .collect();
-    // (loop, edges, new vertices, iterations, time, flat and smooth
+    // (loop, edges, new vertices, faired vertices, time, flat and smooth
     // dihedrals: largest, mean at the rim).
     type Row = (
         u32,
@@ -231,7 +231,7 @@ fn real_scan_holes_fill_smoothly() {
         };
         let (smooth_out, took) = run(&smooth);
         let smooth_out = smooth_out.unwrap_or_else(|e| panic!("loop {id} (smooth): {e}"));
-        let iterations = smooth_out.report["filled_loops"][0]["fairing_iterations"]
+        let faired = smooth_out.report["filled_loops"][0]["faired_vertices"]
             .as_u64()
             .unwrap_or(0);
         let (fa, fp) = flat_out.change.unwrap();
@@ -241,12 +241,12 @@ fn real_scan_holes_fill_smoothly() {
         }
         let f = patch_dihedrals(&before_faces, &fa, &fp);
         let s = patch_dihedrals(&before_faces, &sa, &sp);
-        rows.push((id, edges, sp.created_vertices.len(), iterations, took, f, s));
+        rows.push((id, edges, sp.created_vertices.len(), faired, took, f, s));
     }
     assert!(rows.len() >= 50, "{}", rows.len());
-    for (id, edges, new, iterations, took, f, s) in &rows {
+    for (id, edges, new, faired, took, f, s) in &rows {
         eprintln!(
-            "loop {id}: {edges} edges, {new} new vertices, {iterations} iterations, {took:?}; \
+            "loop {id}: {edges} edges, {new} new vertices, {faired} faired, {took:?}; \
              max dihedral flat {:.2}°, smooth {:.2}°; mean at the rim flat {:.2}°, smooth {:.2}°",
             f.0, s.0, f.1, s.1
         );
@@ -255,9 +255,9 @@ fn real_scan_holes_fill_smoothly() {
     // vertices to only a few, and only those can be faired; the rest are
     // the same patch in every style. Where fairing works on a noisy rim it
     // lowers the sharpest angle overall, but one rim edge can end up a
-    // little sharper (by under 3°: loops 34, 70 and 73 here). MF-ISSUE-054,
-    // for the owner to rule on; meanwhile the gate is that no hole gets
-    // more than 3° sharper and the scan as a whole gets smoother.
+    // little sharper (by under 3°: loops 34, 70 and 73 here). The gate,
+    // owner-approved 2026-11-09 (MF-ISSUE-054): no hole gets 3° or more
+    // sharper, and the scan as a whole gets smoother.
     let faired: Vec<_> = rows.iter().filter(|r| r.2 > 0).collect();
     let worse: Vec<_> = faired
         .iter()

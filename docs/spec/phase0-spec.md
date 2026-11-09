@@ -196,9 +196,9 @@ Selections bound to one revision are never applied to another without translatio
 - `smooth`, the default: bi-Laplacian fairing (Δ²x = 0) of the patch interior, with the boundary and 1-ring fixed, so the patch meets the surface with matching slope (C1).
 - `curvature`: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
 
-Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`.
+`smooth` and `curvature` always refine (fairing moves the added vertices; without them the patch would be flat). Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`.
 *Accept:*
-- On a 44-edge hole in a unit-radius sphere, every patch vertex is within 2% of the radius with `smooth`, and within 1% with `curvature`.
+- On a 44-edge hole in a unit-radius sphere (the cap within 30° of a pole removed), every patch vertex is within 2% of the radius with `smooth`, and within 1% with `curvature`. The limit depends on the cap: the continuous Δ² solution overshoots by ≈ 1.04% of the radius at 30° and ≈ 2.0% at 35°, so a change in refinement density can move the measurement by a few tenths of a percent.
 - On procedural holes, the patch's mean edge length is within ±25% of the boundary's mean, and no patch triangle has a minimum angle below 5°.
 - On the real scan fixture, every targeted loop closes, the result is manifold around each patch, and an offscreen render is captured for review.
 

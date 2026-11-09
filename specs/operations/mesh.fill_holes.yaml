@@ -18,13 +18,15 @@ parameters:
   - name: refine
     type: bool
     default: true
+    # Always on for fill_style smooth and curvature.
     description: Add vertices so the patch matches the surrounding triangle density
   - name: fill_style
     type: choice
     # flat: triangulate and refine only. smooth: bi-Laplacian fairing
     # (Δ²x = 0) of the patch's new vertices, boundary and the 1-ring around
     # it fixed (C1). curvature: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
-    # Fairing moves only new vertices, and needs refine to have added some.
+    # Fairing moves only new vertices, so smooth and curvature always
+    # refine, whatever refine says (the report's "refined" says so).
     values: [flat, smooth, curvature]
     default: smooth
     description: How the patch meets the surface around the hole
