@@ -7,7 +7,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use mf_metrics::{FrameSummary, MemoryBreakdown, RssSampler};
+use mf_metrics::{FrameSummary, MemoryBreakdown, ProcessMemory, ProcessSampler};
 
 /// How often the snapshot is refreshed while the panel is open.
 pub const REFRESH_EVERY: Duration = Duration::from_millis(500);
@@ -65,7 +65,7 @@ impl JobStart {
             live
         });
         JobStart {
-            label: label.trim_end_matches('…').to_owned(),
+            label: short_label(label),
             started: Instant::now(),
             live,
         }
@@ -79,6 +79,19 @@ impl JobStart {
                 .map(|live| mf_metrics::peak_bytes().saturating_sub(live)),
             label: self.label,
         }
+    }
+}
+
+/// A job's label for the panel: "Importing /long/temp/dir/part.stl" is
+/// "Importing part.stl"; a trailing "…" goes.
+pub fn short_label(label: &str) -> String {
+    let label = label.trim_end_matches('…');
+    match label.split_once(' ') {
+        Some((verb, rest)) if rest.contains(['/', '\\']) => {
+            let name = rest.rsplit(['/', '\\']).next().unwrap_or(rest);
+            format!("{verb} {name}")
+        }
+        _ => label.to_owned(),
     }
 }
 
@@ -101,10 +114,11 @@ pub struct MetricsSnapshot {
     pub jobs: Vec<JobRecord>,
 }
 
-/// The RSS sampler, started when the panel opens, stopped when it closes.
+/// The process-memory sampler, started when the panel opens, stopped when
+/// it closes.
 #[derive(Default)]
 pub struct Rss {
-    sampler: Option<Result<RssSampler, String>>,
+    sampler: Option<Result<ProcessSampler, String>>,
 }
 
 impl Rss {
@@ -112,7 +126,7 @@ impl Rss {
     pub fn keep(&mut self, on: bool) {
         match (on, self.sampler.is_some()) {
             (true, false) => {
-                self.sampler = Some(RssSampler::start(RSS_EVERY).map_err(|e| e.to_string()))
+                self.sampler = Some(ProcessSampler::start(RSS_EVERY).map_err(|e| e.to_string()))
             }
             (false, true) => self.sampler = None,
             _ => {}
@@ -120,10 +134,10 @@ impl Rss {
     }
 
     /// The latest sample; `None` before the first.
-    pub fn latest(&self) -> Option<Result<u64, String>> {
+    pub fn latest(&self) -> Option<Result<ProcessMemory, String>> {
         match self.sampler.as_ref()? {
             Ok(s) => s.latest(),
-            Err(e) => Some(Err(format!("can't start the RSS sampler: {e}"))),
+            Err(e) => Some(Err(format!("can't start the memory sampler: {e}"))),
         }
     }
 }
@@ -149,5 +163,24 @@ pub fn format_duration(d: Duration) -> String {
         format!("{:.2} s", d.as_secs_f64())
     } else {
         format!("{:.1} ms", mf_metrics::duration_ms(d))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_label;
+
+    #[test]
+    fn job_labels_show_file_names_not_paths() {
+        assert_eq!(
+            short_label("Importing /var/folders/g7/T/.tmp8j93Ze/damaged.stl"),
+            "Importing damaged.stl"
+        );
+        assert_eq!(
+            short_label(r"Exporting C:\tmp\out.3mf"),
+            "Exporting out.3mf"
+        );
+        assert_eq!(short_label("Fill all holes…"), "Fill all holes");
+        assert_eq!(short_label("Replaying logs/run 1"), "Replaying run 1");
     }
 }

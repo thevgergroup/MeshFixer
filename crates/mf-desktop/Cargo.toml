@@ -40,3 +40,4 @@ mf-render.workspace = true
 tempfile.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
+sysinfo.workspace = true

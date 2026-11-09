@@ -17,13 +17,42 @@ use mf_desktop::{MeshFixerApp, Settings};
 use mf_fixtures::{DamageSpec, damaged_sphere};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
-use mf_metrics::{GpuSummary, Percentiles};
+use mf_metrics::{GatedFrame, GpuSummary, Percentiles, frame_gate};
 
 const BIG: usize = 5_000_000;
 /// MF-RT-001: no UI frame over 50 ms while fill_holes runs on 5M triangles.
 const FRAME_BUDGET: Duration = Duration::from_millis(50);
 /// MF-RT-002: cancel returns within 250 ms.
 const CANCEL_BUDGET: Duration = Duration::from_millis(250);
+
+/// Swap in use and total (bytes), for an INCONCLUSIVE gate's message.
+fn swap() -> Option<(u64, u64)> {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    (sys.total_swap() > 0).then(|| (sys.used_swap(), sys.total_swap()))
+}
+
+/// Page-ins so far; `None` where the OS doesn't count them (then a slow
+/// frame can't be put down to swapping, and fails: see `frame_gate`).
+fn page_ins() -> Option<u64> {
+    // allow-swallow: unknown page-ins are `None`, which the gate treats as no excuse
+    mf_metrics::page_ins().ok()
+}
+
+/// The page-ins between two readings.
+fn page_ins_since(before: Option<u64>) -> Option<u64> {
+    Some(page_ins()?.saturating_sub(before?))
+}
+
+/// MF-RT-001's gate with the swap policy (M4 Task 10 fix round 1, P1):
+/// the budget never widens; a run whose over-budget frames all waited on
+/// page-ins is INCONCLUSIVE and run exactly once more.
+fn gate(what: &str, run: impl FnMut(u32) -> Vec<GatedFrame>) {
+    match frame_gate(what, FRAME_BUDGET, swap, run) {
+        Ok(log) => eprint!("{log}"),
+        Err(log) => panic!("{log}"),
+    }
+}
 
 fn heavy() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -342,6 +371,8 @@ struct FrameSplit {
     app: Duration,
     paint: Duration,
     gpu_wait: Duration,
+    /// Page-ins while the frame ran (`None`: unknown).
+    page_ins: Option<u64>,
 }
 
 impl FrameSplit {
@@ -352,6 +383,7 @@ impl FrameSplit {
 
 /// One whole frame with the camera moved, so the 3D view is redrawn.
 fn orbit_frame(harness: &mut Harness<'_, MeshFixerApp>, painter: &Painter) -> FrameSplit {
+    let paged = page_ins();
     let start = Instant::now();
     if let Some(cam) = harness.state_mut().camera.as_mut() {
         cam.orbit(0.01, 0.0);
@@ -363,6 +395,7 @@ fn orbit_frame(harness: &mut Harness<'_, MeshFixerApp>, painter: &Painter) -> Fr
         app,
         paint,
         gpu_wait,
+        page_ins: page_ins_since(paged),
     }
 }
 
@@ -373,7 +406,7 @@ fn gated_frames(
     harness: &mut Harness<'_, MeshFixerApp>,
     painter: &Painter,
     mut done: impl FnMut(&MeshFixerApp) -> bool,
-) -> Vec<(Duration, String)> {
+) -> Vec<GatedFrame> {
     let mut frames = Vec::new();
     loop {
         let split = orbit_frame(harness, painter);
@@ -389,7 +422,11 @@ fn gated_frames(
             ms(split.paint),
             ms(split.gpu_wait)
         );
-        frames.push((split.total(), at));
+        frames.push(GatedFrame {
+            time: split.total(),
+            page_ins: split.page_ins,
+            at,
+        });
         if done(app) {
             return frames;
         }
@@ -397,28 +434,31 @@ fn gated_frames(
     }
 }
 
-/// Reports `frames` and checks the worst against the budget.
-fn judge(what: &str, frames: &[(Duration, String)], app: &MeshFixerApp) {
-    let times: Vec<Duration> = frames.iter().map(|(d, _)| *d).collect();
-    let (worst, at) = frames
+/// Reports `frames` (the gate itself is [`gate`]'s).
+fn report(what: &str, frames: &[GatedFrame], app: &MeshFixerApp) {
+    let times: Vec<Duration> = frames.iter().map(|f| f.time).collect();
+    let worst = frames
         .iter()
-        .max_by_key(|(d, _)| *d)
+        .max_by_key(|f| f.time)
         .expect("at least one frame");
     let last = frames.last().expect("at least one frame");
-    eprintln!("{what}: {} frames", frames.len());
+    let paged: u64 = frames.iter().filter_map(|f| f.page_ins).sum();
+    eprintln!("{what}: {} frames, {paged} page-ins", frames.len());
     eprintln!("{}", summary("whole frame", Percentiles::of(times)));
-    eprintln!("worst frame {:.1} ms (at {at})", ms(*worst));
-    eprintln!("first frame drawing the new revision: {:.1} ms", ms(last.0));
+    eprintln!(
+        "worst frame {:.1} ms (at {}; {} page-ins)",
+        ms(worst.time),
+        worst.at,
+        worst.page_ins.map_or("unknown".into(), |p| p.to_string())
+    );
+    eprintln!(
+        "first frame drawing the new revision: {:.1} ms",
+        ms(last.time)
+    );
     let t = &app.frame_times;
     eprintln!("{}", summary("app CPU (update + encode/submit)", t.cpu()));
     eprintln!("{}", summary("app frame interval", t.interval()));
     eprintln!("GPU (3D view): {}", gpu_summary(app));
-    assert!(
-        *worst <= FRAME_BUDGET,
-        "{what}: worst frame {:.1} ms at {at} (budget {} ms)",
-        ms(*worst),
-        FRAME_BUDGET.as_millis()
-    );
 }
 
 /// MF-RT-001's acceptance test. A frame here is the whole frame: the app's
@@ -435,71 +475,81 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
         return;
     }
     let _heavy = heavy();
-    let (mut harness, render_state) = opened();
-    let painter = Painter::new(render_state, [1440, 900]);
-    // Warm up: the mesh is on the GPU and egui's fonts are cached.
-    for _ in 0..5 {
-        orbit_frame(&mut harness, &painter);
-    }
-    let mut idle = Vec::new();
-    for _ in 0..20 {
-        idle.push(orbit_frame(&mut harness, &painter).total());
-    }
-    eprintln!(
-        "{}",
-        summary("idle whole frame (before the fill)", Percentiles::of(idle))
-    );
-    let labels = harness.state().session.history_labels().len();
-    let rendered = harness.state().viewport.frames_rendered;
-
-    harness.get_by_label("Fill all holes").click();
-    harness.run_steps(2);
-    harness.get_by_label("Apply").click();
-    let mut started = false;
-    let mut committed_at = None;
-    let mut rendered_while_running = 0;
-    let mut n = 0;
-    let frames = gated_frames(&mut harness, &painter, |app| {
-        n += 1;
-        started |= app.busy.is_some();
-        assert!(started || n < 10, "the fill didn't start");
-        if started && app.busy.is_none() && committed_at.is_none() {
-            committed_at = Some(n);
-            rendered_while_running = app.viewport.frames_rendered - rendered;
+    gate("fill_holes on 5M", |_attempt| {
+        let (mut harness, render_state) = opened();
+        let painter = Painter::new(render_state, [1440, 900]);
+        // Warm up: the mesh is on the GPU and egui's fonts are cached.
+        for _ in 0..5 {
+            orbit_frame(&mut harness, &painter);
         }
-        started && app.busy.is_none() && app.shows_current_revision()
+        let mut idle = Vec::new();
+        for _ in 0..20 {
+            idle.push(orbit_frame(&mut harness, &painter).total());
+        }
+        eprintln!(
+            "{}",
+            summary("idle whole frame (before the fill)", Percentiles::of(idle))
+        );
+        let labels = harness.state().session.history_labels().len();
+        let rendered = harness.state().viewport.frames_rendered;
+
+        harness.get_by_label("Fill all holes").click();
+        harness.run_steps(2);
+        harness.get_by_label("Apply").click();
+        let applied = Instant::now();
+        let mut fill_wall = None;
+        let mut started = false;
+        let mut committed_at = None;
+        let mut rendered_while_running = 0;
+        let mut n = 0;
+        let frames = gated_frames(&mut harness, &painter, |app| {
+            n += 1;
+            started |= app.busy.is_some();
+            assert!(started || n < 10, "the fill didn't start");
+            if started && app.busy.is_none() && committed_at.is_none() {
+                committed_at = Some(n);
+                fill_wall = Some(applied.elapsed());
+                rendered_while_running = app.viewport.frames_rendered - rendered;
+            }
+            started && app.busy.is_none() && app.shows_current_revision()
+        });
+        let app = harness.state();
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(
+            app.session.history_labels().len(),
+            labels + 1,
+            "the fill committed"
+        );
+        let committed_at = committed_at.expect("committed");
+        assert!(
+            rendered_while_running >= committed_at as u64 / 2,
+            "the 3D view was redrawn as the camera moved"
+        );
+        eprintln!("commit frame: {:.1} ms", ms(frames[committed_at - 1].time));
+        eprintln!(
+            "fill wall time (Apply to commit): {:.2} s",
+            fill_wall.expect("committed").as_secs_f64()
+        );
+        // MF-RENDER-003: the filled revision's GPU chunks, mostly shared.
+        let view = app.object_views().into_iter().find(|v| v.active).unwrap();
+        let (surface, _) = view.render.gpu.surface_vertex_count();
+        let surface = (surface * std::mem::size_of::<mf_render::SurfaceVertex>()) as u64;
+        let upload = view.render.gpu.last_upload();
+        eprintln!(
+            "filled revision uploaded {} of {surface} surface bytes, {} line bytes",
+            upload.surface_bytes, upload.line_bytes
+        );
+        assert!(
+            upload.surface_bytes < surface / 10,
+            "a fill re-uploads only the chunks it appended to: {upload:?}"
+        );
+        assert!(
+            committed_at >= 10,
+            "too few frames while the fill ran to judge: {committed_at}"
+        );
+        report("fill_holes on 5M", &frames, app);
+        frames
     });
-    let app = harness.state();
-    assert!(app.error.is_none(), "{:?}", app.error);
-    assert_eq!(
-        app.session.history_labels().len(),
-        labels + 1,
-        "the fill committed"
-    );
-    let committed_at = committed_at.expect("committed");
-    assert!(
-        rendered_while_running >= committed_at as u64 / 2,
-        "the 3D view was redrawn as the camera moved"
-    );
-    eprintln!("commit frame: {:.1} ms", ms(frames[committed_at - 1].0));
-    // MF-RENDER-003: the filled revision's GPU chunks, mostly shared.
-    let view = app.object_views().into_iter().find(|v| v.active).unwrap();
-    let (surface, _) = view.render.gpu.surface_vertex_count();
-    let surface = (surface * std::mem::size_of::<mf_render::SurfaceVertex>()) as u64;
-    let upload = view.render.gpu.last_upload();
-    eprintln!(
-        "filled revision uploaded {} of {surface} surface bytes, {} line bytes",
-        upload.surface_bytes, upload.line_bytes
-    );
-    assert!(
-        upload.surface_bytes < surface / 10,
-        "a fill re-uploads only the chunks it appended to: {upload:?}"
-    );
-    assert!(
-        committed_at >= 10,
-        "too few frames while the fill ran to judge: {committed_at}"
-    );
-    judge("fill_holes on 5M", &frames, app);
 }
 
 /// MF-RT-001 for an import: gated from the frame that starts importing a
@@ -514,21 +564,24 @@ fn ui_frames_stay_under_50ms_while_a_5m_file_imports() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.stl");
     mf_io::write_path(&big_mesh(), &path, Format::StlBinary).unwrap();
-    let (mut harness, render_state) = empty_app();
-    let painter = Painter::new(render_state, [1440, 900]);
-    for _ in 0..5 {
-        orbit_frame(&mut harness, &painter);
-    }
-    harness.state_mut().open(path);
-    let mut started = false;
-    let frames = gated_frames(&mut harness, &painter, |app| {
-        started |= app.busy.is_some();
-        started && app.busy.is_none() && app.shows_current_revision()
+    gate("5M STL import", |_attempt| {
+        let (mut harness, render_state) = empty_app();
+        let painter = Painter::new(render_state, [1440, 900]);
+        for _ in 0..5 {
+            orbit_frame(&mut harness, &painter);
+        }
+        harness.state_mut().open(path.clone());
+        let mut started = false;
+        let frames = gated_frames(&mut harness, &painter, |app| {
+            started |= app.busy.is_some();
+            started && app.busy.is_none() && app.shows_current_revision()
+        });
+        let app = harness.state();
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert_eq!(app.session.document().objects().len(), 1);
+        report("5M STL import", &frames, app);
+        frames
     });
-    let app = harness.state();
-    assert!(app.error.is_none(), "{:?}", app.error);
-    assert_eq!(app.session.document().objects().len(), 1);
-    judge("5M STL import", &frames, app);
 }
 
 /// Clicks Cancel and returns how long until the job has stopped and the
@@ -671,55 +724,49 @@ fn ui_frames_stay_under_50ms_while_hovering_during_a_5m_topology_build() {
         return;
     }
     let _heavy = heavy();
-    let (mut harness, _render_state) = empty_app();
-    // A small object first: the view has a camera and draws, so the
-    // pointer over it asks for hover picks.
-    let mut small = big_model();
-    small.objects[0].name = "small".into();
-    small.objects[0].mesh = mf_fixtures::cube(1.0);
-    harness.state_mut().import_model(small);
-    wait_until(
-        &mut harness,
-        "small object ready",
-        Duration::from_secs(60),
-        |a| a.current_analysis().is_some() && a.camera.is_some() && a.picking_ready(),
-    );
-    let view = harness.state().viewport.last_rect.unwrap();
+    gate("hover during a 5M topology build", |_attempt| {
+        let (mut harness, _render_state) = empty_app();
+        // A small object first: the view has a camera and draws, so the
+        // pointer over it asks for hover picks.
+        let mut small = big_model();
+        small.objects[0].name = "small".into();
+        small.objects[0].mesh = mf_fixtures::cube(1.0);
+        harness.state_mut().import_model(small);
+        wait_until(
+            &mut harness,
+            "small object ready",
+            Duration::from_secs(60),
+            |a| a.current_analysis().is_some() && a.camera.is_some() && a.picking_ready(),
+        );
+        let view = harness.state().viewport.last_rect.unwrap();
 
-    // The 5M object, its topology not yet computed (earlier tests may
-    // have cached it on the shared mesh).
-    let big = big_mesh();
-    big.release_topology();
-    harness.state_mut().import_model(big_model());
-    let computing = std::thread::spawn(move || {
-        big.topology();
-    });
-    let start = Instant::now();
-    let mut worst = (Duration::ZERO, 0);
-    let mut i = 0;
-    while !(computing.is_finished() && harness.state().picking_ready()) {
-        assert!(start.elapsed() < Duration::from_secs(600), "timed out");
-        let p = view.center() + egui::vec2((i % 40) as f32 * 4.0 - 80.0, (i % 7) as f32 * 3.0);
-        harness.event(egui::Event::PointerMoved(p));
-        let t = Instant::now();
-        harness.step();
-        let frame = t.elapsed();
-        if frame > worst.0 {
-            worst = (frame, i);
+        // The 5M object, its topology not yet computed (earlier tests may
+        // have cached it on the shared mesh).
+        let big = big_mesh();
+        big.release_topology();
+        harness.state_mut().import_model(big_model());
+        let computing = std::thread::spawn(move || {
+            big.topology();
+        });
+        let start = Instant::now();
+        let mut frames = Vec::new();
+        let mut i = 0;
+        while !(computing.is_finished() && harness.state().picking_ready()) {
+            assert!(start.elapsed() < Duration::from_secs(600), "timed out");
+            let p = view.center() + egui::vec2((i % 40) as f32 * 4.0 - 80.0, (i % 7) as f32 * 3.0);
+            harness.event(egui::Event::PointerMoved(p));
+            let paged = page_ins();
+            let t = Instant::now();
+            harness.step();
+            frames.push(GatedFrame {
+                time: t.elapsed(),
+                page_ins: page_ins_since(paged),
+                at: format!("frame {i} of the hover"),
+            });
+            i += 1;
+            std::thread::sleep(Duration::from_millis(2));
         }
-        i += 1;
-        std::thread::sleep(Duration::from_millis(2));
-    }
-    computing.join().unwrap();
-    println!(
-        "hover during a 5M topology build: {i} frames, worst {:.1} ms (frame {})",
-        ms(worst.0),
-        worst.1
-    );
-    assert!(
-        worst.0 <= FRAME_BUDGET,
-        "worst frame {:.1} ms (frame {}) while the topology was computed",
-        ms(worst.0),
-        worst.1
-    );
+        computing.join().unwrap();
+        frames
+    });
 }

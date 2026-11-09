@@ -6,7 +6,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::{FrameTimes, GpuSummary, Percentiles};
+use crate::{FrameTimes, GpuSummary, Percentiles, ProcessMemory};
 
 /// Milliseconds, from whole nanoseconds (no `as_secs_f64() * 1000`
 /// rounding drift: 49.5 ms is exactly 49.5).
@@ -115,11 +115,21 @@ pub struct FrameSummary {
     /// CPU time per frame (update, encode and submit).
     pub cpu: Option<DurationStats>,
     pub gpu: GpuStats,
-    /// Frame to frame (start to start).
+    /// Frame to frame (start to start), every interval, idle gaps included.
     pub interval: Option<DurationStats>,
-    /// 1 / the median frame-to-frame interval.
+    /// Frame to frame over the intervals shorter than [`CONTINUOUS_GAP`]:
+    /// frames redrawn back to back (the app repaints on demand, so a long
+    /// gap is idling, not a slow frame).
+    pub continuous: Option<DurationStats>,
+    /// Intervals of [`CONTINUOUS_GAP`] or more (idle).
+    pub idle_gaps: usize,
+    /// 1 / the median continuous interval; `None` without one.
     pub fps: Option<f64>,
 }
+
+/// A frame-to-frame gap this long or longer is the app idling between
+/// repaints, not a frame taking that long.
+pub const CONTINUOUS_GAP: Duration = Duration::from_millis(100);
 
 /// Frames per second at a frame time of `d` (`None` for zero).
 pub fn fps(d: Duration) -> Option<f64> {
@@ -131,12 +141,17 @@ impl FrameTimes {
     /// [`crate::FRAME_HISTORY`] durations three times, so callers on a UI
     /// thread refresh it now and then, not every frame.
     pub fn summary(&self) -> FrameSummary {
-        let interval = self.interval();
+        let intervals: Vec<Duration> = self.frames().filter_map(|f| f.interval).collect();
+        let (continuous, idle): (Vec<Duration>, Vec<Duration>) =
+            intervals.iter().partition(|d| **d < CONTINUOUS_GAP);
+        let continuous = Percentiles::of(continuous);
         FrameSummary {
             cpu: self.cpu().as_ref().map(DurationStats::from),
             gpu: GpuStats::of(&self.gpu()),
-            fps: interval.as_ref().and_then(|p| fps(p.p50())),
-            interval: interval.as_ref().map(DurationStats::from),
+            interval: Percentiles::of(intervals).as_ref().map(DurationStats::from),
+            fps: continuous.as_ref().and_then(|p| fps(p.p50())),
+            continuous: continuous.as_ref().map(DurationStats::from),
+            idle_gaps: idle.len(),
         }
     }
 }
@@ -160,9 +175,9 @@ impl GpuBufferBytes {
     }
 }
 
-/// Where memory goes (MF-RT-005). Counted figures and the OS's process RSS
+/// Where memory goes (MF-RT-005). Counted figures and the OS's figures
 /// side by side, never one standing in for the other; a figure that isn't
-/// known is `None` (with the reason for the RSS), never a guess.
+/// known is `None` (with the reason), never a guess.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 pub struct MemoryBreakdown {
     /// The mesh's own storage (`Mesh::heap_bytes`).
@@ -170,51 +185,64 @@ pub struct MemoryBreakdown {
     /// The cached topology; `None` while it isn't computed.
     pub topology_bytes: Option<u64>,
     /// How far the heap rose above its level at the start of the last
-    /// operation (counting allocator, whole process); `None` with no
-    /// operation yet or no counting allocator.
+    /// operation (counting allocator, whole process).
     pub scratch_peak_bytes: Option<u64>,
+    /// Why `scratch_peak_bytes` is `None` ("no operation run", "no counting
+    /// allocator").
+    pub scratch_peak_note: Option<String>,
     /// GPU allocations; `None` when nothing is on a GPU.
     pub gpu: Option<GpuBufferBytes>,
-    /// Resident set size from the OS.
+    /// Resident pages (excludes compressed and swapped-out pages).
     pub process_rss_bytes: Option<u64>,
+    /// macOS physical footprint: resident, compressed and swapped pages,
+    /// GPU buffers included (Activity Monitor's "Memory").
+    pub phys_footprint_bytes: Option<u64>,
+    /// Why the OS figures are missing.
     pub rss_error: Option<String>,
 }
 
 impl MemoryBreakdown {
-    /// Set the process RSS from the OS now (or the reason there's none).
-    /// Spawns `ps` on macOS: not for a UI thread (see [`RssSampler`]).
-    pub fn with_rss_now(mut self) -> MemoryBreakdown {
-        self.set_rss(crate::process_rss_bytes());
+    /// Set the OS's figures now (or the reason there are none).
+    pub fn with_process_now(mut self) -> MemoryBreakdown {
+        self.set_process(crate::process_memory());
         self
     }
 
-    pub fn set_rss(&mut self, rss: Result<u64, String>) {
-        (self.process_rss_bytes, self.rss_error) = match rss {
-            Ok(b) => (Some(b), None),
-            Err(e) => (None, Some(e)),
-        };
+    pub fn set_process(&mut self, m: Result<ProcessMemory, String>) {
+        match m {
+            Ok(m) => {
+                self.process_rss_bytes = Some(m.resident_bytes);
+                self.phys_footprint_bytes = m.phys_footprint_bytes;
+                self.rss_error = None;
+            }
+            Err(e) => {
+                self.process_rss_bytes = None;
+                self.phys_footprint_bytes = None;
+                self.rss_error = Some(e);
+            }
+        }
     }
 }
 
-/// The process RSS, sampled on a thread of its own (on macOS each sample
-/// runs `ps`, far too slow for a UI frame). Samples at once, then every
-/// `every`, until dropped.
-pub struct RssSampler {
-    latest: Arc<Mutex<Option<Result<u64, String>>>>,
+/// The process's memory, sampled on a thread of its own (cheap on Linux
+/// and macOS, but Windows runs `tasklist`, far too slow for a UI frame).
+/// Samples at once, then every `every`, until dropped.
+pub struct ProcessSampler {
+    latest: Arc<Mutex<Option<Result<ProcessMemory, String>>>>,
     stop: Option<std::sync::mpsc::Sender<()>>,
 }
 
-impl RssSampler {
-    pub fn start(every: Duration) -> std::io::Result<RssSampler> {
+impl ProcessSampler {
+    pub fn start(every: Duration) -> std::io::Result<ProcessSampler> {
         let latest = Arc::new(Mutex::new(None));
         let (stop, stopped) = std::sync::mpsc::channel::<()>();
         let slot = latest.clone();
         std::thread::Builder::new()
-            .name("mf-rss".into())
+            .name("mf-process-memory".into())
             .spawn(move || {
                 loop {
-                    let rss = crate::process_rss_bytes();
-                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(rss);
+                    let m = crate::process_memory();
+                    *slot.lock().unwrap_or_else(|p| p.into_inner()) = Some(m);
                     match stopped.recv_timeout(every) {
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                         // Dropped (or told to stop): done.
@@ -222,14 +250,14 @@ impl RssSampler {
                     }
                 }
             })?;
-        Ok(RssSampler {
+        Ok(ProcessSampler {
             latest,
             stop: Some(stop),
         })
     }
 
     /// The latest sample; `None` before the first.
-    pub fn latest(&self) -> Option<Result<u64, String>> {
+    pub fn latest(&self) -> Option<Result<ProcessMemory, String>> {
         self.latest
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -237,7 +265,7 @@ impl RssSampler {
     }
 }
 
-impl Drop for RssSampler {
+impl Drop for ProcessSampler {
     fn drop(&mut self) {
         // Dropping the sender wakes the thread, which then returns.
         self.stop.take();

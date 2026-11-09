@@ -41,7 +41,7 @@ struct Metrics {
     frames: Option<serde_json::Map<String, serde_json::Value>>,
     /// The process RSS measured by the command at its busiest (`bench
     /// orbit`: while the GPU mesh is held); otherwise sampled at the end.
-    rss: Option<Result<u64, String>>,
+    rss: Option<Result<mf_metrics::ProcessMemory, String>>,
 }
 
 impl Metrics {
@@ -59,24 +59,23 @@ impl Metrics {
     /// Where memory went (MF-RT-005): counted storage, the last
     /// operation's peak, GPU buffers and the process RSS side by side.
     fn memory(&self) -> MemoryBreakdown {
+        let operation = self.phases.iter().rev().find(|p| p.name == "operation");
+        let (scratch_peak_bytes, scratch_peak_note) = match operation {
+            None => (None, Some("no operation run".to_owned())),
+            Some(_) if !mf_metrics::is_installed() => {
+                (None, Some("no counting allocator".to_owned()))
+            }
+            Some(p) => (Some(p.peak_bytes), None),
+        };
         let mut memory = MemoryBreakdown {
             mesh_storage_bytes: self.mesh_bytes,
             topology_bytes: (self.topology_bytes > 0).then_some(self.topology_bytes),
-            scratch_peak_bytes: self
-                .phases
-                .iter()
-                .rev()
-                .find(|p| p.name == "operation")
-                .filter(|_| mf_metrics::is_installed())
-                .map(|p| p.peak_bytes),
+            scratch_peak_bytes,
+            scratch_peak_note,
             gpu: self.gpu,
             ..MemoryBreakdown::default()
         };
-        memory.set_rss(
-            self.rss
-                .clone()
-                .unwrap_or_else(mf_metrics::process_rss_bytes),
-        );
+        memory.set_process(self.rss.clone().unwrap_or_else(mf_metrics::process_memory));
         memory
     }
 
@@ -675,13 +674,39 @@ fn parse_size(s: &str) -> Result<(u32, u32), Failure> {
     Ok((w, h))
 }
 
-/// What `bench orbit` holds per triangle, at most: the mesh and its
-/// topology, the GPU mesh (72 bytes of surface vertices and a face-state
-/// byte; unified memory counts it in RAM) and the import's transient
-/// buffers. Measured on an M2 Max: 1M requested (960,857 actual) from an
-/// STL peaked at a 393 MB memory footprint (184 MB RSS), ≈350 bytes per
-/// triangle above the ≈55 MB baseline; rounded up.
-const ORBIT_BYTES_PER_TRIANGLE: u64 = 400;
+/// What `bench orbit` holds per requested triangle, at its peak: the mesh
+/// and its topology, the GPU mesh (72 bytes of surface vertices and a
+/// face-state byte; unified memory counts it in the footprint) and the
+/// import's transient buffers. Calibrated on an M2 Max from the physical
+/// footprint's lifetime peak (M4 Task 10 fix round 1, P2): 10M requested
+/// (9,618,698 actual) from an STL peaked at 2,176 MB (≈218 bytes per
+/// requested triangle above the ≈40 MB baseline; 5M: 1,225 MB). Rounded
+/// up by ~10%. (The first estimate, 400, came from a 1M run, where the
+/// baseline dominates.)
+const ORBIT_BYTES_PER_TRIANGLE: u64 = 240;
+/// Where [`ORBIT_BYTES_PER_TRIANGLE`] comes from (in the JSON).
+const ORBIT_ESTIMATE_BASIS: &str = "M2 Max, 10M requested (9,618,698 actual) from an STL: \
+     2,176 MB peak physical footprint (≈218 B per requested triangle above baseline), +10%";
+
+/// One figure of the OS's process memory; `None` if the OS gave none (the
+/// error itself is reported in `memory.rss_error`).
+fn process_figure(
+    m: &Result<mf_metrics::ProcessMemory, String>,
+    figure: impl Fn(&mf_metrics::ProcessMemory) -> Option<u64>,
+) -> Option<u64> {
+    match m {
+        Ok(m) => figure(m),
+        Err(_) => None,
+    }
+}
+
+fn memory_estimate_json() -> serde_json::Value {
+    serde_json::json!({
+        "bytes_per_requested_triangle": ORBIT_BYTES_PER_TRIANGLE,
+        "basis": ORBIT_ESTIMATE_BASIS,
+        "compared_with": "sysinfo available memory",
+    })
+}
 
 /// The machine `bench orbit` ran on (MF-RENDER-002): CPU, RAM and OS from
 /// `sysinfo`, the GPU from wgpu's adapter info. A figure the OS doesn't
@@ -774,6 +799,7 @@ fn bench_orbit(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resul
                 "skipped": short,
                 "reason": reason,
                 "requested_triangles": triangles,
+                "memory_estimate": memory_estimate_json(),
                 "frames": frames,
                 "resolution": { "width": width, "height": height },
                 "device": device_json(&info),
@@ -831,7 +857,7 @@ fn bench_orbit(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resul
     percentiles.insert("gpu_ms".into(), serde_json::json!(summary.gpu));
     metrics.gpu = Some(run.buffers);
     metrics.frames = Some(percentiles.clone());
-    metrics.rss = Some(run.rss.clone());
+    metrics.rss = Some(run.process.clone());
 
     let mut json = serde_json::json!({
         "requested_triangles": requested,
@@ -839,6 +865,16 @@ fn bench_orbit(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resul
         "input": input.map(|p| p.display().to_string()),
         "frames": frames,
         "resolution": { "width": width, "height": height },
+        "measures": mf_render::bench::MEASURES,
+        "msaa_samples": mf_render::bench::SAMPLES,
+        "overlay_layers": "none (the boundary outlines in the mesh's own buffers are drawn; \
+                           selection, hover and defect overlay layers are not)",
+        "fps_basis": "1 / p50 frame time (render only, see measures)",
+        // A process-memory error is reported in memory.rss_error; these are
+        // null then (and off macOS / Linux), never a guess.
+        "peak_phys_footprint_bytes": process_figure(&run.process, |p| p.peak_phys_footprint_bytes),
+        "page_ins": process_figure(&run.process, |p| p.page_ins),
+        "memory_estimate": memory_estimate_json(),
         "device": device_json(&run.adapter),
         "gpu_timestamps": run.timestamps,
         "gpu_time": summary.gpu.describe(),

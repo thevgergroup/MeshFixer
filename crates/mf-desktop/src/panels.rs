@@ -390,16 +390,26 @@ pub fn metrics_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     if !app.show_metrics {
         return;
     }
+    // The app repaints on demand: without this an idle app's panel would
+    // freeze until the next input.
+    ctx.request_repaint_after(crate::metrics::REFRESH_EVERY);
     let mut open = true;
     let pools = app.pool_sizes();
     let snapshot = app.metrics_snapshot().cloned();
+    // Over the 3D view's top-left corner, clear of the side panels (the
+    // view's rect from its last frame; before any, just right of the tree).
+    let at = app
+        .viewport
+        .last_rect
+        .map_or(egui::pos2(TREE_WIDTH + 16.0, 40.0), |view| {
+            view.left_top() + egui::vec2(12.0, 12.0)
+        });
     egui::Window::new("Metrics")
         .open(&mut open)
         .resizable(false)
         .collapsible(true)
         .default_width(380.0)
-        // Over the 3D view's top-left corner, clear of the tree.
-        .default_pos([TREE_WIDTH + 16.0, 40.0])
+        .default_pos(at)
         .show(ctx, |ui| {
             let Some(m) = snapshot else {
                 ui.label("Collecting…");
@@ -417,15 +427,22 @@ pub fn metrics_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
 
             ui.strong("Frame times");
             let f = &m.frames;
-            ui.label(match (&f.interval, f.fps) {
-                (Some(i), Some(fps)) => format!("Frame to frame: {} ({fps:.0} fps)", stats(i)),
-                _ => "Frame to frame: not enough frames yet (fps unknown)".into(),
-            });
+            // What a frame costs leads; the redraw rate follows, said to be
+            // one (the app repaints on demand, so idle gaps aren't slowness).
             ui.label(match &f.cpu {
                 Some(c) => format!("CPU per frame: {}", stats(c)),
                 None => "CPU per frame: no frames finished yet".into(),
             });
             ui.label(f.gpu.describe());
+            ui.label(match (&f.continuous, f.fps) {
+                (Some(c), Some(fps)) => format!(
+                    "Redraw rate: {fps:.0} fps over {} back-to-back frames ({} idle gaps left \
+                     out); the view only redraws when something changes, so this is not a \
+                     speed figure",
+                    c.frames, f.idle_gaps
+                ),
+                _ => "Redraw rate: idle; the view only redraws when something changes".into(),
+            });
             muted(
                 ui,
                 format!(
@@ -482,15 +499,23 @@ pub fn metrics_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                 bytes(m.last_upload_bytes),
                 bytes(m.geometry_uploaded_bytes)
             ));
+            const RSS: &str = "Resident memory (RSS, excludes swapped/compressed pages)";
             ui.label(match (&mem.process_rss_bytes, &mem.rss_error) {
-                (Some(b), _) => format!("Process memory (RSS): {}", bytes(*b)),
-                (None, Some(e)) => format!("Process memory (RSS): unavailable ({e})"),
-                (None, None) => "Process memory (RSS): measuring…".into(),
+                (Some(b), _) => format!("{RSS}: {}", bytes(*b)),
+                (None, Some(e)) => format!("{RSS}: unavailable ({e})"),
+                (None, None) => format!("{RSS}: measuring…"),
             });
+            if let Some(b) = mem.phys_footprint_bytes {
+                ui.label(format!(
+                    "Memory footprint: {} (Activity Monitor's \"Memory\": compressed and \
+                     swapped pages and GPU buffers included)",
+                    bytes(b)
+                ));
+            }
             muted(
                 ui,
-                "RSS is everything the app holds in RAM, GPU buffers included on \
-                 unified-memory Macs; the figures above it are counted"
+                "Resident and footprint come from the OS; the figures above them are \
+                 counted. Under memory pressure resident can be far below what the app holds"
                     .into(),
             );
             ui.add_space(6.0);

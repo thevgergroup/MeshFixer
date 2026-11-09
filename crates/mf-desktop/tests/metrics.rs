@@ -12,6 +12,7 @@
 
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use mf_desktop::MeshFixerApp;
@@ -132,7 +133,12 @@ fn metrics_panel_shows_gpu_bytes_and_thread_budget() {
 
     // Frame times with fps, the last operation, peak heap, the memory
     // breakdown with process RSS.
-    assert!(label(&h, "Frame to frame:").contains("fps"));
+    // fps only over frames redrawn back to back, said to be a redraw rate.
+    let redraw = label(&h, "Redraw rate:");
+    assert!(
+        redraw.contains("only redraws when something changes"),
+        "{redraw}"
+    );
     assert!(label(&h, "CPU per frame:").contains("p95"));
     // GPU time comes with its counts, or says why there is none.
     let gpu_line = h
@@ -160,10 +166,43 @@ fn metrics_panel_shows_gpu_bytes_and_thread_budget() {
             || label(&h, "Cached topology:").contains("KB")
     );
     assert!(label(&h, "Last operation's peak:").contains("above its start"));
-    let rss = label(&h, "Process memory (RSS):");
+    // Resident memory says what it leaves out; macOS adds the footprint.
+    let rss = label(&h, "Resident memory (RSS");
+    assert!(rss.contains("excludes swapped/compressed"), "{rss}");
     if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         assert!(rss.contains("MB"), "{rss}");
     }
+    if cfg!(target_os = "macos") {
+        let footprint = label(&h, "Memory footprint:");
+        assert!(
+            footprint.contains(&format_bytes(m.memory.phys_footprint_bytes.unwrap())),
+            "{footprint}"
+        );
+    }
+
+    // P4: a job shows its file's name, not a temporary path.
+    let import = label(&h, "Importing ");
+    assert!(
+        import.starts_with("Importing damaged.stl:") && !import.contains('/'),
+        "{import}"
+    );
+
+    // I3: while open, the panel refreshes even when nothing else repaints.
+    h.run_steps(3);
+    let delay = h.output().viewport_output[&egui::ViewportId::ROOT].repaint_delay;
+    assert!(
+        delay <= mf_desktop::metrics::REFRESH_EVERY,
+        "the panel asks for a repaint within {:?}, not {delay:?}",
+        mf_desktop::metrics::REFRESH_EVERY
+    );
+
+    // P5: it opens over the 3D view, not over the side panels.
+    let view = h.state().viewport.last_rect.unwrap();
+    let window = h.get_by_label("Metrics").rect();
+    assert!(
+        window.left() >= view.left() && window.top() >= view.top() - 1.0,
+        "window {window:?}, view {view:?}"
+    );
 
     if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
         h.render()

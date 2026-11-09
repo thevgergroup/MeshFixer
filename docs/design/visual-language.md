@@ -142,12 +142,12 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
 
 A window over the 3D view's top-left corner (M4 Task 10, MF-RT-005). Each line is a plain-language label followed by the engineering numbers; muted text explains what a figure includes.
 
-- **Frame times:** frame to frame and CPU per frame at p50 / p95 / p99 over the last 1000 frames, with fps (1 / median frame-to-frame). GPU time is shown only with its counts ("GPU p95 2.2 ms from 28 of 600 frames; 572 unusable"), or as "not supported on this device"; never as a bare figure or a zero.
+- **Frame times:** CPU per frame at p50 / p95 / p99 over the last 1000 frames comes first. GPU time is shown only with its counts ("GPU p95 2.2 ms from 28 of 600 frames; 572 unusable"), or as "not supported on this device"; never as a bare figure or a zero. Then the **redraw rate**: fps over frames redrawn back to back (gaps under 100 ms), with the idle gaps it leaves out, labelled as a redraw rate, not a speed figure: the app repaints on demand, so an idle app's frame-to-frame gaps are not slowness.
 - **Operations:** the last few jobs (imports, operations, exports) with their duration and how far the heap rose above its level at their start.
-- **Memory:** mesh storage, cached topology ("not computed yet" if it isn't), the last operation's peak, peak heap since start, GPU buffers by kind (geometry, face states, outlines, view textures), bytes uploaded by the last change, and process RSS (with the reason when the OS gives none).
+- **Memory:** mesh storage, cached topology ("not computed yet" if it isn't), the last operation's peak, peak heap since start, GPU buffers by kind (geometry, face states, outlines, view textures), bytes uploaded by the last change, resident memory (RSS, labelled as excluding swapped and compressed pages) and, on macOS, the memory footprint (Activity Monitor's "Memory": compressed and swapped pages and GPU buffers included), with the reason when the OS gives none.
 - **Threads:** the thread budget with its `PoolChoice` reason and the jobs/background split.
 
-It reads a snapshot of cached counters refreshed twice a second while open (the RSS is sampled on its own thread), so it never does work proportional to the mesh on a UI frame.
+It opens over the 3D view's top-left corner, clear of the side panels. It reads a snapshot of cached counters refreshed twice a second while open (the process memory is sampled on its own thread), and asks for a repaint every half second so it keeps updating while the app is otherwise idle; it never does work proportional to the mesh on a UI frame. Job names show the file name, not its folder.
 
 ## Camera controls (Help ▸ Controls)
 

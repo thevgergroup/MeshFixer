@@ -48,6 +48,25 @@ fn bench_orbit_json_has_device_info_and_percentiles() {
     assert_eq!(v["resolution"]["width"], 640, "{v}");
     assert_eq!(v["resolution"]["height"], 360, "{v}");
 
+    // What the frame time covers and leaves out (I2, P6).
+    let measures = v["measures"].as_str().unwrap();
+    assert!(
+        measures.contains("4x MSAA") && measures.contains("excludes egui"),
+        "{v}"
+    );
+    assert_eq!(v["msaa_samples"], 4, "{v}");
+    assert!(
+        v["overlay_layers"].as_str().unwrap().starts_with("none"),
+        "{v}"
+    );
+    assert!(
+        v["memory_estimate"]["bytes_per_requested_triangle"]
+            .as_u64()
+            .unwrap()
+            > 0,
+        "{v}"
+    );
+
     // Device tags: CPU, GPU adapter, RAM, OS.
     let d = &v["device"];
     assert!(!d["cpu"]["model"].as_str().unwrap().is_empty(), "{v}");
@@ -105,4 +124,11 @@ fn bench_orbit_json_has_device_info_and_percentiles() {
     if cfg!(any(target_os = "linux", target_os = "macos", windows)) {
         assert!(mem["process_rss_bytes"].as_u64().unwrap() > 0, "{m}");
     }
+    if cfg!(target_os = "macos") {
+        assert!(mem["phys_footprint_bytes"].as_u64().unwrap() > 0, "{m}");
+        assert!(v["peak_phys_footprint_bytes"].as_u64().unwrap() > 0, "{v}");
+    }
+    // No operation ran, and the JSON says so rather than leaving a bare null.
+    assert!(mem["scratch_peak_bytes"].is_null(), "{m}");
+    assert_eq!(mem["scratch_peak_note"], "no operation run", "{m}");
 }

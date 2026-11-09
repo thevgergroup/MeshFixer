@@ -2299,7 +2299,7 @@ impl MeshFixerApp {
             ..Default::default()
         };
         if let Some(rss) = self.rss.latest() {
-            memory.set_rss(rss);
+            memory.set_process(rss);
         }
         self.metrics = Some(MetricsSnapshot {
             taken: Instant::now(),

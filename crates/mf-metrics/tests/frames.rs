@@ -202,3 +202,38 @@ fn frame_time_percentiles() {
     let empty = FrameTimes::new().summary();
     assert!(empty.cpu.is_none() && empty.interval.is_none() && empty.fps.is_none());
 }
+
+/// The app repaints on demand: a gap of seconds between two frames is the
+/// app idling, not a slow frame. fps counts only frames redrawn back to
+/// back (gaps under [`mf_metrics::CONTINUOUS_GAP`]).
+#[test]
+fn fps_counts_only_continuously_redrawn_frames() {
+    let mut t = FrameTimes::new();
+    let mut at = Instant::now();
+    for i in 0..40u64 {
+        // 30 frames 10 ms apart, then 10 frames 2 s apart (idle).
+        at += if i < 30 { ms(10) } else { ms(2000) };
+        let f = t.begin(at);
+        t.end(f, ms(1), GpuTime::NotRendered);
+    }
+    let s = t.summary();
+    // Every interval is still reported…
+    assert_eq!(s.interval.as_ref().unwrap().frames, 39);
+    // …but fps and the continuous intervals leave out the idle gaps.
+    let c = s.continuous.as_ref().unwrap();
+    assert_eq!((c.frames, c.p50_ms), (29, 10.0));
+    assert_eq!(s.fps, Some(100.0));
+    assert_eq!(s.idle_gaps, 10);
+
+    // Only idle gaps: no fps at all (not a tiny one).
+    let mut t = FrameTimes::new();
+    let mut at = Instant::now();
+    for _ in 0..5 {
+        at += ms(3000);
+        let f = t.begin(at);
+        t.end(f, ms(1), GpuTime::NotRendered);
+    }
+    let s = t.summary();
+    assert!(s.fps.is_none() && s.continuous.is_none(), "{s:?}");
+    assert_eq!(s.idle_gaps, 4);
+}

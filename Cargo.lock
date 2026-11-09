@@ -2455,6 +2455,7 @@ dependencies = [
  "mf-spec",
  "rfd",
  "serde_json",
+ "sysinfo",
  "tempfile",
  "wgpu",
 ]
@@ -2511,6 +2512,7 @@ dependencies = [
 name = "mf-metrics"
 version = "0.0.1"
 dependencies = [
+ "libc",
  "serde",
  "serde_json",
 ]

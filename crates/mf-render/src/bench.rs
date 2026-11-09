@@ -22,7 +22,11 @@ use crate::{
 };
 
 /// As the desktop view.
-const SAMPLES: u32 = 4;
+pub const SAMPLES: u32 = 4;
+
+/// What an orbit's frame time covers, and what it leaves out.
+pub const MEASURES: &str = "offscreen 3D-view render (desktop path, 4x MSAA, boundary outlines, \
+     no overlay layers); excludes egui UI/paint, swapchain present and vsync";
 /// As the desktop's uploads (`mf-desktop` `UPLOAD_CHUNK_BYTES`).
 const UPLOAD_CHUNK_BYTES: u64 = 16 << 20;
 
@@ -52,9 +56,9 @@ pub struct OrbitRun {
     /// GPU allocations while orbiting: the mesh's buffers and the target's
     /// textures.
     pub buffers: GpuBufferBytes,
-    /// The process RSS right after the last frame, while the GPU mesh is
-    /// still held (or why there's none).
-    pub rss: Result<u64, String>,
+    /// The process's memory right after the last frame, while the GPU
+    /// mesh is still held (or why there's none).
+    pub process: Result<mf_metrics::ProcessMemory, String>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -207,7 +211,7 @@ pub fn orbit(mesh: &Mesh, spec: OrbitSpec, ctx: &RunContext) -> Result<OrbitRun,
             }
         }
     }
-    let rss = mf_metrics::process_rss_bytes();
+    let process = mf_metrics::process_memory();
     let mut buffers = gpu.resident_buffers();
     buffers.textures = target.texture_bytes();
     Ok(OrbitRun {
@@ -218,6 +222,6 @@ pub fn orbit(mesh: &Mesh, spec: OrbitSpec, ctx: &RunContext) -> Result<OrbitRun,
         frames,
         times,
         buffers,
-        rss,
+        process,
     })
 }

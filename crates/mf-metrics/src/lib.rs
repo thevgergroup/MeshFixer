@@ -8,6 +8,7 @@
 
 mod alloc;
 mod frames;
+mod gate;
 mod process;
 mod summary;
 
@@ -15,10 +16,11 @@ use std::time::Instant;
 
 use serde::Serialize;
 
-pub use process::process_rss_bytes;
+pub use gate::{GateVerdict, GatedFrame, frame_gate, judge_frames};
+pub use process::{ProcessMemory, page_ins, process_memory, process_rss_bytes};
 pub use summary::{
-    DurationStats, FrameSummary, GpuBufferBytes, GpuStats, MemoryBreakdown, RssSampler,
-    duration_ms, fps,
+    CONTINUOUS_GAP, DurationStats, FrameSummary, GpuBufferBytes, GpuStats, MemoryBreakdown,
+    ProcessSampler, duration_ms, fps,
 };
 
 pub use frames::{FRAME_HISTORY, FrameSample, FrameTimes, GpuSummary, GpuTime, Percentiles};
