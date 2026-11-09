@@ -430,6 +430,12 @@ impl Mesh {
         Ok(self.lock_topology().get_or_insert(topo).clone())
     }
 
+    /// The topology if it is already cached; never computes it (O(1), for
+    /// diagnostics on a UI thread).
+    pub fn cached_topology(&self) -> Option<Arc<Topology>> {
+        self.lock_topology().clone()
+    }
+
     /// The cached topology's slot. Only ever held briefly (see
     /// [`Mesh::topology_with`]).
     fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {

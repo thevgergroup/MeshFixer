@@ -99,6 +99,21 @@ impl RenderTarget {
         })
     }
 
+    /// Bytes of the target's textures: the resolved colour, the
+    /// multisampled colour (with MSAA) and the depth buffer.
+    pub fn texture_bytes(&self) -> u64 {
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        let samples = u64::from(self.samples.max(1));
+        let color = 4; // Rgba8Unorm
+        let depth = 4; // Depth32Float
+        let msaa = if self.msaa_view.is_some() {
+            pixels * samples * color
+        } else {
+            0
+        };
+        pixels * color + msaa + pixels * samples * depth
+    }
+
     pub fn texture(&self) -> &wgpu::Texture {
         &self.resolved
     }

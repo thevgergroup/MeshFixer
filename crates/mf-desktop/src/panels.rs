@@ -87,6 +87,8 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut app.show_boundaries, "Show defects");
                 ui.checkbox(&mut app.shown.recent_repairs, "Highlight recent repairs");
+                ui.checkbox(&mut app.show_metrics, "Metrics")
+                    .on_hover_text("Frame times, memory, GPU buffers and threads");
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Frame selection").shortcut_text("F"))
@@ -378,6 +380,132 @@ pub fn view_hover_tooltip(app: &MeshFixerApp, ctx: &egui::Context) {
                 );
             });
         });
+}
+
+/// View ▸ Metrics (MF-RT-005): plain-language labels with the engineering
+/// numbers, from the app's cached snapshot (refreshed twice a second, so
+/// drawing this is O(1) in the mesh's size).
+pub fn metrics_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    use crate::metrics::{format_bytes as bytes, format_duration};
+    if !app.show_metrics {
+        return;
+    }
+    let mut open = true;
+    let pools = app.pool_sizes();
+    let snapshot = app.metrics_snapshot().cloned();
+    egui::Window::new("Metrics")
+        .open(&mut open)
+        .resizable(false)
+        .collapsible(true)
+        .default_width(380.0)
+        // Over the 3D view's top-left corner, clear of the tree.
+        .default_pos([TREE_WIDTH + 16.0, 40.0])
+        .show(ctx, |ui| {
+            let Some(m) = snapshot else {
+                ui.label("Collecting…");
+                return;
+            };
+            let muted = |ui: &mut egui::Ui, text: String| {
+                ui.label(RichText::new(text).color(theme::TEXT_MUTED));
+            };
+            let stats = |s: &mf_metrics::DurationStats| {
+                format!(
+                    "p50 {:.1} ms · p95 {:.1} ms · p99 {:.1} ms",
+                    s.p50_ms, s.p95_ms, s.p99_ms
+                )
+            };
+
+            ui.strong("Frame times");
+            let f = &m.frames;
+            ui.label(match (&f.interval, f.fps) {
+                (Some(i), Some(fps)) => format!("Frame to frame: {} ({fps:.0} fps)", stats(i)),
+                _ => "Frame to frame: not enough frames yet (fps unknown)".into(),
+            });
+            ui.label(match &f.cpu {
+                Some(c) => format!("CPU per frame: {}", stats(c)),
+                None => "CPU per frame: no frames finished yet".into(),
+            });
+            ui.label(f.gpu.describe());
+            muted(
+                ui,
+                format!(
+                    "Over the last {} frames; GPU time comes from timestamp queries, \
+                     which Metal often can't give for heavy frames",
+                    f.cpu.as_ref().map_or(0, |c| c.frames)
+                ),
+            );
+            ui.add_space(6.0);
+
+            ui.strong("Operations");
+            if m.jobs.is_empty() {
+                muted(ui, "No operations yet".into());
+            }
+            for job in m.jobs.iter().rev() {
+                ui.label(format!(
+                    "{}: {}{}",
+                    job.label,
+                    format_duration(job.duration),
+                    job.peak_above_start
+                        .map_or(String::new(), |p| format!(" (heap peak +{})", bytes(p)))
+                ));
+            }
+            ui.add_space(6.0);
+
+            ui.strong("Memory");
+            let mem = &m.memory;
+            ui.label(format!("Mesh storage: {}", bytes(mem.mesh_storage_bytes)));
+            ui.label(match mem.topology_bytes {
+                Some(b) => format!("Cached topology: {}", bytes(b)),
+                None => "Cached topology: not computed yet".into(),
+            });
+            ui.label(match mem.scratch_peak_bytes {
+                Some(b) => format!("Last operation's peak: {} above its start", bytes(b)),
+                None if m.jobs.is_empty() => "Last operation's peak: no operation yet".into(),
+                None => "Last operation's peak: not counted (no counting allocator)".into(),
+            });
+            ui.label(match m.peak_heap_bytes {
+                Some(b) => format!("Peak heap: {} since start", bytes(b)),
+                None => "Peak heap: not counted (no counting allocator)".into(),
+            });
+            ui.label(match &mem.gpu {
+                Some(g) => format!(
+                    "GPU buffers: geometry {} · face states {} · outlines {} · view textures {}",
+                    bytes(g.geometry),
+                    bytes(g.state),
+                    bytes(g.lines),
+                    bytes(g.textures)
+                ),
+                None => "GPU buffers: none yet".into(),
+            });
+            ui.label(format!(
+                "Uploaded by the last change: {} ({} of geometry since start)",
+                bytes(m.last_upload_bytes),
+                bytes(m.geometry_uploaded_bytes)
+            ));
+            ui.label(match (&mem.process_rss_bytes, &mem.rss_error) {
+                (Some(b), _) => format!("Process memory (RSS): {}", bytes(*b)),
+                (None, Some(e)) => format!("Process memory (RSS): unavailable ({e})"),
+                (None, None) => "Process memory (RSS): measuring…".into(),
+            });
+            muted(
+                ui,
+                "RSS is everything the app holds in RAM, GPU buffers included on \
+                 unified-memory Macs; the figures above it are counted"
+                    .into(),
+            );
+            ui.add_space(6.0);
+
+            ui.strong("Threads");
+            ui.label(format!(
+                "Thread budget: {} of {} cores ({}): {} for the running job, {} for analysis and display",
+                pools.budget.threads,
+                pools.budget.cores,
+                pools.budget.reason,
+                pools.jobs,
+                pools.background
+            ));
+        });
+    app.show_metrics = open;
 }
 
 pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {

@@ -9,12 +9,17 @@
 mod alloc;
 mod frames;
 mod process;
+mod summary;
 
 use std::time::Instant;
 
 use serde::Serialize;
 
 pub use process::process_rss_bytes;
+pub use summary::{
+    DurationStats, FrameSummary, GpuBufferBytes, GpuStats, MemoryBreakdown, RssSampler,
+    duration_ms, fps,
+};
 
 pub use frames::{FRAME_HISTORY, FrameSample, FrameTimes, GpuSummary, GpuTime, Percentiles};
 

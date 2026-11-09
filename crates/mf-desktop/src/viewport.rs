@@ -466,6 +466,12 @@ impl Viewport {
 }
 
 impl Viewport {
+    /// Bytes of the view's render target textures (0 before the first
+    /// frame).
+    pub fn texture_bytes(&self) -> u64 {
+        self.target.as_ref().map_or(0, RenderTarget::texture_bytes)
+    }
+
     /// The device and queue the view draws with.
     pub fn device(&self) -> (&wgpu::Device, &wgpu::Queue) {
         (&self.render_state.device, &self.render_state.queue)

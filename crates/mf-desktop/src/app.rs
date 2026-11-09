@@ -18,6 +18,7 @@ use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::defects::{Defect, operation_label};
+use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
 use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
 use crate::worker::{
@@ -51,6 +52,8 @@ struct RunningJob {
     /// `None`: this kind of job can't be cancelled (replay).
     run: Option<RunContext>,
     cancel_requested: bool,
+    /// When and at what heap level it started (View ▸ Metrics).
+    start: JobStart,
 }
 
 /// An operation offered in Properties for the current target.
@@ -239,6 +242,15 @@ pub struct MeshFixerApp {
     job: Option<RunningJob>,
     /// The last 1000 frames' CPU, GPU and interval times (MF-RT-001).
     pub frame_times: FrameTimes,
+    /// View ▸ Metrics is open.
+    pub show_metrics: bool,
+    /// What it shows, refreshed every [`crate::metrics::REFRESH_EVERY`]
+    /// while open.
+    metrics: Option<MetricsSnapshot>,
+    /// The process RSS, sampled off the UI thread while the panel is open.
+    rss: Rss,
+    /// The last few finished jobs: duration and heap peak.
+    recent_jobs: RecentJobs,
     /// The whole-object tool open in Properties (an operation id).
     pub tool: Option<String>,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
@@ -406,6 +418,10 @@ impl MeshFixerApp {
             busy: None,
             job: None,
             frame_times: FrameTimes::new(),
+            show_metrics: false,
+            metrics: None,
+            rss: Rss::default(),
+            recent_jobs: RecentJobs::default(),
             tool: None,
             op_params: BTreeMap::new(),
             show_boundaries: true,
@@ -490,18 +506,23 @@ impl MeshFixerApp {
     /// context it runs with. `cancellable` jobs get a Cancel button.
     fn start_job(&mut self, label: String, cancellable: bool) -> RunContext {
         let run = RunContext::none();
-        self.busy = Some(label);
         self.job = Some(RunningJob {
             run: cancellable.then(|| run.clone()),
             cancel_requested: false,
+            start: JobStart::now(&label),
         });
+        self.busy = Some(label);
         run
     }
 
     /// The running job is over: returns whether its cancel was requested.
     fn finish_job(&mut self) -> bool {
         self.busy = None;
-        self.job.take().is_some_and(|j| j.cancel_requested)
+        let Some(job) = self.job.take() else {
+            return false;
+        };
+        self.recent_jobs.push(job.start.finish());
+        job.cancel_requested
     }
 
     /// The running job's stage and fraction (0–1), if it reports progress.
@@ -2236,6 +2257,61 @@ impl MeshFixerApp {
         layers
     }
 
+    /// What View ▸ Metrics shows (`None` until it is first opened).
+    pub fn metrics_snapshot(&self) -> Option<&MetricsSnapshot> {
+        self.metrics.as_ref()
+    }
+
+    /// Refresh the metrics snapshot if the panel is open and it is older
+    /// than [`crate::metrics::REFRESH_EVERY`]. Reads cached counters only:
+    /// O(kept frames + chunks + components), never O(triangles).
+    fn refresh_metrics(&mut self) {
+        self.rss.keep(self.show_metrics);
+        if !self.show_metrics
+            || self
+                .metrics
+                .as_ref()
+                .is_some_and(|m| m.taken.elapsed() < crate::metrics::REFRESH_EVERY)
+        {
+            return;
+        }
+        let views = self.object_views();
+        let mut gpu = mf_metrics::GpuBufferBytes {
+            textures: self.viewport.texture_bytes(),
+            ..Default::default()
+        };
+        for v in &views {
+            let b = v.render.gpu.resident_buffers();
+            gpu.geometry += b.geometry;
+            gpu.state += b.state;
+            gpu.lines += b.lines;
+        }
+        let last_upload_bytes = views
+            .iter()
+            .find(|v| v.active)
+            .map_or(0, |v| v.render.gpu.last_upload().total());
+        let mesh = self.active_mesh();
+        let mut memory = mf_metrics::MemoryBreakdown {
+            mesh_storage_bytes: mesh.map_or(0, Mesh::heap_bytes),
+            topology_bytes: mesh.and_then(Mesh::cached_topology).map(|t| t.heap_bytes()),
+            scratch_peak_bytes: self.recent_jobs.last().and_then(|j| j.peak_above_start),
+            gpu: (gpu.total() > 0).then_some(gpu),
+            ..Default::default()
+        };
+        if let Some(rss) = self.rss.latest() {
+            memory.set_rss(rss);
+        }
+        self.metrics = Some(MetricsSnapshot {
+            taken: Instant::now(),
+            frames: self.frame_times.summary(),
+            memory,
+            last_upload_bytes,
+            geometry_uploaded_bytes: self.geometry_bytes_uploaded(),
+            peak_heap_bytes: mf_metrics::is_installed().then(mf_metrics::peak_bytes_since_start),
+            jobs: self.recent_jobs.iter().cloned().collect(),
+        });
+    }
+
     /// Mesh geometry bytes (surfaces and outlines) uploaded by every
     /// render-mesh build so far (diagnostics and tests: a selection change
     /// must not add to it).
@@ -2415,6 +2491,8 @@ impl MeshFixerApp {
         crate::panels::properties_panel(self, ui);
         crate::panels::replay_window(self, &ctx);
         crate::panels::controls_window(self, &ctx);
+        self.refresh_metrics();
+        crate::panels::metrics_window(self, &ctx);
         self.refresh_overlays();
         self.refresh_states();
 

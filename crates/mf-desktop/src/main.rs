@@ -1,4 +1,9 @@
 use mf_desktop::{MeshFixerApp, Settings};
+use mf_metrics::CountingAlloc;
+
+/// Counts heap bytes for View ▸ Metrics (peak heap, each operation's peak).
+#[global_allocator]
+static ALLOC: CountingAlloc = CountingAlloc;
 
 /// `meshfixer-desktop [--threads N] [file]`.
 fn parse_args() -> Result<(Settings, Option<std::path::PathBuf>), String> {

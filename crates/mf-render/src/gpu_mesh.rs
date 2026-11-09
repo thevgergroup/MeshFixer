@@ -706,10 +706,18 @@ impl GpuMesh {
     /// possibly shared with another revision's mesh), face states and
     /// outlines. What it occupies, unlike [`GpuMesh::total_uploaded`].
     pub fn resident_bytes(&self) -> u64 {
-        let surface: u64 = self.surface_buffers().map(|(b, _)| b.size()).sum();
-        let states = self.state_buffer.as_ref().map_or(0, |s| s.buffer.size());
-        let lines: u64 = self.lines.iter().map(|(b, _)| b.size()).sum();
-        surface + states + lines
+        self.resident_buffers().total()
+    }
+
+    /// [`GpuMesh::resident_bytes`] by kind: surface geometry, face states
+    /// and outlines (`textures` is 0: a mesh has none). O(chunks).
+    pub fn resident_buffers(&self) -> mf_metrics::GpuBufferBytes {
+        mf_metrics::GpuBufferBytes {
+            geometry: self.surface_buffers().map(|(b, _)| b.size()).sum(),
+            state: self.state_buffer.as_ref().map_or(0, |s| s.buffer.size()),
+            lines: self.lines.iter().map(|(b, _)| b.size()).sum(),
+            textures: 0,
+        }
     }
 
     /// Bytes uploaded for this mesh and every revision it was updated

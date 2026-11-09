@@ -138,6 +138,17 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
 - **Numbering:** "Hole N" counts holes in the tree's order.
 - **Operation names** come from `defects::operation_label` and use the same words in Properties and the history breadcrumb: Fill hole / Fill holes (n) / Fill all holes, and Remove piece / Remove pieces (n) / Remove loose pieces.
 
+## Metrics (View ▸ Metrics)
+
+A window over the 3D view's top-left corner (M4 Task 10, MF-RT-005). Each line is a plain-language label followed by the engineering numbers; muted text explains what a figure includes.
+
+- **Frame times:** frame to frame and CPU per frame at p50 / p95 / p99 over the last 1000 frames, with fps (1 / median frame-to-frame). GPU time is shown only with its counts ("GPU p95 2.2 ms from 28 of 600 frames; 572 unusable"), or as "not supported on this device"; never as a bare figure or a zero.
+- **Operations:** the last few jobs (imports, operations, exports) with their duration and how far the heap rose above its level at their start.
+- **Memory:** mesh storage, cached topology ("not computed yet" if it isn't), the last operation's peak, peak heap since start, GPU buffers by kind (geometry, face states, outlines, view textures), bytes uploaded by the last change, and process RSS (with the reason when the OS gives none).
+- **Threads:** the thread budget with its `PoolChoice` reason and the jobs/background split.
+
+It reads a snapshot of cached counters refreshed twice a second while open (the RSS is sampled on its own thread), so it never does work proportional to the mesh on a UI frame.
+
 ## Camera controls (Help ▸ Controls)
 
 Every move works without a mouse wheel: on a trackpad, with a one-button mouse, or from the keyboard (M4 Task 2a).

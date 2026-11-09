@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 use clap::{Arg, ArgMatches, Command};
 use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
 use mf_io::{Format, IoError};
-use mf_metrics::{CountingAlloc, Phase, measure};
+use mf_metrics::{CountingAlloc, GpuBufferBytes, MemoryBreakdown, Phase, measure};
 use mf_runtime::{JobPool, PoolChoice, RunContext};
 use mf_selection::{Selection, SelectionKind, Translation};
 
@@ -34,6 +34,14 @@ struct Metrics {
     topology_bytes: u64,
     /// The job pool's size: requested, chosen, cores and why (MF-RT-004).
     threads: Option<(Option<usize>, PoolChoice)>,
+    /// GPU allocations by kind, when the command used a GPU (`bench orbit`).
+    gpu: Option<GpuBufferBytes>,
+    /// Frame-time percentiles (`frame_ms`, `cpu_ms`, `gpu_ms`, `fps`),
+    /// when the command rendered frames (`bench orbit`).
+    frames: Option<serde_json::Map<String, serde_json::Value>>,
+    /// The process RSS measured by the command at its busiest (`bench
+    /// orbit`: while the GPU mesh is held); otherwise sampled at the end.
+    rss: Option<Result<u64, String>>,
 }
 
 impl Metrics {
@@ -48,10 +56,36 @@ impl Metrics {
         self.topology_bytes = mesh.topology().heap_bytes();
     }
 
+    /// Where memory went (MF-RT-005): counted storage, the last
+    /// operation's peak, GPU buffers and the process RSS side by side.
+    fn memory(&self) -> MemoryBreakdown {
+        let mut memory = MemoryBreakdown {
+            mesh_storage_bytes: self.mesh_bytes,
+            topology_bytes: (self.topology_bytes > 0).then_some(self.topology_bytes),
+            scratch_peak_bytes: self
+                .phases
+                .iter()
+                .rev()
+                .find(|p| p.name == "operation")
+                .filter(|_| mf_metrics::is_installed())
+                .map(|p| p.peak_bytes),
+            gpu: self.gpu,
+            ..MemoryBreakdown::default()
+        };
+        memory.set_rss(
+            self.rss
+                .clone()
+                .unwrap_or_else(mf_metrics::process_rss_bytes),
+        );
+        memory
+    }
+
     fn write(&self, path: &Path) -> Result<(), Failure> {
-        let json = serde_json::json!({
+        let mut json = serde_json::json!({
             "phases": self.phases,
             "structures": { "mesh": self.mesh_bytes, "topology": self.topology_bytes },
+            "memory": self.memory(),
+            "gpu_buffer_bytes": self.gpu,
             "peak_heap": mf_metrics::peak_bytes_since_start(),
             "threads": self.threads.map(|(requested, choice)| serde_json::json!({
                 "requested": requested,
@@ -61,6 +95,9 @@ impl Metrics {
             })),
             "allocator_installed": mf_metrics::is_installed(),
         });
+        if let (Some(frames), Some(obj)) = (&self.frames, json.as_object_mut()) {
+            obj.extend(frames.clone());
+        }
         let text =
             serde_json::to_string_pretty(&json).map_err(|e| Failure::Runtime(e.to_string()))?;
         std::fs::write(path, text).map_err(|e| Failure::Runtime(format!("writing metrics: {e}")))
@@ -252,6 +289,68 @@ fn cli() -> Command {
                             .long("seed")
                             .default_value("11")
                             .value_parser(clap::value_parser!(u64)),
+                    )
+                    .arg(
+                        Arg::new("json")
+                            .long("json")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Print the measurements as JSON"),
+                    ),
+            )
+            .subcommand(
+                Command::new("orbit")
+                    .about(
+                        "Frame times of a full 360° orbit rendered offscreen with the desktop's \
+                         render path, each frame waited for on the GPU, tagged with the device",
+                    )
+                    .arg(
+                        Arg::new("input")
+                            .value_parser(clap::value_parser!(PathBuf))
+                            .help("Mesh to orbit (default: the damaged fixture, generated in memory)"),
+                    )
+                    .arg(
+                        Arg::new("triangles")
+                            .long("triangles")
+                            .default_value("1000000")
+                            .value_parser(clap::value_parser!(u64).range(100..=200_000_000))
+                            .help("Requested size of the generated fixture (with an input: the size it was generated at, for the report)"),
+                    )
+                    .arg(
+                        Arg::new("seed")
+                            .long("seed")
+                            .default_value("11")
+                            .value_parser(clap::value_parser!(u64)),
+                    )
+                    .arg(
+                        Arg::new("frames")
+                            .long("frames")
+                            .default_value("600")
+                            .value_parser(clap::value_parser!(u32).range(1..=100_000))
+                            .help("Frames in the orbit (CPU and GPU percentiles cover the last 1000)"),
+                    )
+                    .arg(
+                        Arg::new("size")
+                            .long("size")
+                            .default_value("1920x1080")
+                            .help("Render size, WIDTHxHEIGHT pixels"),
+                    )
+                    .arg(
+                        Arg::new("skip-if-short-of-memory")
+                            .long("skip-if-short-of-memory")
+                            .action(clap::ArgAction::SetTrue)
+                            .help(
+                                "Report the run as skipped, with the reason, instead of running \
+                                 when the estimated memory need exceeds the memory available",
+                            ),
+                    )
+                    .arg(
+                        Arg::new("only-check-memory")
+                            .long("only-check-memory")
+                            .action(clap::ArgAction::SetTrue)
+                            .help(
+                                "Only say whether the run would be skipped for memory (as \
+                                 --skip-if-short-of-memory decides), without running it",
+                            ),
                     )
                     .arg(
                         Arg::new("json")
@@ -561,6 +660,224 @@ fn bench_memory(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             topology_phase.wall_s
         );
     }
+    Ok(())
+}
+
+/// `--size WIDTHxHEIGHT`.
+fn parse_size(s: &str) -> Result<(u32, u32), Failure> {
+    let usage = || Failure::Usage(format!("--size '{s}' must be WIDTHxHEIGHT, e.g. 1920x1080"));
+    let (w, h) = s.split_once(['x', 'X']).ok_or_else(usage)?;
+    let w: u32 = w.trim().parse().map_err(|_| usage())?;
+    let h: u32 = h.trim().parse().map_err(|_| usage())?;
+    if !(1..=16384).contains(&w) || !(1..=16384).contains(&h) {
+        return Err(usage());
+    }
+    Ok((w, h))
+}
+
+/// What `bench orbit` holds per triangle, at most: the mesh and its
+/// topology, the GPU mesh (72 bytes of surface vertices and a face-state
+/// byte; unified memory counts it in RAM) and the import's transient
+/// buffers. Measured on an M2 Max: 1M requested (960,857 actual) from an
+/// STL peaked at a 393 MB memory footprint (184 MB RSS), ≈350 bytes per
+/// triangle above the ≈55 MB baseline; rounded up.
+const ORBIT_BYTES_PER_TRIANGLE: u64 = 400;
+
+/// The machine `bench orbit` ran on (MF-RENDER-002): CPU, RAM and OS from
+/// `sysinfo`, the GPU from wgpu's adapter info. A figure the OS doesn't
+/// give is `null`, never a guess.
+fn device_json(adapter: &wgpu::AdapterInfo) -> serde_json::Value {
+    use sysinfo::{CpuRefreshKind, System};
+    let mut sys = System::new();
+    sys.refresh_cpu_list(CpuRefreshKind::nothing());
+    sys.refresh_memory();
+    let model = sys
+        .cpus()
+        .first()
+        .map(|c| c.brand().trim().to_owned())
+        .filter(|b| !b.is_empty());
+    let os = match (System::long_os_version(), System::kernel_version()) {
+        (Some(os), Some(kernel)) => Some(format!("{os} (kernel {kernel})")),
+        (os, kernel) => os.or(kernel),
+    };
+    serde_json::json!({
+        "cpu": {
+            "model": model,
+            "physical_cores": System::physical_core_count(),
+            "logical_cores": sys.cpus().len(),
+        },
+        "gpu": {
+            "name": adapter.name,
+            "backend": adapter.backend.to_string(),
+            "device_type": format!("{:?}", adapter.device_type),
+            "driver": adapter.driver,
+            "driver_info": adapter.driver_info,
+            "vendor_id": adapter.vendor,
+            "device_id": adapter.device,
+        },
+        "memory_bytes": sys.total_memory(),
+        "available_memory_bytes": sys.available_memory(),
+        "swap_total_bytes": sys.total_swap(),
+        "swap_used_bytes": sys.used_swap(),
+        "os": os,
+    })
+}
+
+/// `bench orbit` (MF-RENDER-002, MF-RT-005): a full 360° orbit of the
+/// damaged fixture (or `input`) rendered offscreen at `--size` with the
+/// desktop's render path, every frame waited for on the GPU
+/// (`mf_render::bench`). Reports whole-frame p50/p95/p99 and the worst
+/// frame, fps (1 / p50), CPU time and GPU timestamps (with their counts),
+/// the GPU buffers and the process RSS, tagged with the device.
+fn bench_orbit(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
+    let input = m.get_one::<PathBuf>("input");
+    let triangles = *m.get_one::<u64>("triangles").unwrap_or(&1_000_000);
+    let seed = *m.get_one::<u64>("seed").unwrap_or(&11);
+    let frames = *m.get_one::<u32>("frames").unwrap_or(&600);
+    let size = m
+        .get_one::<String>("size")
+        .map_or("1920x1080", String::as_str);
+    let (width, height) = parse_size(size)?;
+    // With an input, --triangles only labels it (what it was generated at).
+    let requested = (input.is_none()
+        || m.value_source("triangles") == Some(clap::parser::ValueSource::CommandLine))
+    .then_some(triangles);
+    let print = |json: &serde_json::Value| -> Result<(), Failure> {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(json).map_err(|e| Failure::Runtime(e.to_string()))?
+        );
+        Ok(())
+    };
+
+    let only_check = m.get_flag("only-check-memory");
+    if only_check || m.get_flag("skip-if-short-of-memory") {
+        let need = triangles * ORBIT_BYTES_PER_TRIANGLE;
+        let mut sys = sysinfo::System::new();
+        sys.refresh_memory();
+        let available = sys.available_memory();
+        let short = need > available;
+        if short || only_check {
+            let (info, _, _) =
+                mf_render::bench::timing_device().map_err(|e| Failure::Runtime(e.to_string()))?;
+            let gb = |b: u64| b as f64 / f64::from(1u32 << 30);
+            let reason = format!(
+                "needs ≈{:.1} GB ({ORBIT_BYTES_PER_TRIANGLE} bytes per requested triangle), \
+                 {:.1} GB available",
+                gb(need),
+                gb(available)
+            );
+            if short {
+                eprintln!("skipped: {reason}");
+            }
+            return print(&serde_json::json!({
+                "skipped": short,
+                "reason": reason,
+                "requested_triangles": triangles,
+                "frames": frames,
+                "resolution": { "width": width, "height": height },
+                "device": device_json(&info),
+            }));
+        }
+    }
+
+    let mesh = match input {
+        Some(path) => {
+            metrics
+                .record("import", || mf_io::read_model_with(path, ctx))?
+                .objects
+                .into_iter()
+                .next()
+                .ok_or_else(|| {
+                    Failure::Runtime(format!("{} contains no mesh objects", path.display()))
+                })?
+                .mesh
+        }
+        None => metrics.record("mesh", || {
+            mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(
+                triangles as usize,
+                seed,
+            ))
+        }),
+    };
+    ctx.checkpoint()?;
+    metrics.record("topology", || mesh.topology_with(ctx))?;
+    metrics.structures(&mesh);
+    let spec = mf_render::bench::OrbitSpec {
+        frames,
+        width,
+        height,
+    };
+    let run = metrics
+        .record("orbit", || mf_render::bench::orbit(&mesh, spec, ctx))
+        .map_err(|e| match e {
+            mf_render::bench::OrbitError::Cancelled => Failure::Cancelled,
+            e => Failure::Runtime(e.to_string()),
+        })?;
+
+    let frame = mf_metrics::Percentiles::of(run.frames.clone())
+        .ok_or_else(|| Failure::Runtime("no frames were rendered".into()))?;
+    let summary = run.times.summary();
+    let mut percentiles = serde_json::Map::new();
+    percentiles.insert(
+        "frame_ms".into(),
+        serde_json::json!(mf_metrics::DurationStats::from(&frame)),
+    );
+    percentiles.insert(
+        "fps".into(),
+        serde_json::json!(mf_metrics::fps(frame.p50())),
+    );
+    percentiles.insert("cpu_ms".into(), serde_json::json!(summary.cpu));
+    percentiles.insert("gpu_ms".into(), serde_json::json!(summary.gpu));
+    metrics.gpu = Some(run.buffers);
+    metrics.frames = Some(percentiles.clone());
+    metrics.rss = Some(run.rss.clone());
+
+    let mut json = serde_json::json!({
+        "requested_triangles": requested,
+        "triangles": mesh.triangle_count(),
+        "input": input.map(|p| p.display().to_string()),
+        "frames": frames,
+        "resolution": { "width": width, "height": height },
+        "device": device_json(&run.adapter),
+        "gpu_timestamps": run.timestamps,
+        "gpu_time": summary.gpu.describe(),
+        "first_frame_ms": mf_metrics::duration_ms(run.first_frame),
+        "upload_s": run.upload.as_secs_f64(),
+        "gpu_buffer_bytes": run.buffers,
+        "memory": metrics.memory(),
+        "allocator_installed": mf_metrics::is_installed(),
+    });
+    if let Some(obj) = json.as_object_mut() {
+        obj.extend(percentiles);
+    }
+    if m.get_flag("json") {
+        return print(&json);
+    }
+    let ms = |p: &mf_metrics::Percentiles| {
+        let d = mf_metrics::DurationStats::from(p);
+        format!(
+            "p50 {:.2} ms, p95 {:.2} ms, p99 {:.2} ms, worst {:.2} ms",
+            d.p50_ms, d.p95_ms, d.p99_ms, d.max_ms
+        )
+    };
+    println!(
+        "{} triangles{}, {frames} frames at {width}x{height} on {} ({})",
+        mesh.triangle_count(),
+        requested.map_or(String::new(), |r| format!(" (requested {r})")),
+        run.adapter.name,
+        run.adapter.backend
+    );
+    println!("{:>12}: {}", "frame", ms(&frame));
+    println!(
+        "{:>12}: {:.1}",
+        "fps (p50)",
+        mf_metrics::fps(frame.p50()).unwrap_or(f64::INFINITY)
+    );
+    if let Some(cpu) = run.times.cpu() {
+        println!("{:>12}: {}", "CPU", ms(&cpu));
+    }
+    println!("{:>12}: {}", "GPU", summary.gpu.describe());
     Ok(())
 }
 
@@ -906,7 +1223,10 @@ fn main() -> ExitCode {
         Some(("gen-fixture", m)) => gen_fixture(m, &ctx),
         Some(("bench", m)) => match m.subcommand() {
             Some(("memory", m)) => bench_memory(m, &ctx),
-            _ => Err(Failure::Usage("bench needs a measurement: memory".into())),
+            Some(("orbit", m)) => bench_orbit(m, &mut metrics, &ctx),
+            _ => Err(Failure::Usage(
+                "bench needs a measurement: memory or orbit".into(),
+            )),
         },
         Some(("run", m)) => run_sequence(m, &mut metrics, &ctx),
         Some(("replay", m)) => replay_log(m, &ctx),

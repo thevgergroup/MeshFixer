@@ -42,6 +42,7 @@ rfd = "0.18"
 jsonschema = "0.60"
 tempfile = "3"
 ctrlc = "3.5"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -4,6 +4,7 @@
 //! precision holds far from the world origin (MF-GEO-001). Render buffers
 //! are never read back as geometry.
 
+pub mod bench;
 mod bvh;
 mod camera;
 mod gpu_mesh;
