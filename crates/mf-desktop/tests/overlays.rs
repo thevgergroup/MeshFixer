@@ -226,8 +226,9 @@ fn every_loose_piece_is_listed_and_tinted() {
         "plate_and_sphere.obj",
         &mf_fixtures::merge(&[mf_fixtures::grid(10), sphere]),
     ));
-    assert_eq!(h.state().current_analysis().unwrap().defects.loose.len(), 1);
-    h.get_by_label("Loose piece");
+    let defects = h.state().current_analysis().unwrap().defects.clone();
+    assert_eq!(defects.loose.len(), 1);
+    h.get_by_label(&copy_of(h.state(), &defects.loose[0]).row);
     let mesh = h.state().active_mesh().unwrap().clone();
     let piece = mesh.topology().components[1].clone();
     assert_eq!(piece.len(), 150);
@@ -353,8 +354,10 @@ fn hovering_a_hole_highlights_it_and_shows_its_size() {
                 .iter()
                 .any(|l| l.color == mf_desktop::theme::HOVER)
     });
-    // The tooltip: the hole's title (also its tree row) and its size.
-    assert_eq!(h.get_all_by_label(&copy.title).count(), 2, "{copy:?}");
+    // The tooltip: the hole's title and its size (its tree row gives the
+    // size too).
+    h.get_by_label(&copy.title);
+    h.get_by_label(&copy.row);
     h.get_by_label(&copy.detail);
     assert!(h.state().selection.is_none(), "hovering selects nothing");
 

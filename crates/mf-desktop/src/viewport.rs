@@ -9,7 +9,8 @@ use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
 use mf_metrics::GpuTime;
 use mf_render::{
-    GpuLines, GpuTimer, Layer, MeshRenderer, OrbitCamera, Palette, RenderTarget, model_matrix,
+    GpuLines, GpuTimer, Layer, MeshRenderer, OrbitCamera, Palette, RenderTarget, SelectionCue,
+    model_matrix,
 };
 
 use crate::theme;
@@ -25,10 +26,14 @@ struct FrameKey {
     /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
     /// Each object drawn: the identity of its render mesh, its face-state
-    /// generation (a selection change redraws) and the states shown.
-    objects: Vec<(ObjectId, usize, u64, u32)>,
-    /// Identity and colour of each overlay layer, in draw order.
-    layers: Vec<(ObjectId, usize, [u8; 4])>,
+    /// generation (a selection change redraws), the states shown and
+    /// whether it's dimmed.
+    objects: Vec<(ObjectId, usize, u64, u32, bool)>,
+    /// Identity, colour, x-ray and emphasis (bits) of each overlay layer,
+    /// in draw order.
+    layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
+    /// The selection cue: emphasis (bits) and x-ray.
+    cue: (u32, bool),
 }
 
 /// One line overlay to draw on an object (built by a worker; see app.rs).
@@ -41,6 +46,10 @@ pub struct ViewLayer {
     /// Built on a worker (the view never uploads).
     pub lines: Arc<GpuLines>,
     pub color: egui::Color32,
+    /// Also drawn faintly where nearer surfaces hide it (the selection).
+    pub xray: bool,
+    /// 0–1: drawn brighter and wider (the selection's pulse).
+    pub emphasis: f32,
 }
 
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
@@ -50,6 +59,9 @@ pub struct ObjectView {
     pub render: Arc<RenderMesh>,
     pub transform: [f64; 12],
     pub active: bool,
+    /// Its row is hovered in the tree: drawn undimmed even if it isn't
+    /// active, so its hover glow shows.
+    pub hovered: bool,
     /// Which face-state flags tint it (`mf_render::FaceStates`).
     pub shown_states: u32,
 }
@@ -65,6 +77,8 @@ pub struct ViewOptions<'a> {
     pub placeholder: &'a str,
     /// The app's frame index (`FrameTimes`), to tag the GPU time with.
     pub frame: u64,
+    /// How the selection is drawn besides its tint and outline.
+    pub cue: SelectionCue,
 }
 
 /// A primary click in the viewport (not a drag), in points relative to the
@@ -170,6 +184,7 @@ impl Viewport {
             updating,
             placeholder,
             frame,
+            cue,
         } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -219,6 +234,7 @@ impl Viewport {
         self.renderer
             .set_pixels_per_point(ui.ctx().pixels_per_point());
         let size = self.target_size(ui, rect);
+        self.renderer.set_selection_cue(cue);
         let texture = self.render(*cam, objects, show_boundaries, &layers, size, frame);
         ui.painter().image(
             texture,
@@ -362,6 +378,7 @@ impl Viewport {
         frame: u64,
     ) -> egui::TextureId {
         let mut dirty = self.ensure_target(size);
+        let cue = self.renderer.selection_cue();
         let device = &self.render_state.device;
 
         // Every buffer was built on a worker (MF-RT-001): nothing is
@@ -385,13 +402,23 @@ impl Viewport {
                         Arc::as_ptr(&o.render) as usize,
                         o.render.gpu.state_generation(),
                         o.shown_states,
+                        !(o.active || o.hovered),
                     )
                 })
                 .collect(),
             layers: drawn
                 .iter()
-                .map(|l| (l.object, Arc::as_ptr(&l.lines) as usize, l.color.to_array()))
+                .map(|l| {
+                    (
+                        l.object,
+                        Arc::as_ptr(&l.lines) as usize,
+                        l.color.to_array(),
+                        l.xray,
+                        l.emphasis.to_bits(),
+                    )
+                })
                 .collect(),
+            cue: (cue.emphasis.to_bits(), cue.xray_faces),
         };
         dirty |= self.last_frame.as_ref() != Some(&key);
 
@@ -401,7 +428,7 @@ impl Viewport {
                 .map(|o| mf_render::DrawItem {
                     mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
-                    inactive: !o.active,
+                    inactive: !(o.active || o.hovered),
                     shown_states: o.shown_states,
                 })
                 .collect();
@@ -414,6 +441,8 @@ impl Viewport {
                         model: model_matrix(&o.transform),
                         mesh_origin: l.origin,
                         color: theme::rgba(l.color),
+                        xray: l.xray,
+                        emphasis: l.emphasis,
                     })
                 })
                 .collect();
@@ -644,7 +673,14 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         model,
         mesh_origin: vertices.origin,
         color: [1.0; 4],
+        // The x-ray pipelines too.
+        xray: true,
+        emphasis: 0.0,
     }];
+    renderer.set_selection_cue(SelectionCue {
+        emphasis: 0.0,
+        xray_faces: true,
+    });
     target.draw(
         device,
         queue,
@@ -654,6 +690,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         true,
         &layers,
     );
+    renderer.set_selection_cue(SelectionCue::default());
 }
 
 /// The controls hint at the view's bottom-left.

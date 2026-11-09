@@ -15,7 +15,7 @@ mod timer;
 mod transform;
 
 pub use bvh::{Bvh, LEAF_MAX};
-pub use camera::OrbitCamera;
+pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
@@ -25,7 +25,9 @@ pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,
     loop_edge_candidates, pick_loop, ray_pick, ray_pick_with, screen_position,
 };
-pub use renderer::{DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat};
+pub use renderer::{
+    DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue,
+};
 pub use target::RenderTarget;
 pub use timer::GpuTimer;
 pub use transform::model_matrix;

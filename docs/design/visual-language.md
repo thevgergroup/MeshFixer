@@ -27,6 +27,14 @@ Someone who has used Meshmixer or Fusion should understand the screen without an
 ```
 
 - **Left: "Objects & Defects"** (210 pt, resizable). Every object in the document. The active one is in bold and expands to: **Model**, then **Holes (n)**, **Narrow cracks (n)**, **Loose pieces (n)** and **Non-manifold edges (n)**. A category with something in it opens by default, with its header in its defect colour. An empty one is grey and stays closed. Each category lists up to 200 rows, then "…and N more". To work on another object, click its name or click it in the view.
+  - **Every row behaves the same way** (M4 Task 8a; one shared row handler, `panels::tree_row`, which rows added later use too): an object, "Model", and every hole, crack, loose piece and tangled edge.
+    - **Click** selects it (an object row makes that object active; "Model" targets the whole object). The camera stays.
+    - **Double-click**, or **Enter** on the focused row, selects it and frames it: the camera moves there in 200 ms (eased out; camera maths only, no geometry work), then the selection pulses twice over 600 ms (brighter, outlines wider) so the eye finds it. Ordinary clicks don't pulse. A double-click counts only if both clicks land on the same row.
+    - **Hover** highlights it in the view without moving the camera: an outline for holes, cracks and tangled edges, the hover glow for loose pieces and whole objects (another object's row lights that object up, undimmed). Hovering what is already the target shows nothing more (selection wins over hover; with nothing selected, "Model" is the target).
+    - **Rows give sizes**, so a speck is recognisable before you zoom to it: "Hole 3 · 42 edges · 12.4 mm" (the perimeter), "Loose piece · 1 triangle · 0.213 mm" (its largest dimension), "Narrow crack · 8 edges", "Tangled edge · 3 faces". The name is on the left, the size muted on the right; the accessible label is both. The tooltip gives the title, detail and next action.
+    - After an object's row is clicked, the tree keeps its layout for 0.35 s (longer than egui's 0.3 s double-click window), so the second click of a double-click lands on the same row.
+  - **Framing a defect** (`framing.rs`): its bounding sphere fills 40% of the view height, with a floor of 1/10,000 of the scene's radius so a degenerate piece can't send the camera infinitely close. It is centred, and the whole scene stays inside the clipping planes. The camera looks from the way the defect faces when it faces away (a hole on the far side; a hole faces the way the face that would close it would), otherwise from the current direction. If something is in the way, or the eye would end up inside the model (an odd number of surfaces beyond it), it tries the six axes and eight diagonals. If the target is shut inside the model, the eye backs out past the model's last surface along the shortest way out, and the x-ray pass shows the target through it. An object is framed whole (75% of the view height) from the current direction. These line-of-sight checks are a few ray casts through the picking BVHs (O(log n) each). Each defect's bounds and facing are measured on the analysis worker (`defects::Place`), so nothing O(n) runs on the UI thread.
+  - Category headers aren't targets: they fold and unfold.
   - A **Legend** is pinned to the bottom of the panel: a swatch and a checkbox for each overlay in the view (Selection, Hover, Holes, Narrow cracks, Loose pieces, Non-manifold edges, Recent repairs), each with a tooltip saying what it means. Unticking one hides that overlay; View ▸ Show defects hides every defect overlay at once (their checkboxes are then disabled). Switching an overlay changes only what the view draws, never the GPU data.
 - **Right: "Properties & Tools"** (280 pt, resizable). This panel is contextual to the current target:
   - What the target is: its title and details, from the copy table below.
@@ -54,6 +62,7 @@ Targets:
 | You do | The target becomes | Properties shows |
 |---|---|---|
 | Click a hole or crack outline in the view, or its tree row | that loop | its copy and "Fill hole", or what it needs |
+| Double-click any tree row (or Enter on it) | as a click, and the view frames it | as a click |
 | Click a face in the view | that face's connected piece (the model's main body, or a loose piece) | "Main body" with the whole-object tools, or "Loose piece" and "Remove piece" |
 | Click a loose piece's tree row | that piece | "Loose piece" and "Remove piece" |
 | Click a tangled edge's tree row | that edge (shown, not selected) | its copy and a "Select the faces involved" button |
@@ -73,7 +82,7 @@ They are defined once, in `theme.rs`, and used by the panels and the renderer al
 
 | Token | Colour | Means | Where |
 |---|---|---|---|
-| `SELECTED` | cyan `#28D2FF` | the current target | selected loops and tangled edges (outline), pieces and faces (tint, which replaces any defect tint on them), tree rows, the current history step, the targeted tool's name |
+| `SELECTED` | cyan `#28D2FF` | the current target | selected loops and tangled edges (outline), pieces and faces (tint, which replaces any defect tint on them), and the same outline or tint drawn through nearer surfaces at opacity 0.55 (`XRAY_OPACITY`, the x-ray pass) where they hide it; tree rows, the current history step, the targeted tool's name |
 | `HOVER` | light `#E8EEF5` | what the pointer is over | the outline (loops, edges) or glow (pieces: strength 0.85 and barely shaded, so it reads near-white at any angle) of the defect under the pointer, in the tree or in the 3D view (where a tooltip gives its size); widget hover outlines |
 | `HOLE` | orange `#FF8020` | an open boundary (hole) | every boundary outline in the view; the Holes header |
 | `CRACK` | magenta `#E646D2` | a narrow crack (edges almost touch) | crack outlines; the Narrow cracks header |
@@ -98,7 +107,11 @@ Line widths: defect outlines are 2 pt; overlay lines (selection, hover, cracks, 
 Draw order, bottom to top:
 
 1. the model surface, with its face tints, then hole outlines
-2. crack lines, tangled-edge lines, selection outline, hover outline
+2. the x-ray pass for selected faces: drawn only where something nearer hides them (depth test "greater", no depth write), in `SELECTED` at `XRAY_OPACITY`
+3. crack lines, tangled-edge lines, selection outline, hover outline
+4. the x-ray pass for the selection outline (as 2)
+
+**Hidden selections show through (x-ray).** A selected item hidden behind other geometry, such as a loose piece inside the model or a hole on the far side, is drawn through the surfaces in front of it. It uses the same cyan as the selection, at reduced opacity, because it means the same thing: the current target. The parts in view draw normally, and nothing else is drawn through. While the selection pulses after a double-click framing, the face tint goes up to full strength and is evenly lit, and outlines get up to 40% lighter (same hue) and twice as wide.
 
 Face tints are not separate layers: they are drawn with the surface, from a per-face state buffer (one byte of flags per face, `mf_render::FaceStates`): loose piece, next to a tangled edge, recent repair, selected, hover. One colour, one meaning: a selected face shows only the selection tint, even when it is hovered too or is a loose piece (so it is cyan, never a blend); a hovered face shows only the hover glow (the hover tint, with little shading; the hover outline lines still draw over a selection); otherwise the defect and repair tints apply in that order. Changing the selection or hover rewrites only the changed chunks of that buffer (at most 32 KB per 32,768 faces), never the geometry; it is built on a worker.
 
@@ -108,13 +121,13 @@ Clicking in the view picks, nearest first within 8 pt on screen and not hidden b
 
 One function, `defects::defect_copy`, words every defect for the tree, Properties and tooltips. It is unit-tested against this table (`defect_copy_matches_the_table`).
 
-| Kind | Title | Detail | Next action |
-|---|---|---|---|
-| hole | "Hole N: small opening" (or "large opening" above 200 edges) | "42 boundary edges · 12.4 mm perimeter" | "Fill hole" |
-| slit | "Narrow crack" | "Edges almost touch" | "Needs edge stitching (not yet available)" |
-| island | "Loose piece" | "N triangles, not connected to the model" | "Remove piece" |
-| non-manifold | "Tangled edge" | "More than two faces share this edge" | "Select the faces involved" |
-| over cap | "Very large opening" | (as hole) | "Needs the large-hole method (not yet available)" |
+| Kind | Title | Tree row (name · size) | Detail | Next action |
+|---|---|---|---|---|
+| hole | "Hole N: small opening" (or "large opening" above 200 edges) | "Hole N · 42 edges · 12.4 mm" | "42 boundary edges · 12.4 mm perimeter" | "Fill hole" |
+| slit | "Narrow crack" | "Narrow crack · 8 edges" | "Edges almost touch" | "Needs edge stitching (not yet available)" |
+| island | "Loose piece" | "Loose piece · N triangles · 0.420 mm" (largest dimension) | "N triangles, 0.420 mm across, not connected to the model" | "Remove piece" |
+| non-manifold | "Tangled edge" | "Tangled edge · 3 faces" | "More than two faces share this edge" | "Select the faces involved" |
+| over cap | "Very large opening" | "Very large opening · 1500 edges · 88.0 mm" | (as hole) | "Needs the large-hole method (not yet available)" |
 
 - **Measurements** are in the document's units: mm when a file has none (STL, OBJ), or µm, cm, in, ft or m from a 3MF. They are given to three significant figures (12.4, 3.41, 0.500), and as whole numbers from 100 up. A perimeter that overflowed reads "perimeter too large to measure".
 - **Classification** runs on the analysis worker, never the UI thread (MF-RT-001):
@@ -140,6 +153,7 @@ Every move works without a mouse wheel: on a trackpad, with a one-button mouse, 
 | Pinch | zoom towards the cursor |
 | + or = / − | zoom in / out, 1.25× toward the view centre |
 | F | frame the target (or everything when nothing is targeted), keeping the view direction |
+| Double-click a tree row, or Enter on it | select it and frame it (animated; see the layout section) |
 | Home, or Cmd/Ctrl+0 | reset the view: the default angle, everything in view (Home needs Fn+← on Mac laptops) |
 | Esc | cancel the running job; otherwise clear the selection |
 
@@ -154,7 +168,7 @@ Every move works without a mouse wheel: on a trackpad, with a one-button mouse, 
   - lines or pages means a wheel, so the view zooms.
 - **Momentum.** Momentum scrolling after the fingers lift is ignored, so the view stops when you stop.
 - **Pinch.** Pinch, and Ctrl/Cmd + wheel (which egui turns into zoom), zoom towards the cursor.
-- **F** frames the target at 2.5× its size, so its surroundings show. If the target faces away from the camera (for example, a hole on the far side), the view first turns to look at it from outside. The move is instant; a later task animates it.
+- **F** frames the target at 2.5× its size, so its surroundings show. If the target faces away from the camera (for example, a hole on the far side), the view first turns to look at it from outside. The move is instant. Like a double-click framing, it keeps the whole scene inside the clipping planes, so framing a speck doesn't clip away the model around it. A double-click on a tree row animates the move (Task 8a).
 
 ## Constraints learned
 

@@ -16,7 +16,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use mf_desktop::MeshFixerApp;
-use mf_desktop::defects::Defect;
+use mf_desktop::defects::{Defect, defect_copy};
 use mf_io::threemf::{Model, ModelObject, Unit};
 use mf_selection::SelectionKind;
 
@@ -286,9 +286,10 @@ fn checkpoint_a_walkthrough() {
     let defects = h.state().current_analysis().unwrap().defects.clone();
     assert_eq!(defects.cracks.len(), 1, "{defects:?}");
     assert_eq!(defects.tangled.len(), 1, "{defects:?}");
-    click_label(&mut h, "Narrow crack");
+    let row = |d: &Defect| defect_copy(d, Unit::Millimeter).row;
+    click_label(&mut h, &row(&defects.cracks[0]));
     rec.still(&mut h, "07-crack-properties", 2.0);
-    click_label(&mut h, "Tangled edge");
+    click_label(&mut h, &row(&defects.tangled[0]));
     h.get_by_label("Select the faces involved");
     rec.still(&mut h, "08-tangled-edge-properties", 2.0);
     click_label(&mut h, "Select the faces involved");
@@ -306,15 +307,12 @@ fn checkpoint_a_walkthrough() {
         a.active == Some(scan) && a.current_analysis().is_some()
     });
     let defects = h.state().current_analysis().unwrap().defects.clone();
-    let number = defects
+    let hole = defects
         .holes
         .iter()
-        .find_map(|d| match d {
-            Defect::Hole { number, .. } => Some(*number),
-            _ => None,
-        })
+        .find(|d| matches!(d, Defect::Hole { .. }))
         .expect("the scan has a fillable hole");
-    let row = format!("Hole {number}: small opening");
+    let row = row(hole);
     let row_pos = h.get_by_label(&row).rect().center();
     hover(&mut h, row_pos);
     wait_until(&mut h, "hover outline", |a| a.hover.is_some());
@@ -358,8 +356,9 @@ fn checkpoint_a_walkthrough() {
     // 6. A loose piece: select it in the tree, remove it.
     // (The category is open: it has pieces.)
     h.get_by_label("Loose pieces (3)");
+    let first = h.state().current_analysis().unwrap().defects.loose[0].clone();
     let piece = h
-        .get_all_by_label("Loose piece")
+        .get_all_by_label(&defect_copy(&first, Unit::Millimeter).row)
         .next()
         .unwrap()
         .rect()

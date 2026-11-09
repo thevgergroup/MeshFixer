@@ -199,6 +199,15 @@ impl RenderMesh {
         true
     }
 
+    /// True if the face states last asked for hover over something.
+    pub fn hover_requested(&self) -> bool {
+        self.requested_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|i| i.hover.is_some())
+    }
+
     /// Forget that `inputs` were asked for (their write was superseded
     /// before it happened), so they're asked for again if still wanted.
     fn forget_states(&self, inputs: &StateInputs) {
@@ -272,6 +281,11 @@ pub fn face_states(
                 }
             }
             Some(OverlayTarget::Faces(ids)) => set(ids, bit),
+            Some(OverlayTarget::Object) => {
+                for faces in &topo.components {
+                    set(faces, bit);
+                }
+            }
             Some(OverlayTarget::Loops(_) | OverlayTarget::Edges(_)) | None => {}
         }
     }
@@ -310,6 +324,8 @@ pub enum OverlayTarget {
     Components(Vec<u32>),
     Faces(Vec<u32>),
     Edges(Vec<[u32; 2]>),
+    /// The whole object (its row in the tree, hovered).
+    Object,
 }
 
 /// What an overlay is for (each purpose has one slot in the app).
@@ -626,6 +642,27 @@ impl Workers {
                     render.forget_states(&inputs);
                     return None;
                 };
+                render.write_states(&gpu, &states, seq)?;
+                Some(Message::StatesWritten)
+            },
+        );
+    }
+
+    /// Like [`Workers::write_states`], for an object that isn't active
+    /// (its row hovered in the tree): never superseded by, nor
+    /// superseding, the active object's writes; the request number keeps
+    /// the newest.
+    pub fn write_object_states(&self, render: Arc<RenderMesh>, inputs: StateInputs, seq: u64) {
+        let gpu = self.gpu.clone();
+        spawn_on(
+            &self.lane,
+            &self.tx,
+            &self.repaint,
+            "face states",
+            false,
+            move || {
+                let states = face_states(&render.mesh, &inputs, &RunContext::none())
+                    .expect("an uncancelled face-state build completes");
                 render.write_states(&gpu, &states, seq)?;
                 Some(Message::StatesWritten)
             },
@@ -949,6 +986,7 @@ fn build_overlay(
                 (face_corners(&mesh, &faces).collect(), Vec::new())
             }
             OverlayTarget::Faces(ids) => (face_corners(&mesh, ids).collect(), Vec::new()),
+            OverlayTarget::Object => (mesh.faces().flat_map(|(_, t)| t).collect(), Vec::new()),
             OverlayTarget::Edges(edges) => {
                 (edges.iter().flatten().copied().collect(), edges.clone())
             }
@@ -956,7 +994,9 @@ fn build_overlay(
         let lines = match &target {
             OverlayTarget::Loops(ids) => loop_line_vertices(&mesh, origin, ids),
             OverlayTarget::Edges(edges) => edge_line_vertices(&mesh, origin, edges),
-            OverlayTarget::Components(_) | OverlayTarget::Faces(_) => Vec::new(),
+            OverlayTarget::Components(_) | OverlayTarget::Faces(_) | OverlayTarget::Object => {
+                Vec::new()
+            }
         };
         // Which way the target faces, for framing it (F): only a selection
         // is framed, and finding a loop's faces is O(n).
@@ -975,6 +1015,7 @@ fn build_overlay(
                     .collect::<Vec<u32>>(),
             ),
             (OverlayTarget::Faces(ids), _) => facing(&mesh, ids),
+            (OverlayTarget::Object, _) => None,
         };
         let bounds =
             points

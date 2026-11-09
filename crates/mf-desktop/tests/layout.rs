@@ -122,21 +122,16 @@ fn clicking_a_target_shows_its_operations_in_properties() {
     assert!(h.query_by_label("Fill hole").is_none());
 
     // Click one of the one-cell holes in the tree: it becomes the target.
-    let number = h
+    let label = h
         .state()
         .current_analysis()
         .unwrap()
         .defects
         .holes
         .iter()
-        .find_map(|d| match d {
-            mf_desktop::defects::Defect::Hole {
-                number, edges: 3, ..
-            } => Some(*number),
-            _ => None,
-        })
+        .find(|d| matches!(d, mf_desktop::defects::Defect::Hole { edges: 3, .. }))
+        .map(|d| mf_desktop::defects::defect_copy(d, mf_io::threemf::Unit::Millimeter).row)
         .expect("a 3-edge hole");
-    let label = format!("Hole {number}: small opening");
     let row = h.get_by_label(&label).rect();
     h.event(egui::Event::PointerMoved(row.center()));
     h.event(egui::Event::PointerButton {
@@ -207,24 +202,17 @@ fn history_breadcrumb_jumps_to_a_revision() {
 
 /// Click the tree row of the first one-cell (3-edge) hole and return it.
 fn click_small_hole_row(h: &mut Harness<'_, MeshFixerApp>) -> egui::Pos2 {
-    let number = h
+    let label = h
         .state()
         .current_analysis()
         .unwrap()
         .defects
         .holes
         .iter()
-        .find_map(|d| match d {
-            mf_desktop::defects::Defect::Hole {
-                number, edges: 3, ..
-            } => Some(*number),
-            _ => None,
-        })
+        .find(|d| matches!(d, mf_desktop::defects::Defect::Hole { edges: 3, .. }))
+        .map(|d| mf_desktop::defects::defect_copy(d, mf_io::threemf::Unit::Millimeter).row)
         .expect("a 3-edge hole");
-    let pos = h
-        .get_by_label(&format!("Hole {number}: small opening"))
-        .rect()
-        .center();
+    let pos = h.get_by_label(&label).rect().center();
     h.event(egui::Event::PointerMoved(pos));
     h.event(egui::Event::PointerButton {
         pos,

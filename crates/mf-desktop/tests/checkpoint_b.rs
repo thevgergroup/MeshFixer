@@ -373,7 +373,7 @@ fn walkthrough(
         .expect("a fillable hole")
         .clone();
     println!("{}: hole {:?}", rec.prefix, size(&hole));
-    let hole_row = defect_copy(&hole, h.state().session.document().units()).title;
+    let hole_row = defect_copy(&hole, h.state().session.document().units()).row;
     hover_and_click(&mut h, rec, &hole, &hole_row, "02-hole");
     h.get_by_label("Fill hole");
 
@@ -391,7 +391,8 @@ fn walkthrough(
     h.run_steps(4);
 
     let piece = defects.loose.first().expect("a loose piece").clone();
-    hover_and_click(&mut h, rec, &piece, "Loose piece", "03-loose-piece");
+    let piece_row = defect_copy(&piece, h.state().session.document().units()).row;
+    hover_and_click(&mut h, rec, &piece, &piece_row, "03-loose-piece");
     h.get_by_label("Remove piece");
 
     let pos = h
@@ -402,7 +403,8 @@ fn walkthrough(
     h.run_steps(4);
 
     let tangled = defects.tangled.first().expect("a tangled edge").clone();
-    hover_and_click(&mut h, rec, &tangled, "Tangled edge", "04-tangled-edge");
+    let tangled_row = defect_copy(&tangled, h.state().session.document().units()).row;
+    hover_and_click(&mut h, rec, &tangled, &tangled_row, "04-tangled-edge");
 
     // Fill the hole: select it in the tree, Apply; the patch is tinted as
     // a recent repair.

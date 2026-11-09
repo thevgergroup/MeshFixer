@@ -6,10 +6,9 @@ use eframe::egui::{self, RichText};
 use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
 
-use crate::app::{MeshFixerApp, Tool};
+use crate::app::{MeshFixerApp, Tool, TreeItem};
 use crate::defects::{Defect, count, defect_copy, measure, unit_symbol};
 use crate::theme;
-use crate::worker::OverlayTarget;
 
 /// Panel widths (points). With the bottom bar, they leave the 3D view at
 /// least 60% of a 1440×900 window.
@@ -480,7 +479,7 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             &mut shown.selection,
             "Selection",
             theme::SELECTED,
-            "The current target: outlined, or tinted",
+            "The current target: outlined, or tinted; shown faintly through whatever hides it",
             true,
         ),
         (
@@ -561,28 +560,104 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         } else {
             RichText::new(&name).color(theme::TEXT_MUTED)
         };
-        let row = ui.selectable_label(false, text).on_hover_text(format!(
-            "{}{}",
+        let tip = format!(
+            "{}{} · double-click to frame it",
             count(tris, "triangle"),
             if active {
                 ""
             } else {
                 " · click to work on it"
             }
-        ));
-        if row.clicked() {
-            app.set_active(id);
-        }
-        if active {
-            ui.indent(("defects", id.0), |ui| defects_tree(app, ui));
+        );
+        tree_row(
+            app,
+            ui,
+            &TreeItem::Object(id),
+            Row {
+                text,
+                size: None,
+                label: &name,
+            },
+            |ui| {
+                ui.label(&tip);
+            },
+        );
+        if app.tree_expanded() == Some(id) {
+            ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
         }
     }
 }
 
-fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let Some(object) = app.active else { return };
-    let Some(analysis) = app.current_analysis() else {
-        if app.analysis_failed_for_active() {
+/// What a tree row shows: its text, its size at the right (muted), and
+/// its accessible label (both, as words).
+struct Row<'a> {
+    text: RichText,
+    size: Option<&'a str>,
+    label: &'a str,
+}
+
+/// One row of "Objects & Defects". Every row (an object, "Model", each
+/// defect, and any row added later) behaves the same way, here (M4 Task
+/// 8a): click selects its item; double-click, or Enter on the focused row,
+/// selects it and frames it in the view (animated); hovering highlights it
+/// in the view (an outline, or a glow); `tooltip` says more.
+fn tree_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    item: &TreeItem,
+    row: Row<'_>,
+    tooltip: impl FnOnce(&mut egui::Ui),
+) {
+    let selected = app.tree_selected(item);
+    let mut button = egui::Button::selectable(selected, row.text)
+        .min_size(egui::vec2(ui.available_width(), 0.0));
+    if let Some(size) = row.size {
+        button = button.right_text(RichText::new(size).color(theme::TEXT_MUTED));
+    }
+    // Its id is its item's, wherever it is in the tree.
+    let response = ui.push_id(item_key(item), |ui| ui.add(button)).inner;
+    let label = row.label.to_owned();
+    response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
+    let response = response.on_hover_ui(tooltip);
+    if response.hovered() {
+        app.tree_hover(item);
+    }
+    // Enter (or Space) on a focused row is a click too: Enter also frames.
+    let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    // egui's double-click is the pointer's: it only counts here if the
+    // first click was on this row too.
+    let last_click = egui::Id::unique("tree row last clicked");
+    let twice = response.double_clicked()
+        && ui.data(|d| d.get_temp::<egui::Id>(last_click)) == Some(response.id);
+    if response.clicked() {
+        ui.data_mut(|d| d.insert_temp(last_click, response.id));
+    }
+    if twice || (response.clicked() && enter) {
+        app.tree_find(item);
+    } else if response.clicked() {
+        app.tree_select(item);
+    }
+}
+
+/// A tree item's identity, for its row's widget id.
+fn item_key(item: &TreeItem) -> (u8, u64, [u32; 2]) {
+    match item {
+        TreeItem::Object(id) => (0, id.0, [0; 2]),
+        TreeItem::Model(id) => (1, id.0, [0; 2]),
+        TreeItem::Defect(id, d) => match d {
+            Defect::Hole { loop_id, .. } | Defect::OverCap { loop_id, .. } => {
+                (2, id.0, [*loop_id, 0])
+            }
+            Defect::Crack { loop_id, .. } => (3, id.0, [*loop_id, 0]),
+            Defect::LoosePiece { component, .. } => (4, id.0, [*component, 0]),
+            Defect::Tangled { edge, .. } => (5, id.0, *edge),
+        },
+    }
+}
+
+fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui, object: mf_command::ObjectId) {
+    let Some(analysis) = app.analysis_of(object) else {
+        if app.active == Some(object) && app.analysis_failed_for_active() {
             ui.weak("Couldn't analyse this object");
         } else {
             ui.horizontal(|ui| {
@@ -594,14 +669,20 @@ fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     };
     let defects = analysis.defects.clone();
     let units = app.session.document().units();
-    let nothing_targeted = app.selection.is_none() && app.current_inspected().is_none();
-    if ui
-        .selectable_label(nothing_targeted, "Model")
-        .on_hover_text("The whole object: its operations are in Properties")
-        .clicked()
-    {
-        app.clear_selection();
-    }
+    tree_row(
+        app,
+        ui,
+        &TreeItem::Model(object),
+        Row {
+            text: RichText::new("Model"),
+            size: None,
+            label: "Model",
+        },
+        |ui| {
+            ui.label("The whole object: its operations are in Properties");
+            ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
+        },
+    );
     let categories = [
         ("Holes", &defects.holes, theme::HOLE),
         ("Narrow cracks", &defects.cracks, theme::CRACK),
@@ -645,34 +726,22 @@ fn defect_row(
     units: mf_io::threemf::Unit,
 ) {
     let copy = defect_copy(d, units);
-    let selected = match (d.selection(), app.current_selection()) {
-        (Some((kind, id)), Some(sel)) => sel.kind == kind && sel.ids.contains(&id),
-        (None, _) => app.current_inspected().is_some_and(|i| i.defect == *d),
-        _ => false,
-    };
-    let row = ui
-        .selectable_label(selected, &copy.title)
-        .on_hover_ui(|ui| {
+    tree_row(
+        app,
+        ui,
+        &TreeItem::Defect(object, d.clone()),
+        Row {
+            text: RichText::new(&copy.name),
+            size: Some(&copy.size),
+            label: &copy.row,
+        },
+        |ui| {
             ui.strong(&copy.title);
             ui.label(&copy.detail);
             ui.label(RichText::new(format!("Next: {}", copy.next_action)).color(theme::TEXT_MUTED));
-        });
-    if row.hovered() {
-        app.hover = Some((object, overlay_target(d)));
-    }
-    if row.clicked() {
-        app.select_defect(d);
-    }
-}
-
-fn overlay_target(d: &Defect) -> OverlayTarget {
-    match d {
-        Defect::Hole { loop_id, .. }
-        | Defect::OverCap { loop_id, .. }
-        | Defect::Crack { loop_id, .. } => OverlayTarget::Loops(vec![*loop_id]),
-        Defect::LoosePiece { component, .. } => OverlayTarget::Components(vec![*component]),
-        Defect::Tangled { edge, .. } => OverlayTarget::Edges(vec![*edge]),
-    }
+            ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
+        },
+    );
 }
 
 /// Right: "Properties & Tools", contextual to the current target: what it

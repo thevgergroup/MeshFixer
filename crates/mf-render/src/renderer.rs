@@ -29,6 +29,23 @@ pub struct Palette {
     pub overlay_width: f32,
     /// What each face-state flag tints a face with ([`FaceStates`]).
     pub tints: FaceTints,
+    /// Opacity (0–1) of the selection drawn through nearer surfaces (the
+    /// x-ray pass, in the selection's own colour; see [`SelectionCue`]).
+    pub xray_opacity: f32,
+}
+
+/// How the selection is drawn this frame, besides its face tint and
+/// outline layers.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct SelectionCue {
+    /// 0–1: how much brighter (and, for outlines, wider) the selection is
+    /// drawn: the pulse after a camera move frames it.
+    pub emphasis: f32,
+    /// Draw selected faces of every active item where nearer surfaces hide
+    /// them, at [`Palette::xray_opacity`] (an x-ray pass: no depth write,
+    /// only where something is in front). Outline layers have their own
+    /// [`Layer::xray`].
+    pub xray_faces: bool,
 }
 
 /// The tint of each face-state flag: RGB, and in alpha how much of it
@@ -63,6 +80,7 @@ impl Palette {
             selected: [0.16, 0.82, 1.0, 0.6],
             hover: [0.91, 0.93, 0.96, 0.85],
         },
+        xray_opacity: 0.55,
     };
 }
 
@@ -84,6 +102,8 @@ struct SceneUniforms {
     viewport: [f32; 4],
     /// [`FaceTints`], in its order.
     tints: [[f32; 4]; 5],
+    /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity.
+    cue: [f32; 4],
 }
 
 #[repr(C)]
@@ -135,6 +155,11 @@ pub struct Layer<'a> {
     /// The local origin the layer's vertices are relative to.
     pub mesh_origin: DVec3,
     pub color: [f32; 4],
+    /// Also drawn, at [`Palette::xray_opacity`], where nearer surfaces hide
+    /// it (the selection's outline: one colour, one meaning).
+    pub xray: bool,
+    /// 0–1: drawn brighter and wider (the selection's pulse).
+    pub emphasis: f32,
 }
 
 /// A per-draw uniform buffer and its bind group, reused across frames.
@@ -148,7 +173,12 @@ pub struct MeshRenderer {
     surface_pipeline_cw: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     overlay_line_pipeline: wgpu::RenderPipeline,
+    /// The selection drawn through nearer surfaces (see [`SelectionCue`]).
+    xray_surface_pipeline_ccw: wgpu::RenderPipeline,
+    xray_surface_pipeline_cw: wgpu::RenderPipeline,
+    xray_line_pipeline: wgpu::RenderPipeline,
     palette: Palette,
+    cue: SelectionCue,
     /// Physical pixels per point (line widths are in points).
     pixels_per_point: f32,
     draw_bgl: wgpu::BindGroupLayout,
@@ -218,13 +248,28 @@ impl MeshRenderer {
             immediate_size: 0,
         });
 
-        let pipeline = |label: &str,
-                        layout: &wgpu::PipelineLayout,
-                        vs: &str,
-                        fs: &str,
-                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
-                        topology: wgpu::PrimitiveTopology,
-                        front_face: wgpu::FrontFace| {
+        // Opaque passes write and test depth as usual; the x-ray passes
+        // draw only behind what's already there (`Greater`), blended,
+        // writing no depth and keeping the target opaque.
+        let xray_blend = wgpu::BlendState {
+            color: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::SrcAlpha,
+                dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
+                operation: wgpu::BlendOperation::Add,
+            },
+            alpha: wgpu::BlendComponent {
+                src_factor: wgpu::BlendFactor::Zero,
+                dst_factor: wgpu::BlendFactor::One,
+                operation: wgpu::BlendOperation::Add,
+            },
+        };
+        let pipeline_with = |label: &str,
+                             layout: &wgpu::PipelineLayout,
+                             vs: &str,
+                             fs: &str,
+                             buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                             front_face: wgpu::FrontFace,
+                             xray: bool| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
@@ -235,15 +280,19 @@ impl MeshRenderer {
                     compilation_options: Default::default(),
                 },
                 primitive: wgpu::PrimitiveState {
-                    topology,
+                    topology: wgpu::PrimitiveTopology::TriangleList,
                     front_face,
                     cull_mode: None,
                     ..Default::default()
                 },
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: target.depth,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                    depth_write_enabled: Some(!xray),
+                    depth_compare: Some(if xray {
+                        wgpu::CompareFunction::Greater
+                    } else {
+                        wgpu::CompareFunction::LessEqual
+                    }),
                     stencil: Default::default(),
                     bias: Default::default(),
                 }),
@@ -254,12 +303,24 @@ impl MeshRenderer {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some(fs),
-                    targets: &[Some(target.color.into())],
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: target.color,
+                        blend: xray.then_some(xray_blend),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
                     compilation_options: Default::default(),
                 }),
                 multiview_mask: None,
                 cache: None,
             })
+        };
+        let pipeline = |label: &str,
+                        layout: &wgpu::PipelineLayout,
+                        vs: &str,
+                        fs: &str,
+                        buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
+                        front_face: wgpu::FrontFace| {
+            pipeline_with(label, layout, vs, fs, buffers, front_face, false)
         };
         let surface_buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<SurfaceVertex>() as u64,
@@ -276,7 +337,6 @@ impl MeshRenderer {
             "vs_surface",
             "fs_surface",
             &surface_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
         );
         let surface_pipeline_cw = pipeline(
@@ -285,7 +345,6 @@ impl MeshRenderer {
             "vs_surface",
             "fs_surface",
             &surface_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Cw,
         );
         // Lines are drawn as screen-space quads so they can be wider than a
@@ -302,7 +361,6 @@ impl MeshRenderer {
             "vs_line",
             "fs_line",
             &line_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
         );
         let overlay_line_pipeline = pipeline(
@@ -311,10 +369,35 @@ impl MeshRenderer {
             "vs_line",
             "fs_overlay_line",
             &line_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
         );
+        let xray_surface = |label: &str, front_face| {
+            pipeline_with(
+                label,
+                &surface_layout,
+                "vs_surface",
+                "fs_xray_surface",
+                &surface_buffers,
+                front_face,
+                true,
+            )
+        };
+        let xray_surface_pipeline_ccw = xray_surface("mf x-ray surface ccw", wgpu::FrontFace::Ccw);
+        let xray_surface_pipeline_cw = xray_surface("mf x-ray surface cw", wgpu::FrontFace::Cw);
+        let xray_line_pipeline = pipeline_with(
+            "mf x-ray lines",
+            &layout,
+            "vs_line",
+            "fs_xray_line",
+            &line_buffers,
+            wgpu::FrontFace::Ccw,
+            true,
+        );
         MeshRenderer {
+            xray_surface_pipeline_ccw,
+            xray_surface_pipeline_cw,
+            xray_line_pipeline,
+            cue: SelectionCue::default(),
             surface_pipeline_ccw,
             surface_pipeline_cw,
             line_pipeline,
@@ -330,6 +413,15 @@ impl MeshRenderer {
 
     pub fn palette(&self) -> &Palette {
         &self.palette
+    }
+
+    /// How the selection is drawn from the next [`Self::prepare`] on.
+    pub fn set_selection_cue(&mut self, cue: SelectionCue) {
+        self.cue = cue;
+    }
+
+    pub fn selection_cue(&self) -> SelectionCue {
+        self.cue
     }
 
     /// Physical pixels per point of the target, so line widths (in points)
@@ -362,6 +454,7 @@ impl MeshRenderer {
                 p.tints.selected,
                 p.tints.hover,
             ],
+            cue: [self.cue.emphasis.clamp(0.0, 1.0), p.xray_opacity, 0.0, 0.0],
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
@@ -427,13 +520,17 @@ impl MeshRenderer {
         let layer_slots = &self.draw_slots[items.len()..];
         for (slot, layer) in layer_slots.iter().zip(layers) {
             let shifted = shifted_model(layer.model, layer.mesh_origin, world_origin);
+            // The pulse: up to 40% lighter (the same hue) and twice as wide.
+            let e = layer.emphasis.clamp(0.0, 1.0);
+            let [r, g, b, a] = layer.color;
+            let lighter = |c: f32| c + (1.0 - c) * 0.4 * e;
             let u = DrawUniforms {
                 model: shifted.to_cols_array_2d(),
                 normal_matrix: normal_matrix(layer.model).to_cols_array_2d(),
-                color: layer.color,
+                color: [lighter(r), lighter(g), lighter(b), a],
                 params: [
                     0.0,
-                    self.palette.overlay_width * self.pixels_per_point,
+                    self.palette.overlay_width * self.pixels_per_point * (1.0 + e),
                     // Over the mesh's own outlines: a selected or hovered
                     // hole draws its colour, not the hole's (fix round 1,
                     // I1). Layers among themselves tie (same width, same
@@ -471,9 +568,38 @@ impl MeshRenderer {
                 }
             }
         }
+        // The selected faces where nearer surfaces hide them, once every
+        // surface is in the depth buffer.
+        if self.cue.xray_faces {
+            for (slot, item) in self.draw_slots.iter().zip(items) {
+                if item.inactive || item.shown_states & u32::from(FaceStates::SELECTED) == 0 {
+                    continue;
+                }
+                pass.set_bind_group(1, &slot.bind_group, &[]);
+                pass.set_pipeline(if item.model.determinant() < 0.0 {
+                    &self.xray_surface_pipeline_cw
+                } else {
+                    &self.xray_surface_pipeline_ccw
+                });
+                let (states, buffers) = item.mesh.surface_draws();
+                pass.set_bind_group(2, states, &[]);
+                for (buf, count, first_face) in buffers {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..count, first_face..first_face + 1);
+                }
+            }
+        }
         for (slot, layer) in layer_slots.iter().zip(layers) {
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(&self.overlay_line_pipeline);
+            for (buf, count) in &layer.lines.chunks {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..*count / 2);
+            }
+        }
+        for (slot, layer) in layer_slots.iter().zip(layers).filter(|(_, l)| l.xray) {
+            pass.set_bind_group(1, &slot.bind_group, &[]);
+            pass.set_pipeline(&self.xray_line_pipeline);
             for (buf, count) in &layer.lines.chunks {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..*count / 2);

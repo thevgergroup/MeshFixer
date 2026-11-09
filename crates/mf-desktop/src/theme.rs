@@ -34,6 +34,10 @@ pub const RECENT_REPAIR_STRENGTH: f32 = 0.45;
 /// the strongest mark.
 pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.35;
 
+/// The selection where nearer surfaces hide it (the x-ray pass) is drawn
+/// in `SELECTED` at this opacity: the same colour, so the same meaning.
+pub const XRAY_OPACITY: f32 = 0.55;
+
 /// Outline widths in the 3D view, in points: defect outlines, and the
 /// selection / hover / crack / tangled-edge overlays drawn over them.
 pub const BOUNDARY_WIDTH: f32 = 2.0;
@@ -77,6 +81,7 @@ pub fn palette() -> mf_render::Palette {
             selected: tint(SELECTED, SELECTED_FACE_STRENGTH),
             hover: tint(HOVER, HOVER_FACE_STRENGTH),
         },
+        xray_opacity: XRAY_OPACITY,
     }
 }
 

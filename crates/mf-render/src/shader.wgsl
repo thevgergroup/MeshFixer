@@ -16,6 +16,9 @@ struct Scene {
     tint_recent_repair: vec4<f32>,
     tint_selected: vec4<f32>,
     tint_hover: vec4<f32>,
+    // The selection cue (renderer.rs `SelectionCue`): x: emphasis (the
+    // pulse after framing, 0–1), y: x-ray opacity.
+    cue: vec4<f32>,
 };
 
 struct Draw {
@@ -74,7 +77,10 @@ fn base_color(front: bool, state: u32) -> vec3<f32> {
     // Back faces (seen through holes, or flipped) are tinted so they stand out.
     var rgb = select(scene.back_face.rgb, scene.surface.rgb, front);
     if ((state & SELECTED) != 0u) {
-        return tint(rgb, state, SELECTED, scene.tint_selected);
+        // The pulse brightens it: the selection tint at up to full strength.
+        let t = scene.tint_selected;
+        let strength = t.a + (1.0 - t.a) * scene.cue.x;
+        return tint(rgb, state, SELECTED, vec4<f32>(t.rgb, strength));
     }
     if ((state & HOVER) != 0u) {
         return tint(rgb, state, HOVER, scene.tint_hover);
@@ -121,8 +127,13 @@ fn glow(rgb: vec3<f32>, n_in: vec3<f32>) -> vec3<f32> {
 @fragment
 fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let base = base_color(front, in.state);
-    let glowing = (in.state & HOVER) != 0u && (in.state & SELECTED) == 0u;
-    let rgb = select(lit(base, in.normal), glow(base, in.normal), glowing);
+    let selected = (in.state & SELECTED) != 0u;
+    let glowing = (in.state & HOVER) != 0u && !selected;
+    var rgb = select(lit(base, in.normal), glow(base, in.normal), glowing);
+    // While the selection pulses, it's lit evenly too (brighter).
+    if (selected) {
+        rgb = mix(rgb, glow(base, in.normal), scene.cue.x);
+    }
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
 }
 
@@ -181,4 +192,23 @@ fn fs_line() -> @location(0) vec4<f32> {
 @fragment
 fn fs_overlay_line() -> @location(0) vec4<f32> {
     return vec4<f32>(draw.color.rgb, 1.0);
+}
+
+// The selection where nearer surfaces hide it (the x-ray pass: drawn only
+// behind the depth buffer, blended, no depth write): the selection colour
+// at the x-ray opacity, a little stronger while it pulses. Everything else
+// is discarded.
+@fragment
+fn fs_xray_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
+    if ((in.state & SELECTED) == 0u) {
+        discard;
+    }
+    let a = min(scene.cue.y * (1.0 + 0.5 * scene.cue.x), 1.0);
+    return vec4<f32>(scene.tint_selected.rgb, a);
+}
+
+// A selection outline where nearer surfaces hide it.
+@fragment
+fn fs_xray_line() -> @location(0) vec4<f32> {
+    return vec4<f32>(draw.color.rgb, min(scene.cue.y * (1.0 + 0.5 * scene.cue.x), 1.0));
 }

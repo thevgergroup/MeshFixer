@@ -9,7 +9,10 @@ use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, 
 use mf_geometry::{Aabb, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_metrics::FrameTimes;
-use mf_render::{Bvh, FaceStates, OrbitCamera, model_matrix, screen_position};
+use mf_render::{
+    Bvh, CameraMove, FaceStates, OrbitCamera, SelectionCue, clip_radius, model_matrix,
+    screen_position,
+};
 use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
@@ -72,6 +75,49 @@ enum ViewRequest {
     FrameAll,
     /// F: the current target in view, same orientation.
     FrameTarget,
+}
+
+/// How long a camera move to an item found from the tree takes (seconds).
+pub const FRAME_MOVE_SECONDS: f64 = 0.2;
+/// After it, the selection pulses twice over this long (seconds).
+pub const PULSE_SECONDS: f64 = 0.6;
+/// How many pulses.
+const PULSES: f64 = 2.0;
+/// After an object's row is clicked, the tree keeps listing the defects it
+/// listed for this long (seconds; egui's double-click window is 0.3 s), so
+/// the rows don't move under a double-click's second click.
+pub const TREE_HOLD_SECONDS: f64 = 0.35;
+
+/// What a row of the tree ("Objects & Defects") stands for. Every row
+/// behaves the same way (M4 Task 8a): click selects it, double-click or
+/// Enter selects it and frames it, hovering highlights it in the view.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TreeItem {
+    /// An object: selecting it makes it active.
+    Object(ObjectId),
+    /// The active object as a whole ("Model"): selecting it clears the
+    /// selection (the whole object is the target).
+    Model(ObjectId),
+    /// A defect of the active object.
+    Defect(ObjectId, Defect),
+}
+
+/// A row double-clicked: frame its item once what that needs is ready (its
+/// bounds, the picking BVHs).
+#[derive(Debug, Clone)]
+struct Find {
+    item: TreeItem,
+    /// The revision a defect belongs to (a later one may not have it).
+    mesh: Option<Mesh>,
+}
+
+/// A camera move under way, the camera it last set (a different one
+/// means the user moved it: theirs wins), and what pulses after it.
+#[derive(Debug, Clone)]
+struct Moving {
+    path: CameraMove,
+    last: OrbitCamera,
+    pulse: Option<(ObjectId, OverlayTarget)>,
 }
 
 /// One overlay slot: what it was requested for, and the result once built.
@@ -225,6 +271,20 @@ pub struct MeshFixerApp {
     /// Help > Controls window.
     pub show_controls: bool,
     view_request: Option<ViewRequest>,
+    /// A tree row to frame (double-click or Enter).
+    find: Option<Find>,
+    /// The camera move framing it.
+    moving: Option<Moving>,
+    /// The selection's pulse after a framing: when it started, and for
+    /// which target (another target doesn't pulse).
+    pulse: Option<(f64, (ObjectId, OverlayTarget))>,
+    /// The selection's emphasis this frame (0–1: the pulse).
+    emphasis: f32,
+    /// This frame's input time (seconds).
+    now: f64,
+    /// The object the tree keeps expanded until a time (see
+    /// [`TREE_HOLD_SECONDS`]).
+    tree_hold: Option<(Option<ObjectId>, f64)>,
     pub viewport: Viewport,
     workers: Workers,
     /// Shares the workers' upload totals.
@@ -274,8 +334,12 @@ impl MeshFixerApp {
                         let bvh = Arc::new(Bvh::build(&mesh, run)?);
                         // Picking needs the topology too (hole edges,
                         // pieces): built here, so a hover never builds it
-                        // on the picking lane.
-                        mesh.topology_with(run)?;
+                        // on the picking lane, unless it's being built
+                        // already (the analysis): then that caches it.
+                        // Waiting for it here could deadlock this pool,
+                        // whose worker may have picked this job up inside
+                        // that very computation (M4 Task 8a).
+                        mesh.topology_unless_busy(run)?;
                         // allow-swallow: the receiver only disappears while the app is closing
                         let _ = tx.send(Message::BvhBuilt { object, mesh, bvh });
                         ctx.request_repaint();
@@ -354,6 +418,12 @@ impl MeshFixerApp {
             state_seq: 0,
             show_controls: false,
             view_request: None,
+            find: None,
+            moving: None,
+            pulse: None,
+            emphasis: 0.0,
+            now: 0.0,
+            tree_hold: None,
             viewport: Viewport::new(render_state.clone(), theme::palette()),
             workers,
             gpu_totals,
@@ -1393,15 +1463,25 @@ impl MeshFixerApp {
                 } else {
                     self.object_vertices.get(&o.id)?.1.clone()
                 };
+                let hovered = !active
+                    && self.shown.hover
+                    && self
+                        .hover
+                        .as_ref()
+                        .is_some_and(|(h, t)| *h == o.id && *t == OverlayTarget::Object);
                 Some(ObjectView {
                     id: o.id,
                     render,
                     transform: o.transform,
                     active,
+                    hovered,
                     // Only the active object's current revision has its
-                    // states: the overlays belong to it.
+                    // states: the overlays belong to it. Another object
+                    // shows only its hover glow (its row hovered).
                     shown_states: if active && self.shows_current_revision() {
                         self.shown_states()
+                    } else if hovered {
+                        u32::from(FaceStates::HOVER)
                     } else {
                         0
                     },
@@ -1449,11 +1529,21 @@ impl MeshFixerApp {
     /// Home: default view of everything (applied once every object's bounds
     /// are known).
     pub fn fit_camera(&mut self) {
+        self.stop_finding();
         self.view_request = Some(ViewRequest::Reset);
+    }
+
+    /// Drop a pending or running framing from the tree (another camera
+    /// request replaces it).
+    fn stop_finding(&mut self) {
+        self.find = None;
+        self.moving = None;
+        self.pulse = None;
     }
 
     /// F: frame the current target, or everything, keeping the orientation.
     pub fn frame_target(&mut self) {
+        self.stop_finding();
         self.view_request = Some(if self.target_overlay_request().is_some() {
             ViewRequest::FrameTarget
         } else {
@@ -1504,14 +1594,251 @@ impl MeshFixerApp {
             }
         };
         self.view_request = None;
+        let scene = self.document_world_bounds().flatten();
         match (bounds, request, &mut self.camera) {
             (None, ViewRequest::Reset, cam) => *cam = None,
             (None, ..) => {}
             (Some(bb), ViewRequest::Reset, cam) | (Some(bb), _, cam @ None) => {
                 *cam = Some(OrbitCamera::fit(&bb))
             }
-            (Some(bb), _, Some(cam)) => cam.frame(&bb),
+            (Some(bb), _, Some(cam)) => {
+                cam.frame(&bb);
+                // Framing a speck mustn't clip away the model around it.
+                if let Some(scene) = scene {
+                    cam.radius = clip_radius(cam.target, cam.radius, &scene);
+                }
+            }
         }
+    }
+
+    /// A row of the tree clicked: select its item (the camera stays).
+    pub fn tree_select(&mut self, item: &TreeItem) {
+        match item {
+            TreeItem::Object(id) => {
+                if self.active != Some(*id) {
+                    self.tree_hold = Some((self.active, self.now + TREE_HOLD_SECONDS));
+                }
+                self.set_active(*id);
+            }
+            TreeItem::Model(id) => {
+                self.set_active(*id);
+                self.clear_selection();
+            }
+            TreeItem::Defect(id, d) => {
+                self.set_active(*id);
+                self.select_defect(d);
+            }
+        }
+    }
+
+    /// A row of the tree double-clicked (or Enter on it): select its item
+    /// and frame it, with a short eased camera move
+    /// ([`FRAME_MOVE_SECONDS`]) then a pulse of the selection
+    /// ([`PULSE_SECONDS`]) so the eye finds it.
+    pub fn tree_find(&mut self, item: &TreeItem) {
+        self.tree_select(item);
+        let mesh = match item {
+            TreeItem::Defect(..) => self.active_mesh().cloned(),
+            _ => None,
+        };
+        self.view_request = None;
+        self.moving = None;
+        self.pulse = None;
+        self.find = Some(Find {
+            item: item.clone(),
+            mesh,
+        });
+    }
+
+    /// The pointer is over a row of the tree this frame: highlight its
+    /// item in the view (its outline or glow; the camera stays).
+    pub fn tree_hover(&mut self, item: &TreeItem) {
+        self.hover = Some(match item {
+            TreeItem::Object(id) | TreeItem::Model(id) => (*id, OverlayTarget::Object),
+            TreeItem::Defect(id, d) => (*id, defect_target(d)),
+        });
+    }
+
+    /// The object whose defects the tree lists under its row: the active
+    /// one, except for a moment after another object's row was clicked
+    /// ([`TREE_HOLD_SECONDS`]).
+    pub fn tree_expanded(&self) -> Option<ObjectId> {
+        match self.tree_hold {
+            Some((held, until)) if self.now < until => held,
+            _ => self.active,
+        }
+    }
+
+    /// The analysis of object `id`'s current revision at its transform, if
+    /// it's ready (the active object's is [`Self::current_analysis`]).
+    pub fn analysis_of(&self, id: ObjectId) -> Option<&Analysis> {
+        let object = self.session.document().object(id)?;
+        self.analysis_for(object.mesh()?, &object.transform)
+    }
+
+    /// True if a row's item is the current target (the row shows selected).
+    pub fn tree_selected(&self, item: &TreeItem) -> bool {
+        match item {
+            // An object row says which object is active by its text.
+            TreeItem::Object(_) => false,
+            TreeItem::Model(id) => {
+                Some(*id) == self.active
+                    && self.selection.is_none()
+                    && self.current_inspected().is_none()
+            }
+            TreeItem::Defect(_, d) => match (d.selection(), self.current_selection()) {
+                (Some((kind, id)), Some(sel)) => sel.kind == kind && sel.ids.contains(&id),
+                (None, _) => self.current_inspected().is_some_and(|i| i.defect == *d),
+                _ => false,
+            },
+        }
+    }
+
+    /// True while the camera moves to (or waits to move to) an item found
+    /// from the tree.
+    pub fn camera_animating(&self) -> bool {
+        self.find.is_some() || self.moving.is_some()
+    }
+
+    /// How much the selection is emphasised this frame (0–1): the pulse
+    /// after a framing from the tree, else 0.
+    pub fn selection_emphasis(&self) -> f32 {
+        self.emphasis
+    }
+
+    /// Start the camera move for a pending [`Find`] once what it needs is
+    /// ready; drop it if its item went away.
+    fn resolve_find(&mut self) {
+        let Some(find) = self.find.clone() else {
+            return;
+        };
+        let Some(cam) = self.camera else { return };
+        let scene = match self.document_world_bounds() {
+            None => return,
+            Some(None) => {
+                self.find = None;
+                return;
+            }
+            Some(Some(scene)) => scene,
+        };
+        let to = match &find.item {
+            TreeItem::Object(id) | TreeItem::Model(id) => {
+                let Some(o) = self.session.document().object(*id) else {
+                    self.find = None;
+                    return;
+                };
+                match self.object_bounds(o) {
+                    None => return,
+                    Some(None) => {
+                        self.find = None;
+                        return;
+                    }
+                    Some(Some(bb)) => crate::framing::object_view(
+                        &cam,
+                        &transformed_bounds(&bb, &model_matrix(&o.transform)),
+                        &scene,
+                    ),
+                }
+            }
+            TreeItem::Defect(id, d) => {
+                let current = Some(*id) == self.active
+                    && match (&find.mesh, self.active_mesh()) {
+                        (Some(m), Some(now)) => Mesh::ptr_eq(m, now),
+                        _ => false,
+                    };
+                if !current || self.analysis_failed_for_active() {
+                    self.find = None;
+                    return;
+                }
+                let Some(analysis) = self.current_analysis() else {
+                    return;
+                };
+                let Some(place) = analysis.defects.place(d) else {
+                    self.find = None;
+                    return;
+                };
+                if !self.picking_ready() {
+                    return;
+                }
+                crate::framing::defect_view(&cam, &place, &scene, |o, d| self.ray_hit(o, d))
+            }
+        };
+        self.find = None;
+        self.moving = Some(Moving {
+            path: CameraMove {
+                from: cam,
+                to,
+                start: self.now,
+                duration: FRAME_MOVE_SECONDS,
+            },
+            last: cam,
+            pulse: self
+                .target_overlay_request()
+                .map(|(object, _, target)| (object, target)),
+        });
+    }
+
+    /// The nearest surface of any object along a world-space ray, through
+    /// the picking BVHs (O(log n) each; [`Self::resolve_find`] waits until
+    /// every object has one).
+    fn ray_hit(&self, origin: glam::DVec3, dir: glam::DVec3) -> Option<f64> {
+        self.session
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh()?;
+                let (_, bvh) = self
+                    .bvhs
+                    .get(&o.id)
+                    .filter(|(m, _)| Mesh::ptr_eq(m, mesh))?;
+                bvh.ray_pick(
+                    mesh,
+                    origin.to_array(),
+                    dir.to_array(),
+                    &model_matrix(&o.transform),
+                )
+            })
+            .map(|(_, t)| t)
+            .min_by(f64::total_cmp)
+    }
+
+    /// Move the camera along a framing move, then start the pulse. A camera
+    /// the user moved meanwhile stops it there.
+    fn step_camera_move(&mut self) {
+        let Some(moving) = self.moving.as_mut() else {
+            return;
+        };
+        if self.camera != Some(moving.last) {
+            self.moving = None;
+            return;
+        }
+        let cam = moving.path.at(self.now);
+        moving.last = cam;
+        self.camera = Some(cam);
+        if moving.path.done(self.now) {
+            self.pulse = moving.pulse.take().map(|target| (self.now, target));
+            self.moving = None;
+        }
+    }
+
+    /// The selection's emphasis now: two pulses after a framing from the
+    /// tree, while the same target stays selected.
+    fn update_emphasis(&mut self) {
+        self.emphasis = 0.0;
+        let Some((start, target)) = &self.pulse else {
+            return;
+        };
+        let t = self.now - start;
+        let same = self
+            .target_overlay_request()
+            .is_some_and(|(object, _, now)| (object, now) == *target);
+        if !same || !(0.0..PULSE_SECONDS).contains(&t) {
+            self.pulse = None;
+            return;
+        }
+        let phase = std::f64::consts::PI * t * PULSES / PULSE_SECONDS;
+        self.emphasis = phase.sin().powi(2) as f32;
     }
 
     /// What the selection overlay should show: the selection, or an
@@ -1601,7 +1928,14 @@ impl MeshFixerApp {
         let faces_of = |want: Option<(ObjectId, Mesh, OverlayTarget)>| {
             want.filter(|(o, m, _)| *o == object && Mesh::ptr_eq(m, mesh))
                 .map(|(_, _, t)| t)
-                .filter(|t| matches!(t, OverlayTarget::Components(_) | OverlayTarget::Faces(_)))
+                .filter(|t| {
+                    matches!(
+                        t,
+                        OverlayTarget::Components(_)
+                            | OverlayTarget::Faces(_)
+                            | OverlayTarget::Object
+                    )
+                })
         };
         StateInputs {
             selected: faces_of(selection),
@@ -1658,6 +1992,40 @@ impl MeshFixerApp {
             self.state_seq += 1;
             self.workers.write_states(render, inputs, self.state_seq);
         }
+        self.refresh_object_hover();
+    }
+
+    /// An object that isn't active glows while its row is hovered (its own
+    /// face states; written only while hovered and once after).
+    fn refresh_object_hover(&mut self) {
+        let hovered = self
+            .hover
+            .as_ref()
+            .filter(|(_, t)| *t == OverlayTarget::Object)
+            .map(|(o, _)| *o);
+        let renders: Vec<(ObjectId, Arc<RenderMesh>)> = self
+            .object_vertices
+            .iter()
+            .filter(|(id, _)| Some(**id) != self.active)
+            .map(|(id, (_, r))| (*id, r.clone()))
+            .collect();
+        for (id, render) in renders {
+            let on = hovered == Some(id);
+            if !on && !render.hover_requested() {
+                continue;
+            }
+            let inputs = StateInputs {
+                selected: None,
+                hover: on.then_some(OverlayTarget::Object),
+                recent: Arc::from([]),
+                tangled: Arc::from([]),
+            };
+            if render.wants_states(&inputs) {
+                self.state_seq += 1;
+                self.workers
+                    .write_object_states(render, inputs, self.state_seq);
+            }
+        }
     }
 
     /// What the pointer is over in the tree (or else in the 3D view),
@@ -1674,6 +2042,13 @@ impl MeshFixerApp {
                 !selection
                     .as_ref()
                     .is_some_and(|(o, _, t)| o == object && t == target)
+            })
+            // With nothing targeted the whole active object is the target:
+            // hovering it ("Model", its row) shows as selected, not hovered.
+            .filter(|(object, target)| {
+                !(*target == OverlayTarget::Object
+                    && Some(*object) == self.active
+                    && selection.is_none())
             })
             .and_then(|(object, target)| {
                 let mesh = self.session.document().object(object)?.mesh()?.clone();
@@ -1738,6 +2113,8 @@ impl MeshFixerApp {
             origin,
             lines: lines.clone(),
             color,
+            xray: false,
+            emphasis: 0.0,
         };
         let ready = |p| {
             self.overlays
@@ -1765,7 +2142,12 @@ impl MeshFixerApp {
         if self.shown.selection
             && let Some((object, o)) = ready(OverlayPurpose::Selection)
         {
-            layers.push(lines(object, o.origin, &o.lines, theme::SELECTED));
+            // Where it's hidden it shows through, faintly (x-ray).
+            layers.push(ViewLayer {
+                xray: true,
+                emphasis: self.emphasis,
+                ..lines(object, o.origin, &o.lines, theme::SELECTED)
+            });
         }
         if self.shown.hover
             && let Some((object, o)) = ready(OverlayPurpose::Hover)
@@ -1798,6 +2180,28 @@ impl MeshFixerApp {
         if Some(*object) != self.active {
             return Ok(None);
         }
+        let Some((chunk, drawn)) = FaceStates::locate(mesh, mf_geometry::FaceId(face)) else {
+            return Ok(None);
+        };
+        let (device, queue) = self.viewport.device();
+        let words = render.gpu.read_face_states(device, queue, chunk)?;
+        Ok(words.get(drawn / 4).map(|w| (w >> (8 * (drawn % 4))) as u8))
+    }
+
+    /// Like [`Self::read_face_state`], for any object drawn (an object
+    /// that isn't active has its own face states while its row is
+    /// hovered). Reads the GPU back and waits: tests and diagnostics only.
+    pub fn read_object_face_state(
+        &self,
+        object: ObjectId,
+        face: u32,
+    ) -> Result<Option<u8>, mf_render::RenderError> {
+        if Some(object) == self.active {
+            return self.read_face_state(face);
+        }
+        let Some((mesh, render)) = self.object_vertices.get(&object) else {
+            return Ok(None);
+        };
         let Some((chunk, drawn)) = FaceStates::locate(mesh, mf_geometry::FaceId(face)) else {
             return Ok(None);
         };
@@ -1867,6 +2271,7 @@ impl MeshFixerApp {
         self.refresh_object_vertices();
         self.refresh_bvhs();
         self.resolve_view_request();
+        self.now = ctx.input(|i| i.time);
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
         // …and to an open popup or menu.
@@ -1925,6 +2330,9 @@ impl MeshFixerApp {
             }
         }
         self.resolve_view_request();
+        self.resolve_find();
+        self.step_camera_move();
+        self.update_emphasis();
 
         self.hover = None;
         crate::panels::menu_bar(self, ui);
@@ -1947,6 +2355,16 @@ impl MeshFixerApp {
         let show_boundaries = self.defect_shown(self.shown.holes);
         let updating = self.is_analyzing();
         let layers = self.view_layers();
+        // Selected faces show through what hides them (x-ray); an outline
+        // carries its own x-ray (`view_layers`).
+        let xray_faces = self.shown.selection
+            && self.target_overlay_request().is_some_and(|(.., t)| {
+                matches!(t, OverlayTarget::Components(_) | OverlayTarget::Faces(_))
+            });
+        let cue = SelectionCue {
+            emphasis: self.emphasis,
+            xray_faces,
+        };
         let out = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
                 self.viewport.show(
@@ -1959,6 +2377,7 @@ impl MeshFixerApp {
                         updating,
                         placeholder,
                         frame: frame_index,
+                        cue,
                     },
                 )
             })
@@ -1982,6 +2401,9 @@ impl MeshFixerApp {
         if self.busy.is_some()
             || self.is_analyzing()
             || self.view_request.is_some()
+            || self.camera_animating()
+            || self.pulse.is_some()
+            || self.tree_hold.is_some_and(|(_, until)| self.now < until)
             || overlays_pending
         {
             ctx.request_repaint();
@@ -2064,6 +2486,17 @@ fn transformed_bounds(bb: &Aabb, model: &glam::DMat4) -> Aabb {
     // `bb` is never empty for a non-empty mesh's bounding box, so there's
     // always at least one corner.
     out.expect("a bounding box has 8 corners")
+}
+
+/// What hovering or selecting `d` outlines or tints.
+pub fn defect_target(d: &Defect) -> OverlayTarget {
+    match d {
+        Defect::Hole { loop_id, .. }
+        | Defect::OverCap { loop_id, .. }
+        | Defect::Crack { loop_id, .. } => OverlayTarget::Loops(vec![*loop_id]),
+        Defect::LoosePiece { component, .. } => OverlayTarget::Components(vec![*component]),
+        Defect::Tangled { edge, .. } => OverlayTarget::Edges(vec![*edge]),
+    }
 }
 
 /// Why a selection couldn't follow a history move, in plain words.

@@ -39,6 +39,35 @@ impl OrbitCamera {
         self.distance = fitted.radius / (self.fov_y * 0.5).sin() * 1.1;
     }
 
+    /// The camera that shows `target` (world bounds) from direction `from`
+    /// (target → eye, any length), with its bounding sphere filling
+    /// `fill` of the view height, and everything in `scene` (world
+    /// bounds) still inside the clipping planes: a speck framed close up
+    /// doesn't clip away the model around it. Field of view kept.
+    pub fn framing(&self, target: &Aabb, from: DVec3, fill: f64, scene: &Aabb) -> OrbitCamera {
+        let centre = DVec3::from(target.center());
+        let radius = (target.diagonal() * 0.5).max(1e-9);
+        let mut out = OrbitCamera {
+            target: centre,
+            distance: self.distance_to_fill(radius, fill),
+            ..*self
+        };
+        out.look_from(from);
+        out.radius = clip_radius(centre, radius, scene);
+        out
+    }
+
+    /// The eye distance at which a sphere of `radius` fills `fill` (0–1)
+    /// of the view height.
+    pub fn distance_to_fill(&self, radius: f64, fill: f64) -> f64 {
+        radius / (fill.clamp(1e-3, 1.0) * (self.fov_y * 0.5).tan())
+    }
+
+    /// Unit direction from the target to the eye.
+    pub fn view_dir(&self) -> DVec3 {
+        self.forward_offset()
+    }
+
     /// Turn to look at the target from direction `from` (target → eye),
     /// keeping target and distance. Pitch stays short of the poles.
     pub fn look_from(&mut self, from: DVec3) {
@@ -49,6 +78,43 @@ impl OrbitCamera {
         self.pitch = d.z.clamp(-1.0, 1.0).asin().clamp(-MAX_PITCH, MAX_PITCH);
         if d.x != 0.0 || d.y != 0.0 {
             self.yaw = d.y.atan2(d.x);
+        }
+    }
+
+    /// This camera part of the way (`t`, 0–1) to `to`: the target moves in
+    /// a straight line, the distance and clipping radius geometrically
+    /// (so zooming feels even), yaw the short way round. `t` = 1 is `to`
+    /// exactly.
+    pub fn towards(&self, to: &OrbitCamera, t: f64) -> OrbitCamera {
+        if t >= 1.0 {
+            return *to;
+        }
+        if t <= 0.0 {
+            return *self;
+        }
+        let geometric = |a: f64, b: f64| {
+            if a > 0.0 && b > 0.0 {
+                a * (b / a).powf(t)
+            } else {
+                a + (b - a) * t
+            }
+        };
+        let tau = std::f64::consts::TAU;
+        let turn = (to.yaw - self.yaw).rem_euclid(tau);
+        let turn = if turn > std::f64::consts::PI {
+            turn - tau
+        } else {
+            turn
+        };
+        OrbitCamera {
+            target: self.target.lerp(to.target, t),
+            distance: geometric(self.distance, to.distance),
+            yaw: self.yaw + turn * t,
+            pitch: self.pitch + (to.pitch - self.pitch) * t,
+            fov_y: self.fov_y + (to.fov_y - self.fov_y) * t,
+            // Never tighter than either end, so nothing is clipped on the
+            // way.
+            radius: self.radius.max(to.radius),
         }
     }
 
@@ -129,4 +195,58 @@ impl OrbitCamera {
         let (near, far) = (unproject(0.0), unproject(1.0));
         (near.to_array(), (far - near).normalize_or_zero().to_array())
     }
+}
+
+/// A clipping radius about `centre` that keeps a target of `radius` and
+/// every corner of `scene` between the near and far planes.
+pub fn clip_radius(centre: DVec3, radius: f64, scene: &Aabb) -> f64 {
+    let far = (0..8)
+        .map(|i| {
+            let pick = |k: usize| {
+                if i & (1 << k) == 0 {
+                    scene.min[k]
+                } else {
+                    scene.max[k]
+                }
+            };
+            (DVec3::new(pick(0), pick(1), pick(2)) - centre).length()
+        })
+        .fold(0.0, f64::max);
+    radius.max(far)
+}
+
+/// An eased camera move (camera interpolation only): `from` to `to` over
+/// `duration` seconds from `start` (seconds on the caller's clock), easing
+/// out (fast, then settling).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraMove {
+    pub from: OrbitCamera,
+    pub to: OrbitCamera,
+    pub start: f64,
+    pub duration: f64,
+}
+
+impl CameraMove {
+    /// The camera at time `now`.
+    pub fn at(&self, now: f64) -> OrbitCamera {
+        self.from.towards(&self.to, ease_out(self.progress(now)))
+    }
+
+    /// True once `now` is past the end: [`CameraMove::at`] is `to`.
+    pub fn done(&self, now: f64) -> bool {
+        self.progress(now) >= 1.0
+    }
+
+    fn progress(&self, now: f64) -> f64 {
+        if self.duration <= 0.0 {
+            return 1.0;
+        }
+        ((now - self.start) / self.duration).clamp(0.0, 1.0)
+    }
+}
+
+/// Cubic ease-out: 0 → 0, 1 → 1, fastest at the start.
+pub fn ease_out(t: f64) -> f64 {
+    let u = 1.0 - t.clamp(0.0, 1.0);
+    1.0 - u * u * u
 }
