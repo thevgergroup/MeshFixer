@@ -359,7 +359,7 @@ The project owner approved this plan with changes, which are folded into the tas
 **Interfaces:**
 - **Reader limits** live in `mf_io::Limits { max_triangles: 50_000_000, max_model_part_bytes: 4 GiB, max_compression_ratio: 200 }`, with the defaults shown. Exceeding one is `IoError::LimitExceeded { what, limit, found }`, raised *before* allocating.
 - **CI:**
-  - A `fuzz` job (nightly, Linux) runs each target for 60 s on PRs and 15 min on a weekly schedule.
+  - A `fuzz` job (nightly, Linux) runs **on demand only** (`workflow_dispatch`, with a duration input; default 15 min per target). It never runs on pushes, PRs or a schedule. *(Owner ruling, 2026-11-09.)*
   - Crashes are uploaded as artifacts and fail the job.
   - The corpus is seeded from the generated fixtures.
 
@@ -542,7 +542,7 @@ The project owner approved this plan with changes, which are folded into the tas
 
 ### Task 15: Evidence, CI, independent review
 
-- **Deep fuzz session** (moved here from Task 11 by the owner): each reader target runs for at least 10 minutes locally, one at a time, on the final readers. Crashes are fixed in the review fix pass, with regression tests.
+- **Deep fuzz session** (moved here from Task 11 by the owner; run on demand): each reader target runs for at least 10 minutes, one at a time, on the final readers. Crashes are fixed in the review fix pass, with regression tests.
 - **Evidence job additions:**
   - the 1M orbit smoke JSON
   - memory gate JSON
