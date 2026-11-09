@@ -38,7 +38,7 @@
     },
     "preconditions": { "type": "array", "items": { "type": "string" } },
     "postconditions": { "type": "array", "items": { "type": "string" } },
-    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes"] } },
+    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements"] } },
     "runtime": {
       "type": "object",
       "additionalProperties": false,

@@ -8,6 +8,7 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod compact;
 mod fill_holes;
 
 /// Most bytes `mesh.fill_holes` spends on triangulation tables at once:
@@ -78,6 +79,7 @@ pub trait Operation: Send + Sync {
 }
 
 static REGISTRY: &[&dyn Operation] = &[
+    &compact::Compact,
     &fill_holes::FillHoles,
     &inspect::Inspect,
     &remove_small::RemoveSmallComponents,

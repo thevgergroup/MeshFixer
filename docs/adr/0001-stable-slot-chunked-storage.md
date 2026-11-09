@@ -23,7 +23,7 @@ MeshFixer must support localized, surgical editing with undo, editable history a
 ## Consequences
 
 - Every reader must iterate live elements (`faces()`, `vertices()`) or index by slot (`corner_position`). The `export_skips_tombstoned_faces` test guards the writers.
-- Tombstones cost 1 bit per slot. Long editing sessions accumulate dead slots. A future `compact` command (which emits a provenance map like any other edit) can reclaim them; tracked as MF-ISSUE-020.
+- Tombstones cost 1 bit per slot. Long editing sessions accumulate dead slots. The `mesh.compact` command (M4 Task 9, MF-ISSUE-020) reclaims them: whole-object only, `effects: [renumbers_elements]`, its provenance is just a `SlotRemap`, so selections translate through it like through any edit, and it replays exactly. `inspect` reports `dead_slot_ratio` (dead face and vertex slots over all slots); the desktop suggests compacting above 0.5.
 - Topology arrays are sized by slots, not live elements, so dead slots cost a few bytes each in transient topology scratch.
 - `Mesh::new` still copies its input `Vec`s into chunks, so construction briefly holds about 2× the mesh. That accounts for most of the import peak rising from 374 to 404 MB. It's acceptable, and readers can build chunked storage directly later if import peak matters.
 - **GPU geometry follows the storage chunks (M4 Task 6, MF-RENDER-003).** The renderer keeps one buffer set per face chunk. A new revision reuses a GPU chunk of the revision it replaces on screen when `Mesh::face_chunk_shared` holds for it (same face storage *and* the same liveness bits) and `Mesh::vertex_chunk_kept` holds for every vertex chunk its faces reference (shared, or only appended to). The test is made against the replaced revision's own storage, never by assuming history is linear, so undo, redo and checkout to another branch can never leave a stale chunk. Buffers are immutable once uploaded and shared through `Arc`, so cached revisions stay valid. The local origin is carried over unless the mesh reaches more than 10³ diagonals from it, and in that case everything is rebuilt. Measured: a one-hole fill on 1M triangles uploads 1.1 MB instead of 72 MB, and the app's fill-all-holes on 5M uploads 10 MB of 355 MB.
@@ -75,3 +75,15 @@ The remaining large transient is topology construction (468 MB), tracked as MF-I
 | **working set (gate ≤ 400 MB at 5M)** | 26 MB | **143 MB ✓** |
 | remove_small: retained by new revision | 4 MB | 32 MB (topology only; storage shared). Was 224 MB |
 | process peak, remove-small run | 118 MB | 612 MB. Was 1383 MB |
+
+### After M4 Task 9 (topology build, MF-ISSUE-019)
+
+| 4.8M tri (damaged sphere) | Before | After |
+|---|---|---|
+| topology build peak (above the mesh) | 466 MB | **104 MB** (gate ≤ 150 MB) |
+| topology (retained) | 32 MB | 18 MB |
+| **working set (gate ≤ 400 MB at 5M)** | ~145 MB | **131 MB** |
+| topology build wall time (all cores, test profile) | 0.62 s | 0.37 s |
+
+Half-edges are no longer sorted as 16-byte records: a counting sort buckets their 4-byte IDs by low vertex, each bucket is sorted by (high vertex, half-edge) reading the vertices back from the mesh, and whether a vertex has one corner fan is checked by walking the fan of one of its corners across two-face edges (in parallel over vertices) instead of collecting fans in a corner union-find plus a sorted fan array. The result is identical, and faster. `meshfixer bench memory` reports these figures and CI's `memory-gate` job fails the working set above 400 MB.
+

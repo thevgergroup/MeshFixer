@@ -629,6 +629,7 @@ pub fn operation_label(op_id: &str, target: Option<(SelectionKind, usize)>) -> O
             many(n, "Remove piece", "Remove pieces")
         }
         ("mesh.remove_small_components", _) => "Remove loose pieces".into(),
+        ("mesh.compact", _) => "Compact".into(),
         ("mesh.inspect", _) => "Inspect".into(),
         _ => return None,
     })

@@ -231,6 +231,36 @@ fn cli() -> Command {
                     .value_parser(clap::value_parser!(u64)),
             ),
     );
+    cmd = cmd.subcommand(
+        Command::new("bench")
+            .about("Measure the engine on generated meshes")
+            .subcommand_required(true)
+            .subcommand(
+                Command::new("memory")
+                    .about(
+                        "Heap kept by a mesh and its cached topology (the working set), \
+                         and the topology build's peak, counted by the allocator",
+                    )
+                    .arg(
+                        Arg::new("triangles")
+                            .long("triangles")
+                            .default_value("5000000")
+                            .value_parser(clap::value_parser!(u64).range(100..=200_000_000)),
+                    )
+                    .arg(
+                        Arg::new("seed")
+                            .long("seed")
+                            .default_value("11")
+                            .value_parser(clap::value_parser!(u64)),
+                    )
+                    .arg(
+                        Arg::new("json")
+                            .long("json")
+                            .action(clap::ArgAction::SetTrue)
+                            .help("Print the measurements as JSON"),
+                    ),
+            ),
+    );
     cmd = cmd
         .subcommand(
             Command::new("run")
@@ -468,6 +498,68 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
         mesh.triangle_count(),
         output.display()
     );
+    Ok(())
+}
+
+/// `bench memory`: what a mesh and its cached topology keep on the heap
+/// (MF-GEO-002, gated at 400 MB for 5M triangles in CI) and how far the
+/// topology build peaks above the mesh (MF-ISSUE-019). Bytes are counted by
+/// the allocator, not estimated. The mesh is the damaged sphere fixture,
+/// generated in memory.
+fn bench_memory(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
+    let requested = *m.get_one::<u64>("triangles").unwrap_or(&5_000_000) as usize;
+    let seed = *m.get_one::<u64>("seed").unwrap_or(&11);
+    if !mf_metrics::is_installed() {
+        return Err(Failure::Runtime(
+            "the counting allocator isn't installed: nothing to measure with".into(),
+        ));
+    }
+    let (mesh, mesh_phase) = measure("mesh", || {
+        mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(requested, seed))
+    });
+    ctx.checkpoint()?;
+    let (topology, topology_phase) = measure("topology", || mesh.topology_with(ctx));
+    let topology = topology?;
+    let working_set = mesh_phase.retained_bytes + topology_phase.retained_bytes;
+    let json = serde_json::json!({
+        "requested_triangles": requested,
+        "triangles": mesh.triangle_count(),
+        "vertices": mesh.vertex_count(),
+        "mesh_bytes": mesh_phase.retained_bytes,
+        "topology_bytes": topology_phase.retained_bytes,
+        "working_set_bytes": working_set,
+        "topology_peak_bytes": topology_phase.peak_bytes,
+        "topology_s": topology_phase.wall_s,
+        "peak_heap": mf_metrics::peak_bytes_since_start(),
+        "structures": { "mesh": mesh.heap_bytes(), "topology": topology.heap_bytes() },
+        "allocator_installed": mf_metrics::is_installed(),
+    });
+    if m.get_flag("json") {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&json).map_err(|e| Failure::Runtime(e.to_string()))?
+        );
+    } else {
+        let mb = |b: u64| format!("{:.1} MB", b as f64 / (1u64 << 20) as f64);
+        println!(
+            "{} triangles, {} vertices",
+            mesh.triangle_count(),
+            mesh.vertex_count()
+        );
+        println!("{:>24}: {}", "mesh", mb(mesh_phase.retained_bytes));
+        println!(
+            "{:>24}: {}",
+            "cached topology",
+            mb(topology_phase.retained_bytes)
+        );
+        println!("{:>24}: {}", "working set", mb(working_set));
+        println!(
+            "{:>24}: {} above the mesh ({:.2} s)",
+            "topology build peak",
+            mb(topology_phase.peak_bytes),
+            topology_phase.wall_s
+        );
+    }
     Ok(())
 }
 
@@ -811,6 +903,10 @@ fn main() -> ExitCode {
         Some(("inspect", m)) => inspect(m, &mut metrics, &ctx),
         Some(("render", m)) => render(m, &ctx),
         Some(("gen-fixture", m)) => gen_fixture(m, &ctx),
+        Some(("bench", m)) => match m.subcommand() {
+            Some(("memory", m)) => bench_memory(m, &ctx),
+            _ => Err(Failure::Usage("bench needs a measurement: memory".into())),
+        },
         Some(("run", m)) => run_sequence(m, &mut metrics, &ctx),
         Some(("replay", m)) => replay_log(m, &ctx),
         Some((name, m)) => match mf_spec::builtin::specs()

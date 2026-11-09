@@ -119,6 +119,33 @@ impl<T: Copy> Chunked<T> {
         Ok(Chunked { chunks, len })
     }
 
+    /// Collect `items` straight into chunks, checking for cancellation
+    /// between chunks. Unlike [`Chunked::from_vec_with`] there's no whole
+    /// `Vec` to copy from, so the transient cost is one chunk.
+    pub fn from_iter_with(
+        items: impl IntoIterator<Item = T>,
+        ctx: &RunContext,
+    ) -> Result<Self, Cancelled> {
+        let mut chunks = Vec::new();
+        let mut len = 0;
+        let mut current = Vec::with_capacity(CHUNK);
+        for x in items {
+            current.push(x);
+            if current.len() == CHUNK {
+                ctx.checkpoint()?;
+                len += CHUNK;
+                let full = std::mem::replace(&mut current, Vec::with_capacity(CHUNK));
+                chunks.push(Arc::new(Chunk::new(full)));
+            }
+        }
+        if !current.is_empty() {
+            len += current.len();
+            current.shrink_to_fit();
+            chunks.push(Arc::new(Chunk::new(current)));
+        }
+        Ok(Chunked { chunks, len })
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }

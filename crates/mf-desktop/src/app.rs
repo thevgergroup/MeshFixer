@@ -2516,6 +2516,14 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
                 s(tris)
             )
         }
+        "mesh.compact" => {
+            let (faces, vertices) = (num("reclaimed_faces"), num("reclaimed_vertices"));
+            format!(
+                "Reclaimed unused space: {faces} face slot{} and {vertices} vertex slot{}",
+                s(faces),
+                s(vertices)
+            )
+        }
         _ => {
             let raw = report.to_string();
             match raw.char_indices().nth(160) {

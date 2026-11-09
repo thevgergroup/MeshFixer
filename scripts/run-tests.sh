@@ -9,8 +9,8 @@
 # A full parallel run starves the timing tests (cancel within 250 ms,
 # checkpoints every 100 ms, UI frames under 50 ms, a UI that settles in a
 # few steps); isolating them keeps their thresholds meaningful without
-# widening them. Both steps always run; the exit status is non-zero if
-# either failed.
+# widening them. The heavy 5M memory tests run there too. Both steps
+# always run; the exit status is non-zero if either failed.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -24,6 +24,11 @@ timing=(
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
+  # 5M memory measurements: alone, so no other test's 5M mesh is in memory
+  # at the same time (and the allocator counts only their own process).
+  "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"
+  "mf-cli bench_memory working_set_under_400mb_at_5m"
+  "mf-desktop memory realistic_session_rss_is_reported"
 )
 
 skips=()

@@ -47,6 +47,14 @@ impl Aabb {
     }
 }
 
+/// The new number of a vertex a live face uses. Faces never reference
+/// removed vertices (enforced by [`MeshEdit::finish`]).
+fn live_vertex(map: &[Option<VertexId>], v: u32) -> u32 {
+    map[v as usize]
+        .expect("a live face only uses live vertices (MeshEdit::finish checks)")
+        .0
+}
+
 /// Old-slot → new-slot maps produced by [`Mesh::compacted`].
 pub type Compaction = SlotRemap;
 
@@ -251,35 +259,77 @@ impl Mesh {
 
     /// Live geometry as plain arrays, renumbered densely in slot order.
     pub fn to_arrays(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
-        let (positions, triangles, _) = self.compact_arrays();
+        let vertex_map = self.vertex_renumbering();
+        let positions = self.vertices().map(|(_, p)| p).collect();
+        let triangles = self
+            .faces()
+            .map(|(_, t)| t.map(|v| live_vertex(&vertex_map, v)))
+            .collect();
         (positions, triangles)
     }
 
-    fn compact_arrays(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, Compaction) {
-        let mut vertex_map = vec![None; self.inner.positions.len()];
-        let mut positions = Vec::with_capacity(self.vertex_count());
-        for (id, p) in self.vertices() {
-            vertex_map[id.0 as usize] = Some(VertexId(positions.len() as u32));
-            positions.push(p);
+    /// Old vertex slot → dense number, in slot order.
+    fn vertex_renumbering(&self) -> Vec<Option<VertexId>> {
+        let mut map = vec![None; self.inner.positions.len()];
+        for (n, (id, _)) in self.vertices().enumerate() {
+            map[id.0 as usize] = Some(VertexId(n as u32));
         }
-        let mut face_map = vec![None; self.inner.faces.len()];
-        let mut triangles = Vec::with_capacity(self.face_count());
-        for (id, t) in self.faces() {
-            face_map[id.0 as usize] = Some(FaceId(triangles.len() as u32));
-            triangles.push(t.map(|v| vertex_map[v as usize].map_or(u32::MAX, |n| n.0)));
-        }
-        let map = Compaction {
-            faces: face_map,
-            vertices: vertex_map,
-        };
-        (positions, triangles, map)
+        map
     }
 
     /// A tombstone-free copy plus the slot maps (used before export).
     pub fn compacted(&self) -> (Mesh, Compaction) {
-        let (positions, triangles, map) = self.compact_arrays();
-        let mesh = Mesh::new(positions, triangles).expect("compacting a valid mesh is valid");
-        (mesh, map)
+        self.compacted_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::compacted`], cancellable. The live elements keep their
+    /// order and are numbered densely from 0 (`mesh.compact`,
+    /// MF-ISSUE-020). Built chunk by chunk, so the only transient memory is
+    /// the slot maps (which the caller keeps as provenance).
+    pub fn compacted_with(&self, ctx: &RunContext) -> Result<(Mesh, Compaction), Cancelled> {
+        let mut tick = ctx.ticker();
+        let mut vertex_map = vec![None; self.inner.positions.len()];
+        for (n, (id, _)) in self.vertices().enumerate() {
+            tick.tick()?;
+            vertex_map[id.0 as usize] = Some(VertexId(n as u32));
+        }
+        let mut face_map = vec![None; self.inner.faces.len()];
+        for (n, (id, _)) in self.faces().enumerate() {
+            tick.tick()?;
+            face_map[id.0 as usize] = Some(FaceId(n as u32));
+        }
+        let positions = Chunked::from_iter_with(self.vertices().map(|(_, p)| p), ctx)?;
+        let faces = Chunked::from_iter_with(
+            self.faces()
+                .map(|(_, t)| t.map(|v| live_vertex(&vertex_map, v))),
+            ctx,
+        )?;
+        let (face_count, vertex_count) = (self.face_count(), self.vertex_count());
+        let mesh = Mesh::from_parts(
+            positions,
+            faces,
+            Bits::all_set(face_count),
+            Bits::all_set(vertex_count),
+            face_count,
+            vertex_count,
+        );
+        let map = Compaction {
+            faces: face_map,
+            vertices: vertex_map,
+        };
+        Ok((mesh, map))
+    }
+
+    /// Fraction of all slots (faces and vertices) that are tombstones:
+    /// storage held by earlier edits that compaction would reclaim.
+    pub fn dead_slot_ratio(&self) -> f64 {
+        let slots = self.inner.faces.len() + self.inner.positions.len();
+        if slots == 0 {
+            return 0.0;
+        }
+        let live = self.inner.face_count + self.inner.vertex_count;
+        (slots - live) as f64 / slots as f64
     }
 
     pub fn bounding_box(&self) -> Option<Aabb> {

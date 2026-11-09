@@ -702,6 +702,16 @@ impl GpuMesh {
         self.last
     }
 
+    /// Bytes of GPU buffers this mesh holds now: surface chunks (some
+    /// possibly shared with another revision's mesh), face states and
+    /// outlines. What it occupies, unlike [`GpuMesh::total_uploaded`].
+    pub fn resident_bytes(&self) -> u64 {
+        let surface: u64 = self.surface_buffers().map(|(b, _)| b.size()).sum();
+        let states = self.state_buffer.as_ref().map_or(0, |s| s.buffer.size());
+        let lines: u64 = self.lines.iter().map(|(b, _)| b.size()).sum();
+        surface + states + lines
+    }
+
     /// Bytes uploaded for this mesh and every revision it was updated
     /// from, cumulatively (metrics and tests).
     pub fn total_uploaded(&self) -> u64 {

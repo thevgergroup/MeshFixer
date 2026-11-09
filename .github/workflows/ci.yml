@@ -77,6 +77,27 @@ jobs:
             skipped-tests.txt
           if-no-files-found: warn
 
+  memory-gate:
+    # MF-GEO-002: a 5M-triangle mesh plus its cached topology stays within
+    # 400 MB, counted by the allocator. Process RSS and GPU buffers of a
+    # realistic session are reported (evidence job), not gated.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p mf-cli
+      - name: Working set at 5M triangles (fails above 400 MB)
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/meshfixer bench memory --triangles 5000000 --json | tee memory.json
+          { echo "### Memory at 5M triangles"; echo '```'; cat memory.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if ! jq -e '.allocator_installed and .working_set_bytes <= 400 * 1048576' memory.json > /dev/null; then
+            echo "::error::working set $(jq .working_set_bytes memory.json) bytes is over the 400 MB budget"
+            exit 1
+          fi
+
   evidence:
     # Durable milestone evidence: screenshots, sample repaired model,
     # diagnostics and benchmark numbers with machine info.
@@ -94,6 +115,8 @@ jobs:
         run: scripts/evidence.sh evidence
       - name: GUI workflow screenshots
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
+      - name: Realistic 5M session memory (process RSS and GPU buffers, reported)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test memory -- --nocapture
       - name: Real scan fixtures (hash-verified)
         uses: actions/cache@v6
         with:

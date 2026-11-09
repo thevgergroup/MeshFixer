@@ -58,6 +58,9 @@ pub struct Diagnostics {
     pub volume_status: VolumeStatus,
     pub is_closed: bool,
     pub is_manifold: bool,
+    /// Fraction of face and vertex slots that are tombstones left by
+    /// earlier edits (ADR-0001): space `mesh.compact` would reclaim.
+    pub dead_slot_ratio: f64,
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -212,6 +215,7 @@ pub fn inspect_with(mesh: &Mesh, ctx: &RunContext) -> Result<Diagnostics, Cancel
         volume_status,
         is_closed,
         is_manifold,
+        dead_slot_ratio: mesh.dead_slot_ratio(),
     })
 }
 

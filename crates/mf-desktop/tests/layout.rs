@@ -442,3 +442,63 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
     assert_eq!((home.yaw, home.pitch), (start.yaw, start.pitch));
     assert!((home.distance - start.distance).abs() < 1e-9 * start.distance);
 }
+
+/// A cube and ten loose tetrahedra: removing the pieces leaves 80 of 100
+/// slots unused (MF-ISSUE-020).
+fn cube_and_crumbs(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("crumbs.obj");
+    let mut parts = vec![mf_fixtures::cube(1.0)];
+    for k in 0..10 {
+        parts.push(mf_fixtures::translated(
+            &mf_fixtures::tetrahedron(),
+            [3.0 + 2.0 * k as f64, 0.0, 0.0],
+        ));
+    }
+    mf_io::write_path(&mf_fixtures::merge(&parts), &path, mf_io::Format::Obj).unwrap();
+    path
+}
+
+/// Above half the slots unused, Properties says so in plain words for the
+/// whole object, and the Compact tool reclaims the space.
+#[test]
+fn lots_of_unused_space_suggests_compacting() {
+    require_gpu!("lots_of_unused_space_suggests_compacting");
+    const SUGGESTION: &str =
+        "This model has lots of unused space from earlier edits. Compact to reclaim it.";
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(cube_and_crumbs(dir.path()));
+    assert!(
+        h.query_by_label(SUGGESTION).is_none(),
+        "a fresh import is compact"
+    );
+
+    h.get_by_label("Remove loose pieces").click();
+    h.run();
+    let before = h.state().session.current();
+    h.get_by_label("Apply").click();
+    wait_until(&mut h, "remove + analysis", |a| {
+        a.session.current() != before
+            && a.current_analysis()
+                .is_some_and(|x| x.diagnostics.dead_slot_ratio > 0.5)
+    });
+    h.run();
+    h.get_by_label(SUGGESTION);
+
+    h.get_by_label("Compact").click();
+    h.run();
+    let before = h.state().session.current();
+    h.get_by_label("Apply").click();
+    wait_until(&mut h, "compact + analysis", |a| {
+        a.session.current() != before
+            && a.current_analysis()
+                .is_some_and(|x| x.diagnostics.dead_slot_ratio == 0.0)
+    });
+    h.run();
+    assert!(h.state().error.is_none(), "{:?}", h.state().error);
+    assert!(h.query_by_label(SUGGESTION).is_none());
+    assert!(h.state().active_mesh().unwrap().is_compact());
+    assert_eq!(
+        h.state().status.as_deref(),
+        Some("Reclaimed unused space: 40 face slots and 40 vertex slots")
+    );
+}

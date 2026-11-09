@@ -897,7 +897,20 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         ))
         .color(theme::TEXT_MUTED)
     });
+    // From the analysis (worked out on a worker), never counted here.
+    if d.dead_slot_ratio > SUGGEST_COMPACT_ABOVE {
+        ui.label(
+            RichText::new(
+                "This model has lots of unused space from earlier edits. Compact to reclaim it.",
+            )
+            .color(theme::TEXT_MUTED),
+        );
+    }
 }
+
+/// Above this fraction of unused (tombstoned) slots, Properties suggests
+/// `mesh.compact` (MF-ISSUE-020).
+const SUGGEST_COMPACT_ABOVE: f64 = 0.5;
 
 fn selection_title(sel: &Selection, n: usize) -> String {
     match sel.kind {
@@ -1078,6 +1091,10 @@ fn details_section(app: &MeshFixerApp, ui: &mut egui::Ui) {
                         d.duplicate_vertices_tolerance.to_string(),
                     );
                     row("Duplicate faces", d.duplicate_faces.to_string());
+                    row(
+                        "Unused space",
+                        format!("{:.0}% of slots", d.dead_slot_ratio * 100.0),
+                    );
                     row(
                         "Volume",
                         d.signed_volume

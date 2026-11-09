@@ -8,10 +8,13 @@
 
 mod alloc;
 mod frames;
+mod process;
 
 use std::time::Instant;
 
 use serde::Serialize;
+
+pub use process::process_rss_bytes;
 
 pub use frames::{FRAME_HISTORY, FrameSample, FrameTimes, GpuSummary, GpuTime, Percentiles};
 
