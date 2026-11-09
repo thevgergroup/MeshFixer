@@ -59,3 +59,12 @@ opt-level = 2
 
 [profile.dev.package.mf-operations]
 opt-level = 2
+
+# Cancellation checkpoints and the cancellable sort sit in every hot loop.
+[profile.dev.package.mf-runtime]
+opt-level = 2
+
+# Import hashes every byte it reads, and revisions hash their chunks:
+# unoptimised, BLAKE3 runs at ~60 MB/s (4 s for a 5M-triangle STL).
+[profile.dev.package.blake3]
+opt-level = 2

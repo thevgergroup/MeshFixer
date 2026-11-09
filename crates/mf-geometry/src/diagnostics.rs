@@ -2,6 +2,8 @@
 
 use serde::Serialize;
 
+use mf_runtime::{Cancelled, RunContext, par_sort_unstable_by_key};
+
 use crate::grid::PointGrid;
 use crate::mesh::{Aabb, Mesh};
 
@@ -79,16 +81,26 @@ fn norm(a: [f64; 3]) -> f64 {
 }
 
 pub fn inspect(mesh: &Mesh) -> Diagnostics {
-    let topo = mesh.topology();
+    inspect_with(mesh, &RunContext::none())
+        .expect("a context that is never cancelled can't be cancelled")
+}
+
+/// As [`inspect`], cancellable, reporting progress as stages `"topology"`
+/// and `"inspecting"`.
+pub fn inspect_with(mesh: &Mesh, ctx: &RunContext) -> Result<Diagnostics, Cancelled> {
+    const STAGE: &str = "inspecting";
+    let topo = mesh.topology_with(ctx)?;
     let pos = |v: u32| mesh.corner_position(v);
-    let bbox = mesh.bounding_box();
+    let bbox = mesh.bounding_box_with(ctx)?;
     let diag = bbox.map(|b| b.diagonal()).unwrap_or(0.0);
     let degenerate_area = 1e-12 * diag * diag;
 
     let mut surface_area = 0.0;
     let mut volume6 = 0.0;
     let mut degenerate = 0;
-    for (_, t) in mesh.faces() {
+    let span = ctx.span(STAGE, 0.0, 0.2, mesh.face_count());
+    for (k, (_, t)) in mesh.faces().enumerate() {
+        span.at(k)?;
         let (a, b, c) = (pos(t[0]), pos(t[1]), pos(t[2]));
         let area = 0.5 * norm(cross(sub(b, a), sub(c, a)));
         surface_area += area;
@@ -100,16 +112,25 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
 
     // Scoped so the sort buffer is freed before the next pass (MF-ISSUE-028).
     let duplicate_vertices_exact = {
-        let mut sorted: Vec<[u64; 3]> = mesh.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
-        sorted.sort_unstable();
+        let span = ctx.span(STAGE, 0.2, 0.25, mesh.vertex_count());
+        let mut sorted: Vec<[u64; 3]> = Vec::with_capacity(mesh.vertex_count());
+        for (k, (_, p)) in mesh.vertices().enumerate() {
+            span.at(k)?;
+            sorted.push(p.map(f64::to_bits));
+        }
+        par_sort_unstable_by_key(&mut sorted, ctx, |p| *p)?;
+        ctx.checkpoint()?;
         sorted.dedup();
         mesh.vertex_count() - sorted.len()
     };
+    ctx.progress.report(STAGE, 0.35);
 
+    let mut tick = ctx.ticker();
     let boundary_loops: Vec<LoopSummary> = topo
         .boundary_loops
         .iter()
         .map(|l| {
+            tick.tick()?;
             let n = l.vertices.len();
             let mut perimeter = 0.0;
             let mut sum = [0.0; 3];
@@ -120,27 +141,29 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
                     sum[i] += p[i];
                 }
             }
-            LoopSummary {
+            Ok(LoopSummary {
                 id: l.id,
                 edge_count: l.edge_count,
                 perimeter: perimeter.is_finite().then_some(perimeter),
                 centroid: sum.map(|s| s / n as f64),
-            }
-        })
-        .collect();
-
-    let duplicate_vertices_tolerance = near_duplicates(mesh, 1e-6 * diag);
-    let duplicate_faces = {
-        let mut sorted: Vec<[u32; 3]> = mesh
-            .faces()
-            .map(|(_, mut t)| {
-                t.sort_unstable();
-                t
             })
-            .filter(|t| t[0] != t[1] && t[1] != t[2])
-            .collect();
+        })
+        .collect::<Result<_, Cancelled>>()?;
+
+    let duplicate_vertices_tolerance = near_duplicates(mesh, 1e-6 * diag, ctx)?;
+    let duplicate_faces = {
+        let span = ctx.span(STAGE, 0.75, 0.8, mesh.face_count());
+        let mut sorted: Vec<[u32; 3]> = Vec::with_capacity(mesh.face_count());
+        for (k, (_, mut t)) in mesh.faces().enumerate() {
+            span.at(k)?;
+            t.sort_unstable();
+            if t[0] != t[1] && t[1] != t[2] {
+                sorted.push(t);
+            }
+        }
         let n = sorted.len();
-        sorted.sort_unstable();
+        par_sort_unstable_by_key(&mut sorted, ctx, |t| *t)?;
+        ctx.checkpoint()?;
         sorted.dedup();
         n - sorted.len()
     };
@@ -167,7 +190,8 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
     };
     let signed_volume = (volume_status == VolumeStatus::Ok).then_some(volume6 / 6.0);
 
-    Diagnostics {
+    ctx.progress.report(STAGE, 1.0);
+    Ok(Diagnostics {
         triangle_count: mesh.triangle_count(),
         vertex_count: mesh.vertex_count(),
         components: topo.components.len(),
@@ -188,20 +212,26 @@ pub fn inspect(mesh: &Mesh) -> Diagnostics {
         volume_status,
         is_closed,
         is_manifold,
-    }
+    })
 }
 
 /// Count live vertices lying within `tolerance` of a lower-ID live vertex
 /// (MF-ISSUE-012). Uses the compact relative grid (MF-ISSUE-026/028).
-fn near_duplicates(mesh: &Mesh, tolerance: f64) -> usize {
+fn near_duplicates(mesh: &Mesh, tolerance: f64, ctx: &RunContext) -> Result<usize, Cancelled> {
     if !(tolerance > 0.0 && tolerance.is_finite()) {
-        return 0;
+        return Ok(0);
     }
-    let grid = PointGrid::new(|| mesh.vertices().map(|(id, p)| (id.0, p)), tolerance);
-    mesh.vertices()
-        .filter(|&(id, p)| {
-            grid.near(p)
-                .any(|j| j < id.0 && norm(sub(p, mesh.corner_position(j))) <= tolerance)
-        })
-        .count()
+    let grid = PointGrid::new_with(|| mesh.vertices().map(|(id, p)| (id.0, p)), tolerance, ctx)?;
+    let span = ctx.span("inspecting", 0.5, 0.75, mesh.vertex_count());
+    let mut count = 0;
+    for (k, (id, p)) in mesh.vertices().enumerate() {
+        span.at(k)?;
+        if grid
+            .near(p)
+            .any(|j| j < id.0 && norm(sub(p, mesh.corner_position(j))) <= tolerance)
+        {
+            count += 1;
+        }
+    }
+    Ok(count)
 }

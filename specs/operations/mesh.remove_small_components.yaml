@@ -22,5 +22,5 @@ postconditions:
   - kept faces are unchanged and keep their relative order
 effects: [geometry_changes, topology_changes]
 runtime:
-  cancellable: false
-  progress: false
+  cancellable: true
+  progress: true

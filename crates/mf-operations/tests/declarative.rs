@@ -155,7 +155,12 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         .collect();
     let params = spec.validate(&raw).map_err(|e| e.to_string())?;
     let target = target(&before, &case.select)?;
-    let result = op.execute(&before, &target, &params);
+    let result = op.execute(
+        &before,
+        &target,
+        &params,
+        &mf_operations::RunContext::none(),
+    );
 
     let mut problems = Vec::new();
     if let Some(Value::String(code)) = case.expect.get("error") {

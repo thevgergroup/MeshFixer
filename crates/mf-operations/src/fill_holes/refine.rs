@@ -7,6 +7,8 @@
 
 use std::collections::BTreeSet;
 
+use mf_runtime::{Cancelled, RunContext};
+
 /// A hole patch in local indices: `0..n_boundary` are the loop's vertices.
 pub struct Patch {
     pub positions: Vec<[f64; 3]>,
@@ -109,10 +111,16 @@ impl Patch {
     /// circumsphere of the neighbouring triangle. Never creates an edge that
     /// already exists (in the patch or in `existing`). Bounded by
     /// `max_flips`, a termination guard for non-planar patches.
-    fn relax(&mut self, existing: &BTreeSet<(usize, usize)>) {
+    fn relax(
+        &mut self,
+        existing: &BTreeSet<(usize, usize)>,
+        ctx: &RunContext,
+    ) -> Result<(), Cancelled> {
         let max_flips = 100 * self.tris.len().max(1);
         let mut flips = 0;
         loop {
+            // One pass is a sort and a sweep over the patch's edges.
+            ctx.checkpoint()?;
             let mut flipped = false;
             // Interior edges: those shared by exactly two patch triangles.
             let mut by_edge: Vec<((usize, usize), usize, usize)> = Vec::new();
@@ -158,20 +166,28 @@ impl Patch {
                     flipped = true;
                     flips += 1;
                     if flips >= max_flips {
-                        return;
+                        return Ok(());
                     }
                 }
             }
             if !flipped {
-                return;
+                return Ok(());
             }
         }
     }
 
-    pub fn refine(&mut self, existing: &BTreeSet<(usize, usize)>) {
-        self.relax(existing);
-        while self.split() {
-            self.relax(existing);
+    pub fn refine(
+        &mut self,
+        existing: &BTreeSet<(usize, usize)>,
+        ctx: &RunContext,
+    ) -> Result<(), Cancelled> {
+        self.relax(existing, ctx)?;
+        loop {
+            ctx.checkpoint()?;
+            if !self.split() {
+                return Ok(());
+            }
+            self.relax(existing, ctx)?;
         }
     }
 }

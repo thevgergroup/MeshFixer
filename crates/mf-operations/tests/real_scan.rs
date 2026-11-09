@@ -94,7 +94,12 @@ fn fill_each_small_hole_of_real_scan_untouched_outside() {
         // One command per hole, each on the imported mesh. A slit (collinear
         // crack) is refused by name rather than "filled" with zero-area
         // triangles; everything else closes.
-        let out = match op.execute(&m, &Target::Loops(vec![id]), &params) {
+        let out = match op.execute(
+            &m,
+            &Target::Loops(vec![id]),
+            &params,
+            &mf_operations::RunContext::none(),
+        ) {
             Ok(out) => out,
             Err(mf_operations::OpError::Failed { code, message }) => {
                 assert_eq!(code, "loop_untriangulable", "loop {id}: {message}");
@@ -154,7 +159,12 @@ fn real_scan_render_before_after() {
     };
     let out = find("mesh.fill_holes")
         .unwrap()
-        .execute(&m, &Target::WholeObject, &params())
+        .execute(
+            &m,
+            &Target::WholeObject,
+            &params(),
+            &mf_operations::RunContext::none(),
+        )
         .unwrap();
     let (after, _) = out.change.unwrap();
     let d = inspect(&after);

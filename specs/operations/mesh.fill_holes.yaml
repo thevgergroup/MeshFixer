@@ -25,5 +25,5 @@ postconditions:
   - faces and vertices outside the targeted loops are unchanged
 effects: [geometry_changes, topology_changes]
 runtime:
-  cancellable: false
-  progress: false
+  cancellable: true
+  progress: true

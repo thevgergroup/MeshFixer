@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
 use crate::chunked::{Bits, Chunked};
@@ -94,28 +95,48 @@ impl Mesh {
 
     /// A mesh whose slots are all live, in the given order.
     pub fn new(positions: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>) -> Result<Mesh, GeometryError> {
-        Self::check_counts(positions.len(), triangles.len())?;
-        if let Some(vertex) = positions
-            .iter()
-            .position(|p| !p.iter().all(|c| c.is_finite()))
-        {
-            return Err(GeometryError::NonFinite { vertex });
+        Mesh::new_with(positions, triangles, &RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::new`], checking for cancellation while validating (it is
+    /// linear in the input). The outer error is cancellation, the inner one
+    /// invalid input.
+    pub fn new_with(
+        positions: Vec<[f64; 3]>,
+        triangles: Vec<[u32; 3]>,
+        ctx: &RunContext,
+    ) -> Result<Result<Mesh, GeometryError>, Cancelled> {
+        if let Err(e) = Self::check_counts(positions.len(), triangles.len()) {
+            return Ok(Err(e));
+        }
+        let mut tick = ctx.ticker();
+        for (vertex, p) in positions.iter().enumerate() {
+            tick.tick()?;
+            if !p.iter().all(|c| c.is_finite()) {
+                return Ok(Err(GeometryError::NonFinite { vertex }));
+            }
         }
         let n = positions.len();
         for (triangle, t) in triangles.iter().enumerate() {
+            tick.tick()?;
             if let Some(&index) = t.iter().find(|&&i| i as usize >= n) {
-                return Err(GeometryError::IndexOutOfRange { triangle, index });
+                return Ok(Err(GeometryError::IndexOutOfRange { triangle, index }));
             }
         }
         let (face_count, vertex_count) = (triangles.len(), positions.len());
-        Ok(Mesh::from_parts(
-            Chunked::from_vec(positions),
-            Chunked::from_vec(triangles),
+        // Copying into chunks is ~100 MB at 5M triangles.
+        let positions = Chunked::from_vec_with(positions, ctx)?;
+        let triangles = Chunked::from_vec_with(triangles, ctx)?;
+        ctx.checkpoint()?;
+        Ok(Ok(Mesh::from_parts(
+            positions,
+            triangles,
             Bits::all_set(face_count),
             Bits::all_set(vertex_count),
             face_count,
             vertex_count,
-        ))
+        )))
     }
 
     pub(crate) fn from_parts(
@@ -262,19 +283,29 @@ impl Mesh {
     }
 
     pub fn bounding_box(&self) -> Option<Aabb> {
+        self.bounding_box_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::bounding_box`], cancellable.
+    pub fn bounding_box_with(&self, ctx: &RunContext) -> Result<Option<Aabb>, Cancelled> {
         let mut it = self.vertices().map(|(_, p)| p);
-        let first = it.next()?;
+        let Some(first) = it.next() else {
+            return Ok(None);
+        };
         let mut bb = Aabb {
             min: first,
             max: first,
         };
+        let mut tick = ctx.ticker();
         for p in it {
+            tick.tick()?;
             for (i, &c) in p.iter().enumerate() {
                 bb.min[i] = bb.min[i].min(c);
                 bb.max[i] = bb.max[i].max(c);
             }
         }
-        Some(bb)
+        Ok(Some(bb))
     }
 
     /// Canonical content hash (MF-DOC-003), cached. Covers every slot (with
@@ -307,12 +338,36 @@ impl Mesh {
         })
     }
 
+    /// The content and structure hashes, computing any chunk hashes not yet
+    /// cached in parallel and cancellably (a 5M-triangle mesh hashed from
+    /// scratch takes a few hundred milliseconds single-threaded).
+    pub fn hashes_with(&self, ctx: &RunContext) -> Result<(ContentHash, ContentHash), Cancelled> {
+        if self.inner.hash.get().is_none() {
+            self.inner.positions.warm_hashes(ctx)?;
+            self.inner.faces.warm_hashes(ctx)?;
+            self.inner.face_live.warm_hashes(ctx)?;
+            self.inner.vertex_live.warm_hashes(ctx)?;
+        }
+        Ok((self.content_hash(), self.structure_hash()))
+    }
+
     /// Derived topology, computed on first use and cached (MF-GEO-003).
     pub fn topology(&self) -> Arc<Topology> {
+        self.topology_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::topology`], cancellable, reporting progress as stage
+    /// `"topology"`. A cancelled computation caches nothing.
+    pub fn topology_with(&self, ctx: &RunContext) -> Result<Arc<Topology>, Cancelled> {
         let mut cached = self.lock_topology();
-        cached
-            .get_or_insert_with(|| Arc::new(Topology::compute(self)))
-            .clone()
+        if let Some(topo) = cached.as_ref() {
+            ctx.progress.report("topology", 1.0);
+            return Ok(topo.clone());
+        }
+        let topo = Arc::new(Topology::compute_with(self, ctx)?);
+        *cached = Some(topo.clone());
+        Ok(topo)
     }
 
     fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {

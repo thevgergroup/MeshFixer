@@ -25,9 +25,12 @@ fn fill(
     target: Target,
     pairs: &[(&str, &str)],
 ) -> Result<(Mesh, mf_geometry::Provenance, serde_json::Value), OpError> {
-    let out = find("mesh.fill_holes")
-        .unwrap()
-        .execute(m, &target, &params(pairs))?;
+    let out = find("mesh.fill_holes").unwrap().execute(
+        m,
+        &target,
+        &params(pairs),
+        &mf_operations::RunContext::none(),
+    )?;
     let (mesh, prov) = out.change.expect("fill_holes changed the mesh");
     Ok((mesh, prov, out.report))
 }
@@ -248,7 +251,12 @@ fn collinear_loop_is_never_filled_with_a_zero_area_triangle() {
         // Whole object: skipped and reported, and nothing degenerate added.
         let out = find("mesh.fill_holes")
             .unwrap()
-            .execute(&m, &Target::WholeObject, &params(&p))
+            .execute(
+                &m,
+                &Target::WholeObject,
+                &params(&p),
+                &mf_operations::RunContext::none(),
+            )
             .unwrap();
         let skipped = out.report["skipped_loops"].as_array().unwrap();
         assert!(

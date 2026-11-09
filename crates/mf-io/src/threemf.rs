@@ -10,7 +10,9 @@ use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
 
-use crate::{IoError, significant_digits};
+use mf_runtime::{RunContext, TICK_INTERVAL};
+
+use crate::{IoError, PARSE_FROM, READING, significant_digits};
 
 /// 3MF model units. 3MF defaults to millimetres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -152,23 +154,51 @@ fn attr(e: &BytesStart, name: &str) -> Result<Option<String>, String> {
 /// Read a 3MF archive. Returns the model, the largest number of significant
 /// digits seen in coordinates, and warnings.
 pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoError> {
+    read_with(bytes, &RunContext::none())
+}
+
+/// Where in `"reading"` decompressing the model part starts and XML parsing
+/// starts (reading the file comes first).
+const UNZIP_FROM: f64 = PARSE_FROM;
+const XML_FROM: f64 = 0.7;
+
+/// As [`read_with_precision`], cancellable, reporting stage `"reading"` by
+/// bytes decompressed and then parsed.
+pub fn read_with(bytes: &[u8], ctx: &RunContext) -> Result<(Model, u8, Vec<String>), IoError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| not_3mf(format!("not a 3MF (zip) archive: {e}")))?;
     let mut warnings = Vec::new();
-    let read_entry =
-        |zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str| -> Result<String, IoError> {
-            let mut entry = zip
-                .by_name(name)
-                .map_err(|e| not_3mf(format!("3MF archive has no '{name}': {e}")))?;
-            let mut text = String::new();
-            entry
-                .read_to_string(&mut text)
+    // Decompressed in blocks so a cancel is seen between them; only the
+    // model part (`progress`) is large enough to report.
+    let read_entry = |zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+                      name: &str,
+                      progress: bool|
+     -> Result<String, IoError> {
+        const BLOCK: u64 = 4 << 20;
+        let mut entry = zip
+            .by_name(name)
+            .map_err(|e| not_3mf(format!("3MF archive has no '{name}': {e}")))?;
+        let size = entry.size() as usize;
+        let span = progress.then(|| ctx.span(READING, UNZIP_FROM, XML_FROM, size));
+        let mut buf = Vec::new();
+        loop {
+            match &span {
+                Some(span) => span.step(buf.len())?,
+                None => ctx.checkpoint()?,
+            }
+            let read = (&mut entry)
+                .take(BLOCK)
+                .read_to_end(&mut buf)
                 .map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))?;
-            Ok(text)
-        };
+            if read == 0 {
+                break;
+            }
+        }
+        String::from_utf8(buf).map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))
+    };
 
     // Locate the model part through the package relationships.
-    let model_path = match read_entry(&mut zip, "_rels/.rels") {
+    let model_path = match read_entry(&mut zip, "_rels/.rels", false) {
         Ok(rels) => {
             let mut reader = quick_xml::Reader::from_str(&rels);
             let mut target = None;
@@ -197,7 +227,7 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
             DEFAULT_MODEL_PATH.to_owned()
         }
     };
-    let text = read_entry(&mut zip, &model_path)?;
+    let text = read_entry(&mut zip, &model_path, true)?;
 
     #[derive(Default)]
     struct Obj {
@@ -223,7 +253,13 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     let mut has_properties = false;
     let mut reader = quick_xml::Reader::from_str(&text);
     let mut lines = LineCounter::new(&text);
+    let xml = ctx.span(READING, XML_FROM, 1.0, text.len());
+    let mut events = 0usize;
     loop {
+        if events.is_multiple_of(TICK_INTERVAL as usize) {
+            xml.step(reader.buffer_position() as usize)?;
+        }
+        events += 1;
         let pos = reader.buffer_position();
         let line = lines.line_at(pos);
         let event = reader.read_event().map_err(|e| IoError::Parse {
@@ -389,11 +425,12 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     }
 
     let to_model_object = |o: &Obj, transform: [f64; 12]| -> Result<ModelObject, IoError> {
-        let mesh =
-            Mesh::new(o.positions.clone(), o.triangles.clone()).map_err(|e| IoError::Parse {
+        let mesh = Mesh::new_with(o.positions.clone(), o.triangles.clone(), ctx)?.map_err(|e| {
+            IoError::Parse {
                 line: o.line,
                 message: format!("object {}: {e}", o.id),
-            })?;
+            }
+        })?;
         Ok(ModelObject {
             name: o.name.clone().unwrap_or_else(|| format!("object {}", o.id)),
             mesh,
@@ -429,6 +466,7 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
             }
         }
     }
+    ctx.progress.report(READING, 1.0);
     Ok((Model { unit, objects: out }, digits, warnings))
 }
 

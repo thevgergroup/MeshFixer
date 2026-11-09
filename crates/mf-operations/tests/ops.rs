@@ -43,6 +43,7 @@ fn removes_island() {
             &input,
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[("max_triangles", "5")]),
+            &mf_operations::RunContext::none(),
         )
         .unwrap();
     let mesh = out.change.unwrap().0;
@@ -64,6 +65,7 @@ fn kept_faces_keep_relative_order() {
             &input,
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[("max_triangles", "5")]),
+            &mf_operations::RunContext::none(),
         )
         .unwrap()
         .change
@@ -81,6 +83,7 @@ fn keep_largest_guard() {
             &input,
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[("max_triangles", "50")]),
+            &mf_operations::RunContext::none(),
         )
         .unwrap()
         .change
@@ -95,6 +98,7 @@ fn keep_largest_guard() {
                 op.id(),
                 &[("max_triangles", "50"), ("keep_largest", "false")],
             ),
+            &mf_operations::RunContext::none(),
         )
         .unwrap()
         .change
@@ -113,6 +117,7 @@ fn input_not_mutated() {
         &input,
         &mf_operations::Target::WholeObject,
         &params(op.id(), &[("max_triangles", "5")]),
+        &mf_operations::RunContext::none(),
     )
     .unwrap();
     assert_eq!(input.content_hash(), before);
@@ -127,6 +132,7 @@ fn inspect_is_read_only() {
             &cube(1.0),
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[]),
+            &mf_operations::RunContext::none(),
         )
         .unwrap();
     assert!(out.change.is_none());
@@ -142,6 +148,7 @@ fn empty_mesh_ok() {
             &Mesh::empty(),
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[]),
+            &mf_operations::RunContext::none(),
         )
         .unwrap();
     assert!(out.change.is_none(), "nothing to remove: no new revision");
@@ -165,6 +172,7 @@ mod edit_based {
                 &input,
                 &Target::WholeObject,
                 &params(op.id(), &[("max_triangles", "5")]),
+                &mf_operations::RunContext::none(),
             )
             .unwrap();
         let (mesh, prov) = out.change.unwrap();
@@ -179,7 +187,12 @@ mod edit_based {
     fn noop_returns_no_change() {
         let op = find("mesh.remove_small_components").unwrap();
         let out = op
-            .execute(&cube(1.0), &Target::WholeObject, &params(op.id(), &[]))
+            .execute(
+                &cube(1.0),
+                &Target::WholeObject,
+                &params(op.id(), &[]),
+                &mf_operations::RunContext::none(),
+            )
             .unwrap();
         assert!(out.change.is_none());
         assert_eq!(out.report["removed_components"], 0);
@@ -193,6 +206,7 @@ mod edit_based {
                 &cube(1.0),
                 &Target::Faces(vec![FaceId(0)]),
                 &params(op.id(), &[]),
+                &mf_operations::RunContext::none(),
             )
             .err()
             .unwrap();

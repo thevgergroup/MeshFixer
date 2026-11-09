@@ -54,7 +54,7 @@ crates/
 specs/operations/   tests/geometry/   fixtures/
 ```
 
-Dependency direction: `mf-geometry` depends on nothing in the workspace. Frontends (`mf-cli`, `mf-desktop`) are leaves. Only `mf-desktop` depends on egui. `mf-render` depends on geometry and selection types, never on documents or commands.
+Dependency direction: `mf-geometry` depends on nothing in the workspace except `mf-runtime` (cancellation and progress, itself dependency-light: `rayon` and `thiserror`), so topology and diagnostics can be cancelled (MF-RT-002). Frontends (`mf-cli`, `mf-desktop`) are leaves. Only `mf-desktop` depends on egui. `mf-render` depends on geometry and selection types, never on documents or commands.
 
 ---
 

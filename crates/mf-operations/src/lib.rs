@@ -5,6 +5,7 @@
 //! [`Mesh`] (MF-DOC-001).
 
 use mf_geometry::{FaceId, Mesh, Provenance};
+pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
 mod fill_holes;
@@ -43,12 +44,32 @@ pub enum OpError {
     Spec(#[from] SpecError),
     #[error("{code}: {message}")]
     Failed { code: &'static str, message: String },
+    /// The run was cancelled through its [`RunContext`]; nothing was
+    /// produced (MF-CMD-006).
+    #[error("cancelled by the user")]
+    Cancelled,
+}
+
+impl From<Cancelled> for OpError {
+    fn from(_: Cancelled) -> Self {
+        OpError::Cancelled
+    }
 }
 
 pub trait Operation: Send + Sync {
     fn id(&self) -> &'static str;
     fn version(&self) -> u32;
-    fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError>;
+    /// Runs the operation. Long work checks `ctx` for cancellation at least
+    /// every 100 ms (MF-RT-002) and reports progress through it (MF-RT-003).
+    /// A cancelled run returns [`OpError::Cancelled`], never a partial
+    /// result.
+    fn execute(
+        &self,
+        input: &Mesh,
+        target: &Target,
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<OpOutput, OpError>;
 }
 
 static REGISTRY: &[&dyn Operation] = &[

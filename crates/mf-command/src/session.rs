@@ -6,6 +6,7 @@ use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
 use mf_operations::{OpError, OpOutput, Operation, Target};
+use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
@@ -55,7 +56,11 @@ pub enum CommandError {
     #[error("object {0} does not exist")]
     UnknownObject(ObjectId),
     #[error(transparent)]
-    Operation(#[from] OpError),
+    Operation(OpError),
+    /// The run was cancelled; nothing was produced and nothing commits
+    /// (MF-CMD-006).
+    #[error("cancelled by the user")]
+    Cancelled,
     #[error(
         "the document changed while the command ran (expected revision {expected}, now {actual})"
     )]
@@ -88,6 +93,21 @@ pub enum CommandError {
         recorded: u32,
         current: u32,
     },
+}
+
+impl From<mf_runtime::Cancelled> for CommandError {
+    fn from(_: mf_runtime::Cancelled) -> Self {
+        CommandError::Cancelled
+    }
+}
+
+impl From<OpError> for CommandError {
+    fn from(e: OpError) -> Self {
+        match e {
+            OpError::Cancelled => CommandError::Cancelled,
+            other => CommandError::Operation(other),
+        }
+    }
 }
 
 /// Why a translation can't be used to re-execute a command.
@@ -132,19 +152,29 @@ impl Prepared {
 
     /// Run the operation. Safe on any thread. Hashing happens here too, so
     /// the UI thread never does O(n) work on commit (MF-RT-001).
-    pub fn run(self) -> Result<Completed, CommandError> {
+    ///
+    /// Cancelling `ctx` while this runs returns [`CommandError::Cancelled`]
+    /// and produces nothing. Once this has returned `Ok`, cancelling has no
+    /// effect: the result is committed or dropped by the caller, so there
+    /// is exactly one outcome.
+    pub fn run(self, ctx: &RunContext) -> Result<Completed, CommandError> {
         let start = Instant::now();
         let output = self
             .op
-            .execute(&self.input, &self.target_spec, &self.params)?;
+            .execute(&self.input, &self.target_spec, &self.params, ctx)?;
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
-        // the chunks this command copied are hashed (review I6).
-        let input_hash = self.input.content_hash().to_hex();
-        let input_structure_hash = self.input.structure_hash().to_hex();
-        let output_hashes = output
-            .change
-            .as_ref()
-            .map(|(m, _)| (m.content_hash().to_hex(), m.structure_hash().to_hex()));
+        // the chunks this command copied are hashed (review I6). Still
+        // cancellable: the first hash of a freshly imported mesh is O(n).
+        let (input_hash, input_structure_hash) = self.input.hashes_with(ctx)?;
+        let (input_hash, input_structure_hash) =
+            (input_hash.to_hex(), input_structure_hash.to_hex());
+        let output_hashes = match &output.change {
+            Some((m, _)) => {
+                let (content, structure) = m.hashes_with(ctx)?;
+                Some((content.to_hex(), structure.to_hex()))
+            }
+            None => None,
+        };
         let kept = output
             .change
             .as_ref()
@@ -584,7 +614,7 @@ impl Session {
     }
 
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
-        let completed = self.prepare(inv)?.run()?;
+        let completed = self.prepare(inv)?.run(&RunContext::none())?;
         self.commit(completed)
     }
 
@@ -632,7 +662,7 @@ impl Session {
                 selection,
                 record.params.clone(),
             )
-            .and_then(Prepared::run)
+            .and_then(|p| p.run(&RunContext::none()))
             .and_then(|c| self.commit(c));
         if result.is_err() {
             self.checkout(back);

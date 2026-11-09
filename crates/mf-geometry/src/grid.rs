@@ -6,6 +6,8 @@
 //! clamped so keys stay well inside `i64`. Entries live in one sorted array
 //! (about 32 bytes per point) instead of a hash map of vectors.
 
+use mf_runtime::{Cancelled, RunContext, par_sort_unstable_by_key};
+
 pub struct PointGrid {
     origin: [f64; 3],
     cell: f64,
@@ -21,9 +23,21 @@ impl PointGrid {
         points: impl Fn() -> I,
         min_cell: f64,
     ) -> PointGrid {
+        PointGrid::new_with(points, min_cell, &RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`PointGrid::new`], cancellable.
+    pub fn new_with<I: Iterator<Item = (u32, [f64; 3])>>(
+        points: impl Fn() -> I,
+        min_cell: f64,
+        ctx: &RunContext,
+    ) -> Result<PointGrid, Cancelled> {
+        let mut tick = ctx.ticker();
         let mut lo = [f64::INFINITY; 3];
         let mut hi = [f64::NEG_INFINITY; 3];
         for (_, p) in points() {
+            tick.tick()?;
             for k in 0..3 {
                 lo[k] = lo[k].min(p[k]);
                 hi[k] = hi[k].max(p[k]);
@@ -40,9 +54,14 @@ impl PointGrid {
             cell,
             entries: Vec::new(),
         };
-        grid.entries = points().map(|(i, p)| (grid.key(p), i)).collect();
-        grid.entries.sort_unstable();
-        grid
+        let mut entries = Vec::new();
+        for (i, p) in points() {
+            tick.tick()?;
+            entries.push((grid.key(p), i));
+        }
+        par_sort_unstable_by_key(&mut entries, ctx, |e| *e)?;
+        grid.entries = entries;
+        Ok(grid)
     }
 
     fn key(&self, p: [f64; 3]) -> [i64; 3] {

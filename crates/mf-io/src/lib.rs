@@ -6,6 +6,7 @@
 use std::path::{Path, PathBuf};
 
 use mf_geometry::{ContentHash, GeometryError, Mesh};
+use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
 pub mod obj;
@@ -75,6 +76,16 @@ pub enum IoError {
     Export { path: PathBuf, reason: String },
     #[error("unsupported file format: {0}")]
     UnsupportedFormat(PathBuf),
+    /// The import was cancelled through its [`RunContext`]; nothing was
+    /// produced.
+    #[error("cancelled by the user")]
+    Cancelled,
+}
+
+impl From<Cancelled> for IoError {
+    fn from(_: Cancelled) -> Self {
+        IoError::Cancelled
+    }
 }
 
 /// Every object of a source file (STL and OBJ have one), with the model
@@ -88,10 +99,20 @@ pub struct ImportedModel {
 }
 
 pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
+    read_model_with(path, &RunContext::none())
+}
+
+/// As [`read_model`], cancellable, reporting progress as stages
+/// `"reading"` (by bytes consumed) and `"welding"`.
+///
+/// Reading the file is the first half of `"reading"`; parsing text formats
+/// (by bytes consumed) is the second. Binary and ASCII STL then weld
+/// corners into vertices (`"welding"`); OBJ and 3MF index their vertices
+/// already, so their import ends with `"reading"`.
+pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, IoError> {
     let format =
         Format::from_path(path).ok_or_else(|| IoError::UnsupportedFormat(path.to_owned()))?;
-    let bytes = std::fs::read(path)?;
-    let content_hash = ContentHash(*blake3::hash(&bytes).as_bytes());
+    let (bytes, content_hash) = read_file(path, ctx)?;
     let stem = path
         .file_stem()
         .and_then(|s| s.to_str())
@@ -110,7 +131,7 @@ pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
                 line: 0,
                 message: format!("not valid UTF-8: {e}"),
             })?;
-            let (mesh, precision, warnings) = obj::read(text)?;
+            let (mesh, precision, warnings) = obj::read_with(text, ctx)?;
             (
                 single(mesh),
                 threemf::Unit::Millimeter,
@@ -120,7 +141,7 @@ pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
             )
         }
         Format::StlBinary | Format::StlAscii => {
-            let (mesh, precision, warnings) = stl::read(&bytes)?;
+            let (mesh, precision, warnings) = stl::read_with(&bytes, ctx)?;
             let format = match precision {
                 SourcePrecision::F32 => Format::StlBinary,
                 SourcePrecision::Decimal { .. } => Format::StlAscii,
@@ -134,7 +155,7 @@ pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
             )
         }
         Format::ThreeMf => {
-            let (model, digits, warnings) = threemf::read_with_precision(&bytes)?;
+            let (model, digits, warnings) = threemf::read_with(&bytes, ctx)?;
             let precision = SourcePrecision::Decimal {
                 max_significant_digits: digits,
             };
@@ -158,6 +179,47 @@ pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
         },
         warnings,
     })
+}
+
+/// Stage of every reader's parsing pass; see [`read_model_with`].
+pub(crate) const READING: &str = "reading";
+/// Stage of the STL readers' welding pass.
+pub(crate) const WELDING: &str = "welding";
+/// Where in `"reading"` parsing starts (reading the file comes first).
+pub(crate) const PARSE_FROM: f64 = 0.5;
+
+/// Read a whole file in blocks, hashing as it goes, so a cancel is seen
+/// between blocks and the hash costs no second pass. Progress is the first
+/// half of `"reading"`.
+fn read_file(path: &Path, ctx: &RunContext) -> Result<(Vec<u8>, ContentHash), IoError> {
+    use std::io::Read;
+    // Small enough to hash in a few milliseconds even unoptimised.
+    const BLOCK: u64 = 2 << 20;
+    let mut file = std::fs::File::open(path)?;
+    let len = file.metadata()?.len() as usize;
+    let span = ctx.span(READING, 0.0, PARSE_FROM, len);
+    let mut bytes = Vec::with_capacity(len);
+    let mut hasher = blake3::Hasher::new();
+    loop {
+        span.step(bytes.len())?;
+        let start = bytes.len();
+        if (&mut file).take(BLOCK).read_to_end(&mut bytes)? == 0 {
+            break;
+        }
+        hasher.update(&bytes[start..]);
+    }
+    span.finish();
+    Ok((bytes, ContentHash(*hasher.finalize().as_bytes())))
+}
+
+/// Progress through text being parsed: `consumed` bytes of `text` map onto
+/// the parsing half of `"reading"`. Checkpoints every call.
+pub(crate) fn parsed(ctx: &RunContext, text: &str, line: &str) -> Result<(), Cancelled> {
+    let consumed = (line.as_ptr() as usize).saturating_sub(text.as_ptr() as usize);
+    let f = consumed as f64 / text.len().max(1) as f64;
+    ctx.progress
+        .report(READING, PARSE_FROM + (1.0 - PARSE_FROM) * f);
+    ctx.checkpoint()
 }
 
 /// Read a file's first (usually only) mesh. A 3MF with more objects adds a

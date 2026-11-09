@@ -19,15 +19,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 
+mod sort;
+pub use sort::par_sort_unstable_by_key;
+
 /// A cheaply-clonable flag that background work polls to know whether the
 /// user asked for cancellation.
 ///
 /// Cloning is an `Arc` clone (cheap, no allocation beyond the initial one);
-/// [`CancelToken::is_cancelled`] is a single atomic load, safe to call in
-/// hot loops.
+/// [`CancelToken::is_cancelled`] is a single atomic load (plus a branch on
+/// whether a test probe is attached), safe to call in hot loops.
 #[derive(Debug, Clone)]
 pub struct CancelToken {
     cancelled: Arc<AtomicBool>,
+    /// Test instrumentation (see [`RunContext::instrumented`]); `None` in
+    /// production, so checking costs one predictable branch.
+    probe: Option<Arc<ProbeState>>,
 }
 
 impl CancelToken {
@@ -35,6 +41,7 @@ impl CancelToken {
     pub fn new() -> Self {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
+            probe: None,
         }
     }
 
@@ -47,7 +54,12 @@ impl CancelToken {
     ///
     /// An atomic load: no locks, no allocation. Safe to call every ~32,768
     /// elements (or at least every 100 ms of work) in a hot loop.
+    #[inline]
+    #[track_caller]
     pub fn is_cancelled(&self) -> bool {
+        if let Some(probe) = &self.probe {
+            probe.hit(std::panic::Location::caller());
+        }
         self.cancelled.load(Ordering::Relaxed)
     }
 }
@@ -88,12 +100,214 @@ impl RunContext {
     /// Cheap: a single atomic load, no allocation. Call this at least every
     /// 100 ms of work; the rule of thumb for tight loops is every 32,768
     /// elements.
+    #[inline]
+    #[track_caller]
     pub fn checkpoint(&self) -> Result<(), Cancelled> {
         if self.cancel.is_cancelled() {
             Err(Cancelled)
         } else {
             Ok(())
         }
+    }
+
+    /// A counter for hot loops: [`Ticker::tick`] checkpoints once every
+    /// [`TICK_INTERVAL`] calls, so a loop body stays a counter increment.
+    pub fn ticker(&self) -> Ticker<'_> {
+        Ticker { ctx: self, n: 0 }
+    }
+
+    /// `total` units of work reported as `from..=to` of `stage`: see
+    /// [`Span::at`]. Reports `from` now.
+    pub fn span(&self, stage: &'static str, from: f64, to: f64, total: usize) -> Span<'_> {
+        self.progress.report(stage, from);
+        Span {
+            ctx: self,
+            stage,
+            from,
+            to,
+            total: total.max(1),
+        }
+    }
+
+    /// A context whose checkpoints are timed, for tests that check work
+    /// polls for cancellation often enough (MF-RT-002: every 100 ms).
+    /// The probe sees every checkpoint made through this context or any
+    /// clone of it, from any thread.
+    pub fn instrumented() -> (RunContext, CheckpointProbe) {
+        let state = Arc::new(ProbeState {
+            inner: std::sync::Mutex::new(ProbeInner {
+                last: std::time::Instant::now(),
+                last_at: None,
+                worst: None,
+                count: 0,
+            }),
+        });
+        let mut cancel = CancelToken::new();
+        cancel.probe = Some(Arc::clone(&state));
+        (
+            RunContext {
+                cancel,
+                progress: Progress::new(),
+            },
+            CheckpointProbe(state),
+        )
+    }
+}
+
+/// `0..n` as a `Vec<u32>`, written with checkpoints: first-touching a few
+/// hundred megabytes can take a while when the machine is short of memory.
+pub fn indices(n: u32, ctx: &RunContext) -> Result<Vec<u32>, Cancelled> {
+    let mut v = Vec::with_capacity(n as usize);
+    let mut start = 0u32;
+    while start < n {
+        ctx.checkpoint()?;
+        let end = start.saturating_add(TICK_INTERVAL).min(n);
+        v.extend(start..end);
+        start = end;
+    }
+    Ok(v)
+}
+
+/// How many [`Ticker::tick`] calls go between checkpoints.
+pub const TICK_INTERVAL: u32 = 32_768;
+
+/// Checkpoints every [`TICK_INTERVAL`] ticks (see [`RunContext::ticker`]).
+pub struct Ticker<'a> {
+    ctx: &'a RunContext,
+    n: u32,
+}
+
+impl Ticker<'_> {
+    /// Counts one unit of work; every [`TICK_INTERVAL`]th call is a
+    /// checkpoint.
+    #[inline]
+    #[track_caller]
+    pub fn tick(&mut self) -> Result<(), Cancelled> {
+        self.n = self.n.wrapping_add(1);
+        if self.n.is_multiple_of(TICK_INTERVAL) {
+            self.ctx.checkpoint()
+        } else {
+            Ok(())
+        }
+    }
+}
+
+/// A share of a stage's progress covering `total` units of work (see
+/// [`RunContext::span`]).
+pub struct Span<'a> {
+    ctx: &'a RunContext,
+    stage: &'static str,
+    from: f64,
+    to: f64,
+    total: usize,
+}
+
+impl Span<'_> {
+    /// Call with the index of each unit of work as it starts (any order,
+    /// any thread): every [`TICK_INTERVAL`]th index reports progress and
+    /// checkpoints.
+    #[inline]
+    #[track_caller]
+    pub fn at(&self, done: usize) -> Result<(), Cancelled> {
+        if done.is_multiple_of(TICK_INTERVAL as usize) {
+            self.report(done);
+            self.ctx.checkpoint()
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Reports `done` of `total` units, and checkpoints. For work whose
+    /// units are big enough to check every time.
+    #[track_caller]
+    pub fn step(&self, done: usize) -> Result<(), Cancelled> {
+        self.report(done);
+        self.ctx.checkpoint()
+    }
+
+    fn report(&self, done: usize) {
+        let f = done.min(self.total) as f64 / self.total as f64;
+        self.ctx
+            .progress
+            .report(self.stage, self.from + (self.to - self.from) * f);
+    }
+
+    /// Reports the span's end.
+    pub fn finish(&self) {
+        self.ctx.progress.report(self.stage, self.to);
+    }
+}
+
+/// The longest stretch between two checkpoints seen by a
+/// [`CheckpointProbe`], and where it started and ended.
+#[derive(Debug, Clone, Copy)]
+pub struct CheckpointGap {
+    pub gap: std::time::Duration,
+    /// The checkpoint that opened the gap; `None` when it is the probe's
+    /// creation.
+    pub from: Option<&'static std::panic::Location<'static>>,
+    pub to: &'static std::panic::Location<'static>,
+}
+
+#[derive(Debug)]
+struct ProbeInner {
+    last: std::time::Instant,
+    last_at: Option<&'static std::panic::Location<'static>>,
+    worst: Option<CheckpointGap>,
+    count: u64,
+}
+
+#[derive(Debug)]
+struct ProbeState {
+    inner: std::sync::Mutex<ProbeInner>,
+}
+
+impl ProbeState {
+    fn hit(&self, at: &'static std::panic::Location<'static>) {
+        let now = std::time::Instant::now();
+        let mut inner = self.inner.lock().expect("checkpoint probe lock poisoned");
+        let gap = now.duration_since(inner.last);
+        if inner.worst.is_none_or(|w| gap > w.gap) {
+            inner.worst = Some(CheckpointGap {
+                gap,
+                from: inner.last_at,
+                to: at,
+            });
+        }
+        inner.last = now;
+        inner.last_at = Some(at);
+        inner.count += 1;
+    }
+}
+
+/// Read side of [`RunContext::instrumented`]. Gaps are measured between
+/// consecutive checkpoints from any thread, starting at the probe's
+/// creation.
+#[derive(Debug, Clone)]
+pub struct CheckpointProbe(Arc<ProbeState>);
+
+impl CheckpointProbe {
+    /// The longest gap so far, if any checkpoint has been made.
+    pub fn worst(&self) -> Option<CheckpointGap> {
+        self.0
+            .inner
+            .lock()
+            .expect("checkpoint probe lock poisoned")
+            .worst
+    }
+
+    /// The longest gap so far (zero before the first checkpoint).
+    pub fn max_gap(&self) -> std::time::Duration {
+        self.worst().map_or(std::time::Duration::ZERO, |w| w.gap)
+    }
+
+    /// Checkpoints made so far.
+    pub fn checkpoints(&self) -> u64 {
+        self.0
+            .inner
+            .lock()
+            .expect("checkpoint probe lock poisoned")
+            .count
     }
 }
 
@@ -245,12 +459,12 @@ impl StageTable {
 /// (e.g. a stale update racing a newer one). Starting a new stage resets
 /// the monotonic floor. The fraction is always clamped to `0.0..=1.0`.
 ///
-/// `report` and `snapshot` each resolve to a single atomic operation on
-/// the packed `(stage index, fraction)` word (plus, for `report`, an
-/// amortised one-time stage-name lookup/insert): no locks held across the
-/// two atomic operations, so readers (e.g. a UI polling every frame)
-/// never block a writer and vice versa, and a reader can never observe a
-/// stage paired with another stage's fraction.
+/// `snapshot` is a single atomic load of the packed `(stage index,
+/// fraction)` word, and `report` a single CAS loop on it, so a reader
+/// (e.g. a UI polling every frame) never blocks and can never observe a
+/// stage paired with another stage's fraction. Writers serialise on the
+/// channel sink's lock (held across the CAS) so a [`Progress::channel`]
+/// reader receives updates in exactly the order they were committed.
 #[derive(Debug, Clone)]
 pub struct Progress {
     // Bit-packed (stage index, fraction), updated as a single atomic unit.
@@ -317,8 +531,15 @@ impl Progress {
         let clamped = fraction.clamp(0.0, 1.0);
         let stage_index = self.stages.index_of(stage);
 
-        let updated = self
-            .state
+        // The sink lock is held across the update so a channel reader sees
+        // updates in the order they were applied: two concurrent writers
+        // can't send in the opposite order to their commits (and a reader
+        // would see progress regress). `snapshot` never takes this lock.
+        let sink = self.sink.lock().expect("progress sink lock poisoned");
+        let mut committed = clamped;
+        // `try_update` returns the *previous* value, so the committed
+        // fraction is captured from the closure's last (successful) run.
+        self.state
             .try_update(Ordering::Release, Ordering::Acquire, |bits| {
                 let (current_index, current_fraction) = unpack(bits);
                 let next_fraction = if current_index == stage_index {
@@ -331,15 +552,15 @@ impl Progress {
                     // race to become current yet): reset the floor.
                     clamped
                 };
-                Some(pack(stage_index, next_fraction))
+                let next = pack(stage_index, next_fraction);
+                committed = unpack(next).1;
+                Some(next)
             })
             .expect("try_update closure always returns Some");
-        let (_, reported_fraction) = unpack(updated);
 
-        let sink = self.sink.lock().expect("progress sink lock poisoned");
         if let Some(sender) = sink.as_ref() {
             // allow-swallow: best-effort fan-out; a dropped reader must not fail reporting.
-            let _ = sender.send((stage, reported_fraction));
+            let _ = sender.send((stage, committed));
         }
     }
 

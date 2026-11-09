@@ -124,7 +124,7 @@ pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) 
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
     spawn(tx, ctx, move || {
-        Message::Completed(Box::new(prepared.run()))
+        Message::Completed(Box::new(prepared.run(&mf_runtime::RunContext::none())))
     });
 }
 

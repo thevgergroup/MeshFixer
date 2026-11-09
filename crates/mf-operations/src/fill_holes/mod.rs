@@ -8,12 +8,15 @@ mod refine;
 mod triangulate;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use mf_geometry::{BoundaryLoop, Mesh, Sources};
+use mf_runtime::Cancelled;
 use mf_spec::Params;
+use rayon::prelude::*;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation, Target, unsupported_target};
+use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 pub struct FillHoles;
 
@@ -26,8 +29,25 @@ fn unique_vertices(l: &BoundaryLoop) -> bool {
     set.len() == l.vertices.len()
 }
 
+/// Marks every vertex on one of `loops`, so whole-mesh passes can skip the
+/// (vast majority of) faces that touch none.
+fn on_loops(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<bool> {
+    let mut on = vec![false; mesh.vertex_slots() as usize];
+    for l in loops {
+        for &v in &l.vertices {
+            on[v as usize] = true;
+        }
+    }
+    on
+}
+
 /// Unit normal of the existing face across each directed loop edge.
-fn outer_normals(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<Vec<[f64; 3]>> {
+fn outer_normals(
+    mesh: &Mesh,
+    loops: &[&BoundaryLoop],
+    on: &[bool],
+    ctx: &RunContext,
+) -> Result<Vec<Vec<[f64; 3]>>, Cancelled> {
     let mut want: BTreeMap<(u32, u32), (usize, usize)> = BTreeMap::new();
     for (li, l) in loops.iter().enumerate() {
         let n = l.vertices.len();
@@ -39,7 +59,12 @@ fn outer_normals(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<Vec<[f64; 3]>> {
         .iter()
         .map(|l| vec![[0.0; 3]; l.vertices.len()])
         .collect();
+    let mut tick = ctx.ticker();
     for (_, t) in mesh.faces() {
+        tick.tick()?;
+        if !t.iter().any(|&v| on[v as usize]) {
+            continue;
+        }
         for c in 0..3 {
             if let Some(&(li, k)) = want.get(&(t[c], t[(c + 1) % 3])) {
                 let [a, b, d] = t.map(|v| mesh.corner_position(v));
@@ -57,7 +82,7 @@ fn outer_normals(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<Vec<[f64; 3]>> {
             }
         }
     }
-    out
+    Ok(out)
 }
 
 /// Per loop: the target edge length at each loop vertex (mean length of its
@@ -65,7 +90,12 @@ fn outer_normals(mesh: &Mesh, loops: &[&BoundaryLoop]) -> Vec<Vec<[f64; 3]>> {
 /// indices (so neither triangulation nor refinement duplicates one).
 type LoopContext = (Vec<Vec<f64>>, Vec<BTreeSet<(usize, usize)>>);
 
-fn loop_context(mesh: &Mesh, loops: &[&BoundaryLoop]) -> LoopContext {
+fn loop_context(
+    mesh: &Mesh,
+    loops: &[&BoundaryLoop],
+    on: &[bool],
+    ctx: &RunContext,
+) -> Result<LoopContext, Cancelled> {
     let mut local: BTreeMap<u32, Vec<(usize, usize)>> = BTreeMap::new();
     for (li, l) in loops.iter().enumerate() {
         for (k, &v) in l.vertices.iter().enumerate() {
@@ -77,7 +107,12 @@ fn loop_context(mesh: &Mesh, loops: &[&BoundaryLoop]) -> LoopContext {
         .map(|l| vec![(0.0, 0); l.vertices.len()])
         .collect();
     let mut existing: Vec<BTreeSet<(usize, usize)>> = vec![BTreeSet::new(); loops.len()];
+    let mut tick = ctx.ticker();
     for (_, t) in mesh.faces() {
+        tick.tick()?;
+        if !t.iter().any(|&v| on[v as usize]) {
+            continue;
+        }
         for c in 0..3 {
             let (a, b) = (t[c], t[(c + 1) % 3]);
             let (pa, pb) = (mesh.corner_position(a), mesh.corner_position(b));
@@ -111,7 +146,7 @@ fn loop_context(mesh: &Mesh, loops: &[&BoundaryLoop]) -> LoopContext {
                 .collect()
         })
         .collect();
-    (sigma, existing)
+    Ok((sigma, existing))
 }
 
 impl Operation for FillHoles {
@@ -123,15 +158,24 @@ impl Operation for FillHoles {
         1
     }
 
-    fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError> {
+    fn execute(
+        &self,
+        input: &Mesh,
+        target: &Target,
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<OpOutput, OpError> {
         let max_edges = params.get_int("max_loop_edges")?.max(3) as usize;
         let refine = params.get_bool("refine")?;
-        let topo = input.topology();
+        let last_stage = if refine { "refining" } else { "triangulating" };
+        let topo = input.topology_with(ctx)?;
         let mut fill: Vec<&BoundaryLoop> = Vec::new();
         let mut skipped = Vec::new();
         match target {
             Target::WholeObject => {
+                let mut tick = ctx.ticker();
                 for l in &topo.boundary_loops {
+                    tick.tick()?;
                     if l.edge_count > max_edges {
                         skipped.push(
                             json!({"id": l.id, "edges": l.edge_count, "reason": "too_large"}),
@@ -183,23 +227,92 @@ impl Operation for FillHoles {
             other => return Err(unsupported_target(self.id(), other)),
         }
 
-        let normals = outer_normals(input, &fill);
-        let (sigma, existing) = loop_context(input, &fill);
+        let on = on_loops(input, &fill);
+        let normals = outer_normals(input, &fill, &on, ctx)?;
+        let (sigma, existing) = loop_context(input, &fill, &on, ctx)?;
+        drop(on);
         // The same threshold `inspect` reports as degenerate.
         let min_area = input
-            .bounding_box()
+            .bounding_box_with(ctx)?
             .map_or(0.0, |b| 1e-12 * b.diagonal() * b.diagonal());
+        let points: Vec<Vec<[f64; 3]>> = fill
+            .iter()
+            .map(|l| {
+                l.vertices
+                    .iter()
+                    .map(|&v| input.corner_position(v))
+                    .collect()
+            })
+            .collect();
+
+        // Loops are independent: triangulate them all in parallel, then
+        // refine them all, each stage reporting loops done. The results
+        // are applied below in loop order, so the output doesn't depend on
+        // how the work was split (MF-CMD-005).
+        let total = fill.len();
+        let done = AtomicUsize::new(0);
+        let loop_done = |stage: &'static str| {
+            let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+            ctx.progress.report(stage, n as f64 / total.max(1) as f64);
+        };
+        ctx.progress.report("triangulating", 0.0);
+        let triangulations: Vec<Option<Vec<[usize; 3]>>> = (0..total)
+            .into_par_iter()
+            .map(|li| {
+                let tris = triangulate::triangulate(
+                    &points[li],
+                    &normals[li],
+                    &existing[li],
+                    min_area,
+                    ctx,
+                )?;
+                loop_done("triangulating");
+                Ok(tris)
+            })
+            .collect::<Result<_, Cancelled>>()?;
+        ctx.progress.report("triangulating", 1.0);
+
+        if refine {
+            done.store(0, Ordering::Relaxed);
+            ctx.progress.report("refining", 0.0);
+        }
+        let patches: Vec<Option<refine::Patch>> = triangulations
+            .into_par_iter()
+            .zip(points)
+            .enumerate()
+            .map(|(li, (tris, positions))| {
+                let Some(tris) = tris else {
+                    if refine {
+                        loop_done("refining");
+                    }
+                    return Ok(None);
+                };
+                let mut patch = refine::Patch {
+                    n_boundary: positions.len(),
+                    sigma: Vec::new(),
+                    tris,
+                    positions,
+                };
+                if refine {
+                    patch.sigma = sigma[li].clone();
+                    patch.refine(&existing[li], ctx)?;
+                    loop_done("refining");
+                }
+                Ok(Some(patch))
+            })
+            .collect::<Result<_, Cancelled>>()?;
+        ctx.checkpoint()?;
+
         let mut edit = input.edit();
         let mut filled = Vec::new();
-        for (li, (l, outer)) in fill.iter().zip(&normals).enumerate() {
-            let points: Vec<[f64; 3]> = l
-                .vertices
-                .iter()
-                .map(|&v| input.corner_position(v))
-                .collect();
+        for (l, patch) in fill.iter().zip(patches) {
             // A loop with no valid patch: an error when it was selected,
             // skipped and reported in a whole-object run.
-            let mut untriangulable = || {
+            let patch = match patch {
+                Some(p) if p.min_area() < min_area => None,
+                other => other,
+            };
+            let Some(patch) = patch else {
                 if matches!(target, Target::Loops(_)) {
                     return Err(failed(
                         "loop_untriangulable",
@@ -211,27 +324,8 @@ impl Operation for FillHoles {
                 }
                 skipped
                     .push(json!({"id": l.id, "edges": l.edge_count, "reason": "untriangulable"}));
-                Ok(())
-            };
-            let Some(tris) = triangulate::triangulate(&points, outer, &existing[li], min_area)
-            else {
-                untriangulable()?;
                 continue;
             };
-            let mut patch = refine::Patch {
-                n_boundary: points.len(),
-                sigma: Vec::new(),
-                tris,
-                positions: points,
-            };
-            if refine {
-                patch.sigma = sigma[li].clone();
-                patch.refine(&existing[li]);
-            }
-            if patch.min_area() < min_area {
-                untriangulable()?;
-                continue;
-            }
             // Local → mesh vertex IDs: boundary first, then new vertices.
             let mut ids: Vec<u32> = l.vertices.clone();
             for &p in &patch.positions[patch.n_boundary..] {
@@ -254,6 +348,7 @@ impl Operation for FillHoles {
             "skipped_loops": skipped,
         });
         if filled.is_empty() {
+            ctx.progress.report(last_stage, 1.0);
             return Ok(OpOutput {
                 change: None,
                 report,
@@ -268,6 +363,7 @@ impl Operation for FillHoles {
             "created_faces": prov.created_faces.len(),
             "created_vertices": prov.created_vertices.len(),
         });
+        ctx.progress.report(last_stage, 1.0);
         Ok(OpOutput {
             change: Some((mesh, prov)),
             report,

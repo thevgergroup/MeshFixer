@@ -11,5 +11,5 @@ postconditions:
   - geometry unchanged
 effects: [read_only]
 runtime:
-  cancellable: false
-  progress: false
+  cancellable: true
+  progress: true

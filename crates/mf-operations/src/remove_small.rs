@@ -2,7 +2,7 @@ use mf_geometry::{FaceId, Mesh, VertexId};
 use mf_spec::Params;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation, Target, unsupported_target};
+use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 pub struct RemoveSmallComponents;
 
@@ -15,10 +15,16 @@ impl Operation for RemoveSmallComponents {
         1
     }
 
-    fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError> {
+    fn execute(
+        &self,
+        input: &Mesh,
+        target: &Target,
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<OpOutput, OpError> {
         let max_triangles = params.get_int("max_triangles")?.max(0) as usize;
         let keep_largest = params.get_bool("keep_largest")?;
-        let topo = input.topology();
+        let topo = input.topology_with(ctx)?;
 
         // Which components are candidates: all of them, or the selected ones.
         // A selected component is removed only if it is under the threshold;
@@ -58,11 +64,14 @@ impl Operation for RemoveSmallComponents {
             other => return Err(unsupported_target(self.id(), other)),
         };
 
+        const STAGE: &str = "removing";
+        let mut tick = ctx.ticker();
         let mut keep_face = vec![true; input.face_slots() as usize];
         let mut removed_components = 0;
         let mut removed_triangles = 0;
         for &i in &candidates {
             for &f in &topo.components[i] {
+                tick.tick()?;
                 keep_face[f as usize] = false;
             }
             removed_components += 1;
@@ -74,6 +83,7 @@ impl Operation for RemoveSmallComponents {
             "removed_triangles": removed_triangles,
         });
         if removed_components == 0 {
+            ctx.progress.report(STAGE, 1.0);
             return Ok(OpOutput {
                 change: None,
                 report,
@@ -84,7 +94,9 @@ impl Operation for RemoveSmallComponents {
         // Kept faces and vertices keep their IDs (ADR-0001, MF-OP-003).
         let mut used_by_kept = vec![false; input.vertex_slots() as usize];
         let mut used_by_removed = vec![false; input.vertex_slots() as usize];
-        for (FaceId(f), t) in input.faces() {
+        let span = ctx.span(STAGE, 0.0, 0.5, input.face_count());
+        for (k, (FaceId(f), t)) in input.faces().enumerate() {
+            span.at(k)?;
             let used = if keep_face[f as usize] {
                 &mut used_by_kept
             } else {
@@ -99,17 +111,22 @@ impl Operation for RemoveSmallComponents {
             code: "invalid_edit",
             message: e.to_string(),
         };
-        for (FaceId(f), _) in input.faces() {
+        let span = ctx.span(STAGE, 0.5, 0.9, input.face_count());
+        for (k, (FaceId(f), _)) in input.faces().enumerate() {
+            span.at(k)?;
             if !keep_face[f as usize] {
                 edit.remove_face(FaceId(f)).map_err(fail)?;
             }
         }
         for v in 0..input.vertex_slots() {
+            tick.tick()?;
             if used_by_removed[v as usize] && !used_by_kept[v as usize] {
                 edit.remove_vertex(VertexId(v)).map_err(fail)?;
             }
         }
+        ctx.checkpoint()?;
         let change = edit.finish().map_err(fail)?;
+        ctx.progress.report(STAGE, 1.0);
         Ok(OpOutput {
             change: Some(change),
             report,

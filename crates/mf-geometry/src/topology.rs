@@ -4,7 +4,7 @@
 //! authoritative state. Sorted arrays are used instead of hash maps so the
 //! results are deterministic (MF-CMD-005).
 
-use rayon::slice::ParallelSliceMut;
+use mf_runtime::{Cancelled, RunContext, indices, par_sort_unstable_by_key};
 
 use crate::ids::FaceId;
 use crate::mesh::Mesh;
@@ -40,8 +40,8 @@ pub struct Topology {
 struct UnionFind(Vec<u32>);
 
 impl UnionFind {
-    fn new(n: usize) -> Self {
-        UnionFind((0..n as u32).collect())
+    fn new(n: usize, ctx: &RunContext) -> Result<Self, Cancelled> {
+        Ok(UnionFind(indices(n as u32, ctx)?))
     }
     fn find(&mut self, mut x: u32) -> u32 {
         while self.0[x as usize] != x {
@@ -91,6 +91,15 @@ impl Topology {
 
     /// Topology of the mesh's live faces. Face and vertex IDs are slots.
     pub fn compute(mesh: &Mesh) -> Topology {
+        Topology::compute_with(mesh, &RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Topology::compute`], cancellable, reporting progress as stage
+    /// `"topology"`.
+    pub fn compute_with(mesh: &Mesh, ctx: &RunContext) -> Result<Topology, Cancelled> {
+        const STAGE: &str = "topology";
+        let faces_total = mesh.face_count();
         let face_slots = mesh.face_slots() as usize;
         let vertex_count = mesh.vertex_slots() as usize;
         // Faces with a repeated index (collapsed onto an edge or point) have
@@ -99,7 +108,9 @@ impl Topology {
         // edges or vertices.
         let collapsed = |t: &[u32; 3]| t[0] == t[1] || t[1] == t[2] || t[0] == t[2];
         let mut edges: Vec<HalfEdge> = Vec::with_capacity(mesh.face_count() * 3);
-        for (FaceId(f), t) in mesh.faces() {
+        let span = ctx.span(STAGE, 0.0, 0.1, faces_total);
+        for (k, (FaceId(f), t)) in mesh.faces().enumerate() {
+            span.at(k)?;
             if collapsed(&t) {
                 continue;
             }
@@ -115,10 +126,11 @@ impl Topology {
             }
         }
         // Parallel and deterministic: the key is a total order.
-        edges.par_sort_unstable_by_key(|e| (e.lo, e.hi, e.face, e.corner));
+        ctx.progress.report(STAGE, 0.1);
+        par_sort_unstable_by_key(&mut edges, ctx, |e| (e.lo, e.hi, e.face, e.corner))?;
 
-        let mut faces = UnionFind::new(face_slots);
-        let mut corners = UnionFind::new(face_slots * 3);
+        let mut faces = UnionFind::new(face_slots, ctx)?;
+        let mut corners = UnionFind::new(face_slots * 3, ctx)?;
         let mut on_bad_edge = vec![false; vertex_count];
         // Directed boundary half-edges a -> b, with the corner IDs of a and b
         // in their face (for fan-based pairing at pinched vertices).
@@ -144,8 +156,12 @@ impl Topology {
                 }
         };
 
+        let span = ctx.span(STAGE, 0.35, 0.5, edges.len());
         let mut i = 0;
+        let mut groups_seen = 0usize;
         while i < edges.len() {
+            span.at(groups_seen)?;
+            groups_seen += 1;
             let mut j = i + 1;
             while j < edges.len() && edges[j].lo == edges[i].lo && edges[j].hi == edges[i].hi {
                 j += 1;
@@ -185,14 +201,18 @@ impl Topology {
         topo.boundary_edges = boundary.len();
 
         // Components: group faces by root, in face order.
-        let mut groups: Vec<(u32, u32)> = mesh
-            .faces()
-            .map(|(FaceId(f), _)| (faces.find(f), f))
-            .collect();
-        groups.par_sort_unstable();
+        let span = ctx.span(STAGE, 0.5, 0.55, faces_total);
+        let mut groups: Vec<(u32, u32)> = Vec::with_capacity(faces_total);
+        for (k, (FaceId(f), _)) in mesh.faces().enumerate() {
+            span.at(k)?;
+            groups.push((faces.find(f), f));
+        }
+        par_sort_unstable_by_key(&mut groups, ctx, |g| *g)?;
+        let span = ctx.span(STAGE, 0.65, 0.7, groups.len());
         let mut components: Vec<Vec<u32>> = Vec::new();
         let mut last_root = u32::MAX;
-        for (root, f) in groups {
+        for (k, (root, f)) in groups.into_iter().enumerate() {
+            span.at(k)?;
             if root != last_root {
                 components.push(Vec::new());
                 last_root = root;
@@ -201,25 +221,41 @@ impl Topology {
                 c.push(f);
             }
         }
-        components.sort_by(|a, b| b.len().cmp(&a.len()).then(a[0].cmp(&b[0])));
+        // Largest first, ties by lowest first face (a total order: every
+        // face is in exactly one component).
+        par_sort_unstable_by_key(&mut components, ctx, |c| (std::cmp::Reverse(c.len()), c[0]))?;
         topo.components = components;
 
         // Non-manifold vertices: more than one corner fan, or on a >2-face edge.
+        let span = ctx.span(STAGE, 0.7, 0.75, faces_total);
         let mut fans: Vec<(u32, u32)> = Vec::with_capacity(mesh.face_count() * 3);
-        for (FaceId(f), t) in mesh.faces().filter(|(_, t)| !collapsed(t)) {
+        for (k, (FaceId(f), t)) in mesh.faces().enumerate() {
+            span.at(k)?;
+            if collapsed(&t) {
+                continue;
+            }
             for (c, &v) in t.iter().enumerate() {
                 fans.push((v, corners.find(f * 3 + c as u32)));
             }
         }
-        fans.par_sort_unstable();
+        par_sort_unstable_by_key(&mut fans, ctx, |x| *x)?;
+        ctx.checkpoint()?;
         fans.dedup();
+        let span = ctx.span(STAGE, 0.9, 0.95, fans.len() + vertex_count);
         let mut fan_count = vec![0u32; vertex_count];
-        for (v, _) in &fans {
+        for (k, (v, _)) in fans.iter().enumerate() {
+            span.at(k)?;
             fan_count[*v as usize] += 1;
         }
-        topo.non_manifold_vertices = (0..vertex_count)
-            .filter(|&v| fan_count[v] > 1 || on_bad_edge[v])
-            .count();
+        let mut tick = ctx.ticker();
+        let mut non_manifold_vertices = 0;
+        for v in 0..vertex_count {
+            tick.tick()?;
+            if fan_count[v] > 1 || on_bad_edge[v] {
+                non_manifold_vertices += 1;
+            }
+        }
+        topo.non_manifold_vertices = non_manifold_vertices;
 
         // Boundary loops. Trace edge to edge: at an ordinary boundary vertex
         // the next edge is the only outgoing one. At a pinched vertex (k > 1
@@ -227,10 +263,13 @@ impl Topology {
         // across the same gap: the next outgoing edge counter-clockwise
         // around the vertex (MF-ISSUE-007). Vertices on non-manifold edges,
         // or with unequal in/out degree, stay untraced.
-        boundary.par_sort_unstable();
+        ctx.progress.report(STAGE, 0.95);
+        par_sort_unstable_by_key(&mut boundary, ctx, |b| *b)?;
         let mut out_deg = vec![0u32; vertex_count];
         let mut in_deg = vec![0u32; vertex_count];
+        let mut tick = ctx.ticker();
         for &(a, b, _, _) in &boundary {
+            tick.tick()?;
             out_deg[a as usize] += 1;
             in_deg[b as usize] += 1;
         }
@@ -244,28 +283,34 @@ impl Topology {
             let hi = boundary.partition_point(|&(a, ..)| a <= v);
             lo..hi
         };
-        let pinched_next =
-            pinched_pairing(mesh, &boundary, &out_deg, &in_deg, &traceable, &mut corners);
+        let pinched_next = pinched_pairing(
+            mesh,
+            &boundary,
+            &out_deg,
+            &in_deg,
+            &traceable,
+            &mut corners,
+            ctx,
+        )?;
         const NONE: u32 = u32::MAX;
-        let next_edge: Vec<u32> = boundary
-            .iter()
-            .enumerate()
-            .map(|(e, &(_, v, _, _))| {
-                if !traceable(v) {
-                    NONE
-                } else if out_deg[v as usize] == 1 {
-                    out_range(v).start as u32
-                } else {
-                    pinched_next
-                        .binary_search_by_key(&(e as u32), |&(i, _)| i)
-                        .map_or(NONE, |k| pinched_next[k].1)
-                }
-            })
-            .collect();
+        let mut next_edge: Vec<u32> = Vec::with_capacity(boundary.len());
+        for (e, &(_, v, _, _)) in boundary.iter().enumerate() {
+            tick.tick()?;
+            next_edge.push(if !traceable(v) {
+                NONE
+            } else if out_deg[v as usize] == 1 {
+                out_range(v).start as u32
+            } else {
+                pinched_next
+                    .binary_search_by_key(&(e as u32), |&(i, _)| i)
+                    .map_or(NONE, |k| pinched_next[k].1)
+            });
+        }
 
         let mut visited = vec![false; boundary.len()];
         let mut traced = 0usize;
         for start in 0..boundary.len() {
+            tick.tick()?;
             if visited[start] {
                 continue;
             }
@@ -284,6 +329,7 @@ impl Topology {
                 if visited[n] {
                     break false;
                 }
+                tick.tick()?;
                 visited[n] = true;
                 edges.push(n);
                 cur = n;
@@ -298,7 +344,8 @@ impl Topology {
             }
         }
         topo.untraced_boundary_edges = topo.boundary_edges - traced;
-        topo
+        ctx.progress.report(STAGE, 1.0);
+        Ok(topo)
     }
 }
 
@@ -321,14 +368,18 @@ fn pinched_pairing(
     in_deg: &[u32],
     traceable: &dyn Fn(u32) -> bool,
     corners: &mut UnionFind,
-) -> Vec<(u32, u32)> {
-    let mut pinched: Vec<u32> = (0..out_deg.len() as u32)
-        .filter(|&v| {
-            out_deg[v as usize] > 1 && in_deg[v as usize] == out_deg[v as usize] && traceable(v)
-        })
-        .collect();
+    ctx: &RunContext,
+) -> Result<Vec<(u32, u32)>, Cancelled> {
+    let mut tick = ctx.ticker();
+    let mut pinched: Vec<u32> = Vec::new();
+    for v in 0..out_deg.len() as u32 {
+        tick.tick()?;
+        if out_deg[v as usize] > 1 && in_deg[v as usize] == out_deg[v as usize] && traceable(v) {
+            pinched.push(v);
+        }
+    }
     if pinched.is_empty() {
-        return Vec::new();
+        return Ok(Vec::new());
     }
     pinched.sort_unstable();
 
@@ -351,6 +402,7 @@ fn pinched_pairing(
         }
     };
     for (e, &(a, b, ca, cb)) in boundary.iter().enumerate() {
+        tick.tick()?;
         if let Ok(k) = pinched.binary_search(&a) {
             let root = corners.find(ca);
             fan_entry(k, root, e as u32, true, &mut fans);
@@ -366,6 +418,7 @@ fn pinched_pairing(
     let mut normals = vec![[0.0f64; 3]; pinched.len()];
     if needs_geometry.iter().any(|&g| g) {
         for (_, t) in mesh.faces() {
+            tick.tick()?;
             let [a, b, c] = t.map(|v| mesh.corner_position(v));
             let n = cross(sub(b, a), sub(c, a));
             for v in t {
@@ -382,6 +435,7 @@ fn pinched_pairing(
 
     let mut pairs = Vec::new();
     for (k, &v) in pinched.iter().enumerate() {
+        tick.tick()?;
         let mut vertex_fans = std::mem::take(&mut fans[k]);
         // Each fan must be disk-like at v: exactly one edge in, one out.
         if vertex_fans.len() < 2 || vertex_fans.iter().any(|f| f.1.len() != 1 || f.2.len() != 1) {
@@ -423,8 +477,8 @@ fn pinched_pairing(
             pairs.push((vertex_fans[i].1[0], vertex_fans[(i + 1) % m].2[0]));
         }
     }
-    pairs.sort_unstable();
-    pairs
+    par_sort_unstable_by_key(&mut pairs, ctx, |p| *p)?;
+    Ok(pairs)
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {

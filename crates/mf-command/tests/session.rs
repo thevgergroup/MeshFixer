@@ -109,7 +109,7 @@ fn stale_commit_rejected() {
     let mut s = Session::new();
     let id = s.import(imported(damaged()), "part".into());
     let prepared = s.prepare(remove(id, "5")).unwrap();
-    let completed = std::thread::spawn(move || prepared.run())
+    let completed = std::thread::spawn(move || prepared.run(&mf_runtime::RunContext::none()))
         .join()
         .unwrap()
         .unwrap();
@@ -131,7 +131,7 @@ fn stale_after_undo_then_new_command() {
     let prepared = s.prepare(remove(id, "5")).unwrap();
     s.undo();
     s.execute(remove(id, "3")).unwrap();
-    let completed = prepared.run().unwrap();
+    let completed = prepared.run(&mf_runtime::RunContext::none()).unwrap();
     assert!(matches!(
         s.commit(completed),
         Err(CommandError::StaleInput { .. })
