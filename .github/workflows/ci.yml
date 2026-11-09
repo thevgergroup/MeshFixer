@@ -2,6 +2,10 @@ name: CI
 on:
   push:
   pull_request:
+  schedule:
+    # Weekly deep fuzz run (MF-IO-002): 15 minutes per target instead of the
+    # 60s smoke run on every push/PR.
+    - cron: "0 7 * * 1"
 
 env:
   CARGO_TERM_COLOR: never
@@ -183,3 +187,44 @@ jobs:
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check licenses
+
+  fuzz:
+    # MF-IO-002: malformed, truncated or malicious STL/OBJ/3MF input must
+    # fail fast with a structured error, never panic, allocate unboundedly
+    # or hang. `fuzz/` is its own workspace (cargo-fuzz's standard layout,
+    # excluded from the main workspace) so this nightly-only build never
+    # touches the pinned stable toolchain used everywhere else.
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [stl, obj, threemf]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - name: Cache cargo-fuzz
+        id: cargo-fuzz-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-v0.13.2
+      - name: Install cargo-fuzz
+        if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz ${{ matrix.target }} (60s on push/PR, 15 min on the weekly schedule)
+        working-directory: fuzz
+        run: |
+          seconds=60
+          if [ "${{ github.event_name }}" = "schedule" ]; then seconds=900; fi
+          cargo fuzz run ${{ matrix.target }} -- \
+            -rss_limit_mb=2048 -max_len=1048576 -max_total_time="$seconds"
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

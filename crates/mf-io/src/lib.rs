@@ -80,6 +80,42 @@ pub enum IoError {
     /// produced.
     #[error("cancelled by the user")]
     Cancelled,
+    /// A declared or measured size exceeded a [`Limits`] bound. Always
+    /// raised before allocating for `found` (MF-IO-002): a hostile file
+    /// never gets to make the reader allocate on its say-so.
+    #[error("{what} is {found}, over the limit of {limit}")]
+    LimitExceeded {
+        /// What was measured, e.g. "declared triangle count" or
+        /// "decompressed 3MF model part size".
+        what: &'static str,
+        limit: u64,
+        found: u64,
+    },
+}
+
+/// Bounds readers enforce before allocating or decompressing, so a hostile
+/// file fails fast with a structured [`IoError::LimitExceeded`] instead of
+/// an unbounded allocation or a hang (MF-IO-002, review focus 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// Largest declared triangle count a reader will act on (STL's header
+    /// count, or an OBJ/3MF vertex index implying this many triangles).
+    pub max_triangles: u64,
+    /// Largest a 3MF archive's model part may be once decompressed.
+    pub max_model_part_bytes: u64,
+    /// Largest ratio of decompressed to compressed bytes a 3MF model part
+    /// may have (a zip-bomb signature: tiny compressed, huge inflated).
+    pub max_compression_ratio: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Limits {
+            max_triangles: 50_000_000,
+            max_model_part_bytes: 4 * (1 << 30),
+            max_compression_ratio: 200,
+        }
+    }
 }
 
 impl From<Cancelled> for IoError {

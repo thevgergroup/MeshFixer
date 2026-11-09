@@ -4,7 +4,7 @@
 use mf_geometry::{Mesh, VertexId};
 use mf_runtime::{RunContext, TICK_INTERVAL, indices, par_sort_unstable_by_key};
 
-use crate::{IoError, READING, SourcePrecision, WELDING, parsed, significant_digits};
+use crate::{IoError, Limits, READING, SourcePrecision, WELDING, parsed, significant_digits};
 
 const HEADER: usize = 80;
 const FACET: usize = 50;
@@ -28,13 +28,39 @@ pub fn read_with(
     bytes: &[u8],
     ctx: &RunContext,
 ) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError> {
+    read_with_limits(bytes, ctx, Limits::default())
+}
+
+/// As [`read_with`], with explicit [`Limits`] (tests use tighter ones than
+/// the defaults so hostile-input tests don't need gigabyte fixtures).
+pub fn read_with_limits(
+    bytes: &[u8],
+    ctx: &RunContext,
+    limits: Limits,
+) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError> {
     let ascii = looks_ascii(bytes);
     let len = bytes.len();
     let mut header = None;
     if len >= HEADER + 4 {
         let n = u32::from_le_bytes([bytes[80], bytes[81], bytes[82], bytes[83]]) as u64;
+        // A genuinely ASCII file's bytes 80..84 are just text and may decode
+        // to any 32-bit value; only a file that is actually going to be read
+        // as binary (size-consistent, or not ASCII at all) commits to `n`,
+        // and that commitment is checked against the limit before anything
+        // downstream sizes an allocation to it (MF-IO-002): a hostile header
+        // declaring billions of facets must never reach
+        // `Vec::with_capacity(n)`.
+        let expected_if_binary = (HEADER + 4) as u64 + FACET as u64 * n;
+        let commits_to_binary = expected_if_binary == len as u64 || !ascii;
+        if commits_to_binary && n > limits.max_triangles {
+            return Err(IoError::LimitExceeded {
+                what: "declared STL facet count",
+                limit: limits.max_triangles,
+                found: n,
+            });
+        }
         // u64: `50 * n` can't overflow even on 32-bit targets (MF-ISSUE-001).
-        let expected = (HEADER + 4) as u64 + FACET as u64 * n;
+        let expected = expected_if_binary;
         header = Some((n, expected));
         let body = &bytes[HEADER + 4..];
         let whole = body.len() / FACET;

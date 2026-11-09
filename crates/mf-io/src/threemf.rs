@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use mf_runtime::{RunContext, TICK_INTERVAL};
 
-use crate::{IoError, PARSE_FROM, READING, significant_digits};
+use crate::{IoError, Limits, PARSE_FROM, READING, significant_digits};
 
 /// 3MF model units. 3MF defaults to millimetres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -165,11 +165,30 @@ const XML_FROM: f64 = 0.7;
 /// As [`read_with_precision`], cancellable, reporting stage `"reading"` by
 /// bytes decompressed and then parsed.
 pub fn read_with(bytes: &[u8], ctx: &RunContext) -> Result<(Model, u8, Vec<String>), IoError> {
+    read_with_limits(bytes, ctx, Limits::default())
+}
+
+/// As [`read_with`], with explicit [`Limits`] (tests use tighter ones than
+/// the defaults so hostile-input tests don't need gigabyte fixtures).
+pub fn read_with_limits(
+    bytes: &[u8],
+    ctx: &RunContext,
+    limits: Limits,
+) -> Result<(Model, u8, Vec<String>), IoError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| not_3mf(format!("not a 3MF (zip) archive: {e}")))?;
     let mut warnings = Vec::new();
     // Decompressed in blocks so a cancel is seen between them; only the
     // model part (`progress`) is large enough to report.
+    //
+    // Bounds are checked twice, both before any inflate buffer grows large
+    // (MF-IO-002, review focus 5):
+    //  - the entry's declared uncompressed size and its ratio to the
+    //    compressed size on disk, against `Limits`, before reading a byte;
+    //  - a hard stop on bytes actually decompressed, in case the declared
+    //    size understates reality (a corrupt or adversarial local header).
+    // Either way, a zip bomb fails fast with `LimitExceeded`, never an
+    // unbounded inflate.
     let read_entry = |zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
                       name: &str,
                       progress: bool|
@@ -178,7 +197,26 @@ pub fn read_with(bytes: &[u8], ctx: &RunContext) -> Result<(Model, u8, Vec<Strin
         let mut entry = zip
             .by_name(name)
             .map_err(|e| not_3mf(format!("3MF archive has no '{name}': {e}")))?;
-        let size = entry.size() as usize;
+        let declared = entry.size();
+        let compressed = entry.compressed_size();
+        if declared > limits.max_model_part_bytes {
+            return Err(IoError::LimitExceeded {
+                what: "declared 3MF archive entry size",
+                limit: limits.max_model_part_bytes,
+                found: declared,
+            });
+        }
+        // Only meaningful once there is enough compressed data that a
+        // ratio says anything (a few bytes of input can trivially "ratio"
+        // high on tiny, legitimate entries).
+        if compressed >= 64 && declared / compressed > limits.max_compression_ratio {
+            return Err(IoError::LimitExceeded {
+                what: "3MF archive entry compression ratio",
+                limit: limits.max_compression_ratio,
+                found: declared / compressed,
+            });
+        }
+        let size = declared as usize;
         let span = progress.then(|| ctx.span(READING, UNZIP_FROM, XML_FROM, size));
         let mut buf = Vec::new();
         loop {
@@ -192,6 +230,16 @@ pub fn read_with(bytes: &[u8], ctx: &RunContext) -> Result<(Model, u8, Vec<Strin
                 .map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))?;
             if read == 0 {
                 break;
+            }
+            // Hard stop on what was actually decompressed, independent of
+            // what the entry's header claimed: a lying declared size must
+            // not let actual inflate output grow past the limit either.
+            if buf.len() as u64 > limits.max_model_part_bytes {
+                return Err(IoError::LimitExceeded {
+                    what: "decompressed 3MF archive entry size",
+                    limit: limits.max_model_part_bytes,
+                    found: buf.len() as u64,
+                });
             }
         }
         String::from_utf8(buf).map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))
