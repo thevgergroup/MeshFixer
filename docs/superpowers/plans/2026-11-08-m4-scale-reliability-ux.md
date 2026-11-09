@@ -368,7 +368,7 @@ The project owner approved this plan with changes, which are folded into the tas
   - `stl_declaring_4_billion_triangles_fails_fast`
   - `obj_with_huge_indices_fails_fast`
   - `truncated_inputs_never_panic` (every prefix of each seed file)
-- [ ] **Step 2–4:** FAIL → implement → PASS. Then run each fuzz target locally for 10 minutes; fix and add a regression test for every crash found.
+- [ ] **Step 2–4:** FAIL → implement → PASS. Then a 1-minute local smoke run per target, to prove the harness works. *(Owner ruling, 2026-11-09: the long local fuzz session moves to Task 15, at milestone end, after the readers stop changing.)*
 - [ ] **Step 5:** Commit `test(io): fuzz targets per reader; bounded decompression and declared sizes [MF-IO-002]`.
 
 ### Task 11a: Real-world messy-model collection (owner request, 2026-11-09)
@@ -542,6 +542,7 @@ The project owner approved this plan with changes, which are folded into the tas
 
 ### Task 15: Evidence, CI, independent review
 
+- **Deep fuzz session** (moved here from Task 11 by the owner): each reader target runs for at least 10 minutes locally, one at a time, on the final readers. Crashes are fixed in the review fix pass, with regression tests.
 - **Evidence job additions:**
   - the 1M orbit smoke JSON
   - memory gate JSON
