@@ -230,9 +230,11 @@ impl Viewport {
                 theme::TEXT_MUTED,
             );
         }
-        // The controls hint, on a backdrop so it reads over the model.
+        // The controls hint, on a backdrop so it reads over the model. Kept
+        // short so it clears the navigation bar at the bottom-right; Help >
+        // Controls lists everything.
         let hint = ui.painter().layout_no_wrap(
-            "Drag: orbit · Shift/right-drag: pan · Option/Alt-drag or wheel: zoom · +/−: zoom · F: frame · Home or Cmd+0: reset · Help > Controls"
+            "Drag: orbit · Shift-drag: pan · Alt-drag: zoom · F: frame · Help > Controls"
                 .to_owned(),
             egui::FontId::proportional(12.0),
             theme::TEXT_MUTED,
