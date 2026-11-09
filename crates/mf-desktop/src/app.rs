@@ -817,15 +817,17 @@ impl MeshFixerApp {
     }
 
     /// True once every object's current revision has its picking BVH and
-    /// topology: hover picks wait for them (MF-RENDER-004).
+    /// topology: hover picks wait for them (MF-RENDER-004). The BVH is
+    /// checked first (O(1), and the builder computes the topology before
+    /// reporting one); the topology check never waits for a computation
+    /// holding its lock (fix round 2, N1).
     pub fn picking_ready(&self) -> bool {
         self.session.document().objects().iter().all(|o| {
             o.mesh().is_none_or(|mesh| {
-                mesh.has_cached_topology()
-                    && self
-                        .bvhs
-                        .get(&o.id)
-                        .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
+                self.bvhs
+                    .get(&o.id)
+                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
+                    && mesh.has_cached_topology()
             })
         })
     }
@@ -1113,10 +1115,19 @@ impl MeshFixerApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
-            Message::Hovered { seq, hover } => {
+            Message::Hovered {
+                seq,
+                hover,
+                incomplete,
+            } => {
                 let picks = &mut self.hover_picks;
                 if seq == picks.seq {
                     picks.in_flight = false;
+                    if incomplete {
+                        // Ask again for the same spot once picking is
+                        // ready (fix round 2, N3).
+                        picks.sent = None;
+                    }
                     // A result for where the pointer was is stale once it
                     // has moved on: the next frame asks for where it is.
                     if picks.want == picks.sent {

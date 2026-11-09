@@ -406,8 +406,16 @@ impl Mesh {
     }
 
     /// True if this revision's topology has been computed and is cached.
+    /// Never waits: while another thread holds the topology lock (for as
+    /// long as computing the topology takes) it answers false, so a UI
+    /// thread can ask every frame (MF-RT-001).
     pub fn has_cached_topology(&self) -> bool {
-        self.lock_topology().is_some()
+        match self.inner.topology.try_lock() {
+            Ok(guard) => guard.is_some(),
+            // See `lock_topology`: a poisoned lock is safe to use.
+            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().is_some(),
+            Err(std::sync::TryLockError::WouldBlock) => false,
+        }
     }
 
     /// Heap bytes owned by this mesh's storage (excludes cached topology).

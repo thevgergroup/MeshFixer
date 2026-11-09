@@ -368,10 +368,13 @@ pub enum Message {
         add: bool,
     },
     /// What the pointer is over in the 3D view (see [`Workers::hover`]),
-    /// for hover request number `seq`.
+    /// for hover request number `seq`. `incomplete`: it couldn't look (a
+    /// target's topology wasn't there), so the same spot is asked again
+    /// once picking is ready (fix round 2, N3).
     Hovered {
         seq: u64,
         hover: Option<ViewHover>,
+        incomplete: bool,
     },
     /// `object`'s revision `mesh` has its picking BVH.
     BvhBuilt {
@@ -750,7 +753,11 @@ impl Workers {
             false,
             move || {
                 if targets.iter().any(|t| !t.mesh.has_cached_topology()) {
-                    return Some(Message::Hovered { seq, hover: None });
+                    return Some(Message::Hovered {
+                        seq,
+                        hover: None,
+                        incomplete: true,
+                    });
                 }
                 // Nothing supersedes a hover pick (one is in flight at a
                 // time), and with every BVH built it does no O(n) work.
@@ -765,7 +772,11 @@ impl Workers {
                         defect,
                     })
                 });
-                Some(Message::Hovered { seq, hover })
+                Some(Message::Hovered {
+                    seq,
+                    hover,
+                    incomplete: false,
+                })
             },
         );
     }
@@ -1212,7 +1223,7 @@ fn pick_targets<'a>(
             }
         }
     }
-    candidates.sort_by(|a, b| a.2.total_cmp(&b.2));
+    nearest_edge_candidates(&mut candidates, |c| c.2);
     for (target, hit, _, point, endpoints) in candidates {
         let mut hidden = false;
         for other in targets {
@@ -1257,6 +1268,22 @@ fn pick_targets<'a>(
     Ok(best.map(|(target, hit, _)| PickHit { target, hit }))
 }
 
+/// At most this many edges near a click are tested for visibility, the
+/// nearest on screen first. An edge-on hole can put hundreds of boundary
+/// edges within the tolerance, and without a BVH each test walks every
+/// face (~20 ms at 5M): this bounds a click to the nearest few (fix round
+/// 2, N2). Past them the click falls through to the face under it.
+const MAX_EDGE_CANDIDATES: usize = 16;
+
+/// Sorts `candidates` nearest first by `distance` (a stable sort: ties
+/// keep their order, which is the targets' and then their edges' order, so
+/// the result is deterministic) and keeps the nearest
+/// [`MAX_EDGE_CANDIDATES`].
+fn nearest_edge_candidates<T>(candidates: &mut Vec<T>, distance: impl Fn(&T) -> f64) {
+    candidates.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
+    candidates.truncate(MAX_EDGE_CANDIDATES);
+}
+
 /// What to export: one mesh, or a whole 3MF model.
 pub enum ExportJob {
     Mesh(Mesh, Format),
@@ -1282,6 +1309,23 @@ mod tests {
             fov_y: 40f64.to_radians(),
             radius: distance,
         }
+    }
+
+    /// Fix round 2, N2: only the nearest 16 edge candidates are tested,
+    /// nearest first, ties in their given order.
+    #[test]
+    fn edge_candidates_are_capped_to_the_nearest() {
+        // (distance, original position)
+        let mut c: Vec<(f64, usize)> = (0..40)
+            .map(|i| (f64::from((40 - i) as u32 % 20), i))
+            .collect();
+        nearest_edge_candidates(&mut c, |c| c.0);
+        assert_eq!(c.len(), MAX_EDGE_CANDIDATES);
+        assert_eq!(MAX_EDGE_CANDIDATES, 16);
+        // Distances 0 (positions 0, 20), 1 (19, 39), 2 (18, 38), …
+        assert_eq!(&c[..4], &[(0.0, 0), (0.0, 20), (1.0, 19), (1.0, 39)]);
+        assert!(c.windows(2).all(|w| w[0].0 <= w[1].0));
+        assert_eq!(c.last().unwrap().0, 7.0);
     }
 
     /// A narrow crack is drawn only in the crack colour (fix round 1, P3):

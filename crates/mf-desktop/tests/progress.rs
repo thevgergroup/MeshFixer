@@ -657,3 +657,69 @@ fn cancel_is_prompt_after_switching_objects_during_a_fill() {
     eprintln!("cancel after switching objects during a fill: {took:?}");
     assert!(took <= CANCEL_BUDGET, "took {took:?}");
 }
+
+/// Fix round 2, N1 (MF-RT-001): hovering the view while another thread
+/// computes a 5M mesh's topology never stalls a UI frame. Picking
+/// readiness is checked as the pointer moves, and must not wait for the
+/// topology lock the computation holds.
+#[test]
+fn ui_frames_stay_under_50ms_while_hovering_during_a_5m_topology_build() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable(
+            "ui_frames_stay_under_50ms_while_hovering_during_a_5m_topology_build",
+        );
+        return;
+    }
+    let _heavy = heavy();
+    let (mut harness, _render_state) = empty_app();
+    // A small object first: the view has a camera and draws, so the
+    // pointer over it asks for hover picks.
+    let mut small = big_model();
+    small.objects[0].name = "small".into();
+    small.objects[0].mesh = mf_fixtures::cube(1.0);
+    harness.state_mut().import_model(small);
+    wait_until(
+        &mut harness,
+        "small object ready",
+        Duration::from_secs(60),
+        |a| a.current_analysis().is_some() && a.camera.is_some() && a.picking_ready(),
+    );
+    let view = harness.state().viewport.last_rect.unwrap();
+
+    // The 5M object, its topology not yet computed (earlier tests may
+    // have cached it on the shared mesh).
+    let big = big_mesh();
+    big.release_topology();
+    harness.state_mut().import_model(big_model());
+    let computing = std::thread::spawn(move || {
+        big.topology();
+    });
+    let start = Instant::now();
+    let mut worst = (Duration::ZERO, 0);
+    let mut i = 0;
+    while !(computing.is_finished() && harness.state().picking_ready()) {
+        assert!(start.elapsed() < Duration::from_secs(600), "timed out");
+        let p = view.center() + egui::vec2((i % 40) as f32 * 4.0 - 80.0, (i % 7) as f32 * 3.0);
+        harness.event(egui::Event::PointerMoved(p));
+        let t = Instant::now();
+        harness.step();
+        let frame = t.elapsed();
+        if frame > worst.0 {
+            worst = (frame, i);
+        }
+        i += 1;
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    computing.join().unwrap();
+    println!(
+        "hover during a 5M topology build: {i} frames, worst {:.1} ms (frame {})",
+        ms(worst.0),
+        worst.1
+    );
+    assert!(
+        worst.0 <= FRAME_BUDGET,
+        "worst frame {:.1} ms (frame {}) while the topology was computed",
+        ms(worst.0),
+        worst.1
+    );
+}

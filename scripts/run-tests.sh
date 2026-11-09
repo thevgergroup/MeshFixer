@@ -20,7 +20,7 @@ timing=(
   "mf-render bvh face_pick_under_16ms_at_5m bvh_build_is_cancellable brute_force_pick_is_cancellable"
   "mf-desktop checkpoint_b checkpoint_b_5m_mesh checkpoint_b_real_scan"
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
-  "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first"
+  "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
 )
 
