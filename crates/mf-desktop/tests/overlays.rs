@@ -147,7 +147,7 @@ fn small_components_are_tinted_and_clickable() {
     require_gpu!("small_components_are_tinted_and_clickable");
     let dir = tempfile::tempdir().unwrap();
     // The model (a 10×10 plate, 200 faces) and a 12-face loose cube beside
-    // it: under remove_small_components' 100-triangle default.
+    // it.
     let plate = mf_fixtures::grid(10);
     let cube = mf_fixtures::translated(&mf_fixtures::cube(4.0), [14.0, 3.0, 0.0]);
     let mut h = open(write(
@@ -205,4 +205,96 @@ fn small_components_are_tinted_and_clickable() {
     let p = pixel(&mut h, top);
     assert!(cyan(p), "the selected piece is cyan: {p:?}");
     h.get_by_label("Remove piece");
+}
+
+/// "Loose pieces" means one set everywhere (fix round 1, I1): every piece
+/// but the main body is listed in the tree and tinted in the view, however
+/// big; the remove tool's size limit doesn't decide what is a loose piece.
+#[test]
+fn every_loose_piece_is_listed_and_tinted() {
+    require_gpu!("every_loose_piece_is_listed_and_tinted");
+    let dir = tempfile::tempdir().unwrap();
+    // The model (200 faces) and a 150-triangle loose sphere: over
+    // remove_small_components' 100-triangle default.
+    let sphere = mf_fixtures::translated(
+        &mf_fixtures::scaled(&mf_fixtures::uv_sphere(6, 15), 2.0),
+        [15.0, 5.0, 2.0],
+    );
+    assert_eq!(sphere.triangle_count(), 150);
+    let mut h = open(write(
+        dir.path(),
+        "plate_and_sphere.obj",
+        &mf_fixtures::merge(&[mf_fixtures::grid(10), sphere]),
+    ));
+    assert_eq!(h.state().current_analysis().unwrap().defects.loose.len(), 1);
+    h.get_by_label("Loose piece");
+    let mesh = h.state().active_mesh().unwrap().clone();
+    let piece = mesh.topology().components[1].clone();
+    assert_eq!(piece.len(), 150);
+    wait_until(&mut h, "loose-piece tint", |a| {
+        piece
+            .iter()
+            .all(|&f| state(a, f) & FaceStates::SMALL_COMPONENT != 0)
+    });
+}
+
+/// A selection change in the app re-uploads no geometry (fix round 1,
+/// P1): the render mesh on screen stays the same, its upload totals don't
+/// move, and only its face states change.
+#[test]
+fn selecting_in_the_view_uploads_no_geometry() {
+    require_gpu!("selecting_in_the_view_uploads_no_geometry");
+    let dir = tempfile::tempdir().unwrap();
+    let cube = mf_fixtures::translated(&mf_fixtures::cube(4.0), [14.0, 3.0, 0.0]);
+    let mut h = open(write(
+        dir.path(),
+        "plate_and_cube.obj",
+        &mf_fixtures::merge(&[mf_fixtures::grid(10), cube]),
+    ));
+    let shown = |app: &MeshFixerApp| {
+        app.object_views()
+            .into_iter()
+            .find(|v| v.active)
+            .unwrap()
+            .render
+    };
+    let before = shown(h.state());
+    let (total, last, generation) = (
+        before.gpu.total_uploaded(),
+        before.gpu.last_upload(),
+        before.gpu.state_generation(),
+    );
+    let piece = h.state().active_mesh().unwrap().topology().components[1].clone();
+    let uploaded = h.state().geometry_bytes_uploaded();
+    assert!(uploaded > 0, "the model's geometry was counted");
+
+    let top = h.state().screen_point([16.0, 5.0, 4.0]).unwrap();
+    click_at(&mut h, top);
+    wait_until(&mut h, "selection tint", |a| {
+        a.selection.is_some()
+            && piece
+                .iter()
+                .all(|&f| state(a, f) & FaceStates::SELECTED != 0)
+    });
+    // Let anything the click set off finish (an analysis, a rebuild).
+    wait_until(&mut h, "idle", |a| {
+        !a.is_analyzing() && a.shows_current_revision()
+    });
+    h.run_steps(10);
+    let after = shown(h.state());
+    assert!(
+        std::sync::Arc::ptr_eq(&before, &after),
+        "the same render mesh is on screen: no geometry was rebuilt"
+    );
+    assert_eq!(after.gpu.total_uploaded(), total, "no geometry uploaded");
+    assert_eq!(
+        h.state().geometry_bytes_uploaded(),
+        uploaded,
+        "no render mesh was rebuilt anywhere"
+    );
+    assert_eq!(after.gpu.last_upload(), last);
+    assert!(
+        after.gpu.state_generation() > generation,
+        "the face states changed"
+    );
 }

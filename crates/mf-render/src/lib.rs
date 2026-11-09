@@ -15,18 +15,15 @@ mod transform;
 
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
-    ChunkVertices, FaceStates, GpuFaces, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
+    ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
-    chunk_ranges, edge_line_vertices, face_surface_vertices, loop_line_vertices, render_origin,
-    surface_vertices,
+    chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
 };
 pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, loop_edge_candidates,
     pick_loop, ray_pick, screen_position,
 };
-pub use renderer::{
-    DrawItem, FaceTints, Layer, LayerGeometry, MeshRenderer, Palette, RenderTargetFormat,
-};
+pub use renderer::{DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat};
 pub use target::RenderTarget;
 pub use timer::GpuTimer;
 pub use transform::model_matrix;

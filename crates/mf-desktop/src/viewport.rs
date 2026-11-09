@@ -9,8 +9,7 @@ use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
 use mf_metrics::GpuTime;
 use mf_render::{
-    GpuLines, GpuTimer, Layer, LayerGeometry, MeshRenderer, OrbitCamera, Palette, RenderTarget,
-    model_matrix,
+    GpuLines, GpuTimer, Layer, MeshRenderer, OrbitCamera, Palette, RenderTarget, model_matrix,
 };
 
 use crate::theme;
@@ -395,11 +394,10 @@ impl Viewport {
                 .filter_map(|l| {
                     let o = objects.iter().find(|o| o.id == l.object)?;
                     Some(Layer {
-                        geometry: LayerGeometry::Lines(&l.lines),
+                        lines: &l.lines,
                         model: model_matrix(&o.transform),
                         mesh_origin: l.origin,
                         color: theme::rgba(l.color),
-                        strength: 1.0,
                     })
                 })
                 .collect();
@@ -625,14 +623,12 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         inactive,
         shown_states: u32::from(mf_render::FaceStates::ALL),
     });
-    let layer = |geometry| Layer {
-        geometry,
+    let layers = [Layer {
+        lines: &lines,
         model,
         mesh_origin: vertices.origin,
         color: [1.0; 4],
-        strength: 1.0,
-    };
-    let layers = [layer(LayerGeometry::Lines(&lines))];
+    }];
     target.draw(
         device,
         queue,

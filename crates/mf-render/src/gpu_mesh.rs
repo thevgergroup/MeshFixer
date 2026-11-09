@@ -270,8 +270,9 @@ pub fn chunk_ranges(count: u32, stride: u64, max_bytes: u64, primitive: u32) -> 
         .collect()
 }
 
-/// A separately uploaded line set (selection highlight, overlays). Changing the
-/// selection uploads only this, never the mesh buffers (MF-RENDER-003).
+/// A separately uploaded line set (selection outline, defect lines).
+/// Changing the selection uploads only this and the face states, never the
+/// mesh buffers (MF-RENDER-003).
 pub struct GpuLines {
     pub(crate) chunks: Vec<(wgpu::Buffer, u32)>,
 }
@@ -312,32 +313,6 @@ impl GpuLines {
     }
 }
 
-/// Flat-shaded triangles for the given faces (by ID; dead IDs are skipped),
-/// relative to `origin`: a face overlay (selection, loose pieces, recent
-/// repairs). O(faces given).
-pub fn face_surface_vertices(mesh: &Mesh, origin: DVec3, faces: &[u32]) -> Vec<SurfaceVertex> {
-    let pos = |v: u32| mesh.corner_position(v);
-    let mut out = Vec::with_capacity(faces.len() * 3);
-    for &f in faces {
-        let Some(t) = mesh.face(mf_geometry::FaceId(f)) else {
-            continue;
-        };
-        let [a, b, c] = t.map(|i| DVec3::from(pos(i)));
-        let n = (b - a)
-            .cross(c - a)
-            .normalize_or_zero()
-            .as_vec3()
-            .to_array();
-        for i in t {
-            out.push(SurfaceVertex {
-                position: local(pos(i), origin),
-                normal: n,
-            });
-        }
-    }
-    out
-}
-
 /// Line-list vertices for the given edges (vertex pairs), relative to `origin`.
 pub fn edge_line_vertices(mesh: &Mesh, origin: DVec3, edges: &[[u32; 2]]) -> Vec<LineVertex> {
     edges
@@ -348,47 +323,6 @@ pub fn edge_line_vertices(mesh: &Mesh, origin: DVec3, edges: &[[u32; 2]]) -> Vec
             })
         })
         .collect()
-}
-
-/// A separately uploaded face overlay (see [`face_surface_vertices`]).
-pub struct GpuFaces {
-    pub(crate) chunks: Vec<(wgpu::Buffer, u32)>,
-}
-
-impl GpuFaces {
-    pub fn upload(device: &wgpu::Device, faces: &[SurfaceVertex]) -> GpuFaces {
-        GpuFaces {
-            chunks: upload_chunks(device, None, "mf overlay faces", faces, u64::MAX, 3),
-        }
-    }
-
-    /// As [`GpuFaces::upload`], paced like [`GpuMesh::from_vertices_paced`].
-    pub fn upload_paced(
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        faces: &[SurfaceVertex],
-        chunk_bytes: u64,
-    ) -> GpuFaces {
-        GpuFaces {
-            chunks: upload_chunks(
-                device,
-                Some(queue),
-                "mf overlay faces",
-                faces,
-                chunk_bytes,
-                3,
-            ),
-        }
-    }
-
-    /// Vertices uploaded (three per face).
-    pub fn vertex_count(&self) -> usize {
-        self.chunks.iter().map(|(_, n)| *n as usize).sum()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.vertex_count() == 0
-    }
 }
 
 /// Line-list vertices for the given boundary loops (by ID), relative to `origin`.
@@ -447,7 +381,7 @@ fn pack(flags: impl Iterator<Item = u8>) -> Vec<u32> {
 impl FaceStates {
     /// Part of the current selection (cyan).
     pub const SELECTED: u8 = 1;
-    /// A loose piece smaller than remove_small_components' threshold (amber).
+    /// A loose piece: not connected to the model's main body (amber).
     pub const SMALL_COMPONENT: u8 = 2;
     /// What the pointer is over (light).
     pub const HOVER: u8 = 4;

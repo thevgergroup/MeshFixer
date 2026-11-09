@@ -54,11 +54,16 @@ jobs:
         run: |
           scripts/test-check-swallowed.sh
           scripts/check-swallowed-defaults.sh
-      - name: Test
+      - name: Test (timing tests run on their own afterwards, see scripts/run-tests.sh)
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace 2>&1 | tee test-output.txt
+          scripts/run-tests.sh 2>&1 | tee test-output.txt
+      - name: Gated frames (worst frame and where its time went)
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Gated frames on ${RUNNER_OS}"; echo '```'; grep -E "worst frame|first frame drawing" test-output.txt || echo "no gated-frame output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
       - name: Test summary
         if: always()
         shell: bash

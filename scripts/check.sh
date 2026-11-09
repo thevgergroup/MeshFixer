@@ -9,6 +9,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 scripts/test-check-swallowed.sh > /dev/null
 scripts/check-swallowed-defaults.sh
 cargo deny check licenses 2>/dev/null
-cargo test --workspace 2>&1 | tee /tmp/meshfixer-check-tests.txt | grep -E "^test result: FAILED|panicked" || true
+# Timing tests run on their own after the rest (scripts/run-tests.sh).
+tests=0
+scripts/run-tests.sh > /tmp/meshfixer-check-tests.txt 2>&1 || tests=$?
+grep -E "^test result: FAILED|panicked|worst frame" /tmp/meshfixer-check-tests.txt || true
 scripts/ci-test-summary.sh /tmp/meshfixer-check-tests.txt "${MF_SKIP_LOG:-/nonexistent}"
 ! grep -q "^test result: FAILED" /tmp/meshfixer-check-tests.txt
+[ "$tests" -eq 0 ]

@@ -189,6 +189,8 @@ pub struct MeshFixerApp {
     view_request: Option<ViewRequest>,
     pub viewport: Viewport,
     workers: Workers,
+    /// Shares the workers' upload totals.
+    gpu_totals: worker::Gpu,
     rx: Receiver<Message>,
 }
 
@@ -214,13 +216,14 @@ impl MeshFixerApp {
         theme::apply(&cc.egui_ctx);
         // Cmd/Ctrl + / − / 0 belong to the 3D view, not to scaling the UI.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let gpu = worker::Gpu::new(render_state.device.clone(), render_state.queue.clone());
         let workers = Workers::new(
             tx.clone(),
             cc.egui_ctx.clone(),
             settings.threads,
-            worker::Gpu::new(render_state.device.clone(), render_state.queue.clone()),
+            gpu.sibling(),
         );
-        let gpu = worker::Gpu::new(render_state.device.clone(), render_state.queue.clone());
+        let gpu_totals = gpu.clone();
         let analyze = settings.analyze.unwrap_or(worker::analyze);
         let mut app = MeshFixerApp {
             session: Session::new(),
@@ -288,6 +291,7 @@ impl MeshFixerApp {
             view_request: None,
             viewport: Viewport::new(render_state.clone(), theme::palette()),
             workers,
+            gpu_totals,
             rx,
         };
         if let Some(path) = initial {
@@ -1337,8 +1341,9 @@ impl MeshFixerApp {
     }
 
     /// What the face states of `object`'s revision `mesh` (the active one)
-    /// are made from: its selection and hover, its recent repairs, and the
-    /// small-piece threshold. Small (O(selection)).
+    /// are made from: its selection and hover, its recent repairs and its
+    /// tangled edges' faces. Small (O(selection)): the UI thread builds it
+    /// every frame.
     fn state_inputs(&mut self, object: ObjectId, mesh: &Mesh) -> StateInputs {
         let selection = self.target_overlay_request();
         let hover = self.hover_request(&selection);
@@ -1356,24 +1361,7 @@ impl MeshFixerApp {
                 .analyses
                 .get(mesh)
                 .map_or_else(|| Arc::from([]), |a| a.tangled_faces.clone()),
-            small_below: self.small_piece_threshold(),
         }
-    }
-
-    /// remove_small_components' `max_triangles` as set in its tool (or its
-    /// default): loose pieces under it are tinted as small.
-    fn small_piece_threshold(&self) -> usize {
-        let op = "mesh.remove_small_components";
-        let set = self
-            .op_params
-            .get(op)
-            .and_then(|p| p.get("max_triangles"))
-            .and_then(|v| match v {
-                ParamValue::Int(n) => Some(*n),
-                _ => None,
-            });
-        set.unwrap_or_else(|| spec_default(op, "max_triangles"))
-            .max(0) as usize
     }
 
     /// True if a defect overlay switched on by `on` is drawn (View ▸ Show
@@ -1526,6 +1514,13 @@ impl MeshFixerApp {
             .flatten();
         layers.retain(|l| Some(l.object) != stale && !l.lines.is_empty());
         layers
+    }
+
+    /// Mesh geometry bytes (surfaces and outlines) uploaded by every
+    /// render-mesh build so far (diagnostics and tests: a selection change
+    /// must not add to it).
+    pub fn geometry_bytes_uploaded(&self) -> u64 {
+        self.gpu_totals.geometry_uploaded()
     }
 
     /// The face states the GPU holds for `face` of the active object's

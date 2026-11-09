@@ -3,7 +3,7 @@ use glam::{DMat3, DMat4, DVec3, Mat4, Vec4};
 
 use crate::camera::OrbitCamera;
 use crate::gpu_mesh::{
-    FaceStates, GpuFaces, GpuLines, GpuMesh, LineVertex, SurfaceVertex, face_state_layout,
+    FaceStates, GpuLines, GpuMesh, LineVertex, SurfaceVertex, face_state_layout,
 };
 
 /// The colours the 3D view draws with. `mf-render` has no theme of its own
@@ -32,9 +32,9 @@ pub struct Palette {
 }
 
 /// The tint of each face-state flag: RGB, and in alpha how much of it
-/// replaces the surface colour (0–1). Where flags overlap, later ones in
-/// this list draw over earlier ones, and a selected or hovered face shows
-/// only the selection or hover tint.
+/// replaces the surface colour (0–1). A selected face shows only the
+/// selection tint (even when hovered), a hovered one only the hover tint;
+/// otherwise later tints in this list draw over earlier ones.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct FaceTints {
     pub small_component: [f32; 4],
@@ -93,9 +93,7 @@ struct DrawUniforms {
     normal_matrix: [[f32; 4]; 4],
     /// A layer's colour (unused for an object's own surface and outlines).
     color: [f32; 4],
-    /// x: 1 for an inactive object (desaturated), or a face layer's
-    /// strength (how much of `color` replaces the surface colour).
-    /// y: line width in pixels.
+    /// x: 1 for an inactive object (desaturated). y: line width in pixels.
     params: [f32; 4],
     /// x: the face-state flags shown ([`DrawItem::shown_states`]).
     states: [u32; 4],
@@ -122,26 +120,17 @@ pub struct DrawItem<'a> {
     pub shown_states: u32,
 }
 
-/// What an overlay layer draws.
-pub enum LayerGeometry<'a> {
-    /// Lines over the surface (selected loops, cracks, tangled edges, hover).
-    Lines(&'a GpuLines),
-    /// Faces re-shaded with a colour (selected or loose pieces, recent repairs).
-    Faces(&'a GpuFaces),
-}
-
-/// One overlay on an object, drawn after every object's own surface:
-/// face layers first, then line layers, each in the order given (a later
-/// layer draws over an earlier one).
+/// One line overlay on an object (selected loops, cracks, tangled edges,
+/// hover), drawn after every object's own surface, in the order given (a
+/// later layer draws over an earlier one). Face tints aren't layers: they
+/// are the mesh's face states ([`FaceStates`]).
 pub struct Layer<'a> {
-    pub geometry: LayerGeometry<'a>,
+    pub lines: &'a GpuLines,
     /// The object's object-to-world transform.
     pub model: DMat4,
     /// The local origin the layer's vertices are relative to.
     pub mesh_origin: DVec3,
     pub color: [f32; 4],
-    /// Face layers: how much of `color` replaces the surface colour (0–1).
-    pub strength: f32,
 }
 
 /// A per-draw uniform buffer and its bind group, reused across frames.
@@ -155,8 +144,6 @@ pub struct MeshRenderer {
     surface_pipeline_cw: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     overlay_line_pipeline: wgpu::RenderPipeline,
-    overlay_face_pipeline_ccw: wgpu::RenderPipeline,
-    overlay_face_pipeline_cw: wgpu::RenderPipeline,
     palette: Palette,
     /// Physical pixels per point (line widths are in points).
     pixels_per_point: f32,
@@ -323,31 +310,11 @@ impl MeshRenderer {
             wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
         );
-        let overlay_face_pipeline_ccw = pipeline(
-            "mf overlay faces ccw",
-            &layout,
-            "vs_overlay_surface",
-            "fs_overlay_surface",
-            &surface_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
-            wgpu::FrontFace::Ccw,
-        );
-        let overlay_face_pipeline_cw = pipeline(
-            "mf overlay faces cw",
-            &layout,
-            "vs_overlay_surface",
-            "fs_overlay_surface",
-            &surface_buffers,
-            wgpu::PrimitiveTopology::TriangleList,
-            wgpu::FrontFace::Cw,
-        );
         MeshRenderer {
             surface_pipeline_ccw,
             surface_pipeline_cw,
             line_pipeline,
             overlay_line_pipeline,
-            overlay_face_pipeline_ccw,
-            overlay_face_pipeline_cw,
             palette,
             pixels_per_point: 1.0,
             draw_bgl,
@@ -461,7 +428,7 @@ impl MeshRenderer {
                 normal_matrix: normal_matrix(layer.model).to_cols_array_2d(),
                 color: layer.color,
                 params: [
-                    layer.strength,
+                    0.0,
                     self.palette.overlay_width * self.pixels_per_point,
                     0.0,
                     0.0,
@@ -496,31 +463,12 @@ impl MeshRenderer {
                 }
             }
         }
-        // Face layers, then line layers, so outlines stay visible over tints.
-        let layered: Vec<_> = layer_slots.iter().zip(layers).collect();
-        for (slot, layer) in &layered {
-            if let LayerGeometry::Faces(faces) = layer.geometry {
-                let pipeline = if layer.model.determinant() < 0.0 {
-                    &self.overlay_face_pipeline_cw
-                } else {
-                    &self.overlay_face_pipeline_ccw
-                };
-                pass.set_bind_group(1, &slot.bind_group, &[]);
-                pass.set_pipeline(pipeline);
-                for (buf, count) in &faces.chunks {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                    pass.draw(0..*count, 0..1);
-                }
-            }
-        }
-        for (slot, layer) in &layered {
-            if let LayerGeometry::Lines(lines) = layer.geometry {
-                pass.set_bind_group(1, &slot.bind_group, &[]);
-                pass.set_pipeline(&self.overlay_line_pipeline);
-                for (buf, count) in &lines.chunks {
-                    pass.set_vertex_buffer(0, buf.slice(..));
-                    pass.draw(0..6, 0..*count / 2);
-                }
+        for (slot, layer) in layer_slots.iter().zip(layers) {
+            pass.set_bind_group(1, &slot.bind_group, &[]);
+            pass.set_pipeline(&self.overlay_line_pipeline);
+            for (buf, count) in &layer.lines.chunks {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..*count / 2);
             }
         }
     }

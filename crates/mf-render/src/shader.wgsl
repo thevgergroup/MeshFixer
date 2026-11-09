@@ -27,7 +27,7 @@ struct Draw {
     normal_matrix: mat4x4<f32>,
     // A layer's colour.
     color: vec4<f32>,
-    // x: 1 for an inactive object, or a face layer's strength.
+    // x: 1 for an inactive object.
     // y: line width in pixels.
     params: vec4<f32>,
     // x: the face-state flags shown (the overlays switched on).
@@ -50,7 +50,7 @@ const RECENT_REPAIR: u32 = 16u;
 struct SurfaceOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) normal: vec3<f32>,
-    // The face's shown state flags (0 for overlay faces).
+    // The face's shown state flags.
     @location(1) @interpolate(flat) state: u32,
 };
 
@@ -64,20 +64,22 @@ fn tint(rgb: vec3<f32>, state: u32, flag: u32, t: vec4<f32>) -> vec3<f32> {
     return select(rgb, mix(rgb, t.rgb, t.a), (state & flag) != 0u);
 }
 
-// The face's colour before lighting: front or back, then each tint its
-// state flags call for, bottom to top. A selected or hovered face shows
-// only that (one colour, one meaning: a selected loose piece reads as
-// selected, not as a mix of cyan and amber).
+// The face's colour before lighting: front or back, then one tint. One
+// colour, one meaning: a selected face shows only the selection tint (even
+// when hovered, or a loose piece), a hovered one only the hover tint;
+// otherwise the defect and repair tints apply, bottom to top.
 fn base_color(front: bool, state: u32) -> vec3<f32> {
     // Back faces (seen through holes, or flipped) are tinted so they stand out.
     var rgb = select(scene.back_face.rgb, scene.surface.rgb, front);
-    if ((state & (SELECTED | HOVER)) == 0u) {
-        rgb = tint(rgb, state, SMALL_COMPONENT, scene.tint_small_component);
-        rgb = tint(rgb, state, NON_MANIFOLD_ADJ, scene.tint_non_manifold_adj);
-        rgb = tint(rgb, state, RECENT_REPAIR, scene.tint_recent_repair);
+    if ((state & SELECTED) != 0u) {
+        return tint(rgb, state, SELECTED, scene.tint_selected);
     }
-    rgb = tint(rgb, state, SELECTED, scene.tint_selected);
-    rgb = tint(rgb, state, HOVER, scene.tint_hover);
+    if ((state & HOVER) != 0u) {
+        return tint(rgb, state, HOVER, scene.tint_hover);
+    }
+    rgb = tint(rgb, state, SMALL_COMPONENT, scene.tint_small_component);
+    rgb = tint(rgb, state, NON_MANIFOLD_ADJ, scene.tint_non_manifold_adj);
+    rgb = tint(rgb, state, RECENT_REPAIR, scene.tint_recent_repair);
     return rgb;
 }
 
@@ -111,27 +113,6 @@ fn vs_surface(
 fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     let rgb = lit(base_color(front, in.state), in.normal);
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
-}
-
-// Face overlays: the same faces again, pulled slightly towards the camera
-// so they win the depth test against the object's own surface.
-@vertex
-fn vs_overlay_surface(@location(0) position: vec3<f32>, @location(1) normal: vec3<f32>) -> SurfaceOut {
-    var out: SurfaceOut;
-    out.clip = scene.view_proj * draw.model * vec4<f32>(position, 1.0);
-    out.clip.z = out.clip.z - 0.0002 * out.clip.w;
-    out.normal = (draw.normal_matrix * vec4<f32>(normal, 0.0)).xyz;
-    out.state = 0u;
-    return out;
-}
-
-@fragment
-fn fs_overlay_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
-    let light = abs(dot(n, normalize(scene.eye_dir.xyz)));
-    let base = select(scene.back_face.rgb, scene.surface.rgb, front);
-    let tinted = mix(base, draw.color.rgb, draw.params.x);
-    return vec4<f32>(tinted * (0.25 + 0.75 * light), 1.0);
 }
 
 // One line segment (a..b) as a screen-space quad `draw.params.y` pixels

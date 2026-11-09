@@ -125,7 +125,10 @@ impl Painter {
         }
     }
 
-    fn paint(&self, harness: &Harness<'_, MeshFixerApp>) {
+    /// Returns how long encoding and submitting took, then waiting for the
+    /// GPU (which also waits for anything workers submitted before).
+    fn paint(&self, harness: &Harness<'_, MeshFixerApp>) -> (Duration, Duration) {
+        let start = Instant::now();
         let rs = &self.render_state;
         let ppp = harness.ctx.pixels_per_point();
         let jobs = harness.ctx.tessellate(harness.output().shapes.clone(), ppp);
@@ -156,12 +159,15 @@ impl Painter {
         }
         rs.queue
             .submit(uploads.into_iter().chain(std::iter::once(encoder.finish())));
+        drop(renderer);
+        let submitted = Instant::now();
         rs.device
             .poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: Some(Duration::from_secs(10)),
             })
             .unwrap();
+        (submitted - start, submitted.elapsed())
     }
 }
 
@@ -328,19 +334,41 @@ fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
 
+/// Where one gated frame's time went: the app's update (`harness.step`,
+/// which also encodes and submits the 3D view), painting egui (encode and
+/// submit), and waiting for the GPU (including anything workers queued).
+#[derive(Debug, Clone, Copy)]
+struct FrameSplit {
+    app: Duration,
+    paint: Duration,
+    gpu_wait: Duration,
+}
+
+impl FrameSplit {
+    fn total(&self) -> Duration {
+        self.app + self.paint + self.gpu_wait
+    }
+}
+
 /// One whole frame with the camera moved, so the 3D view is redrawn.
-fn orbit_frame(harness: &mut Harness<'_, MeshFixerApp>, painter: &Painter) -> Duration {
+fn orbit_frame(harness: &mut Harness<'_, MeshFixerApp>, painter: &Painter) -> FrameSplit {
     let start = Instant::now();
     if let Some(cam) = harness.state_mut().camera.as_mut() {
         cam.orbit(0.01, 0.0);
     }
     harness.step();
-    painter.paint(harness);
-    start.elapsed()
+    let app = start.elapsed();
+    let (paint, gpu_wait) = painter.paint(harness);
+    FrameSplit {
+        app,
+        paint,
+        gpu_wait,
+    }
 }
 
 /// Times whole frames (see [`orbit_frame`]) until `done` holds after one,
-/// that frame included. Each frame is labelled with what the app was doing.
+/// that frame included. Each frame is labelled with what the app was doing
+/// and where its time went (so a slow frame in CI says which phase it was).
 fn gated_frames(
     harness: &mut Harness<'_, MeshFixerApp>,
     painter: &Painter,
@@ -348,14 +376,20 @@ fn gated_frames(
 ) -> Vec<(Duration, String)> {
     let mut frames = Vec::new();
     loop {
-        let took = orbit_frame(harness, painter);
+        let split = orbit_frame(harness, painter);
         let app = harness.state();
-        let at = match (app.job_progress(), app.shows_current_revision()) {
+        let doing = match (app.job_progress(), app.shows_current_revision()) {
             (Some((stage, f)), _) => format!("{stage} {f:.3}"),
             (None, false) => "job done; new revision not drawn yet".to_owned(),
             (None, true) => "new revision drawn".to_owned(),
         };
-        frames.push((took, at));
+        let at = format!(
+            "{doing}; app update {:.1} ms, egui paint {:.1} ms, GPU wait {:.1} ms",
+            ms(split.app),
+            ms(split.paint),
+            ms(split.gpu_wait)
+        );
+        frames.push((split.total(), at));
         if done(app) {
             return frames;
         }
@@ -409,7 +443,7 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
     }
     let mut idle = Vec::new();
     for _ in 0..20 {
-        idle.push(orbit_frame(&mut harness, &painter));
+        idle.push(orbit_frame(&mut harness, &painter).total());
     }
     eprintln!(
         "{}",

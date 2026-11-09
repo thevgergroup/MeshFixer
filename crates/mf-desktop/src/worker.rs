@@ -61,9 +61,27 @@ pub struct Gpu {
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     primer: Arc<std::sync::Mutex<Primer>>,
+    /// Mesh geometry (surface and outline bytes) uploaded by render-mesh
+    /// builds through this and its siblings (diagnostics and tests).
+    geometry_uploaded: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl Gpu {
+    /// Another handle on the same device, with its own primer (so two
+    /// pools can prime at once), counting into the same totals.
+    pub fn sibling(&self) -> Gpu {
+        Gpu {
+            geometry_uploaded: self.geometry_uploaded.clone(),
+            ..Gpu::new(self.device.clone(), self.queue.clone())
+        }
+    }
+
+    /// Mesh geometry bytes uploaded by render-mesh builds so far.
+    pub fn geometry_uploaded(&self) -> u64 {
+        self.geometry_uploaded
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
     pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
         let primer = Primer {
             renderer: mf_render::MeshRenderer::new(
@@ -78,6 +96,7 @@ impl Gpu {
             device,
             queue,
             primer: Arc::new(std::sync::Mutex::new(primer)),
+            geometry_uploaded: Arc::default(),
         }
     }
 
@@ -153,6 +172,11 @@ impl RenderMesh {
             requested_states: Mutex::new(None),
             written_states: Mutex::new(0),
         };
+        let up = render.gpu.last_upload();
+        gpu.geometry_uploaded.fetch_add(
+            up.surface_bytes + up.line_bytes,
+            std::sync::atomic::Ordering::AcqRel,
+        );
         if let Some(bb) = &bounds {
             gpu.prime(&render.gpu, bb);
         }
@@ -215,13 +239,10 @@ pub struct StateInputs {
     pub recent: Arc<[u32]>,
     /// Faces at a non-manifold edge (from the analysis).
     pub tangled: Arc<[u32]>,
-    /// Loose pieces with fewer triangles than this are small
-    /// (remove_small_components' `max_triangles`).
-    pub small_below: usize,
 }
 
-/// The face states of `mesh` for `inputs`: selection, hover, small loose
-/// pieces, faces at a non-manifold edge, recent repairs. O(the flagged
+/// The face states of `mesh` for `inputs`: selection, hover, loose pieces
+/// (every piece but the main body, as the tree lists them), faces at a non-manifold edge, recent repairs. O(the flagged
 /// faces and the face chunks they're in), never a pass over the whole
 /// mesh, and on a worker (MF-RT-001).
 pub fn face_states(
@@ -232,11 +253,8 @@ pub fn face_states(
     let topo = mesh.topology_with(ctx)?;
     let mut flagged: Vec<(u32, u8)> = Vec::new();
     let mut set = |faces: &[u32], bit: u8| flagged.extend(faces.iter().map(|&f| (f, bit)));
-    // Components are ordered largest first: the small ones are at the end.
-    for c in topo.components.iter().skip(1).rev() {
-        if c.len() >= inputs.small_below {
-            break;
-        }
+    // Components are ordered largest first: the first is the main body.
+    for c in topo.components.iter().skip(1) {
         set(c, FaceStates::SMALL_COMPONENT);
     }
     set(&inputs.tangled, FaceStates::NON_MANIFOLD_ADJ);

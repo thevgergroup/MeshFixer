@@ -308,3 +308,43 @@ fn sparse_states_match_dense_ones() {
             .all(|&w| w == 0)
     );
 }
+
+/// One colour, one meaning (fix round 1, P2): a face that is both
+/// selected and hovered (different targets) shows the selection colour
+/// exactly, not a blend with the hover tint.
+#[test]
+fn selection_wins_over_hover() {
+    let Some((device, queue)) = gpu("selection_wins_over_hover") else {
+        return;
+    };
+    let mesh = grid(40);
+    let (selected, at_selected) = patch(40, 5..15, 5..15);
+    let (both, at_both) = patch(40, 25..35, 25..35);
+    let (hovered, at_hovered) = patch(40, 5..15, 25..35);
+    let mut bits = flags(&mesh, selected, FaceStates::SELECTED);
+    for f in both {
+        bits[f as usize] |= FaceStates::SELECTED | FaceStates::HOVER;
+    }
+    for f in hovered {
+        bits[f as usize] |= FaceStates::HOVER;
+    }
+    let gpu = GpuMesh::from_vertices(&device, &MeshVertices::build(&mesh));
+    gpu.set_face_states(&queue, &FaceStates::from_face_flags(&mesh, &bits));
+    let mut cam = OrbitCamera::fit(&mesh.bounding_box().unwrap());
+    cam.pitch = 80f64.to_radians();
+    let image = draw(&device, &queue, &gpu, &cam, u32::from(FaceStates::ALL));
+    let (s, b, h) = (
+        pixel(&image, &cam, at_selected),
+        pixel(&image, &cam, at_both),
+        pixel(&image, &cam, at_hovered),
+    );
+    assert!(cyan(s), "{s:?}");
+    assert!(
+        (0..3).all(|k| (s[k] - b[k]).abs() <= 3),
+        "selected and hovered {b:?} looks like selected {s:?}"
+    );
+    assert!(
+        (0..3).any(|k| (h[k] - s[k]).abs() > 20),
+        "hover alone is its own colour: {h:?}"
+    );
+}

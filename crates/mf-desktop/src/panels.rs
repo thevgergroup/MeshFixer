@@ -482,7 +482,7 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             &mut shown.loose_pieces,
             "Loose pieces",
             theme::LOOSE_PIECE,
-            "Pieces too small to keep (under Remove loose pieces' size limit), tinted; click one to select it",
+            "Pieces not connected to the model (every one the tree lists), tinted; click one to select it",
             defects,
         ),
         (

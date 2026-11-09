@@ -8,7 +8,7 @@ Status: **Phase 0 spike.** See `docs/spec/phase0-spec.md` and `docs/plan/phase0-
 cargo run -p mf-desktop -- model.stl     # desktop app
 cargo run -p mf-cli -- inspect model.stl # CLI
 scripts/check.sh                         # same checks as CI; run before pushing
-cargo test --workspace
+scripts/run-tests.sh                     # all tests; timing tests run alone afterwards
 ```
 
 The toolchain is pinned in `rust-toolchain.toml` (Rust 1.99.1) so local clippy matches CI. Install Rust with rustup. Homebrew's `rust` package ignores the pin.
