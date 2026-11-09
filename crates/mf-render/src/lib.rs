@@ -10,6 +10,7 @@ pub mod offscreen;
 mod pick;
 mod renderer;
 mod target;
+mod timer;
 mod transform;
 
 pub use camera::OrbitCamera;
@@ -23,6 +24,7 @@ pub use pick::{
 };
 pub use renderer::{DrawItem, Layer, LayerGeometry, MeshRenderer, Palette, RenderTargetFormat};
 pub use target::RenderTarget;
+pub use timer::GpuTimer;
 pub use transform::model_matrix;
 
 #[derive(Debug, thiserror::Error)]

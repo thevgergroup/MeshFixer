@@ -254,10 +254,31 @@ pub fn read_path(path: &Path) -> Result<Imported, IoError> {
 /// file in the same directory, flushed to disk, and renamed over `path`.
 /// If any step fails, an existing file at `path` is left unchanged.
 pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoError> {
+    write_path_with(mesh, path, format, &RunContext::none())
+}
+
+/// Progress stage of [`write_path_with`] and [`write_model_path_with`]:
+/// encoding and verifying take its first half, writing the second.
+pub const WRITING: &str = "writing";
+const WRITE_FROM: f64 = 0.5;
+
+/// As [`write_path`], cancellable, reporting progress as stage
+/// [`WRITING`]. Cancelling before the final rename returns
+/// [`IoError::Cancelled`] and leaves nothing behind: no file at `path`
+/// (an existing one is unchanged) and no temp file. Once renamed, the
+/// export is done and cancelling has no effect.
+pub fn write_path_with(
+    mesh: &Mesh,
+    path: &Path,
+    format: Format,
+    ctx: &RunContext,
+) -> Result<(), IoError> {
     let fail = |reason: String| IoError::Export {
         path: path.to_owned(),
         reason,
     };
+    ctx.progress.report(WRITING, 0.0);
+    ctx.checkpoint()?;
     let bytes = match format {
         Format::StlBinary => stl::write_binary(mesh).map_err(fail)?,
         Format::StlAscii => stl::write_ascii(mesh).into_bytes(),
@@ -271,21 +292,36 @@ pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoErro
                     transform: threemf::IDENTITY,
                 }],
             };
-            return write_model_path(&model, path);
+            return write_model_path_with(&model, path, ctx);
         }
     };
+    ctx.progress.report(WRITING, WRITE_FROM * 0.8);
+    ctx.checkpoint()?;
     verify_encoded(mesh, &bytes, format).map_err(fail)?;
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes, ctx)
 }
 
 /// Export a whole model as 3MF (objects, transforms, unit), verified and
 /// atomic like [`write_path`].
 pub fn write_model_path(model: &threemf::Model, path: &Path) -> Result<(), IoError> {
+    write_model_path_with(model, path, &RunContext::none())
+}
+
+/// As [`write_model_path`], cancellable like [`write_path_with`].
+pub fn write_model_path_with(
+    model: &threemf::Model,
+    path: &Path,
+    ctx: &RunContext,
+) -> Result<(), IoError> {
     let fail = |reason: String| IoError::Export {
         path: path.to_owned(),
         reason,
     };
+    ctx.progress.report(WRITING, 0.0);
+    ctx.checkpoint()?;
     let bytes = threemf::write(model).map_err(fail)?;
+    ctx.progress.report(WRITING, WRITE_FROM * 0.5);
+    ctx.checkpoint()?;
     let (back, warnings) =
         threemf::read(&bytes).map_err(|e| fail(format!("verification re-read failed: {e}")))?;
     if !warnings.is_empty() {
@@ -307,12 +343,16 @@ pub fn write_model_path(model: &threemf::Model, path: &Path) -> Result<(), IoErr
     if !same {
         return Err(fail("verification found a different model".into()));
     }
-    atomic_write(path, &bytes)
+    atomic_write(path, &bytes, ctx)
 }
 
+/// Bytes written between checkpoints.
+const WRITE_BLOCK: usize = 4 << 20;
+
 /// Write to a temp file in the same directory, flush, then rename over
-/// `path`; on failure an existing file is left unchanged.
-fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
+/// `path`; on failure or cancellation an existing file is left unchanged
+/// and the temp file is removed.
+fn atomic_write(path: &Path, bytes: &[u8], ctx: &RunContext) -> Result<(), IoError> {
     let fail = |reason: String| IoError::Export {
         path: path.to_owned(),
         reason,
@@ -334,19 +374,32 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), IoError> {
         name.to_string_lossy(),
         std::process::id()
     ));
-    let result = (|| -> std::io::Result<()> {
+    let span = ctx.span(WRITING, WRITE_FROM, 1.0, bytes.len());
+    let result = (|| -> Result<(), IoError> {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
+        let mut done = 0;
+        for block in bytes.chunks(WRITE_BLOCK) {
+            span.step(done)?;
+            f.write_all(block)?;
+            done += block.len();
+        }
         f.sync_all()?;
         drop(f);
-        std::fs::rename(&tmp, path)
+        // The last moment a cancel can still leave nothing behind.
+        ctx.checkpoint()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
     })();
     if let Err(e) = result {
         // allow-swallow: best-effort cleanup on an error path; the original error is returned
         let _ = std::fs::remove_file(&tmp);
-        return Err(fail(e.to_string()));
+        return Err(match e {
+            IoError::Cancelled => IoError::Cancelled,
+            e => fail(e.to_string()),
+        });
     }
+    span.finish();
     Ok(())
 }
 

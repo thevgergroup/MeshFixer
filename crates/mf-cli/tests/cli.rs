@@ -461,3 +461,179 @@ fn select_ids_in_later_steps_refer_to_the_imported_mesh() {
         "the third hole is the one left open"
     );
 }
+
+/// A damaged sphere big enough that import and fill take a while (binary
+/// STL, so import goes through both "reading" and "welding").
+fn big_damaged(dir: &Path, triangles: usize) -> String {
+    let p = dir.join("big.stl");
+    let m = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(triangles, 3));
+    write_path(&m, &p, Format::StlBinary).unwrap();
+    p.to_str().unwrap().to_owned()
+}
+
+/// `progress <stage> <fraction>` lines from stderr, in order.
+fn progress_lines(stderr: &str) -> Vec<(String, f64)> {
+    stderr
+        .lines()
+        .filter_map(|l| l.strip_prefix("progress "))
+        .map(|rest| {
+            let (stage, f) = rest.rsplit_once(' ').unwrap();
+            assert_eq!(f.len(), 5, "three decimals: {rest:?}");
+            (stage.to_owned(), f.parse::<f64>().unwrap())
+        })
+        .collect()
+}
+
+/// MF-RT-003: `--progress` reports `progress <stage> <0.000–1.000>` on
+/// stderr, at most 10 lines a second, never going backwards within a stage,
+/// and the last line is 1.000.
+#[test]
+fn progress_lines_are_monotonic_and_end_at_one() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = big_damaged(dir.path(), 1_000_000);
+    let output = dir.path().join("filled.stl");
+    let start = std::time::Instant::now();
+    let out = meshfixer(&[
+        "--progress",
+        "fill-holes",
+        &input,
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    let elapsed = start.elapsed().as_secs_f64();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "{stderr}");
+    let lines = progress_lines(&stderr);
+    assert!(lines.len() >= 3, "too few progress lines: {stderr}");
+    for (stage, f) in &lines {
+        assert!((0.0..=1.0).contains(f), "{stage} {f}");
+        assert!(!stage.is_empty() && !stage.contains(' '), "{stage:?}");
+    }
+    for pair in lines.windows(2) {
+        let ((a, fa), (b, fb)) = (&pair[0], &pair[1]);
+        if a == b {
+            assert!(fb >= fa, "{a} went backwards: {fa} then {fb}");
+        }
+    }
+    assert_eq!(lines.last().unwrap().1, 1.0, "{stderr}");
+    // At most 10 a second (the first may come at once).
+    let allowed = (elapsed * 10.0).floor() as usize + 1;
+    assert!(
+        lines.len() <= allowed,
+        "{} lines in {elapsed:.2} s",
+        lines.len()
+    );
+    // Import, the fill and the export each have their own stages.
+    let mut stages: Vec<&str> = lines.iter().map(|(s, _)| s.as_str()).collect();
+    stages.dedup();
+    assert!(stages.len() >= 3, "{stages:?}");
+    assert_eq!(stages.last(), Some(&mf_io::WRITING), "{stages:?}");
+    // Without --progress, nothing of the sort is printed.
+    let quiet = meshfixer(&["fill-holes", &input, "-o", output.to_str().unwrap()]);
+    assert!(quiet.status.success());
+    assert!(progress_lines(&String::from_utf8_lossy(&quiet.stderr)).is_empty());
+}
+
+/// MF-RT-004: `--threads N` sizes the job pool, and `--metrics` says how
+/// many threads ran, out of how many cores, and why.
+#[test]
+fn threads_flag_is_reported_in_metrics() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let output = dir.path().join("fixed.stl");
+    let metrics = dir.path().join("m.json");
+    let out = meshfixer(&[
+        "--threads",
+        "3",
+        "--metrics",
+        metrics.to_str().unwrap(),
+        "fill-holes",
+        &input,
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&metrics).unwrap()).unwrap();
+    assert_eq!(v["threads"]["requested"], 3, "{v}");
+    assert_eq!(v["threads"]["threads"], 3, "{v}");
+    assert!(v["threads"]["cores"].as_u64().unwrap() >= 1, "{v}");
+    assert!(v["threads"]["reason"].as_str().is_some(), "{v}");
+
+    // Without the flag the default leaves one core free.
+    let out = meshfixer(&[
+        "--metrics",
+        metrics.to_str().unwrap(),
+        "fill-holes",
+        &input,
+        "-o",
+        output.to_str().unwrap(),
+    ]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&std::fs::read(&metrics).unwrap()).unwrap();
+    let cores = v["threads"]["cores"].as_u64().unwrap();
+    assert_eq!(v["threads"]["requested"], serde_json::Value::Null, "{v}");
+    assert_eq!(
+        v["threads"]["threads"],
+        cores.saturating_sub(1).max(1),
+        "{v}"
+    );
+}
+
+/// MF-RT-002 from the CLI: Ctrl-C cancels the running job, exits 130 with
+/// "cancelled", and writes no output file (not even a temp file).
+#[cfg(unix)]
+#[test]
+fn sigint_cancels_and_writes_no_output() {
+    use std::io::{BufRead, BufReader};
+    use std::process::Stdio;
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = big_damaged(dir.path(), 1_000_000);
+    let output = dir.path().join("filled.stl");
+    let mut child = Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+        .args([
+            "--progress",
+            "fill-holes",
+            &input,
+            "-o",
+            output.to_str().unwrap(),
+        ])
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut stderr = BufReader::new(child.stderr.take().unwrap());
+    // Wait for the first progress line: the job is running.
+    let mut seen = String::new();
+    loop {
+        let mut line = String::new();
+        assert!(
+            stderr.read_line(&mut line).unwrap() > 0,
+            "exited before any progress: {seen}"
+        );
+        seen.push_str(&line);
+        if line.starts_with("progress ") {
+            break;
+        }
+    }
+    let kill = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success());
+    let mut rest = String::new();
+    std::io::Read::read_to_string(&mut stderr, &mut rest).unwrap();
+    seen.push_str(&rest);
+    let status = child.wait().unwrap();
+    assert_eq!(status.code(), Some(130), "{seen}");
+    assert!(seen.lines().any(|l| l == "cancelled"), "{seen}");
+    assert!(!output.exists(), "an output file was written");
+    let left: Vec<_> = std::fs::read_dir(dir.path())
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(left, ["big.stl"], "temp files left behind: {left:?}");
+}

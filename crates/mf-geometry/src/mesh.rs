@@ -360,7 +360,7 @@ impl Mesh {
     /// As [`Mesh::topology`], cancellable, reporting progress as stage
     /// `"topology"`. A cancelled computation caches nothing.
     pub fn topology_with(&self, ctx: &RunContext) -> Result<Arc<Topology>, Cancelled> {
-        let mut cached = self.lock_topology();
+        let mut cached = self.lock_topology_with(ctx)?;
         if let Some(topo) = cached.as_ref() {
             ctx.progress.report("topology", 1.0);
             return Ok(topo.clone());
@@ -368,6 +368,26 @@ impl Mesh {
         let topo = Arc::new(Topology::compute_with(self, ctx)?);
         *cached = Some(topo.clone());
         Ok(topo)
+    }
+
+    /// The topology lock, waited for cancellably: another thread may hold
+    /// it for as long as computing the topology takes, and a cancelled
+    /// caller must not wait that out (MF-RT-002).
+    fn lock_topology_with(
+        &self,
+        ctx: &RunContext,
+    ) -> Result<std::sync::MutexGuard<'_, Option<Arc<Topology>>>, Cancelled> {
+        loop {
+            match self.inner.topology.try_lock() {
+                Ok(guard) => return Ok(guard),
+                // See `lock_topology`: a poisoned lock is safe to use.
+                Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    ctx.checkpoint()?;
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                }
+            }
+        }
     }
 
     fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {

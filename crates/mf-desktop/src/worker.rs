@@ -1,5 +1,7 @@
-//! Background work. Every O(n) step (import, operations, analysis, export)
-//! runs on a worker thread and reports back over a channel.
+//! Background work (MF-RT-001, MF-RT-004). Every O(n) step (import,
+//! operations, analysis, export, render vertices, overlays) runs on the
+//! app's job pool and reports back over a channel; picking and hover run on
+//! a small separate lane, so a long operation can't keep a click waiting.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,6 +15,7 @@ use mf_render::{
     LineVertex, MeshVertices, SurfaceVertex, edge_line_vertices, face_surface_vertices,
     loop_line_vertices,
 };
+use mf_runtime::{CancelToken, Cancelled, JobPool, PoolChoice, RunContext};
 use mf_selection::SelectionKind;
 
 use crate::defects::{Defect, Defects};
@@ -90,42 +93,268 @@ pub enum Message {
         target: OverlayTarget,
         overlay: Overlay,
     },
-    /// What a click picked (see [`pick`]), for the revision it was made on.
-    /// `mesh` is `None` only when the click's `active` object had no mesh to
-    /// pick against in the first place (for example a non-mesh geometry
-    /// kind); a miss against a real mesh still carries it, so a plain click
-    /// that hits nothing can clear that object's selection.
+    /// What a click picked (see [`Workers::pick`]), for the revision it was
+    /// made on. `mesh` is `None` only when the click's `active` object had
+    /// no mesh to pick against in the first place (for example a non-mesh
+    /// geometry kind); a miss against a real mesh still carries it, so a
+    /// plain click that hits nothing can clear that object's selection.
     Picked {
         object: ObjectId,
         mesh: Option<Mesh>,
         picked: Option<(SelectionKind, u32)>,
         add: bool,
     },
+    /// A worker panicked. `job` is true when it was the running job (the
+    /// one the status bar shows), which is then over.
+    Failed {
+        what: &'static str,
+        job: bool,
+        message: String,
+    },
 }
 
-fn spawn(
+/// Threads in the picking/hover lane: enough that a hover build never
+/// queues behind a click's ray cast.
+const LANE_THREADS: usize = 2;
+
+/// The app's job pool and its low-latency lane (MF-RT-004).
+pub struct Workers {
+    tx: Sender<Message>,
+    repaint: eframe::egui::Context,
+    pool: Arc<JobPool>,
+    lane: JobPool,
+    /// How the pool was sized, for diagnostics.
+    pub choice: PoolChoice,
+    /// The latest pick and hover build: a newer one cancels the older, so
+    /// the lane only ever works on what the pointer is doing now.
+    latest_pick: Option<CancelToken>,
+    latest_hover: Option<CancelToken>,
+}
+
+/// The message for a worker that panicked with `payload`.
+pub fn failed(what: &'static str, job: bool, payload: Box<dyn std::any::Any + Send>) -> Message {
+    let message = match payload.downcast::<String>() {
+        Ok(s) => *s,
+        Err(payload) => match payload.downcast::<&'static str>() {
+            Ok(s) => (*s).to_owned(),
+            Err(_) => "unknown panic".to_owned(),
+        },
+    };
+    Message::Failed { what, job, message }
+}
+
+/// Run `f` on `pool` and send what it returns (`None`: nothing to say, as
+/// for superseded work). A panic becomes a [`Message::Failed`]: a worker
+/// must never take the app down, nor leave it waiting for an answer that
+/// will never come.
+fn spawn_on(
+    pool: &JobPool,
     tx: &Sender<Message>,
-    ctx: &eframe::egui::Context,
-    f: impl FnOnce() -> Message + Send + 'static,
+    repaint: &eframe::egui::Context,
+    what: &'static str,
+    job: bool,
+    f: impl FnOnce() -> Option<Message> + Send + 'static,
 ) {
     let tx = tx.clone();
-    let ctx = ctx.clone();
-    std::thread::spawn(move || {
-        // The receiver only disappears when the app is closing.
-        // allow-swallow: the receiver only disappears while the app is closing
-        let _ = tx.send(f());
-        ctx.request_repaint();
+    let repaint = repaint.clone();
+    pool.spawn(move || {
+        let msg = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)) {
+            Ok(msg) => msg,
+            Err(payload) => Some(failed(what, job, payload)),
+        };
+        if let Some(msg) = msg {
+            // allow-swallow: the receiver only disappears while the app is closing
+            let _ = tx.send(msg);
+            repaint.request_repaint();
+        }
     });
 }
 
-pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) {
-    spawn(tx, ctx, move || Message::Imported(mf_io::read_model(&path)));
+/// A fresh context for a lane job, cancelling the one it supersedes.
+fn supersede(latest: &mut Option<CancelToken>) -> RunContext {
+    if let Some(old) = latest.take() {
+        old.cancel();
+    }
+    let ctx = RunContext::none();
+    *latest = Some(ctx.cancel.clone());
+    ctx
 }
 
-pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
-    spawn(tx, ctx, move || {
-        Message::Completed(Box::new(prepared.run(&mf_runtime::RunContext::none())))
-    });
+impl Workers {
+    /// The pool has `threads` threads (`None`: all cores but one).
+    pub fn new(
+        tx: Sender<Message>,
+        repaint: eframe::egui::Context,
+        threads: Option<usize>,
+    ) -> Workers {
+        let (pool, choice) = JobPool::new(threads);
+        let (lane, _) = JobPool::named("mf-lane", Some(LANE_THREADS));
+        Workers {
+            tx,
+            repaint,
+            pool: Arc::new(pool),
+            lane,
+            choice,
+            latest_pick: None,
+            latest_hover: None,
+        }
+    }
+
+    /// The job pool, shared with the analysis worker.
+    pub fn pool(&self) -> Arc<JobPool> {
+        self.pool.clone()
+    }
+
+    fn spawn(&self, what: &'static str, job: bool, f: impl FnOnce() -> Message + Send + 'static) {
+        spawn_on(&self.pool, &self.tx, &self.repaint, what, job, move || {
+            Some(f())
+        });
+    }
+
+    pub fn import(&self, path: PathBuf, ctx: RunContext) {
+        self.spawn("import", true, move || {
+            Message::Imported(mf_io::read_model_with(&path, &ctx))
+        });
+    }
+
+    pub fn run(&self, prepared: Prepared, ctx: RunContext) {
+        self.spawn("operation", true, move || {
+            Message::Completed(Box::new(prepared.run(&ctx)))
+        });
+    }
+
+    /// Build an overlay: O(target) to O(n) (a large component, or finding a
+    /// loop's vertices), so never on the UI thread (MF-RT-001). Hover
+    /// overlays go to the lane, superseding the previous hover.
+    pub fn build_overlay(
+        &mut self,
+        purpose: OverlayPurpose,
+        object: ObjectId,
+        mesh: Mesh,
+        target: OverlayTarget,
+    ) {
+        if purpose == OverlayPurpose::Hover {
+            let ctx = supersede(&mut self.latest_hover);
+            spawn_on(
+                &self.lane,
+                &self.tx,
+                &self.repaint,
+                "hover",
+                false,
+                move || {
+                    // allow-swallow: a superseded hover has nothing to show
+                    build_overlay(purpose, object, mesh, target, &ctx).ok()
+                },
+            );
+        } else {
+            self.spawn("overlay", false, move || {
+                build_overlay(purpose, object, mesh, target, &RunContext::none())
+                    .expect("an uncancelled overlay build completes")
+            });
+        }
+    }
+
+    /// Render vertices only, for an object that isn't active
+    /// (MF-ISSUE-042): it still needs to be drawn at its transform, but not
+    /// analysed.
+    pub fn build_vertices(&self, object: ObjectId, mesh: Mesh) {
+        self.spawn("render vertices", false, move || {
+            let vertices = Arc::new(MeshVertices::build(&mesh));
+            Message::ObjectVertices {
+                object,
+                mesh,
+                vertices,
+            }
+        });
+    }
+
+    /// Replay a command log (it re-imports source files).
+    pub fn replay(&self, dir: PathBuf) {
+        self.spawn("replay", true, move || {
+            Message::Replayed(
+                mf_command::replay(&dir)
+                    .map(|report| {
+                        let mut lines: Vec<String> = report
+                            .results
+                            .iter()
+                            .map(|(id, v)| format!("command {}: {v:?}", id.0))
+                            .collect();
+                        lines.push(if report.all_verified() {
+                            format!("All {} command(s) verified.", report.results.len())
+                        } else {
+                            "Replay did NOT reproduce the log.".into()
+                        });
+                        lines
+                    })
+                    .map_err(|e| e.to_string()),
+            )
+        });
+    }
+
+    /// Ray-cast pick on the lane (O(n) over faces, across every object). All
+    /// O(n) work (topology, ray casts) happens there, never on the UI
+    /// thread (MF-RT-001). `active` is reported when the click hits
+    /// nothing, so a miss still clears the right object's selection; its
+    /// mesh comes from `targets` if it has one there (an active object with
+    /// no mesh, such as a non-mesh geometry kind, reports no mesh rather
+    /// than a fabricated one). A newer click supersedes this one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn pick(
+        &mut self,
+        targets: Vec<PickTarget>,
+        active: ObjectId,
+        cam: mf_render::OrbitCamera,
+        origin: glam::DVec3,
+        size: (f64, f64),
+        px: (f64, f64),
+        add: bool,
+    ) {
+        let ctx = supersede(&mut self.latest_pick);
+        spawn_on(
+            &self.lane,
+            &self.tx,
+            &self.repaint,
+            "pick",
+            false,
+            move || {
+                // The analysis may be computing a target's topology right now:
+                // wait for it cancellably, so a newer click isn't kept waiting.
+                for t in &targets {
+                    // allow-swallow: a superseded click has nothing to report
+                    t.mesh.topology_with(&ctx).ok()?;
+                }
+                Some(match pick_targets(&targets, &cam, origin, size, px) {
+                    Some(hit) => Message::Picked {
+                        object: hit.target.object,
+                        mesh: Some(hit.target.mesh.clone()),
+                        picked: Some(hit.picked),
+                        add,
+                    },
+                    None => Message::Picked {
+                        object: active,
+                        mesh: targets
+                            .iter()
+                            .find(|t| t.object == active)
+                            .map(|t| t.mesh.clone()),
+                        picked: None,
+                        add,
+                    },
+                })
+            },
+        );
+    }
+
+    /// Export on the pool; cancelling leaves no file behind (see
+    /// [`mf_io::write_path_with`]).
+    pub fn export(&self, job: ExportJob, path: PathBuf, ctx: RunContext) {
+        self.spawn("export", true, move || {
+            let result = match &job {
+                ExportJob::Mesh(mesh, format) => mf_io::write_path_with(mesh, &path, *format, &ctx),
+                ExportJob::Model(model) => mf_io::write_model_path_with(model, &path, &ctx),
+            };
+            Message::Exported(result.map(|()| path))
+        });
+    }
 }
 
 /// The largest hole the fill operation can take (its `max_loop_edges` limit).
@@ -143,18 +372,24 @@ fn fill_cap() -> usize {
 }
 
 /// Diagnostics, defects and render vertices for one revision (O(n), so off
-/// the UI thread).
-/// Measurements are made after the object's `transform`.
-pub fn analyze((mesh, transform): (Mesh, [f64; 12])) -> Message {
-    let diagnostics = mf_geometry::inspect(&mesh);
+/// the UI thread). Measurements are made after the object's `transform`.
+/// Cancelled when a newer revision is submitted (see analysis.rs).
+pub fn analyze(
+    (mesh, transform): (Mesh, [f64; 12]),
+    ctx: &RunContext,
+) -> Result<Message, Cancelled> {
+    let diagnostics = mf_geometry::inspect_with(&mesh, ctx)?;
+    ctx.checkpoint()?;
     let defects = crate::defects::classify(&mesh, &diagnostics, &transform, fill_cap());
     let crack_ids: Vec<u32> = defects
         .cracks
         .iter()
         .filter_map(|d| d.selection().map(|(_, id)| id))
         .collect();
+    ctx.checkpoint()?;
     // Cracks get only the crack colour: no hole outline under them.
     let vertices = Arc::new(MeshVertices::build_skipping(&mesh, &crack_ids));
+    ctx.checkpoint()?;
     let origin = vertices.origin;
     let tangled: Vec<[u32; 2]> = defects
         .tangled
@@ -165,7 +400,7 @@ pub fn analyze((mesh, transform): (Mesh, [f64; 12])) -> Message {
         })
         .collect();
     let loose: Vec<u32> = mesh
-        .topology()
+        .topology_with(ctx)?
         .components
         .iter()
         .skip(1)
@@ -184,25 +419,23 @@ pub fn analyze((mesh, transform): (Mesh, [f64; 12])) -> Message {
         defects: Arc::new(defects),
         layers,
     };
-    Message::Analyzed {
+    Ok(Message::Analyzed {
         mesh,
         analysis: Box::new(analysis),
-    }
+    })
 }
 
-/// Build an overlay on a worker: O(target) to O(n) (a large component, or
-/// finding a loop's vertices), so never on the UI thread (MF-RT-001).
-pub fn build_overlay(
-    tx: &Sender<Message>,
-    ctx: &eframe::egui::Context,
+/// An overlay for `target` on `mesh` (see [`Workers::build_overlay`]).
+fn build_overlay(
     purpose: OverlayPurpose,
     object: ObjectId,
     mesh: Mesh,
     target: OverlayTarget,
-) {
-    spawn(tx, ctx, move || {
+    ctx: &RunContext,
+) -> Result<Message, Cancelled> {
+    {
         let origin = crate::app::mesh_origin(&mesh);
-        let topo = mesh.topology();
+        let topo = mesh.topology_with(ctx)?;
         let (mut lines, mut faces, mut points) = (Vec::new(), Vec::new(), Vec::new());
         // The faces whose normals say which way the target faces.
         let around: Vec<u32> = match &target {
@@ -252,7 +485,7 @@ pub fn build_overlay(
                         },
                     })
                 });
-        Message::Overlay {
+        Ok(Message::Overlay {
             purpose,
             object,
             mesh: mesh.clone(),
@@ -263,8 +496,8 @@ pub fn build_overlay(
                 bounds,
                 normal,
             },
-        }
-    });
+        })
+    }
 }
 
 /// Live faces with an edge among `edges` (either direction). O(n).
@@ -308,47 +541,6 @@ fn face_corners<'a>(mesh: &'a Mesh, faces: &'a [u32]) -> impl Iterator<Item = u3
         .iter()
         .filter_map(|&f| mesh.face(mf_geometry::FaceId(f)))
         .flatten()
-}
-
-/// Render vertices only, for an object that isn't active (MF-ISSUE-042): it
-/// still needs to be drawn at its transform, but not analysed.
-pub fn build_vertices(
-    tx: &Sender<Message>,
-    ctx: &eframe::egui::Context,
-    object: ObjectId,
-    mesh: Mesh,
-) {
-    spawn(tx, ctx, move || {
-        let vertices = Arc::new(MeshVertices::build(&mesh));
-        Message::ObjectVertices {
-            object,
-            mesh,
-            vertices,
-        }
-    });
-}
-
-/// Replay a command log off the UI thread (it re-imports source files).
-pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
-    spawn(tx, ctx, move || {
-        Message::Replayed(
-            mf_command::replay(&dir)
-                .map(|report| {
-                    let mut lines: Vec<String> = report
-                        .results
-                        .iter()
-                        .map(|(id, v)| format!("command {}: {v:?}", id.0))
-                        .collect();
-                    lines.push(if report.all_verified() {
-                        format!("All {} command(s) verified.", report.results.len())
-                    } else {
-                        "Replay did NOT reproduce the log.".into()
-                    });
-                    lines
-                })
-                .map_err(|e| e.to_string()),
-        )
-    });
 }
 
 /// One object a click can land on: its mesh and object-to-world transform
@@ -418,59 +610,10 @@ fn pick_targets<'a>(
         .map(|(target, picked, _)| PickHit { target, picked })
 }
 
-/// Ray-cast pick on a worker (O(n) over faces, across every object). All
-/// O(n) work (topology, ray casts) happens here, never on the UI thread
-/// (MF-RT-001). `active` is reported when the click hits nothing, so a
-/// miss still clears the right object's selection; its mesh comes from
-/// `targets` if it has one there (an active object with no mesh, such as a
-/// non-mesh geometry kind, reports no mesh rather than a fabricated one).
-#[allow(clippy::too_many_arguments)]
-pub fn pick(
-    tx: &Sender<Message>,
-    ctx: &eframe::egui::Context,
-    targets: Vec<PickTarget>,
-    active: ObjectId,
-    cam: mf_render::OrbitCamera,
-    origin: glam::DVec3,
-    size: (f64, f64),
-    px: (f64, f64),
-    add: bool,
-) {
-    spawn(tx, ctx, move || {
-        match pick_targets(&targets, &cam, origin, size, px) {
-            Some(hit) => Message::Picked {
-                object: hit.target.object,
-                mesh: Some(hit.target.mesh.clone()),
-                picked: Some(hit.picked),
-                add,
-            },
-            None => Message::Picked {
-                object: active,
-                mesh: targets
-                    .iter()
-                    .find(|t| t.object == active)
-                    .map(|t| t.mesh.clone()),
-                picked: None,
-                add,
-            },
-        }
-    });
-}
-
 /// What to export: one mesh, or a whole 3MF model.
 pub enum ExportJob {
     Mesh(Mesh, Format),
     Model(mf_io::threemf::Model),
-}
-
-pub fn export(tx: &Sender<Message>, ctx: &eframe::egui::Context, job: ExportJob, path: PathBuf) {
-    spawn(tx, ctx, move || {
-        let result = match &job {
-            ExportJob::Mesh(mesh, format) => mf_io::write_path(mesh, &path, *format),
-            ExportJob::Model(model) => mf_io::write_model_path(model, &path),
-        };
-        Message::Exported(result.map(|()| path))
-    });
 }
 
 #[cfg(test)]
@@ -501,7 +644,9 @@ mod tests {
     fn cracks_are_not_outlined_in_the_hole_colour() {
         let plate = mf_fixtures::plate_with_defects();
         let identity = mf_io::threemf::IDENTITY;
-        let Message::Analyzed { analysis, .. } = analyze((plate, identity)) else {
+        let Ok(Message::Analyzed { analysis, .. }) =
+            analyze((plate, identity), &RunContext::none())
+        else {
             panic!("analyze answers with Analyzed");
         };
         let edges = |list: &[Defect]| -> usize {

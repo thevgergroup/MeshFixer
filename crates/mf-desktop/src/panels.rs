@@ -19,13 +19,12 @@ const PROPERTIES_WIDTH: f32 = 280.0;
 const MAX_ROWS: usize = 200;
 
 pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
     egui::Panel::top("menu").show(ui, |ui| {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button("File", |ui| {
                 let idle = app.busy.is_none();
                 if ui.add_enabled(idle, egui::Button::new("Open…")).clicked() {
-                    app.open_dialog(&ctx);
+                    app.open_dialog();
                     ui.close();
                 }
                 let can_export = idle && app.active_mesh().is_some();
@@ -33,7 +32,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     .add_enabled(can_export, egui::Button::new("Export…"))
                     .clicked()
                 {
-                    app.export_dialog(&ctx);
+                    app.export_dialog();
                     ui.close();
                 }
                 ui.separator();
@@ -48,7 +47,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     .add_enabled(idle, egui::Button::new("Replay Command Log…"))
                     .clicked()
                 {
-                    app.replay_dialog(&ctx);
+                    app.replay_dialog();
                     ui.close();
                 }
             });
@@ -110,6 +109,13 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     app.show_controls = true;
                     ui.close();
                 }
+                ui.separator();
+                // MF-RT-004: the thread budget, shown in diagnostics.
+                let pool = app.pool_choice();
+                ui.weak(format!(
+                    "Background work: {} of {} cores ({})",
+                    pool.threads, pool.cores, pool.reason
+                ));
             });
         });
     });
@@ -212,11 +218,14 @@ pub fn history_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     });
 }
 
-/// The status line: what's running, or the last result, or "Ready".
-fn status(app: &MeshFixerApp, ui: &mut egui::Ui) {
-    let (text, spinning) = if let Some(busy) = &app.busy {
-        (busy.clone(), true)
-    } else if app.is_analyzing() {
+/// The status line: what's running (with its stage, percentage and a
+/// Cancel button), or the last result, or "Ready". Laid out right to left.
+fn status(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    if let Some(busy) = app.busy.clone() {
+        job_status(app, ui, &busy);
+        return;
+    }
+    let (text, spinning) = if app.is_analyzing() {
         ("Analyzing…".to_owned(), true)
     } else if let Some(status) = &app.status {
         (status.clone(), false)
@@ -227,6 +236,57 @@ fn status(app: &MeshFixerApp, ui: &mut egui::Ui) {
         .on_hover_text(&text);
     if spinning {
         ui.spinner();
+    }
+}
+
+/// Width of the job's progress bar in the status line.
+const PROGRESS_WIDTH: f32 = 90.0;
+
+/// A running job: Cancel (or "Cancelling…"), a progress bar, and "<job> ·
+/// <stage> <n>%" (MF-RT-003). Jobs that report no progress get a spinner.
+fn job_status(app: &mut MeshFixerApp, ui: &mut egui::Ui, busy: &str) {
+    if app.can_cancel() {
+        if ui
+            .button("Cancel")
+            .on_hover_text("Stop it (Esc); the document stays as it is")
+            .clicked()
+        {
+            app.cancel_job();
+        }
+    } else if app.is_cancelling() {
+        ui.weak("Cancelling…");
+    }
+    let progress = app.job_progress().filter(|(stage, _)| !stage.is_empty());
+    let text = match progress {
+        Some((stage, fraction)) => {
+            ui.add(
+                egui::ProgressBar::new(fraction as f32)
+                    .desired_width(PROGRESS_WIDTH)
+                    .fill(theme::PROGRESS),
+            );
+            format!("{busy} · {} {:.0}%", stage_label(stage), fraction * 100.0)
+        }
+        None => {
+            ui.spinner();
+            busy.to_owned()
+        }
+    };
+    ui.add(egui::Label::new(RichText::new(&text).color(theme::TEXT_MUTED)).truncate())
+        .on_hover_text(&text);
+}
+
+/// A progress stage in plain words.
+fn stage_label(stage: &str) -> String {
+    match stage {
+        "reading" => "reading the file".into(),
+        "welding" => "joining corners".into(),
+        "topology" => "finding edges".into(),
+        "inspecting" => "checking".into(),
+        "triangulating" => "filling".into(),
+        "refining" => "smoothing the patches".into(),
+        "removing" => "removing pieces".into(),
+        mf_io::WRITING => "writing the file".into(),
+        other => other.replace('_', " "),
     }
 }
 
@@ -345,7 +405,10 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                     ("+ or = / −", "Zoom in / out"),
                     ("F", "Frame the selection (or everything)"),
                     ("Home or Cmd/Ctrl+0", "Reset the view"),
-                    ("Esc", "Clear the selection"),
+                    (
+                        "Esc",
+                        "Cancel the running job; otherwise clear the selection",
+                    ),
                     ("Cmd+Z / Shift+Cmd+Z", "Undo / Redo"),
                 ],
             );
@@ -500,7 +563,6 @@ fn overlay_target(d: &Defect) -> OverlayTarget {
 /// Right: "Properties & Tools", contextual to the current target: what it
 /// is, the operations valid for it, their parameters, and Apply.
 pub fn properties_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
     egui::Panel::right("properties")
         .resizable(true)
         .default_size(PROPERTIES_WIDTH)
@@ -518,7 +580,7 @@ pub fn properties_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     }
                     target_section(app, ui);
                     ui.add_space(8.0);
-                    tools_section(app, ui, &ctx);
+                    tools_section(app, ui);
                     ui.add_space(8.0);
                     details_section(app, ui);
                 });
@@ -646,7 +708,7 @@ fn selection_title(sel: &Selection, n: usize) -> String {
 
 /// The operations valid for the target. Targeted tools are open at once;
 /// whole-object tools open when chosen.
-fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let tools = app.tools();
     if tools.is_empty() {
         return;
@@ -676,12 +738,12 @@ fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context)
             app.tool = if open { None } else { Some(tool.op_id.clone()) };
         }
         if open {
-            ui.indent(("tool", &tool.op_id), |ui| tool_body(app, ui, ctx, tool));
+            ui.indent(("tool", &tool.op_id), |ui| tool_body(app, ui, tool));
         }
     }
 }
 
-fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context, tool: &Tool) {
+fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
     let Some(spec) = mf_spec::builtin::get(&tool.op_id) else {
         ui.label(format!("Unknown operation {}", tool.op_id));
         return;
@@ -742,7 +804,7 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context, too
             .add_enabled(can_apply, egui::Button::new("Apply"))
             .clicked()
         {
-            app.apply(ctx, tool);
+            app.apply(tool);
         }
         let editable = spec
             .parameters

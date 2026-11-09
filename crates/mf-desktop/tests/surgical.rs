@@ -225,8 +225,7 @@ fn selection_belongs_to_the_active_object() {
 
     // Opening another file makes it active: the old selection (another
     // object's loop IDs) must not be drawn on it or applied to it.
-    let ctx = h.ctx.clone();
-    h.state_mut().open(&ctx, second);
+    h.state_mut().open(second);
     wait_until(&mut h, "second import + analysis", |a| {
         a.active != Some(first_id) && loops(a).is_some()
     });

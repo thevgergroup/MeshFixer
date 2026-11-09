@@ -44,6 +44,9 @@ pub const BACK_FACE: Color32 = Color32::from_rgb(78, 84, 100);
 pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(38, 41, 46);
 /// Secondary text: details, hints, steps you can redo.
 pub const TEXT_MUTED: Color32 = Color32::from_gray(150);
+/// The running job's progress bar (a neutral: progress is not a defect,
+/// nor the selection).
+pub const PROGRESS: Color32 = Color32::from_gray(120);
 /// The error banner's background (a dark rose: failures, never geometry).
 pub const ERROR_FILL: Color32 = Color32::from_rgb(110, 32, 58);
 

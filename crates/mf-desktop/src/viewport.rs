@@ -7,9 +7,10 @@ use std::sync::Arc;
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
+use mf_metrics::GpuTime;
 use mf_render::{
-    GpuFaces, GpuLines, GpuMesh, Layer, LayerGeometry, LineVertex, MeshRenderer, MeshVertices,
-    OrbitCamera, Palette, RenderTarget, SurfaceVertex, model_matrix,
+    GpuFaces, GpuLines, GpuMesh, GpuTimer, Layer, LayerGeometry, LineVertex, MeshRenderer,
+    MeshVertices, OrbitCamera, Palette, RenderTarget, SurfaceVertex, model_matrix,
 };
 
 use crate::theme;
@@ -73,6 +74,8 @@ pub struct ViewOptions<'a> {
     pub updating: bool,
     /// Text shown when there's nothing to draw.
     pub placeholder: &'a str,
+    /// The app's frame index (`FrameTimes`), to tag the GPU time with.
+    pub frame: u64,
 }
 
 /// A primary click in the viewport (not a drag), in points relative to the
@@ -133,6 +136,10 @@ pub struct Viewport {
     pub last_rect: Option<egui::Rect>,
     /// Frames actually rendered (for tests and the debug readout).
     pub frames_rendered: u64,
+    /// Times the 3D view's pass on the GPU; `None` when the device can't.
+    timer: Option<GpuTimer>,
+    /// The last frame that redrew the 3D view.
+    redrawn: Option<u64>,
 }
 
 impl Viewport {
@@ -142,7 +149,10 @@ impl Viewport {
             RenderTarget::format(MSAA_SAMPLES),
             palette,
         );
+        let timer = GpuTimer::new(&render_state.device, &render_state.queue);
         Viewport {
+            timer,
+            redrawn: None,
             nav_mode: NavMode::Orbit,
             hold: None,
             render_state,
@@ -172,6 +182,7 @@ impl Viewport {
             layers,
             updating,
             placeholder,
+            frame,
         } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -214,7 +225,7 @@ impl Viewport {
             (rect.width() * ppp).round().clamp(1.0, max) as u32,
             (rect.height() * ppp).round().clamp(1.0, max) as u32,
         );
-        let texture = self.render(*cam, objects, show_boundaries, &layers, size);
+        let texture = self.render(*cam, objects, show_boundaries, &layers, size, frame);
         ui.painter().image(
             texture,
             rect,
@@ -357,6 +368,7 @@ impl Viewport {
         show_boundaries: bool,
         layers: &[ViewLayer],
         size: (u32, u32),
+        frame: u64,
     ) -> egui::TextureId {
         let device = &self.render_state.device;
         let mut dirty = false;
@@ -488,7 +500,7 @@ impl Viewport {
                     })
                 })
                 .collect();
-            target.draw(
+            target.draw_timed(
                 device,
                 &self.render_state.queue,
                 &mut self.renderer,
@@ -496,12 +508,47 @@ impl Viewport {
                 &items,
                 show_boundaries,
                 &gpu_layers,
+                self.timer.as_mut().map(|t| (t, frame)),
             );
+            self.redrawn = Some(frame);
             self.last_frame = Some(key);
             self.frames_rendered += 1;
         }
         self.texture
             .expect("the texture is registered whenever a render target exists")
+    }
+}
+
+impl Viewport {
+    /// GPU times of earlier frames that have been read back since the last
+    /// call, as (frame, time). Never waits for the GPU.
+    pub fn collect_gpu_times(&mut self) -> Vec<(u64, std::time::Duration)> {
+        match self.timer.as_mut() {
+            Some(t) => t.collect(&self.render_state.device),
+            None => Vec::new(),
+        }
+    }
+
+    /// GPU samples that couldn't be used (see [`GpuTimer::failed`]);
+    /// `None` without GPU timestamps.
+    pub fn gpu_samples_failed(&self) -> Option<u64> {
+        self.timer.as_ref().map(|t| t.failed)
+    }
+
+    /// What frame `frame` did on the GPU: drew the 3D view (its time
+    /// follows via [`Viewport::collect_gpu_times`]) or not. A device
+    /// without GPU timestamps says so.
+    pub fn frame_gpu_time(&self, frame: u64) -> GpuTime {
+        if self.timer.is_none() {
+            return GpuTime::Unsupported;
+        }
+        // A redraw that couldn't be timed (every read-back was busy) stays
+        // pending for good: its time is unknown, never zero.
+        if self.redrawn == Some(frame) {
+            GpuTime::Pending
+        } else {
+            GpuTime::NotRendered
+        }
     }
 }
 

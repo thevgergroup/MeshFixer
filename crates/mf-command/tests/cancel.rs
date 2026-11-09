@@ -312,6 +312,44 @@ fn cancelled_topology_is_not_cached() {
     assert_eq!(*topo, mf_geometry::Topology::compute(&mesh));
 }
 
+/// A cancellable caller waiting for the topology another thread is
+/// computing (it holds the mesh's topology lock all the while) stops when
+/// cancelled, rather than waiting the computation out (MF-RT-002). The
+/// desktop's Cancel and its picking lane rely on this.
+#[test]
+fn waiting_for_another_threads_topology_is_cancellable() {
+    let _guard = heavy();
+    let mesh = big_mesh();
+    mesh.release_topology();
+    let computing = RunContext::none();
+    let m = mesh.clone();
+    let first = spawn(&computing, move |ctx| m.topology_with(ctx).map(|_| ()));
+    // The first caller is computing, so it holds the lock.
+    while !matches!(computing.progress.snapshot(), ("topology", f) if f > 0.05) {
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    let ctx = RunContext::none();
+    let m = mesh.clone();
+    let waiting = spawn(&ctx, move |ctx| m.topology_with(ctx).map(|_| ()));
+    std::thread::sleep(Duration::from_millis(20));
+    let cancelled_at = Instant::now();
+    ctx.cancel.cancel();
+    let (result, returned_at) = waiting.recv().unwrap();
+    assert!(result.is_err(), "the waiting caller wasn't cancelled");
+    let took = returned_at.saturating_duration_since(cancelled_at);
+    assert!(took <= CANCEL_BUDGET, "took {took:?} to stop waiting");
+    let (first_result, first_done) = first.recv().unwrap();
+    assert!(
+        first_done > returned_at,
+        "the topology finished before the cancel; nothing was tested"
+    );
+    first_result.unwrap();
+    assert!(
+        mesh.has_cached_topology(),
+        "the first caller's topology is kept"
+    );
+}
+
 /// Every update a context's progress sends, in order.
 fn stages_seen(updates: &[(&'static str, f64)]) -> Vec<&'static str> {
     let mut stages: Vec<&'static str> = Vec::new();

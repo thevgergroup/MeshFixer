@@ -302,8 +302,7 @@ fn importing_into_a_non_empty_document_reframes_the_camera() {
     // 1.1x margin `OrbitCamera::fit` applies).
     assert!(radius_before < 2.0, "{radius_before}");
 
-    let ctx = h.ctx.clone();
-    h.state_mut().open(&ctx, second);
+    h.state_mut().open(second);
     wait_until(&mut h, "second import", |a| {
         a.session.document().objects().len() == 2
     });

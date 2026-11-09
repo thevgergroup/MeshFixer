@@ -344,6 +344,12 @@ impl JobPool {
     /// refuses to spawn threads); that is an environment failure, not one
     /// this crate should hide behind a fallback.
     pub fn new(threads: Option<usize>) -> (Self, PoolChoice) {
+        Self::named("mf-pool", threads)
+    }
+
+    /// As [`JobPool::new`], with threads named `{name}-0`, `{name}-1`, ...
+    /// (for example a separate small pool for latency-sensitive work).
+    pub fn named(name: &'static str, threads: Option<usize>) -> (Self, PoolChoice) {
         // `available_parallelism` only errs when the OS cannot answer at
         // all (e.g. a heavily sandboxed environment); 1 core is then the
         // only safe assumption, not a guess hiding a real failure. Whether
@@ -368,7 +374,7 @@ impl JobPool {
 
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(chosen)
-            .thread_name(|i| format!("mf-pool-{i}"))
+            .thread_name(move |i| format!("{name}-{i}"))
             .build()
             .expect("failed to build mf-runtime job pool");
 
@@ -379,6 +385,15 @@ impl JobPool {
         };
 
         (Self { pool }, choice)
+    }
+
+    /// Runs `f` on one of this pool's threads without waiting for it.
+    /// Parallel work inside `f` (rayon iterators, joins) runs on this pool.
+    ///
+    /// A panic in `f` aborts the process (rayon's default), so callers
+    /// that must survive one catch it inside `f`.
+    pub fn spawn(&self, f: impl FnOnce() + Send + 'static) {
+        self.pool.spawn(f)
     }
 
     /// Runs `f` on this pool's threads and returns its result.

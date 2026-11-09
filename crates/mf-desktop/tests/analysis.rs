@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use mf_desktop::analysis::{AnalysisCache, LatestWorker};
 use mf_fixtures::{cube, tetrahedron};
+use mf_runtime::{JobPool, RunContext};
 
 #[test]
 fn latest_worker_bounds_work_and_always_runs_the_last_request() {
@@ -15,14 +16,16 @@ fn latest_worker_bounds_work_and_always_runs_the_last_request() {
     let max_running = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = channel();
     let (s, r, m) = (started.clone(), running.clone(), max_running.clone());
+    let (pool, _) = JobPool::new(Some(4));
     let worker = LatestWorker::new(
-        move |n: u32| {
+        Arc::new(pool),
+        move |n: u32, _ctx: &RunContext| {
             s.fetch_add(1, Ordering::SeqCst);
             let now = r.fetch_add(1, Ordering::SeqCst) + 1;
             m.fetch_max(now, Ordering::SeqCst);
             std::thread::sleep(Duration::from_millis(20));
             r.fetch_sub(1, Ordering::SeqCst);
-            n
+            Ok(n)
         },
         move |n| tx.send(n).unwrap(),
     );
@@ -47,6 +50,38 @@ fn latest_worker_bounds_work_and_always_runs_the_last_request() {
         1,
         "one analysis at a time"
     );
+}
+
+/// A newer request cancels the one running (the analysis of a revision
+/// nobody will look at), and only finished work is reported.
+#[test]
+fn a_newer_request_cancels_the_running_one() {
+    let (tx, rx) = channel();
+    let (pool, _) = JobPool::new(Some(2));
+    let (started_tx, started_rx) = channel();
+    let worker = LatestWorker::new(
+        Arc::new(pool),
+        move |n: u32, ctx: &RunContext| {
+            started_tx.send(n).unwrap();
+            if n == 0 {
+                let start = std::time::Instant::now();
+                while start.elapsed() < Duration::from_secs(10) {
+                    ctx.checkpoint()?;
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+            Ok((n, std::time::Instant::now()))
+        },
+        move |r| tx.send(r).unwrap(),
+    );
+    worker.submit(0);
+    assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 0);
+    let submitted = std::time::Instant::now();
+    worker.submit(1);
+    let (n, at) = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(n, 1, "the cancelled request reported nothing");
+    assert!(at.duration_since(submitted) < Duration::from_secs(1));
+    assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 }
 
 #[test]

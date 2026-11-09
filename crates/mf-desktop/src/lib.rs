@@ -4,9 +4,10 @@
 pub mod analysis;
 pub mod app;
 pub mod defects;
+pub mod gpu;
 mod panels;
 pub mod theme;
 pub mod viewport;
 pub mod worker;
 
-pub use app::MeshFixerApp;
+pub use app::{MeshFixerApp, Settings};

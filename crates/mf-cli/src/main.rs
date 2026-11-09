@@ -3,16 +3,24 @@
 //! Operation subcommands are generated from the built-in operation specs and
 //! run through the same [`Session`] path as the desktop app (MF-SPEC-003,
 //! MF-CMD-001). Exit codes: 0 success, 1 I/O or operation error, 2 usage or
-//! parameter error.
+//! parameter error, 130 cancelled (Ctrl-C / SIGINT: the running job stops
+//! and no output file is written).
+//!
+//! Work runs on one job pool (`--threads`, default all cores but one;
+//! MF-RT-004). `--progress` prints `progress <stage> <fraction>` lines to
+//! stderr (MF-RT-003).
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgMatches, Command};
 use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
 use mf_io::{Format, IoError};
 use mf_metrics::{CountingAlloc, Phase, measure};
+use mf_runtime::{JobPool, PoolChoice, RunContext};
 use mf_selection::{Selection, SelectionKind, Translation};
 
 #[global_allocator]
@@ -24,6 +32,8 @@ struct Metrics {
     phases: Vec<Phase>,
     mesh_bytes: u64,
     topology_bytes: u64,
+    /// The job pool's size: requested, chosen, cores and why (MF-RT-004).
+    threads: Option<(Option<usize>, PoolChoice)>,
 }
 
 impl Metrics {
@@ -43,6 +53,12 @@ impl Metrics {
             "phases": self.phases,
             "structures": { "mesh": self.mesh_bytes, "topology": self.topology_bytes },
             "peak_heap": mf_metrics::peak_bytes_since_start(),
+            "threads": self.threads.map(|(requested, choice)| serde_json::json!({
+                "requested": requested,
+                "threads": choice.threads,
+                "cores": choice.cores,
+                "reason": choice.reason,
+            })),
             "allocator_installed": mf_metrics::is_installed(),
         });
         let text =
@@ -54,11 +70,16 @@ impl Metrics {
 enum Failure {
     Usage(String),
     Runtime(String),
+    /// Ctrl-C: the job stopped and nothing was written.
+    Cancelled,
 }
 
 impl From<IoError> for Failure {
     fn from(e: IoError) -> Self {
-        Failure::Runtime(e.to_string())
+        match e {
+            IoError::Cancelled => Failure::Cancelled,
+            e => Failure::Runtime(e.to_string()),
+        }
     }
 }
 
@@ -68,9 +89,26 @@ impl From<CommandError> for Failure {
             CommandError::Spec(_) | CommandError::UnknownOperation(_) => {
                 Failure::Usage(e.to_string())
             }
+            CommandError::Cancelled => Failure::Cancelled,
             _ => Failure::Runtime(e.to_string()),
         }
     }
+}
+
+impl From<mf_runtime::Cancelled> for Failure {
+    fn from(_: mf_runtime::Cancelled) -> Self {
+        Failure::Cancelled
+    }
+}
+
+/// Run `inv` with `ctx` (cancellable, reporting progress) and commit it.
+fn execute(
+    session: &mut Session,
+    inv: Invocation,
+    ctx: &RunContext,
+) -> Result<CommitOutcome, CommandError> {
+    let completed = session.prepare(inv)?.run(ctx)?;
+    session.commit(completed)
 }
 
 fn input_arg() -> Arg {
@@ -107,6 +145,22 @@ fn cli() -> Command {
                 .global(true)
                 .value_parser(clap::value_parser!(PathBuf))
                 .help("Write timing and memory measurements as JSON to this path"),
+        )
+        .arg(
+            Arg::new("progress")
+                .long("progress")
+                .global(true)
+                .action(clap::ArgAction::SetTrue)
+                .help(
+                    "Print 'progress <stage> <0.000-1.000>' lines to stderr (at most 10 a second)",
+                ),
+        )
+        .arg(
+            Arg::new("threads")
+                .long("threads")
+                .global(true)
+                .value_parser(clap::value_parser!(usize))
+                .help("Worker threads (default: all cores but one)"),
         )
         .subcommand(
             Command::new("inspect")
@@ -235,8 +289,12 @@ fn cli() -> Command {
 }
 
 /// Import every object of the file; commands act on the first one.
-fn open(path: &Path, metrics: &mut Metrics) -> Result<(Session, ObjectId), Failure> {
-    let model = metrics.record("import", || mf_io::read_model(path))?;
+fn open(
+    path: &Path,
+    metrics: &mut Metrics,
+    ctx: &RunContext,
+) -> Result<(Session, ObjectId), Failure> {
+    let model = metrics.record("import", || mf_io::read_model_with(path, ctx))?;
     let mut session = Session::new();
     let (ids, warnings) = session.import_model(model);
     for w in &warnings {
@@ -267,6 +325,7 @@ fn export(
     output: &Path,
     format: Format,
     metrics: &mut Metrics,
+    ctx: &RunContext,
 ) -> Result<(), Failure> {
     let doc = session.document();
     let mesh = doc
@@ -293,21 +352,25 @@ fn export(
             unit: doc.units(),
             objects,
         };
-        metrics.record("export", || mf_io::write_model_path(&model, output))?;
+        metrics.record("export", || {
+            mf_io::write_model_path_with(&model, output, ctx)
+        })?;
     } else {
-        metrics.record("export", || mf_io::write_path(mesh, output, format))?;
+        metrics.record("export", || {
+            mf_io::write_path_with(mesh, output, format, ctx)
+        })?;
     }
     Ok(())
 }
 
-fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
+fn inspect(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
     let path = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let (mut session, id) = open(path, metrics)?;
+    let (mut session, id) = open(path, metrics, ctx)?;
     if let Some(mesh) = session.document().object(id).and_then(|o| o.mesh()) {
         let mesh = mesh.clone();
-        metrics.record("topology", || mesh.topology());
+        metrics.record("topology", || mesh.topology_with(ctx))?;
         metrics.structures(&mesh);
     }
     let inv = Invocation {
@@ -316,7 +379,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
         target: id,
         raw_params: Default::default(),
     };
-    let CommitOutcome::Report(report) = session.execute(inv)? else {
+    let CommitOutcome::Report(report) = execute(&mut session, inv, ctx)? else {
         return Err(Failure::Runtime(
             "inspect unexpectedly changed the document".into(),
         ));
@@ -338,7 +401,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
     Ok(())
 }
 
-fn render(m: &ArgMatches) -> Result<(), Failure> {
+fn render(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
@@ -355,13 +418,14 @@ fn render(m: &ArgMatches) -> Result<(), Failure> {
         !m.get_flag("no-boundaries"),
     )
     .map_err(|e| Failure::Runtime(e.to_string()))?;
+    ctx.checkpoint()?;
     image
         .save_with_format(output, image::ImageFormat::Png)
         .map_err(|e| Failure::Runtime(e.to_string()))?;
     Ok(())
 }
 
-fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
+fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let output = m
         .get_one::<PathBuf>("output")
         .ok_or_else(|| Failure::Usage("missing output".into()))?;
@@ -385,7 +449,7 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
                 })
                 .collect(),
         };
-        mf_io::write_model_path(&model, output)?;
+        mf_io::write_model_path_with(&model, output, ctx)?;
         eprintln!(
             "wrote {} objects to {}",
             model.objects.len(),
@@ -397,7 +461,8 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
     let seed = *m.get_one::<u64>("seed").unwrap_or(&1);
     let mesh =
         mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(triangles, seed));
-    mf_io::write_path(&mesh, output, format)?;
+    ctx.checkpoint()?;
+    mf_io::write_path_with(&mesh, output, format, ctx)?;
     eprintln!(
         "wrote {} triangles to {}",
         mesh.triangle_count(),
@@ -540,7 +605,7 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     Ok(seq)
 }
 
-fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
+fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
@@ -558,17 +623,21 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
     }
-    let (mut session, id) = open(input, metrics)?;
+    let (mut session, id) = open(input, metrics, ctx)?;
     let import = session.current();
     for Step { op, raw, select } in seq {
         let selection = selection_for(&session, id, import, &select)?;
         let outcome = metrics.record("operation", || {
-            session.execute(Invocation {
-                selection,
-                op_id: op.clone(),
-                target: id,
-                raw_params: raw,
-            })
+            execute(
+                &mut session,
+                Invocation {
+                    selection,
+                    op_id: op.clone(),
+                    target: id,
+                    raw_params: raw,
+                },
+                ctx,
+            )
         })?;
         match outcome {
             CommitOutcome::NewRevision { report } => eprintln!("{op}: {report}"),
@@ -582,10 +651,10 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics) -> Result<(), Failure> {
             .map_err(|e| Failure::Runtime(e.to_string()))?;
         eprintln!("saved command log to {}", dir.display());
     }
-    export(&session, id, output, format, metrics)
+    export(&session, id, output, format, metrics, ctx)
 }
 
-fn replay_log(m: &ArgMatches) -> Result<(), Failure> {
+fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let dir = m
         .get_one::<PathBuf>("log")
         .ok_or_else(|| Failure::Usage("missing log".into()))?;
@@ -604,7 +673,7 @@ fn replay_log(m: &ArgMatches) -> Result<(), Failure> {
             .first()
             .and_then(|o| o.mesh())
             .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
-        mf_io::write_path(mesh, out, format)?;
+        mf_io::write_path_with(mesh, out, format, ctx)?;
     }
     if report.all_verified() {
         println!("all {} command(s) verified", report.results.len());
@@ -618,6 +687,7 @@ fn run_operation(
     spec: &mf_spec::OperationSpec,
     m: &ArgMatches,
     metrics: &mut Metrics,
+    ctx: &RunContext,
 ) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
@@ -637,49 +707,135 @@ fn run_operation(
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
-    let (mut session, id) = open(input, metrics)?;
+    let (mut session, id) = open(input, metrics, ctx)?;
     let selection = selection_for(&session, id, session.current(), &select)?;
     let outcome = metrics.record("operation", || {
-        session.execute(Invocation {
-            selection,
-            op_id: spec.id.clone(),
-            target: id,
-            raw_params,
-        })
+        execute(
+            &mut session,
+            Invocation {
+                selection,
+                op_id: spec.id.clone(),
+                target: id,
+                raw_params,
+            },
+            ctx,
+        )
     })?;
     if let CommitOutcome::NewRevision { report } = outcome {
         eprintln!("{}: {report}", spec.id);
     }
-    export(&session, id, output, format, metrics)
+    export(&session, id, output, format, metrics, ctx)
+}
+
+/// Progress lines are at most this often (10 a second).
+const PROGRESS_EVERY: Duration = Duration::from_millis(100);
+
+/// Prints `progress <stage> <fraction>` to stderr every [`PROGRESS_EVERY`]
+/// while the stage or fraction changed, until told how the run ended; a
+/// successful run ends with a line at 1.000. Never more than one line per
+/// [`PROGRESS_EVERY`], the last one included.
+fn progress_reporter(
+    progress: mf_runtime::Progress,
+) -> (mpsc::Sender<bool>, std::thread::JoinHandle<()>) {
+    let (done_tx, done_rx) = mpsc::channel::<bool>();
+    let thread = std::thread::Builder::new()
+        .name("mf-progress".into())
+        .spawn(move || {
+            let mut printed: Option<(&'static str, String)> = None;
+            let mut last_line: Option<Instant> = None;
+            let mut print = |printed: &mut Option<(&'static str, String)>,
+                             stage: &'static str,
+                             fraction: String| {
+                if let Some(t) = last_line {
+                    std::thread::sleep(PROGRESS_EVERY.saturating_sub(t.elapsed()));
+                }
+                eprintln!("progress {stage} {fraction}");
+                last_line = Some(Instant::now());
+                *printed = Some((stage, fraction));
+            };
+            loop {
+                let ended = match done_rx.recv_timeout(PROGRESS_EVERY) {
+                    Ok(success) => Some(success),
+                    Err(mpsc::RecvTimeoutError::Timeout) => None,
+                    // The sender only goes away once main is done.
+                    Err(mpsc::RecvTimeoutError::Disconnected) => Some(false),
+                };
+                let (stage, fraction) = progress.snapshot();
+                match ended {
+                    None => {
+                        let fraction = format!("{fraction:.3}");
+                        let changed = printed
+                            .as_ref()
+                            .is_none_or(|(s, f)| *s != stage || *f != fraction);
+                        if !stage.is_empty() && changed {
+                            print(&mut printed, stage, fraction);
+                        }
+                    }
+                    Some(true) => {
+                        let stage = if stage.is_empty() { "done" } else { stage };
+                        let finished = printed
+                            .as_ref()
+                            .is_some_and(|(s, f)| *s == stage && f == "1.000");
+                        if !finished {
+                            print(&mut printed, stage, "1.000".to_owned());
+                        }
+                        return;
+                    }
+                    Some(false) => return,
+                }
+            }
+        })
+        .expect("failed to spawn the progress thread");
+    (done_tx, thread)
 }
 
 fn main() -> ExitCode {
     let matches = cli().get_matches();
-    let mut metrics = Metrics::default();
-    let result = match matches.subcommand() {
-        Some(("inspect", m)) => inspect(m, &mut metrics),
-        Some(("render", m)) => render(m),
-        Some(("gen-fixture", m)) => gen_fixture(m),
-        Some(("run", m)) => run_sequence(m, &mut metrics),
-        Some(("replay", m)) => replay_log(m),
+    let sub = matches.subcommand().map(|(_, m)| m);
+    let requested = sub.and_then(|m| m.get_one::<usize>("threads").copied());
+    let (pool, choice) = JobPool::new(requested);
+    let mut metrics = Metrics {
+        threads: Some((requested, choice)),
+        ..Metrics::default()
+    };
+    let ctx = RunContext::none();
+    let cancel = ctx.cancel.clone();
+    if let Err(e) = ctrlc::set_handler(move || cancel.cancel()) {
+        eprintln!("error: can't handle Ctrl-C: {e}");
+        return ExitCode::from(1);
+    }
+    let reporter = sub
+        .is_some_and(|m| m.get_flag("progress"))
+        .then(|| progress_reporter(ctx.progress.clone()));
+    let result = pool.install(|| match matches.subcommand() {
+        Some(("inspect", m)) => inspect(m, &mut metrics, &ctx),
+        Some(("render", m)) => render(m, &ctx),
+        Some(("gen-fixture", m)) => gen_fixture(m, &ctx),
+        Some(("run", m)) => run_sequence(m, &mut metrics, &ctx),
+        Some(("replay", m)) => replay_log(m, &ctx),
         Some((name, m)) => match mf_spec::builtin::specs()
             .iter()
             .find(|s| mf_spec::cli::subcommand_name(s) == name)
         {
-            Some(spec) => run_operation(spec, m, &mut metrics),
+            Some(spec) => run_operation(spec, m, &mut metrics, &ctx),
             None => Err(Failure::Usage(format!("unknown command '{name}'"))),
         },
         None => Err(Failure::Usage("no command given".into())),
-    };
+    });
     let result = result.and_then(|()| {
-        let path = matches
-            .subcommand()
-            .and_then(|(_, m)| m.get_one::<PathBuf>("metrics").cloned());
+        let path = sub.and_then(|m| m.get_one::<PathBuf>("metrics").cloned());
         match path {
             Some(p) => metrics.write(&p),
             None => Ok(()),
         }
     });
+    if let Some((done, thread)) = reporter {
+        // allow-swallow: the reporter only stops listening once it has returned
+        let _ = done.send(result.is_ok());
+        if thread.join().is_err() {
+            eprintln!("error: the progress thread panicked");
+        }
+    }
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(Failure::Usage(msg)) => {
@@ -689,6 +845,10 @@ fn main() -> ExitCode {
         Err(Failure::Runtime(msg)) => {
             eprintln!("error: {msg}");
             ExitCode::from(1)
+        }
+        Err(Failure::Cancelled) => {
+            eprintln!("cancelled");
+            ExitCode::from(130)
         }
     }
 }

@@ -3,7 +3,9 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use crate::{DrawItem, Layer, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+use crate::{
+    DrawItem, GpuTimer, Layer, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat,
+};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -121,6 +123,33 @@ impl RenderTarget {
         show_boundaries: bool,
         layers: &[Layer<'_>],
     ) {
+        self.draw_timed(
+            device,
+            queue,
+            renderer,
+            camera,
+            items,
+            show_boundaries,
+            layers,
+            None,
+        );
+    }
+
+    /// As [`RenderTarget::draw`], timing the pass on the GPU as frame
+    /// `frame` of `timer` (see [`GpuTimer::collect`]). Returns whether the
+    /// pass was timed (it isn't while every read-back is still busy).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_timed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        camera: Option<&OrbitCamera>,
+        items: &[DrawItem<'_>],
+        show_boundaries: bool,
+        layers: &[Layer<'_>],
+        mut timer: Option<(&mut GpuTimer, u64)>,
+    ) -> bool {
         if let Some(camera) = camera {
             renderer.prepare(queue, camera, (self.width, self.height));
         }
@@ -130,6 +159,8 @@ impl RenderTarget {
             None => (&self.resolved_view, None),
         };
         let mut encoder = device.create_command_encoder(&Default::default());
+        let timestamp_writes = timer.as_mut().and_then(|(t, frame)| t.begin(*frame));
+        let timed = timestamp_writes.is_some();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mf view"),
@@ -155,7 +186,7 @@ impl RenderTarget {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
@@ -171,6 +202,13 @@ impl RenderTarget {
                 );
             }
         }
+        if let Some((t, _)) = timer.as_mut() {
+            t.resolve(&mut encoder);
+        }
         queue.submit([encoder.finish()]);
+        if let Some((t, _)) = timer {
+            t.submitted();
+        }
+        timed
     }
 }

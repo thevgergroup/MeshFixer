@@ -17,6 +17,7 @@ workspace = true
 
 [dependencies]
 mf-runtime.workspace = true
+mf-metrics.workspace = true
 mf-selection.workspace = true
 glam.workspace = true
 mf-geometry.workspace = true

@@ -38,7 +38,11 @@ Someone who has used Meshmixer or Fusion should understand the screen without an
   - Undo and Redo come first, then the history as steps in plain words (Import scan › Import plate › Fill hole › Remove piece).
   - The current step is highlighted. Steps that Redo would take are greyed. Click any step to jump to it.
   - "Branches…" appears when an undone branch exists and lists the whole history tree.
-  - The status line on the right reads "Ready", or shows what's running (with a spinner), or the last result.
+  - The status line on the right reads "Ready", or shows what's running, or the last result.
+  - While an import, operation or export runs, the status line shows the job, its stage in plain words and a percentage ("Fill all holes… · filling 42%"), a neutral progress bar (`PROGRESS`), and a **Cancel** button at the far right. Esc does the same as Cancel while a job runs, before it would clear the selection; otherwise Esc clears the selection as before. A job that reports no progress (replay) shows a spinner and has no Cancel.
+  - After Cancel the button gives way to "Cancelling…" until the job stops (within 250 ms), then the status reads exactly "Cancelled: document unchanged" (for an export: "Cancelled: nothing exported"). A job that finished before the cancel reached it keeps its result, and the status starts "Finished before it could be cancelled".
+  - Stage words: reading the file, joining corners, finding edges, checking, filling, smoothing the patches, removing pieces, writing the file.
+  - Help shows how many cores background work uses ("Background work: 11 of 12 cores (default: all cores but one)"); `meshfixer-desktop --threads N` changes it.
 - **There is no operation drop-down.** You reach operations from the target.
 - The default window is 1440 × 900 points.
 
@@ -83,6 +87,7 @@ Neutral tokens carry no meaning beyond "the model" and "the room":
 | `BACK_FACE` | `#4E5464` | back faces, seen through holes or flipped (dark slate, so it can't be confused with a defect colour) |
 | `VIEWPORT_BACKGROUND` | `#26292E` | the 3D view's background |
 | `TEXT_MUTED` | grey 150 | secondary text, hints, steps Redo would take |
+| `PROGRESS` | grey 120 | the running job's progress bar (neutral: progress is neither the selection's cyan nor a defect colour) |
 | `ERROR_FILL` | `#6E203A` | the error banner (a dark rose fill for failures, never used in the 3D view) |
 
 Line widths: defect outlines are 2 pt; overlay lines (selection, hover, cracks, tangled edges) are 3 pt. They are drawn as screen-space quads, so they keep that width at any zoom and on Retina displays.
@@ -130,7 +135,7 @@ Every move works without a mouse wheel: on a trackpad, with a one-button mouse, 
 | + or = / − | zoom in / out, 1.25× toward the view centre |
 | F | frame the target (or everything when nothing is targeted), keeping the view direction |
 | Home, or Cmd/Ctrl+0 | reset the view: the default angle, everything in view (Home needs Fn+← on Mac laptops) |
-| Esc | clear the selection |
+| Esc | cancel the running job; otherwise clear the selection |
 
 - **Navigation bar.** It sits at the 3D view's bottom-right, inside the view, drawn with the theme tokens. Each control has an accessible name and a tooltip naming its shortcut.
   - "Orbit / Pan / Zoom": a mode switch (default Orbit) that sets what a plain left-drag does. The current mode shows in the selected (cyan) style, because it is the selected option.

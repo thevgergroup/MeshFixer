@@ -1,87 +1,102 @@
 //! Background analysis of mesh revisions (diagnostics + render vertices).
 //!
-//! One worker thread, latest request wins: rapid undo/redo can't pile up
-//! threads or memory. Results are cached per revision and identified by
-//! pointer, so a result is only ever shown for the revision it describes.
+//! Latest request wins: a new request cancels the one running, and at most
+//! one runs at a time (on the app's job pool), so rapid undo/redo can't
+//! pile up work or memory. Results are cached per revision and identified
+//! by pointer, so a result is only ever shown for the revision it
+//! describes.
 
-use std::sync::{Arc, Condvar, Mutex};
-use std::thread::JoinHandle;
+use std::sync::{Arc, Mutex};
 
 use mf_geometry::Mesh;
+use mf_runtime::{CancelToken, Cancelled, JobPool, RunContext};
 
 struct Slot<T> {
-    pending: Option<T>,
+    pending: Option<(T, RunContext)>,
+    /// A drain loop is on the pool.
+    running: bool,
+    /// The newest request's token, cancelled when it is superseded.
+    latest: Option<CancelToken>,
     shutdown: bool,
 }
 
-/// A single background thread that runs only the most recent request.
+/// Runs one request with its context, reporting only finished work.
+type Run<T> = Arc<dyn Fn(T, &RunContext) + Send + Sync>;
+
+/// Runs only the most recent request, on a shared pool.
 pub struct LatestWorker<T: Send + 'static> {
-    shared: Arc<(Mutex<Slot<T>>, Condvar)>,
-    thread: Option<JoinHandle<()>>,
+    slot: Arc<Mutex<Slot<T>>>,
+    pool: Arc<JobPool>,
+    run: Run<T>,
 }
 
 impl<T: Send + 'static> LatestWorker<T> {
-    pub fn new<R: Send + 'static>(
-        work: impl Fn(T) -> R + Send + 'static,
-        done: impl Fn(R) + Send + 'static,
+    /// `work` returns `Err(Cancelled)` once a newer request has superseded
+    /// it; only finished work reaches `done`.
+    pub fn new<R: 'static>(
+        pool: Arc<JobPool>,
+        work: impl Fn(T, &RunContext) -> Result<R, Cancelled> + Send + Sync + 'static,
+        done: impl Fn(R) + Send + Sync + 'static,
     ) -> LatestWorker<T> {
-        let shared = Arc::new((
-            Mutex::new(Slot {
-                pending: None,
-                shutdown: false,
-            }),
-            Condvar::new(),
-        ));
-        let worker_shared = shared.clone();
-        let thread = std::thread::Builder::new()
-            .name("mf-analysis".into())
-            .spawn(move || {
-                let (lock, cvar) = &*worker_shared;
-                loop {
-                    let request = {
-                        let Ok(mut slot) = lock.lock() else { return };
-                        loop {
-                            if slot.shutdown {
-                                return;
-                            }
-                            if let Some(r) = slot.pending.take() {
-                                break r;
-                            }
-                            slot = match cvar.wait(slot) {
-                                Ok(s) => s,
-                                Err(_) => return,
-                            };
-                        }
-                    };
-                    done(work(request));
-                }
-            })
-            .expect("failed to spawn analysis thread");
         LatestWorker {
-            shared,
-            thread: Some(thread),
+            slot: Arc::new(Mutex::new(Slot {
+                pending: None,
+                running: false,
+                latest: None,
+                shutdown: false,
+            })),
+            pool,
+            run: Arc::new(move |request, ctx| {
+                // Err is a superseded request: there's nothing to report.
+                if let Ok(result) = work(request, ctx) {
+                    done(result);
+                }
+            }),
         }
     }
 
-    /// Queue `request`, replacing any request that hasn't started yet.
+    /// Queue `request`, cancelling the one running and replacing any that
+    /// hasn't started yet.
     pub fn submit(&self, request: T) {
-        let (lock, cvar) = &*self.shared;
-        if let Ok(mut slot) = lock.lock() {
-            slot.pending = Some(request);
-            cvar.notify_one();
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(old) = slot.latest.take() {
+            old.cancel();
         }
+        let ctx = RunContext::none();
+        slot.latest = Some(ctx.cancel.clone());
+        slot.pending = Some((request, ctx));
+        if slot.running {
+            return;
+        }
+        slot.running = true;
+        let (shared, run) = (self.slot.clone(), self.run.clone());
+        self.pool.spawn(move || {
+            loop {
+                let (request, ctx) = {
+                    let mut slot = shared.lock().unwrap_or_else(|p| p.into_inner());
+                    match slot.pending.take() {
+                        Some(next) if !slot.shutdown => next,
+                        _ => {
+                            slot.running = false;
+                            return;
+                        }
+                    }
+                };
+                run(request, &ctx);
+            }
+        });
     }
 }
 
 impl<T: Send + 'static> Drop for LatestWorker<T> {
     fn drop(&mut self) {
-        let (lock, cvar) = &*self.shared;
-        if let Ok(mut slot) = lock.lock() {
-            slot.shutdown = true;
-            cvar.notify_one();
+        let mut slot = self.slot.lock().unwrap_or_else(|p| p.into_inner());
+        slot.shutdown = true;
+        slot.pending = None;
+        // Don't block shutdown on a long analysis: cancel it.
+        if let Some(t) = slot.latest.take() {
+            t.cancel();
         }
-        // Don't block shutdown on a long analysis; the thread exits after it.
-        drop(self.thread.take());
     }
 }
 

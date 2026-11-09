@@ -278,3 +278,32 @@ mod stl_header_cases {
         assert!(!msg.contains("UTF-8"), "{msg}");
     }
 }
+
+/// A cancelled export writes nothing: no file at the path (an existing one
+/// is unchanged) and no temp file (MF-RT-002).
+#[test]
+fn cancelled_export_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.stl");
+    let mesh = mf_fixtures::cube(1.0);
+    let ctx = mf_runtime::RunContext::none();
+    ctx.cancel.cancel();
+    for format in [Format::StlBinary, Format::Obj, Format::ThreeMf] {
+        let r = mf_io::write_path_with(&mesh, &path, format, &ctx);
+        assert!(matches!(r, Err(IoError::Cancelled)), "{format:?}: {r:?}");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // An existing file is left as it was.
+    std::fs::write(&path, b"keep").unwrap();
+    let r = mf_io::write_path_with(&mesh, &path, Format::StlBinary, &ctx);
+    assert!(matches!(r, Err(IoError::Cancelled)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    // Not cancelled: written, and the progress ends at "writing" 1.0.
+    let ctx = mf_runtime::RunContext::none();
+    mf_io::write_path_with(&mesh, &path, Format::StlBinary, &ctx).unwrap();
+    assert_eq!(ctx.progress.snapshot(), (mf_io::WRITING, 1.0));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+}

@@ -1,13 +1,16 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{Receiver, Sender, channel};
+use std::sync::mpsc::{Receiver, channel};
+use std::time::Instant;
 
 use eframe::egui;
-use mf_command::{CommitOutcome, Invocation, ObjectId, RevisionId, Session};
+use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
 use mf_geometry::{Aabb, Mesh};
-use mf_io::Format;
+use mf_io::{Format, ImportedModel, IoError};
+use mf_metrics::FrameTimes;
 use mf_render::{MeshVertices, OrbitCamera, model_matrix, screen_position};
+use mf_runtime::{PoolChoice, RunContext};
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
@@ -16,12 +19,33 @@ use crate::theme;
 use crate::viewport::{
     Click, NavAction, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
 };
-use crate::worker::{self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget};
+use crate::worker::{
+    self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, Workers,
+};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
 /// "Recent repairs" are the faces created by this many of the active
 /// object's latest commands.
 pub const RECENT_REPAIR_COMMANDS: usize = 3;
+
+/// The status after a cancelled import or operation.
+pub const CANCELLED: &str = "Cancelled: document unchanged";
+/// The status after a cancelled export.
+pub const CANCELLED_EXPORT: &str = "Cancelled: nothing exported";
+
+/// App settings that are fixed for a run.
+#[derive(Debug, Clone, Default)]
+pub struct Settings {
+    /// Job pool threads; `None` leaves one core free (MF-RT-004).
+    pub threads: Option<usize>,
+}
+
+/// How the running job (the one the status bar shows) can be stopped.
+struct RunningJob {
+    /// `None`: this kind of job can't be cancelled (replay).
+    run: Option<RunContext>,
+    cancel_requested: bool,
+}
 
 /// An operation offered in Properties for the current target.
 #[derive(Debug, Clone, PartialEq)]
@@ -95,6 +119,10 @@ pub struct MeshFixerApp {
     requested_vertices: BTreeMap<ObjectId, Mesh>,
     /// Label of the running import/operation/export. Blocks new commands.
     pub busy: Option<String>,
+    /// Progress and cancellation of the job `busy` names.
+    job: Option<RunningJob>,
+    /// The last 1000 frames' CPU, GPU and interval times (MF-RT-001).
+    pub frame_times: FrameTimes,
     /// The whole-object tool open in Properties (an operation id).
     pub tool: Option<String>,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
@@ -119,7 +147,7 @@ pub struct MeshFixerApp {
     pub show_controls: bool,
     view_request: Option<ViewRequest>,
     pub viewport: Viewport,
-    tx: Sender<Message>,
+    workers: Workers,
     rx: Receiver<Message>,
 }
 
@@ -127,6 +155,14 @@ impl MeshFixerApp {
     pub fn new(
         cc: &eframe::CreationContext<'_>,
         initial: Option<PathBuf>,
+    ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        Self::with_settings(cc, initial, Settings::default())
+    }
+
+    pub fn with_settings(
+        cc: &eframe::CreationContext<'_>,
+        initial: Option<PathBuf>,
+        settings: Settings,
     ) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let render_state = cc
             .wgpu_render_state
@@ -137,26 +173,41 @@ impl MeshFixerApp {
         theme::apply(&cc.egui_ctx);
         // Cmd/Ctrl + / − / 0 belong to the 3D view, not to scaling the UI.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
+        let workers = Workers::new(tx.clone(), cc.egui_ctx.clone(), settings.threads);
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
             camera: None,
             analyses: AnalysisCache::new(4),
             analyzer: {
-                let tx = tx.clone();
                 let ctx = cc.egui_ctx.clone();
-                LatestWorker::new(worker::analyze, move |msg| {
-                    // The receiver only disappears when the app is closing.
-                    // allow-swallow: the receiver only disappears while the app is closing
-                    let _ = tx.send(msg);
-                    ctx.request_repaint();
-                })
+                LatestWorker::new(
+                    workers.pool(),
+                    |request, run: &RunContext| {
+                        // A panic is reported, not left to abort the app.
+                        let analysed =
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                worker::analyze(request, run)
+                            }));
+                        match analysed {
+                            Ok(result) => result,
+                            Err(payload) => Ok(worker::failed("analysis", false, payload)),
+                        }
+                    },
+                    move |msg| {
+                        // allow-swallow: the receiver only disappears while the app is closing
+                        let _ = tx.send(msg);
+                        ctx.request_repaint();
+                    },
+                )
             },
             requested: None,
             displayed: None,
             object_vertices: BTreeMap::new(),
             requested_vertices: BTreeMap::new(),
             busy: None,
+            job: None,
+            frame_times: FrameTimes::new(),
             tool: None,
             op_params: BTreeMap::new(),
             show_boundaries: true,
@@ -172,11 +223,11 @@ impl MeshFixerApp {
             show_controls: false,
             view_request: None,
             viewport: Viewport::new(render_state.clone(), theme::palette()),
-            tx,
+            workers,
             rx,
         };
         if let Some(path) = initial {
-            app.open(&cc.egui_ctx, path);
+            app.open(path);
         }
         Ok(app)
     }
@@ -187,18 +238,94 @@ impl MeshFixerApp {
             .and_then(|o| o.mesh())
     }
 
-    pub fn open(&mut self, ctx: &egui::Context, path: PathBuf) {
-        self.busy = Some(format!("Importing {}", path.display()));
-        worker::import(&self.tx, ctx, path);
+    pub fn open(&mut self, path: PathBuf) {
+        let run = self.start_job(format!("Importing {}", path.display()), true);
+        self.workers.import(path, run);
     }
 
-    pub fn open_dialog(&mut self, ctx: &egui::Context) {
+    pub fn open_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter("Meshes", &["stl", "obj", "3mf"])
             .pick_file()
         {
-            self.open(ctx, path);
+            self.open(path);
         }
+    }
+
+    /// Add an imported model to the document (what finishing an import
+    /// does): its objects become part of the history, the first is made
+    /// active and the camera is refitted.
+    pub fn import_model(&mut self, model: ImportedModel) {
+        let (ids, warnings) = self.session.import_model(model);
+        self.warnings = warnings;
+        if !self.warnings.is_empty() {
+            self.status = Some(format!("{} import warning(s)", self.warnings.len()));
+        }
+        match ids.first() {
+            Some(&id) => {
+                self.set_active(id);
+                // Refit even into a non-empty document (MF-ISSUE-042
+                // review I5): otherwise the camera keeps framing the old
+                // document and the newly imported object can be off screen.
+                self.fit_camera();
+            }
+            None => self.error = Some("The file contains no mesh objects".into()),
+        }
+    }
+
+    /// Mark a job as running (`label` in the status bar) and return the
+    /// context it runs with. `cancellable` jobs get a Cancel button.
+    fn start_job(&mut self, label: String, cancellable: bool) -> RunContext {
+        let run = RunContext::none();
+        self.busy = Some(label);
+        self.job = Some(RunningJob {
+            run: cancellable.then(|| run.clone()),
+            cancel_requested: false,
+        });
+        run
+    }
+
+    /// The running job is over: returns whether its cancel was requested.
+    fn finish_job(&mut self) -> bool {
+        self.busy = None;
+        self.job.take().is_some_and(|j| j.cancel_requested)
+    }
+
+    /// The running job's stage and fraction (0–1), if it reports progress.
+    pub fn job_progress(&self) -> Option<(&'static str, f64)> {
+        self.job
+            .as_ref()?
+            .run
+            .as_ref()
+            .map(|r| r.progress.snapshot())
+    }
+
+    /// True while a job runs that Cancel (or Esc) would stop.
+    pub fn can_cancel(&self) -> bool {
+        self.job
+            .as_ref()
+            .is_some_and(|j| j.run.is_some() && !j.cancel_requested)
+    }
+
+    /// True once Cancel was pressed and the job hasn't stopped yet.
+    pub fn is_cancelling(&self) -> bool {
+        self.job.as_ref().is_some_and(|j| j.cancel_requested)
+    }
+
+    /// Ask the running job to stop (MF-RT-002). It stops within 250 ms and
+    /// leaves the document unchanged; the status then says so.
+    pub fn cancel_job(&mut self) {
+        if let Some(job) = self.job.as_mut()
+            && let Some(run) = &job.run
+        {
+            run.cancel.cancel();
+            job.cancel_requested = true;
+        }
+    }
+
+    /// How the job pool was sized (shown under Help).
+    pub fn pool_choice(&self) -> PoolChoice {
+        self.workers.choice
     }
 
     /// Write the command log for the current revision path.
@@ -219,10 +346,11 @@ impl MeshFixerApp {
         }
     }
 
-    pub fn replay_dialog(&mut self, ctx: &egui::Context) {
+    pub fn replay_dialog(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            self.busy = Some(format!("Replaying {}", dir.display()));
-            worker::replay(&self.tx, ctx, dir);
+            // Replay can't be cancelled yet: it has no Cancel button.
+            self.start_job(format!("Replaying {}", dir.display()), false);
+            self.workers.replay(dir);
         }
     }
 
@@ -233,7 +361,7 @@ impl MeshFixerApp {
         }
     }
 
-    pub fn export_dialog(&mut self, ctx: &egui::Context) {
+    pub fn export_dialog(&mut self) {
         let Some(mesh) = self.active_mesh().cloned() else {
             return;
         };
@@ -248,14 +376,16 @@ impl MeshFixerApp {
         match Format::from_path(&path) {
             Some(Format::ThreeMf) => match self.document_model() {
                 Ok(model) => {
-                    self.busy = Some(format!("Exporting {}", path.display()));
-                    worker::export(&self.tx, ctx, worker::ExportJob::Model(model), path);
+                    let run = self.start_job(format!("Exporting {}", path.display()), true);
+                    self.workers
+                        .export(worker::ExportJob::Model(model), path, run);
                 }
                 Err(e) => self.error = Some(e),
             },
             Some(format) => {
-                self.busy = Some(format!("Exporting {}", path.display()));
-                worker::export(&self.tx, ctx, worker::ExportJob::Mesh(mesh, format), path);
+                let run = self.start_job(format!("Exporting {}", path.display()), true);
+                self.workers
+                    .export(worker::ExportJob::Mesh(mesh, format), path, run);
             }
             None => self.error = Some(format!("Unsupported export format: {}", path.display())),
         }
@@ -403,7 +533,7 @@ impl MeshFixerApp {
     }
 
     /// Validate on the UI thread, run on a worker, commit when it returns.
-    pub fn apply(&mut self, ctx: &egui::Context, tool: &Tool) {
+    pub fn apply(&mut self, tool: &Tool) {
         let Some(target) = self.active else { return };
         let mut params = self.params_for(&tool.op_id).clone();
         params.extend(tool.fixed.clone());
@@ -418,8 +548,8 @@ impl MeshFixerApp {
             raw_params,
         }) {
             Ok(prepared) => {
-                self.busy = Some(format!("{}…", tool.label));
-                worker::run(&self.tx, ctx, prepared);
+                let run = self.start_job(format!("{}…", tool.label), true);
+                self.workers.run(prepared, run);
             }
             Err(e) => self.error = Some(e.to_string()),
         }
@@ -504,7 +634,7 @@ impl MeshFixerApp {
     /// face's component across every object (ray cast on a worker). A hit
     /// makes its object active (MF-ISSUE-042); shift adds to a same-kind,
     /// same-object selection.
-    pub fn click(&mut self, ctx: &egui::Context, click: Click) {
+    pub fn click(&mut self, click: Click) {
         let (Some(active), Some(cam)) = (self.active, self.camera) else {
             return;
         };
@@ -524,9 +654,7 @@ impl MeshFixerApp {
         if targets.is_empty() {
             return;
         }
-        worker::pick(
-            &self.tx,
-            ctx,
+        self.workers.pick(
             targets,
             active,
             cam,
@@ -664,46 +792,49 @@ impl MeshFixerApp {
     fn handle(&mut self, msg: Message) {
         match msg {
             Message::Imported(result) => {
-                self.busy = None;
+                let too_late = self.finish_job();
                 match result {
                     Ok(model) => {
-                        let (ids, warnings) = self.session.import_model(model);
-                        self.warnings = warnings;
-                        if !self.warnings.is_empty() {
-                            self.status =
-                                Some(format!("{} import warning(s)", self.warnings.len()));
-                        }
-                        match ids.first() {
-                            Some(&id) => {
-                                self.set_active(id);
-                                // Refit even into a non-empty document
-                                // (MF-ISSUE-042 review I5): otherwise the
-                                // camera keeps framing the old document and
-                                // the newly imported object can be off
-                                // screen.
-                                self.fit_camera();
-                            }
-                            None => self.error = Some("The file contains no mesh objects".into()),
+                        self.import_model(model);
+                        if too_late {
+                            self.status = Some(TOO_LATE.into());
                         }
                     }
+                    Err(IoError::Cancelled) => self.status = Some(CANCELLED.into()),
                     Err(e) => self.error = Some(format!("Import failed: {e}")),
                 }
             }
             Message::Completed(result) => {
-                self.busy = None;
+                // Once the run returned Ok, cancelling no longer applies:
+                // the result is committed (one outcome; MF-CMD-006).
+                let too_late = self.finish_job();
+                let report = |r: &serde_json::Value| {
+                    if too_late {
+                        format!("{TOO_LATE}: {r}")
+                    } else {
+                        r.to_string()
+                    }
+                };
                 match (*result).and_then(|c| self.session.commit(c)) {
-                    Ok(CommitOutcome::NewRevision { report }) => {
-                        self.status = Some(report.to_string());
+                    Ok(CommitOutcome::NewRevision { report: r }) => {
+                        self.status = Some(report(&r));
                         self.retarget_selection();
                     }
-                    Ok(CommitOutcome::Report(report)) => {
-                        self.status = Some(report.to_string());
+                    Ok(CommitOutcome::Report(r)) => {
+                        self.status = Some(report(&r));
                     }
-                    Ok(CommitOutcome::NoChange { report }) => {
-                        self.status = Some(format!("Nothing to change: {report}"));
+                    Ok(CommitOutcome::NoChange { report: r }) => {
+                        self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
+                    Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
                     Err(e) => self.error = Some(e.to_string()),
                 }
+            }
+            Message::Failed { what, job, message } => {
+                if job {
+                    self.finish_job();
+                }
+                self.error = Some(format!("Internal error in {what}: {message}"));
             }
             Message::Picked {
                 object,
@@ -777,16 +908,20 @@ impl MeshFixerApp {
                 self.analyses.insert(mesh, *analysis);
             }
             Message::Replayed(result) => {
-                self.busy = None;
+                self.finish_job();
                 match result {
                     Ok(lines) => self.replay_report = Some(lines),
                     Err(e) => self.error = Some(format!("Replay failed: {e}")),
                 }
             }
             Message::Exported(result) => {
-                self.busy = None;
+                let too_late = self.finish_job();
                 match result {
+                    Ok(path) if too_late => {
+                        self.status = Some(format!("{TOO_LATE}: exported {}", path.display()))
+                    }
                     Ok(path) => self.status = Some(format!("Exported {}", path.display())),
+                    Err(IoError::Cancelled) => self.status = Some(CANCELLED_EXPORT.into()),
                     Err(e) => self.error = Some(format!("Export failed: {e}")),
                 }
             }
@@ -834,7 +969,7 @@ impl MeshFixerApp {
     /// Request render vertices for every object that isn't active
     /// (MF-ISSUE-042): the viewport draws them dimmed at their transform,
     /// but they never need the active object's full diagnostics.
-    fn refresh_object_vertices(&mut self, ctx: &egui::Context) {
+    fn refresh_object_vertices(&mut self) {
         let stale: Vec<(ObjectId, Mesh)> = self
             .session
             .document()
@@ -856,7 +991,7 @@ impl MeshFixerApp {
             .collect();
         for (id, mesh) in stale {
             self.requested_vertices.insert(id, mesh.clone());
-            worker::build_vertices(&self.tx, ctx, id, mesh);
+            self.workers.build_vertices(id, mesh);
         }
         // Drop vertices and in-flight requests for objects no longer in the document.
         let doc = self.session.document();
@@ -1066,7 +1201,7 @@ impl MeshFixerApp {
 
     /// Keep each overlay slot matching what should be shown; request a
     /// build on a worker when it changes.
-    fn refresh_overlays(&mut self, ctx: &egui::Context) {
+    fn refresh_overlays(&mut self) {
         let selection = self.target_overlay_request();
         // Hovering the target itself (the pointer is still on the row just
         // clicked) shows it as selected, not hovered.
@@ -1108,7 +1243,8 @@ impl MeshFixerApp {
                 s.object == object && Mesh::ptr_eq(&s.mesh, &mesh) && s.target == target
             });
             if !same {
-                worker::build_overlay(&self.tx, ctx, purpose, object, mesh.clone(), target.clone());
+                self.workers
+                    .build_overlay(purpose, object, mesh.clone(), target.clone());
                 self.overlays.insert(
                     purpose,
                     OverlaySlot {
@@ -1204,12 +1340,26 @@ impl MeshFixerApp {
 
 impl eframe::App for MeshFixerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let started = Instant::now();
+        let frame = self.frame_times.begin(started);
+        for (index, gpu) in self.viewport.collect_gpu_times() {
+            self.frame_times.set_gpu(index, gpu);
+        }
+        self.frame(ui, frame);
+        let gpu = self.viewport.frame_gpu_time(frame);
+        self.frame_times.end(frame, started.elapsed(), gpu);
+    }
+}
+
+impl MeshFixerApp {
+    /// One frame of the UI; `frame_index` is its index in `frame_times`.
+    fn frame(&mut self, ui: &mut egui::Ui, frame_index: u64) {
         let ctx = ui.ctx().clone();
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
         self.refresh_analysis();
-        self.refresh_object_vertices(&ctx);
+        self.refresh_object_vertices();
         self.resolve_view_request();
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
@@ -1242,8 +1392,13 @@ impl eframe::App for MeshFixerApp {
                 i32::from(zoom_in) - i32::from(zoom_out),
             )
         });
+        // Esc stops a running job first; otherwise it clears the selection.
         if escape {
-            self.clear_selection();
+            if self.can_cancel() {
+                self.cancel_job();
+            } else {
+                self.clear_selection();
+            }
         }
         if redo {
             self.redo();
@@ -1273,7 +1428,7 @@ impl eframe::App for MeshFixerApp {
         crate::panels::properties_panel(self, ui);
         crate::panels::replay_window(self, &ctx);
         crate::panels::controls_window(self, &ctx);
-        self.refresh_overlays(&ctx);
+        self.refresh_overlays();
 
         let objects = self.object_views();
         let placeholder = match self.active_mesh() {
@@ -1295,6 +1450,7 @@ impl eframe::App for MeshFixerApp {
                         layers,
                         updating,
                         placeholder,
+                        frame: frame_index,
                     },
                 )
             })
@@ -1307,7 +1463,7 @@ impl eframe::App for MeshFixerApp {
         if let Some(c) = out.click
             && self.busy.is_none()
         {
-            self.click(&ctx, c);
+            self.click(c);
         }
 
         let overlays_pending = self.overlays.values().any(|s| s.ready.is_none());
@@ -1320,6 +1476,10 @@ impl eframe::App for MeshFixerApp {
         }
     }
 }
+
+/// The start of the status after a job that finished before Cancel took
+/// effect (its result was kept).
+const TOO_LATE: &str = "Finished before it could be cancelled";
 
 /// The local origin the renderer and picking use for a mesh. O(n): call it
 /// on a worker.
