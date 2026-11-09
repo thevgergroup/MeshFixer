@@ -19,6 +19,7 @@ mf-render = { path = "crates/mf-render" }
 mf-metrics = { path = "crates/mf-metrics" }
 mf-document = { path = "crates/mf-document" }
 mf-selection = { path = "crates/mf-selection" }
+mf-runtime = { path = "crates/mf-runtime" }
 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
