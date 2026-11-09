@@ -56,14 +56,20 @@ pub enum ParamKind {
     Bool {
         default: bool,
     },
+    /// One of a fixed list of words (`type: choice`, listed in `values`).
+    Choice {
+        default: String,
+        values: Vec<String>,
+    },
 }
 
 impl ParamKind {
     pub fn default_value(&self) -> ParamValue {
-        match *self {
-            ParamKind::Integer { default, .. } => ParamValue::Int(default),
-            ParamKind::Float { default, .. } => ParamValue::Float(default),
-            ParamKind::Bool { default } => ParamValue::Bool(default),
+        match self {
+            ParamKind::Integer { default, .. } => ParamValue::Int(*default),
+            ParamKind::Float { default, .. } => ParamValue::Float(*default),
+            ParamKind::Bool { default } => ParamValue::Bool(*default),
+            ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
         }
     }
 }
@@ -80,30 +86,33 @@ struct RawParam {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     max: Option<Scalar>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    values: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     unit: Option<String>,
     description: String,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 enum Scalar {
     Bool(bool),
     Int(i64),
     Float(f64),
+    Text(String),
 }
 
 impl Scalar {
-    fn as_i64(self, field: &str) -> Result<i64, String> {
-        match self {
+    fn as_i64(&self, field: &str) -> Result<i64, String> {
+        match *self {
             Scalar::Int(i) => Ok(i),
             _ => Err(format!("{field} must be an integer")),
         }
     }
-    fn as_f64(self, field: &str) -> Result<f64, String> {
-        match self {
+    fn as_f64(&self, field: &str) -> Result<f64, String> {
+        match *self {
             Scalar::Int(i) => Ok(i as f64),
             Scalar::Float(f) => Ok(f),
-            Scalar::Bool(_) => Err(format!("{field} must be a number")),
+            Scalar::Bool(_) | Scalar::Text(_) => Err(format!("{field} must be a number")),
         }
     }
 }
@@ -127,6 +136,15 @@ impl TryFrom<RawParam> for ParamSpec {
                 Scalar::Bool(default) => ParamKind::Bool { default },
                 _ => return Err("bool default must be true or false".into()),
             },
+            "choice" => {
+                let values = r.values.ok_or("a choice lists its values")?;
+                match r.default {
+                    Scalar::Text(default) if values.contains(&default) => {
+                        ParamKind::Choice { default, values }
+                    }
+                    _ => return Err("a choice's default must be one of its values".into()),
+                }
+            }
             other => return Err(format!("unknown parameter type '{other}'")),
         };
         Ok(ParamSpec {
@@ -140,6 +158,7 @@ impl TryFrom<RawParam> for ParamSpec {
 
 impl From<ParamSpec> for RawParam {
     fn from(p: ParamSpec) -> RawParam {
+        let mut values = None;
         let (ty, default, min, max) = match p.kind {
             ParamKind::Integer { default, min, max } => (
                 "integer",
@@ -154,6 +173,10 @@ impl From<ParamSpec> for RawParam {
                 max.map(Scalar::Float),
             ),
             ParamKind::Bool { default } => ("bool", Scalar::Bool(default), None, None),
+            ParamKind::Choice { default, values: v } => {
+                values = Some(v);
+                ("choice", Scalar::Text(default), None, None)
+            }
         };
         RawParam {
             name: p.name,
@@ -161,6 +184,7 @@ impl From<ParamSpec> for RawParam {
             default,
             min,
             max,
+            values,
             unit: p.unit,
             description: p.description,
         }
@@ -214,7 +238,7 @@ impl ParamSpec {
             value: text.to_owned(),
             reason: reason.to_owned(),
         };
-        match self.kind {
+        match &self.kind {
             ParamKind::Integer { .. } => text
                 .trim()
                 .parse()
@@ -229,6 +253,14 @@ impl ParamSpec {
                 "false" => Ok(ParamValue::Bool(false)),
                 _ => Err(invalid("expected true or false")),
             },
+            ParamKind::Choice { values, .. } => {
+                let word = text.trim();
+                if values.iter().any(|v| v == word) {
+                    Ok(ParamValue::Text(word.to_owned()))
+                } else {
+                    Err(invalid(&format!("expected {}", one_of(values))))
+                }
+            }
         }
     }
 
@@ -249,5 +281,14 @@ impl ParamSpec {
             });
         }
         Ok(())
+    }
+}
+
+/// "a, b or c".
+pub(crate) fn one_of(values: &[String]) -> String {
+    match values.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
+        None => String::new(),
     }
 }

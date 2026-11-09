@@ -27,8 +27,9 @@
         "required": ["name", "type", "default", "description"],
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "type": { "enum": ["integer", "float", "bool"] },
-          "default": { "type": ["number", "boolean"] },
+          "type": { "enum": ["integer", "float", "bool", "choice"] },
+          "default": { "type": ["number", "boolean", "string"] },
+          "values": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "minItems": 2, "uniqueItems": true },
           "min": { "type": "number" },
           "max": { "type": "number" },
           "unit": { "type": "string" },

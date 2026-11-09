@@ -188,12 +188,14 @@ fn cancel_to_stop_within_250ms_on_5m_import_and_fill() {
         measured.push((what, took));
     }
 
-    // Fill: in topology, triangulating and refining.
-    let fill_points: [(&str, &str, f64); 4] = [
+    // Fill: in topology, triangulating, refining and fairing (the default
+    // smooth style, MF-OP-002).
+    let fill_points: [(&str, &str, f64); 5] = [
         ("fill/topology", "topology", 0.2),
         ("fill/topology late", "topology", 0.7),
         ("fill/triangulating", "triangulating", 0.5),
         ("fill/refining", "refining", 0.3),
+        ("fill/fairing", "fairing", 0.3),
     ];
     for (what, at_stage, at) in fill_points {
         let mesh = big_mesh();
@@ -379,7 +381,7 @@ fn progress_reaches_one_on_success() {
     let ops: [(&str, &[&str]); 3] = [
         (
             "mesh.fill_holes",
-            &["topology", "triangulating", "refining"],
+            &["topology", "triangulating", "refining", "fairing"],
         ),
         ("mesh.remove_small_components", &["topology", "removing"]),
         ("mesh.inspect", &["topology", "inspecting"]),

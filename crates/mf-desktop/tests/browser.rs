@@ -13,10 +13,10 @@ use std::time::{Duration, Instant};
 
 use eframe::egui;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use glam::DVec3;
 use mf_desktop::MeshFixerApp;
-use mf_desktop::defects::{Defect, HoleGroup, defect_copy};
+use mf_desktop::defects::{Defect, HoleGroup, choice_copy, defect_copy};
 use mf_geometry::{ContentHash, FaceId, Mesh};
 use mf_io::threemf::{IDENTITY, ModelObject, Unit};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
@@ -776,5 +776,86 @@ fn next_hole_scrolls_the_tree_to_its_row() {
     assert!(
         r.right() <= view.left() + 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
         "the row is in view in the tree: {r:?}"
+    );
+}
+
+/// MF-OP-002 fill styles in Properties: each style is listed with a plain
+/// one-line explanation, "Smooth (matches slope)" is preselected, and
+/// choosing Flat instead gives a visibly different (flat) patch on a
+/// curved surface.
+#[test]
+fn fill_style_choice_changes_the_patch() {
+    require_gpu!("fill_style_choice_changes_the_patch");
+    // A 20 mm ball with its top cut off: one round hole on a curved surface.
+    let ball = mf_fixtures::uv_sphere(24, 32);
+    let mut e = ball.edit();
+    for (id, t) in ball.faces() {
+        if t.iter().all(|&v| ball.corner_position(v)[2] > 0.8) {
+            e.remove_face(id).unwrap();
+        }
+    }
+    let mut h = opened(mf_fixtures::scaled(&e.finish().unwrap().0, 20.0));
+    let hole = listed(h.state()).into_iter().next().unwrap();
+    // Largest |distance from the centre − 20 mm| over the patch's new
+    // vertices, after filling the hole with the style chosen in the UI.
+    let fill_with = |h: &mut Harness<'static, MeshFixerApp>, label: &str| {
+        h.state_mut().select_defect(&hole);
+        // Selecting frames the hole with an animated move.
+        h.run_steps(60);
+        assert!(h.get_all_by_label("Fill hole").next().is_some());
+        h.get_by_label(label).click();
+        h.run_steps(2);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(h, "the fill", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        let record = h.state().session.records_to_current().pop().unwrap();
+        let m = h.state().active_mesh().unwrap().clone();
+        let s = &h.state().session;
+        let prov = &s.node(s.current()).unwrap().provenance[&h.state().active.unwrap()];
+        let worst = prov
+            .created_vertices
+            .iter()
+            .map(|&v| {
+                let p = m.position(v).unwrap();
+                ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 20.0).abs()
+            })
+            .fold(0.0, f64::max);
+        (record.params.0["fill_style"].clone(), worst)
+    };
+    h.state_mut().select_defect(&hole);
+    h.run_steps(60);
+    // Each style: its name, then one plain line saying what it does.
+    for (value, label, words) in [
+        ("flat", "Flat", "flat"),
+        ("smooth", "Smooth (matches slope)", "without a crease"),
+        ("curvature", "Curvature-matched", "curves"),
+    ] {
+        let (name, line) = choice_copy("mesh.fill_holes", "fill_style", value).unwrap();
+        assert_eq!(name, label);
+        assert!(line.contains(words), "{label}: {line}");
+        h.get_by_label(label);
+        h.get_by_label(line);
+    }
+    let preselected = h
+        .get_by_label("Smooth (matches slope)")
+        .accesskit_node()
+        .toggled();
+    assert_eq!(preselected, Some(egui::accesskit::Toggled::True));
+
+    let (style, flat) = fill_with(&mut h, "Flat");
+    assert_eq!(style, mf_spec::ParamValue::Text("flat".into()));
+    let rev = h.state().session.current();
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "undo", |a| {
+        a.session.current() != rev && a.hole_view().is_some()
+    });
+    let (style, smooth) = fill_with(&mut h, "Smooth (matches slope)");
+    assert_eq!(style, mf_spec::ParamValue::Text("smooth".into()));
+    eprintln!("20 mm ball: patch off the sphere by up to {flat:.3} mm flat, {smooth:.3} mm smooth");
+    assert!(
+        smooth < flat / 3.0,
+        "flat {flat:.3} mm, smooth {smooth:.3} mm"
     );
 }

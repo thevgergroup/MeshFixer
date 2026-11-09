@@ -148,7 +148,7 @@ jobs:
           target/release/meshfixer gen-fixture damaged xos/scan.stl --triangles 200000 --seed 5
           target/release/meshfixer run xos/scan.stl \
             --op mesh.remove_small_components --param max_triangles=100 \
-            --op mesh.fill_holes --param refine=true \
+            --op mesh.fill_holes --param refine=true --param fill_style=smooth \
             --save-log xos/session.mfx.log -o xos/linux-result.stl
           target/release/meshfixer replay xos/session.mfx.log
       - uses: actions/upload-artifact@v7

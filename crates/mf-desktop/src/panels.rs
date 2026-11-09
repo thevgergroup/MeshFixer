@@ -8,8 +8,8 @@ use mf_spec::{ParamKind, ParamValue};
 
 use crate::app::{MeshFixerApp, Tool, TreeItem};
 use crate::defects::{
-    Defect, HoleGroup, count, defect_copy, measure, param_label, thousands, tool_summary,
-    unit_symbol,
+    Defect, HoleGroup, choice_copy, count, defect_copy, measure, param_label, thousands,
+    tool_summary, unit_symbol,
 };
 use crate::theme;
 
@@ -319,7 +319,8 @@ fn stage_label(stage: &str) -> String {
         "topology" => "finding edges".into(),
         "inspecting" => "checking".into(),
         "triangulating" => "filling".into(),
-        "refining" => "smoothing the patches".into(),
+        "refining" => "adding detail to the patches".into(),
+        "fairing" => "shaping the patches to the surface".into(),
         "removing" => "removing pieces".into(),
         mf_io::WRITING => "writing the file".into(),
         other => other.replace('_', " "),
@@ -1619,6 +1620,8 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                 .iter()
                 .filter(|p| !tool.fixed.contains_key(&p.name))
                 .filter(|p| !(batch && p.name == "max_loop_edges"))
+                // Choices get their own block below the grid.
+                .filter(|p| !matches!(p.kind, ParamKind::Choice { .. }))
             {
                 let Some(value) = values.get_mut(&p.name) else {
                     continue;
@@ -1660,6 +1663,33 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                 ui.end_row();
             }
         });
+    // A choice: its name, then one option per line, each with a plain
+    // one-line explanation under it.
+    for p in spec
+        .parameters
+        .iter()
+        .filter(|p| !tool.fixed.contains_key(&p.name))
+    {
+        let (ParamKind::Choice { values, .. }, Some(ParamValue::Text(v))) =
+            (&p.kind, values.get_mut(&p.name))
+        else {
+            continue;
+        };
+        ui.label(param_label(&tool.op_id, &p.name))
+            .on_hover_text(&p.description);
+        for value in values {
+            let (label, line) = choice_copy(&tool.op_id, &p.name, value)
+                // allow-swallow: a choice without plain words shows its value
+                .unwrap_or((value.as_str(), ""));
+            ui.radio_value(v, value.clone(), label)
+                .on_hover_text(&p.description);
+            if !line.is_empty() {
+                ui.indent(("choice", &p.name, value), |ui| {
+                    ui.label(RichText::new(line).color(theme::TEXT_MUTED).small());
+                });
+            }
+        }
+    }
     if batch
         && let (Some(view), Some(ParamValue::Int(limit))) = (
             app.hole_view(),

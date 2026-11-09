@@ -410,34 +410,22 @@ fn unsupported(d: &Diagnostics, m: &Model, skipped: &BTreeMap<String, usize>) ->
 }
 
 /// The fill styles the `mesh.fill_holes` spec offers: each value of its
-/// `fill_style` parameter, read from the spec (Task 12a), or just the
-/// defaults while there is no such parameter.
+/// `fill_style` choice (MF-OP-002), read from the spec.
 fn fill_styles() -> Vec<(String, Params)> {
     let spec = builtin::get("mesh.fill_holes").unwrap();
-    let Some(param) = spec.parameter("fill_style") else {
-        return vec![("default".into(), spec.validate(&BTreeMap::new()).unwrap())];
+    let param = spec
+        .parameter("fill_style")
+        .expect("fill_holes has a fill_style parameter");
+    let mf_spec::ParamKind::Choice { values, .. } = &param.kind else {
+        panic!("fill_style is a choice: {param:?}");
     };
-    // Whatever field the spec lists the choices in: every string array.
-    let raw = serde_json::to_value(param).unwrap();
-    let values: Vec<String> = raw
-        .as_object()
-        .unwrap()
-        .values()
-        .filter_map(Value::as_array)
-        .flatten()
-        .filter_map(|v| v.as_str().map(str::to_owned))
-        .collect();
-    assert!(
-        !values.is_empty(),
-        "fill_holes has a fill_style parameter but its values can't be read from the spec: {raw}"
-    );
     values
-        .into_iter()
+        .iter()
         .map(|style| {
             let params = spec
                 .validate(&BTreeMap::from([("fill_style".into(), style.clone())]))
                 .unwrap();
-            (style, params)
+            (style.clone(), params)
         })
         .collect()
 }
@@ -895,7 +883,15 @@ fn every_messy_model_fills_or_refuses_by_name() {
             );
             for reason in f.skipped.keys() {
                 assert!(
-                    ["too_large", "self_touching", "untriangulable"].contains(&reason.as_str()),
+                    // fairing_did_not_converge: a smooth/curvature solve
+                    // that ran out of iterations (MF-ISSUE-053), named.
+                    [
+                        "too_large",
+                        "self_touching",
+                        "untriangulable",
+                        "fairing_did_not_converge",
+                    ]
+                    .contains(&reason.as_str()),
                     "{} ({}): unnamed skip reason {reason}",
                     r.file,
                     f.style

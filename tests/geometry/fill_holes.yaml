@@ -52,3 +52,33 @@
   select: { loop_containing_vertex: 4 }
   when: { op: mesh.fill_holes, params: { max_loop_edges: 3 } }
   expect: { error: loop_too_large }
+
+# Fill styles (MF-OP-002): fairing moves only the patch's new vertices.
+- name: smooth fill of one sphere hole leaves the other and the rim untouched
+  given: { fixture: sphere_with_two_caps_cut }
+  select: { loop_containing_vertex: 97 }
+  when: { op: mesh.fill_holes, params: { fill_style: smooth } }
+  expect:
+    boundary_loops: 1
+    is_manifold: true
+    inconsistent_orientation_edges: 0
+    untouched_outside_target: true
+    provenance_total: true
+
+- name: every fill style closes a sphere untouched outside
+  given: { fixture: sphere_with_two_caps_cut }
+  when: { op: mesh.fill_holes, params: { fill_style: curvature } }
+  expect:
+    is_closed: true
+    is_manifold: true
+    inconsistent_orientation_edges: 0
+    untouched_outside_target: true
+    provenance_total: true
+
+- name: flat fill of a sphere closes untouched outside
+  given: { fixture: sphere_with_two_caps_cut }
+  when: { op: mesh.fill_holes, params: { fill_style: flat } }
+  expect:
+    is_closed: true
+    is_manifold: true
+    untouched_outside_target: true

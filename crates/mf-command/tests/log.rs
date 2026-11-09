@@ -59,6 +59,60 @@ fn version_1_records_replay_exactly() {
     );
 }
 
+/// A `fill_holes` record from version 1 (before fill styles) replays
+/// exactly: it means `fill_style: flat`, which is what it did then, not the
+/// new default (MF-OP-002).
+#[test]
+fn v1_records_replay_as_flat_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    // A round hole in a sphere: smooth and flat patches differ there.
+    let base = mf_fixtures::uv_sphere(24, 32);
+    let mut e = base.edit();
+    for (id, t) in base.faces() {
+        if t.iter().all(|&v| base.corner_position(v)[2] > 0.8) {
+            e.remove_face(id).unwrap();
+        }
+    }
+    let src = dir.path().join("sphere.stl");
+    write_path(&e.finish().unwrap().0, &src, Format::StlBinary).unwrap();
+    let fill = |style: &str| {
+        let mut s = Session::new();
+        let id = s.import(read_path(&src).unwrap(), "sphere".into());
+        s.execute(Invocation {
+            selection: None,
+            op_id: "mesh.fill_holes".into(),
+            target: id,
+            raw_params: BTreeMap::from([("fill_style".into(), style.into())]),
+        })
+        .unwrap();
+        s
+    };
+    let hash = |s: &Session| s.document().objects()[0].geometry.content_hash();
+    let s = fill("flat");
+    assert_ne!(hash(&s), hash(&fill("smooth")), "the styles differ here");
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let path = log.join("commands.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"op_version\":2"), "{text}");
+    assert!(text.contains("\"fill_style\":\"flat\","), "{text}");
+    let v1 = text
+        .replace("\"op_version\":2", "\"op_version\":1")
+        .replace("\"fill_style\":\"flat\",", "");
+    std::fs::write(&path, v1).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(
+        hash(&report.session),
+        hash(&s),
+        "replayed as flat, not as the new default"
+    );
+}
+
 #[test]
 fn save_load_replay_exact() {
     let dir = tempfile::tempdir().unwrap();

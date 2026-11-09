@@ -37,6 +37,10 @@ timing=(
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
+  # GUI timing under parallel load: the framing animation after
+  # select_defect sometimes outlasts Harness::run's step budget when the
+  # whole browser file runs in parallel (passes alone; seen in Task 12a).
+  "mf-desktop browser intentional_openings_survive_edits_and_are_excluded_from_fill_all"
   # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"

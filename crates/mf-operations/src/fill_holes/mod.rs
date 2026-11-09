@@ -1,18 +1,22 @@
 //! `mesh.fill_holes` (MF-OP-001/002/003).
 //!
 //! Each target loop is closed by a minimum-weight triangulation of its
-//! boundary polygon. Everything goes through `MeshEdit`, so kept geometry is
-//! untouched and provenance names the loop of every new face.
+//! boundary polygon, refined to the density around it and (fill styles
+//! `smooth` and `curvature`) faired to the surface around it. Everything
+//! goes through `MeshEdit`, so kept geometry is untouched and provenance
+//! names the loop of every new face.
 
+mod fairing;
 mod refine;
 mod triangulate;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+use fairing::Style;
 use mf_geometry::{BoundaryLoop, Mesh, Sources};
 use mf_runtime::Cancelled;
-use mf_spec::Params;
+use mf_spec::{ParamValue, Params};
 use rayon::prelude::*;
 use serde_json::json;
 
@@ -152,13 +156,81 @@ fn loop_context(
     Ok((sigma, existing))
 }
 
+/// Per loop, the existing faces within `rings` rings of its rim (those
+/// touching a rim vertex, then those touching a vertex of those, ...), in
+/// face order: what fairing reads around the patch.
+fn ring_faces(
+    mesh: &Mesh,
+    loops: &[&BoundaryLoop],
+    on: &[bool],
+    rings: usize,
+    ctx: &RunContext,
+) -> Result<Vec<Vec<[u32; 3]>>, Cancelled> {
+    let mut marked = on.to_vec();
+    let mut members: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+    let mut seen: Vec<BTreeSet<u32>> = Vec::with_capacity(loops.len());
+    for (li, l) in loops.iter().enumerate() {
+        for &v in &l.vertices {
+            members.entry(v).or_default().push(li);
+        }
+        seen.push(l.vertices.iter().copied().collect());
+    }
+    let mut faces: Vec<BTreeMap<u32, [u32; 3]>> = vec![BTreeMap::new(); loops.len()];
+    let mut tick = ctx.ticker();
+    for _ in 0..rings {
+        let mut grown: Vec<(u32, usize)> = Vec::new();
+        for (id, t) in mesh.faces() {
+            tick.tick()?;
+            if !t.iter().any(|&v| marked[v as usize]) {
+                continue;
+            }
+            let mut owners: Vec<usize> = t
+                .iter()
+                .filter_map(|v| members.get(v))
+                .flatten()
+                .copied()
+                .collect();
+            owners.sort_unstable();
+            owners.dedup();
+            for li in owners {
+                if faces[li].insert(id.0, t).is_none() {
+                    grown.extend(t.iter().map(|&v| (v, li)));
+                }
+            }
+        }
+        for (v, li) in grown {
+            if seen[li].insert(v) {
+                members.entry(v).or_default().push(li);
+                marked[v as usize] = true;
+            }
+        }
+    }
+    Ok(faces
+        .into_iter()
+        .map(|f| f.into_values().collect())
+        .collect())
+}
+
 impl Operation for FillHoles {
     fn id(&self) -> &'static str {
         "mesh.fill_holes"
     }
 
     fn version(&self) -> u32 {
-        1
+        2
+    }
+
+    fn upgrade_params(&self, recorded: u32, params: &mut Params) -> bool {
+        match recorded {
+            // Version 1 had no fill styles: it triangulated and refined.
+            1 => {
+                params
+                    .0
+                    .insert("fill_style".to_owned(), ParamValue::Text("flat".into()));
+                true
+            }
+            v => v == self.version(),
+        }
     }
 
     fn execute(
@@ -170,7 +242,23 @@ impl Operation for FillHoles {
     ) -> Result<OpOutput, OpError> {
         let max_edges = params.get_int("max_loop_edges")?.max(3) as usize;
         let refine = params.get_bool("refine")?;
-        let last_stage = if refine { "refining" } else { "triangulating" };
+        let word = params.get_choice("fill_style")?;
+        let style = Style::parse(word).ok_or_else(|| {
+            failed(
+                "invalid_params",
+                format!("fill_style '{word}' is not flat, smooth or curvature"),
+            )
+        })?;
+        // Fairing moves the vertices refinement added; without them a
+        // patch has nothing to move.
+        let fair = refine && style != Style::Flat;
+        let last_stage = if fair {
+            "fairing"
+        } else if refine {
+            "refining"
+        } else {
+            "triangulating"
+        };
         let topo = input.topology_with(ctx)?;
         let mut fill: Vec<&BoundaryLoop> = Vec::new();
         let mut skipped = Vec::new();
@@ -233,6 +321,11 @@ impl Operation for FillHoles {
         let on = on_loops(input, &fill);
         let normals = outer_normals(input, &fill, &on, ctx)?;
         let (sigma, existing) = loop_context(input, &fill, &on, ctx)?;
+        let rings = if fair {
+            ring_faces(input, &fill, &on, style.rings(), ctx)?
+        } else {
+            Vec::new()
+        };
         drop(on);
         // The same threshold `inspect` reports as degenerate.
         let min_area = input
@@ -298,7 +391,7 @@ impl Operation for FillHoles {
             done.store(0, Ordering::Relaxed);
             ctx.progress.report("refining", 0.0);
         }
-        let patches: Vec<Option<refine::Patch>> = triangulations
+        let mut patches: Vec<Option<refine::Patch>> = triangulations
             .into_par_iter()
             .zip(points)
             .enumerate()
@@ -325,9 +418,56 @@ impl Operation for FillHoles {
             .collect::<Result<_, Cancelled>>()?;
         ctx.checkpoint()?;
 
+        // Fairing: each patch solved on its own, single-threaded, so the
+        // result doesn't depend on how loops were spread over threads.
+        let mut fairing: Vec<Option<Result<usize, fairing::NotConverged>>> =
+            vec![None; patches.len()];
+        if fair {
+            done.store(0, Ordering::Relaxed);
+            ctx.progress.report("fairing", 0.0);
+            fairing = patches
+                .par_iter_mut()
+                .enumerate()
+                .map(|(li, patch)| {
+                    let solved = match patch {
+                        Some(p) => Some(fairing::fair(
+                            p,
+                            &fill[li].vertices,
+                            &rings[li],
+                            input,
+                            style,
+                            ctx,
+                        )?),
+                        None => None,
+                    };
+                    loop_done("fairing");
+                    Ok(solved)
+                })
+                .collect::<Result<_, Cancelled>>()?;
+            ctx.checkpoint()?;
+        }
+
         let mut edit = input.edit();
         let mut filled = Vec::new();
-        for (l, patch) in fill.iter().zip(patches) {
+        for ((l, patch), faired) in fill.iter().zip(patches).zip(fairing) {
+            // A patch whose fairing didn't converge is never kept flat: an
+            // error when selected, skipped and reported in a whole-object
+            // run.
+            if let Some(Err(e)) = &faired {
+                if matches!(target, Target::Loops(_)) {
+                    return Err(failed(
+                        "fairing_did_not_converge",
+                        format!(
+                            "loop {} could not be shaped to the surface around it ({word} fill: the solve stopped at relative residual {:e} after {} iterations); try another fill style",
+                            l.id, e.residual, e.iterations
+                        ),
+                    ));
+                }
+                skipped.push(
+                    json!({"id": l.id, "edges": l.edge_count, "reason": "fairing_did_not_converge"}),
+                );
+                continue;
+            }
             // A loop with no valid patch: an error when it was selected,
             // skipped and reported in a whole-object run.
             let patch = match patch {
@@ -363,7 +503,11 @@ impl Operation for FillHoles {
                 )
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;
             }
-            filled.push(json!({"id": l.id, "edges": l.edge_count, "faces": patch.tris.len()}));
+            let mut entry = json!({"id": l.id, "edges": l.edge_count, "faces": patch.tris.len()});
+            if let Some(Ok(iterations)) = faired {
+                entry["fairing_iterations"] = json!(iterations);
+            }
+            filled.push(entry);
         }
         let report = json!({
             "filled_loops": filled,

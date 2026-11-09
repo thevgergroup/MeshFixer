@@ -498,3 +498,148 @@ fn max_loop_edges_is_capped_where_the_triangulation_stays_interactive() {
     assert_eq!(out.topology().boundary_loops.len(), 1, "only the outer rim");
     assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
 }
+
+/// Fill styles (MF-OP-002): `smooth` and `curvature` fair the patch's
+/// interior so it follows the surface around the hole; `flat` doesn't.
+mod fairing {
+    use super::*;
+
+    /// A unit UV sphere with its north cap (everything within 30° of the
+    /// pole) removed: one round hole of exactly 44 edges.
+    fn capped_sphere() -> Mesh {
+        let base = uv_sphere(36, 44);
+        let cut = 30f64.to_radians().cos() - 1e-9;
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            if t.iter().all(|&v| base.corner_position(v)[2] >= cut) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        let m = e.finish().unwrap().0;
+        let loops = &m.topology().boundary_loops;
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].edge_count, 44);
+        m
+    }
+
+    /// Largest |radius − 1| over the patch's new vertices.
+    fn max_radial_deviation(m: &Mesh, style: &str) -> f64 {
+        let (out, prov, _) = fill(m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+        assert!(
+            prov.created_vertices.len() >= 10,
+            "{style}: refinement added {} vertices",
+            prov.created_vertices.len()
+        );
+        prov.created_vertices
+            .iter()
+            .map(|&v| {
+                let p = out.position(v).unwrap();
+                ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn smooth_fill_follows_a_sphere() {
+        let m = capped_sphere();
+        let flat = max_radial_deviation(&m, "flat");
+        let smooth = max_radial_deviation(&m, "smooth");
+        eprintln!("44-edge cap, max radial deviation: flat {flat:.4}, smooth {smooth:.4}");
+        assert!(smooth <= 0.02, "smooth: {smooth:.4} of the radius");
+        assert!(flat > 3.0 * smooth, "flat {flat:.4} vs smooth {smooth:.4}");
+    }
+
+    #[test]
+    fn curvature_fill_follows_a_sphere_closer() {
+        let m = capped_sphere();
+        let curvature = max_radial_deviation(&m, "curvature");
+        eprintln!("44-edge cap, max radial deviation: curvature {curvature:.4}");
+        assert!(curvature <= 0.01, "curvature: {curvature:.4} of the radius");
+    }
+
+    /// Only the patch's own new vertices move: the hole's rim and the
+    /// existing rings the solve reads stay bit-for-bit where they were
+    /// (MF-OP-003), and no existing vertex is reported moved.
+    #[test]
+    fn fairing_moves_only_patch_interior_vertices() {
+        let m = capped_sphere();
+        let (flat, _, _) = fill(&m, Target::WholeObject, &[("fill_style", "flat")]).unwrap();
+        for style in ["smooth", "curvature"] {
+            let (out, prov, _) = fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+            assert_untouched_outside_target(&m, &out);
+            assert!(prov.moved_vertices.is_empty(), "{style}");
+            assert!(prov.modified_faces.is_empty(), "{style}");
+            // Same patch topology as flat; the new vertices are what moved.
+            assert_eq!(out.face_count(), flat.face_count(), "{style}");
+            let moved = prov
+                .created_vertices
+                .iter()
+                .filter(|&&v| out.position(v) != flat.position(v))
+                .count();
+            assert_eq!(moved, prov.created_vertices.len(), "{style}");
+            let d = inspect(&out);
+            assert!(
+                d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+                "{style}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fairing_is_deterministic_across_thread_counts() {
+        // Several holes of different sizes, filled in one run.
+        let base = uv_sphere(40, 80);
+        let centres: [[f64; 3]; 4] = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -0.6, 0.8],
+        ];
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            let c =
+                [0, 1, 2].map(|k| t.iter().map(|&v| base.corner_position(v)[k]).sum::<f64>() / 3.0);
+            let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+            if centres.iter().enumerate().any(|(i, a)| {
+                (c[0] * a[0] + c[1] * a[1] + c[2] * a[2]) / len > (0.12 + 0.05 * i as f64).cos()
+            }) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        let m = e.finish().unwrap().0;
+        assert_eq!(m.topology().boundary_loops.len(), 4);
+        for style in ["smooth", "curvature"] {
+            let run = |threads| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    fill(&m, Target::WholeObject, &[("fill_style", style)])
+                        .unwrap()
+                        .0
+                        .content_hash()
+                })
+            };
+            let one = run(1);
+            assert_eq!(one, run(8), "{style}");
+            assert_eq!(one, run(3), "{style}");
+        }
+    }
+
+    /// The report says how hard each solve worked.
+    #[test]
+    fn fairing_reports_its_iterations() {
+        let m = capped_sphere();
+        let (_, _, report) = fill(&m, Target::WholeObject, &[("fill_style", "smooth")]).unwrap();
+        let it = report["filled_loops"][0]["fairing_iterations"].as_u64();
+        assert!(it.is_some_and(|n| n > 0), "{report}");
+        let (_, _, report) = fill(&m, Target::WholeObject, &[("fill_style", "flat")]).unwrap();
+        assert!(
+            report["filled_loops"][0]
+                .get("fairing_iterations")
+                .is_none(),
+            "{report}"
+        );
+    }
+}

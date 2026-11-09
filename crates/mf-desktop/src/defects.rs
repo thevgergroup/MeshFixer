@@ -805,6 +805,26 @@ pub fn param_label(op_id: &str, param: &str) -> String {
     }
 }
 
+/// A choice parameter's option in plain words: its name in Properties and
+/// one line saying what it does (MF-OP-002 fill styles).
+pub fn choice_copy(op_id: &str, param: &str, value: &str) -> Option<(&'static str, &'static str)> {
+    Some(match (op_id, param, value) {
+        ("mesh.fill_holes", "fill_style", "flat") => (
+            "Flat",
+            "Closes the hole with a flat patch. Best on flat faces and sharp edges.",
+        ),
+        ("mesh.fill_holes", "fill_style", "smooth") => (
+            "Smooth (matches slope)",
+            "Bends the patch to meet the surface around it without a crease.",
+        ),
+        ("mesh.fill_holes", "fill_style", "curvature") => (
+            "Curvature-matched",
+            "Also follows how the surface curves. Best on round, organic shapes.",
+        ),
+        _ => return None,
+    })
+}
+
 /// What a tool does, in plain words first (the spec's engineering
 /// summary follows it in Properties).
 pub fn tool_summary(op_id: &str) -> Option<&'static str> {

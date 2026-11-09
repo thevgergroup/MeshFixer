@@ -3,12 +3,14 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ParamValue {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// A `choice` parameter's word.
+    Text(String),
 }
 
 impl fmt::Display for ParamValue {
@@ -17,6 +19,7 @@ impl fmt::Display for ParamValue {
             ParamValue::Bool(b) => write!(f, "{b}"),
             ParamValue::Int(i) => write!(f, "{i}"),
             ParamValue::Float(x) => write!(f, "{x}"),
+            ParamValue::Text(t) => write!(f, "{t}"),
         }
     }
 }
@@ -50,7 +53,7 @@ impl Params {
     fn get(&self, name: &str) -> Result<ParamValue, SpecError> {
         self.0
             .get(name)
-            .copied()
+            .cloned()
             .ok_or_else(|| SpecError::UnknownParameter(name.to_owned()))
     }
 
@@ -74,6 +77,15 @@ impl Params {
             ParamValue::Float(f) => Ok(f),
             ParamValue::Int(i) => Ok(i as f64),
             v => Err(Self::wrong(name, v, "a number")),
+        }
+    }
+
+    /// A `choice` parameter's word.
+    pub fn get_choice(&self, name: &str) -> Result<&str, SpecError> {
+        match self.0.get(name) {
+            Some(ParamValue::Text(t)) => Ok(t),
+            Some(v) => Err(Self::wrong(name, v.clone(), "a word")),
+            None => Err(SpecError::UnknownParameter(name.to_owned())),
         }
     }
 

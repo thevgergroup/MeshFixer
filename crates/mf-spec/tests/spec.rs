@@ -131,3 +131,38 @@ fn float_params_roundtrip_exactly_through_json() {
         assert_eq!(back, p, "value {x:e} changed in a JSON round trip");
     }
 }
+
+/// A `choice` parameter (MF-OP-002 fill styles): one of a listed set of
+/// words, its default filled in, anything else rejected by name.
+#[test]
+fn choice_params_parse_and_reject_unknown_values() {
+    let spec = builtin::get("mesh.fill_holes").unwrap();
+    let p = spec.validate(&raw(&[])).unwrap();
+    assert_eq!(p.get_choice("fill_style").unwrap(), "smooth");
+    let p = spec.validate(&raw(&[("fill_style", "flat")])).unwrap();
+    assert_eq!(
+        p.0.get("fill_style"),
+        Some(&ParamValue::Text("flat".into()))
+    );
+    let err = spec.validate(&raw(&[("fill_style", "bumpy")])).unwrap_err();
+    assert!(
+        matches!(err, SpecError::InvalidValue { ref name, ref reason, .. }
+            if name == "fill_style" && reason.contains("flat, smooth or curvature")),
+        "{err:?}"
+    );
+    // Text round-trips through a command log as a JSON string.
+    let json = serde_json::to_string(&p).unwrap();
+    assert!(json.contains("\"fill_style\":\"flat\""), "{json}");
+    let back: mf_spec::Params = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, p);
+    // The CLI shows the choices.
+    let cmd = cli::to_command(spec);
+    let arg = cmd
+        .get_arguments()
+        .find(|a| a.get_id().as_str() == "fill_style")
+        .unwrap();
+    assert_eq!(
+        arg.get_value_names().unwrap()[0].as_str(),
+        "flat|smooth|curvature"
+    );
+}
