@@ -71,3 +71,13 @@ Each is targetable (selection, or the whole object), keeps `untouched_outside_ta
 **Demo:** Run through all nine exit criteria end to end in one recording.
 
 **Gates:** MF-SPEC-003, MF-CMD-005 (cross-platform level), every exit criterion in spec §12, and OD-2 status reported honestly.
+
+## After Phase 0: modelling roadmap (owner-approved order, 2026-11-09)
+
+The requirements are in spec v0.5 §11b (and §11a for sculpting). Each phase gets its own spec, plan, checkpoints and demo, the same way as Phase 0.
+
+| Phase | Order | Why this order |
+|---|---|---|
+| **Phase 1** | 1. Object transform gizmo (MF-OBJ-001) → 2. Intersection detection (MF-MODEL-002) and booleans (MF-MODEL-001) → 3. Split with alignment pegs and joints (MF-MODEL-003) → 4. Sculpting and carving (MF-SCULPT-*) | Everything needs objects that can be moved. Splitting depends on booleans. Sculpting relies on the M4 incremental-update work |
+| **Phase 2** | 1. Kitbashing and a parts library (MF-MODEL-004) → 2. Parametric connectors: hinges, clasps, joints (MF-MODEL-005) → 3. Plugins (MF-PLUG-001) and scripting (MF-SCRIPT-001) | Connectors are placed like kitbash parts and joined with booleans, which makes them the first test of the plugin system |
+
