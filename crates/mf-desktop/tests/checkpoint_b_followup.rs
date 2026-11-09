@@ -393,8 +393,12 @@ fn checkpoint_b_followup_real_scan() {
         off < 0.05 && (0.4..=1.2).contains(&size),
         "framed: {off} {size}"
     );
+    // The pointer leaves the row: the object's hover glow goes.
     h.event(egui::Event::PointerGone);
-    h.run_steps(3);
+    let face = h.state().active_mesh().unwrap().faces().next().unwrap().0.0;
+    wait_until(&mut h, "hover glow gone", SHORT, |a| {
+        a.read_face_state(face).unwrap().unwrap() & FaceStates::HOVER == 0
+    });
     rec.still(&mut h, "04-object-row-framed");
     rec.finish();
 }

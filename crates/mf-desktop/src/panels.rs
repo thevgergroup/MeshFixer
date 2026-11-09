@@ -2,7 +2,7 @@
 //! Defects" on the left, "Properties & Tools" on the right, the history
 //! breadcrumb and status line at the bottom; the 3D view takes the rest.
 
-use eframe::egui::{self, RichText};
+use eframe::egui::{self, AtomExt as _, RichText};
 use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
 
@@ -612,10 +612,22 @@ fn tree_row(
     let mut button = egui::Button::selectable(selected, row.text)
         .min_size(egui::vec2(ui.available_width(), 0.0));
     if let Some(size) = row.size {
-        button = button.right_text(RichText::new(size).color(theme::TEXT_MUTED));
+        // Smaller, muted; cut short ("…") rather than wrapped when the
+        // panel is narrow (the tooltip and the label have it all).
+        button = button.right_text(
+            RichText::new(size)
+                .small()
+                .color(theme::TEXT_MUTED)
+                .atom_shrink(true),
+        );
     }
-    // Its id is its item's, wherever it is in the tree.
-    let response = ui.push_id(item_key(item), |ui| ui.add(button)).inner;
+    // Its id is its item's, wherever it is in the tree. One line, always.
+    let response = ui
+        .push_id(item_key(item), |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            ui.add(button)
+        })
+        .inner;
     let label = row.label.to_owned();
     response.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, &label));
     let response = response.on_hover_ui(tooltip);

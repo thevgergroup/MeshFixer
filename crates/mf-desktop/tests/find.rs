@@ -552,11 +552,11 @@ fn rows_show_piece_size_and_hole_measurements() {
         mf_fixtures::merge(&[open_box, cube]),
         scale2,
     )]));
-    h.get_by_label("Loose piece · 1 triangle · 0.400 mm");
+    h.get_by_label("Piece 1 · 1 triangle · 0.400 mm");
     h.get_by_label("Hole 1 · 4 edges · 80.0 mm");
     let defects = h.state().current_analysis().unwrap().defects.clone();
     let copy = defect_copy(&defects.loose[0], Unit::Millimeter);
-    assert_eq!(copy.row, "Loose piece · 1 triangle · 0.400 mm");
+    assert_eq!(copy.row, "Piece 1 · 1 triangle · 0.400 mm");
     assert!(
         copy.detail.starts_with("1 triangle"),
         "the detail keeps its words: {copy:?}"

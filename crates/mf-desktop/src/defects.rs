@@ -530,7 +530,9 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             "Needs edge stitching (not yet available)",
         ),
         Defect::LoosePiece {
-            triangles, size, ..
+            component,
+            triangles,
+            size,
         } => {
             let triangles = count(*triangles, "triangle");
             let (row_size, detail) = match size {
@@ -548,7 +550,8 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             };
             copy(
                 "Loose piece".into(),
-                "Loose piece".into(),
+                // Numbered like holes: `loose[i]` is component i + 1.
+                format!("Piece {component}"),
                 row_size,
                 detail,
                 "Remove piece",
@@ -759,7 +762,7 @@ mod tests {
                 triangles: 1,
                 size: Some(0.0213),
             }),
-            "Loose piece · 1 triangle · 0.0213 mm"
+            "Piece 4 · 1 triangle · 0.0213 mm"
         );
         assert_eq!(
             row(Defect::Tangled {
