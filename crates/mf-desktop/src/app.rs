@@ -9,7 +9,7 @@ use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, 
 use mf_geometry::{Aabb, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_metrics::FrameTimes;
-use mf_render::{FaceStates, OrbitCamera, model_matrix, screen_position};
+use mf_render::{Bvh, FaceStates, OrbitCamera, model_matrix, screen_position};
 use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
@@ -19,7 +19,7 @@ use crate::theme;
 use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
 use crate::worker::{
     self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
-    RenderMesh, StateInputs, Workers,
+    RenderMesh, StateInputs, ViewHover, Workers,
 };
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
@@ -110,6 +110,30 @@ impl Default for OverlaysShown {
     }
 }
 
+/// Where a hover pick is made: the pointer over the 3D view, the camera
+/// and the revision it looks at. A change in any of them asks again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct HoverQuery {
+    px: (f64, f64),
+    size: (f64, f64),
+    camera: OrbitCamera,
+    revision: RevisionId,
+    tangled: bool,
+}
+
+/// Hover picking in the 3D view (MF-RENDER-004): at most one pick in
+/// flight; the newest pointer position wins, and a result for an older
+/// one is dropped.
+#[derive(Debug, Default)]
+struct HoverPicks {
+    /// Where the pointer is now (`None`: not over the view).
+    want: Option<HoverQuery>,
+    /// The last query sent, and its number.
+    sent: Option<HoverQuery>,
+    seq: u64,
+    in_flight: bool,
+}
+
 /// A tangled edge being looked at (edges aren't a selection kind; its next
 /// action selects its faces).
 #[derive(Debug, Clone)]
@@ -176,6 +200,17 @@ pub struct MeshFixerApp {
     pub inspected: Option<Inspected>,
     /// What the pointer is over in the tree this frame (outlined in the view).
     pub hover: Option<(ObjectId, OverlayTarget)>,
+    /// What the pointer is over in the 3D view (a defect of the active
+    /// object), from the latest hover pick.
+    view_hover: Option<ViewHover>,
+    hover_picks: HoverPicks,
+    /// Each object's picking BVH, for its current revision only.
+    bvhs: BTreeMap<ObjectId, (Mesh, Arc<Bvh>)>,
+    /// Builds BVHs on the background pool, a newer request (a revision
+    /// changed) cancelling the one running.
+    bvh_builder: LatestWorker<Vec<(ObjectId, Mesh)>>,
+    /// The revisions last asked for.
+    bvh_requested: Vec<(ObjectId, Mesh)>,
     overlays: BTreeMap<OverlayPurpose, OverlaySlot>,
     /// Which overlays are switched on (the legend; View menu).
     pub shown: OverlaysShown,
@@ -225,6 +260,24 @@ impl MeshFixerApp {
         );
         let gpu_totals = gpu.clone();
         let analyze = settings.analyze.unwrap_or(worker::analyze);
+        let bvh_builder = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            LatestWorker::new(
+                workers.background(),
+                move |revisions: Vec<(ObjectId, Mesh)>, run: &RunContext| {
+                    // Each is reported as soon as it's built: a superseded
+                    // request keeps the ones it finished.
+                    for (object, mesh) in revisions {
+                        let bvh = Arc::new(Bvh::build(&mesh, run)?);
+                        // allow-swallow: the receiver only disappears while the app is closing
+                        let _ = tx.send(Message::BvhBuilt { object, mesh, bvh });
+                        ctx.request_repaint();
+                    }
+                    Ok(())
+                },
+                |()| {},
+            )
+        };
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -283,6 +336,11 @@ impl MeshFixerApp {
             selection: None,
             inspected: None,
             hover: None,
+            view_hover: None,
+            hover_picks: HoverPicks::default(),
+            bvhs: BTreeMap::new(),
+            bvh_builder,
+            bvh_requested: Vec::new(),
             overlays: BTreeMap::new(),
             shown: OverlaysShown::default(),
             recent: None,
@@ -707,22 +765,7 @@ impl MeshFixerApp {
         let (Some(active), Some(cam)) = (self.active, self.camera) else {
             return;
         };
-        let targets: Vec<PickTarget> = self
-            .session
-            .document()
-            .objects()
-            .iter()
-            .filter_map(|o| {
-                Some(PickTarget {
-                    object: o.id,
-                    mesh: o.mesh()?.clone(),
-                    model: model_matrix(&o.transform),
-                    // Only the active object's tangled edges are drawn.
-                    tangled: Some(o.id) == self.active
-                        && self.defect_shown(self.shown.non_manifold),
-                })
-            })
-            .collect();
+        let targets = self.pick_targets();
         if targets.is_empty() {
             return;
         }
@@ -735,6 +778,152 @@ impl MeshFixerApp {
             click.px,
             click.shift,
         );
+    }
+
+    /// Every object a click or hover can land on, with its BVH if it's
+    /// built (see [`PickTarget::bvh`] for a click before then) and, for the
+    /// active object once analysed, its defects. O(objects).
+    fn pick_targets(&self) -> Vec<PickTarget> {
+        let analysis = self.current_analysis();
+        self.session
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh()?;
+                let active = Some(o.id) == self.active;
+                Some(PickTarget {
+                    object: o.id,
+                    mesh: mesh.clone(),
+                    model: model_matrix(&o.transform),
+                    bvh: self
+                        .bvhs
+                        .get(&o.id)
+                        .filter(|(m, _)| Mesh::ptr_eq(m, mesh))
+                        .map(|(_, b)| b.clone()),
+                    defects: analysis.filter(|_| active).map(|a| a.defects.clone()),
+                    // Only the active object's tangled edges are drawn.
+                    tangled: active && self.defect_shown(self.shown.non_manifold),
+                })
+            })
+            .collect()
+    }
+
+    /// True once every object's current revision has its picking BVH:
+    /// hover picks wait for it (MF-RENDER-004).
+    pub fn picking_ready(&self) -> bool {
+        self.session.document().objects().iter().all(|o| {
+            o.mesh().is_none_or(|mesh| {
+                self.bvhs
+                    .get(&o.id)
+                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
+            })
+        })
+    }
+
+    /// Ask for the BVH of every object revision that lacks one (the active
+    /// object first), and let go of those for revisions no longer current.
+    /// O(objects) on the UI thread; the builds run on the background pool.
+    fn refresh_bvhs(&mut self) {
+        let doc = self.session.document();
+        let stale: Vec<ObjectId> = self
+            .bvhs
+            .iter()
+            .filter(|(id, (m, _))| {
+                doc.object(**id)
+                    .and_then(|o| o.mesh())
+                    .is_none_or(|current| !Mesh::ptr_eq(current, m))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in stale {
+            if let Some(old) = self.bvhs.remove(&id) {
+                self.workers.discard(old);
+            }
+        }
+        let mut missing: Vec<(ObjectId, Mesh)> = doc
+            .objects()
+            .iter()
+            .filter_map(|o| Some((o.id, o.mesh()?.clone())))
+            .filter(|(id, _)| !self.bvhs.contains_key(id))
+            .collect();
+        missing.sort_by_key(|(id, _)| Some(*id) != self.active);
+        let new = missing.iter().any(|(id, m)| {
+            !self
+                .bvh_requested
+                .iter()
+                .any(|(r, rm)| r == id && Mesh::ptr_eq(rm, m))
+        });
+        if new {
+            self.bvh_requested = missing.clone();
+            self.bvh_builder.submit(missing);
+        }
+    }
+
+    /// The view's hover (see [`HoverPicks`]): `pointer` is where it rests
+    /// over the 3D view, if it does. A pick is sent when the pointer, the
+    /// camera or the revision changed and none is in flight, once every
+    /// object has its BVH and the active one its analysis; until then the
+    /// hover just doesn't update.
+    fn update_hover(&mut self, pointer: Option<((f64, f64), (f64, f64))>) {
+        let want = match (pointer, self.camera, self.active) {
+            (Some((px, size)), Some(camera), Some(_)) => Some(HoverQuery {
+                px,
+                size,
+                camera,
+                revision: self.session.current(),
+                tangled: self.defect_shown(self.shown.non_manifold),
+            }),
+            _ => None,
+        };
+        if want.is_none() {
+            self.view_hover = None;
+        }
+        let picks = &mut self.hover_picks;
+        picks.want = want;
+        let Some(query) = want else { return };
+        if picks.in_flight
+            || picks.sent == want
+            || !self.picking_ready()
+            || self.current_analysis().is_none()
+        {
+            return;
+        }
+        let targets = self.pick_targets();
+        let picks = &mut self.hover_picks;
+        picks.seq += 1;
+        picks.sent = want;
+        picks.in_flight = true;
+        let seq = picks.seq;
+        self.workers.hover(
+            targets,
+            query.camera,
+            query.camera.target,
+            query.size,
+            query.px,
+            seq,
+        );
+    }
+
+    /// What the pointer is over in the 3D view, if it's on the active
+    /// object's current revision.
+    pub fn view_hover(&self) -> Option<&ViewHover> {
+        self.view_hover.as_ref().filter(|h| {
+            Some(h.object) == self.active
+                && self
+                    .session
+                    .document()
+                    .object(h.object)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|m| Mesh::ptr_eq(m, &h.mesh))
+        })
+    }
+
+    /// Where the pointer rests over the 3D view (window points), if it does.
+    pub fn view_pointer(&self) -> Option<egui::Pos2> {
+        let q = self.hover_picks.want?;
+        let rect = self.viewport.last_rect?;
+        Some(rect.left_top() + egui::vec2(q.px.0 as f32, q.px.1 as f32))
     }
 
     /// Make `defect` (of the active object) the current target, as a tree
@@ -906,9 +1095,39 @@ impl MeshFixerApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
+            Message::Hovered { seq, hover } => {
+                let picks = &mut self.hover_picks;
+                if seq == picks.seq {
+                    picks.in_flight = false;
+                    // A result for where the pointer was is stale once it
+                    // has moved on: the next frame asks for where it is.
+                    if picks.want == picks.sent {
+                        self.view_hover = hover;
+                    }
+                }
+            }
+            Message::BvhBuilt { object, mesh, bvh } => {
+                let current = self
+                    .session
+                    .document()
+                    .object(object)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|m| Mesh::ptr_eq(m, &mesh));
+                if current {
+                    if let Some(old) = self.bvhs.insert(object, (mesh, bvh)) {
+                        self.workers.discard(old);
+                    }
+                } else {
+                    self.workers.discard((mesh, bvh));
+                }
+            }
             Message::Failed { what, job, message } => {
                 if job {
                     self.finish_job();
+                }
+                if what == "hover" {
+                    // Its answer will never come: let the next one go.
+                    self.hover_picks.in_flight = false;
                 }
                 self.error = Some(format!("Internal error in {what}: {message}"));
             }
@@ -1409,15 +1628,16 @@ impl MeshFixerApp {
         }
     }
 
-    /// What the pointer is over in the tree, unless it's the target itself
-    /// (the pointer is still on the row just clicked): that shows as
-    /// selected, not hovered.
+    /// What the pointer is over in the tree (or else in the 3D view),
+    /// unless it's the target itself (the pointer is still on the row just
+    /// clicked): that shows as selected, not hovered.
     fn hover_request(
         &self,
         selection: &Option<(ObjectId, Mesh, OverlayTarget)>,
     ) -> Option<(ObjectId, Mesh, OverlayTarget)> {
         self.hover
             .clone()
+            .or_else(|| self.view_hover().map(|h| (h.object, h.target.clone())))
             .filter(|(object, target)| {
                 !selection
                     .as_ref()
@@ -1600,6 +1820,7 @@ impl MeshFixerApp {
         }
         self.refresh_analysis();
         self.refresh_object_vertices();
+        self.refresh_bvhs();
         self.resolve_view_request();
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
@@ -1707,6 +1928,10 @@ impl MeshFixerApp {
         {
             self.click(c);
         }
+        self.update_hover(out.pointer);
+        if self.hover.is_none() {
+            crate::panels::view_hover_tooltip(self, &ctx);
+        }
 
         let overlays_pending = self.overlays.values().any(|s| s.ready.is_none());
         if self.busy.is_some()
@@ -1764,13 +1989,6 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
 /// The start of the status after a job that finished before Cancel took
 /// effect (its result was kept).
 const TOO_LATE: &str = "Finished before it could be cancelled";
-
-/// The local origin the renderer and picking use for a mesh. O(n): call it
-/// on a worker.
-pub(crate) fn mesh_origin(mesh: &Mesh) -> glam::DVec3 {
-    mesh.bounding_box()
-        .map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()))
-}
 
 /// The axis-aligned box containing every corner of `bb` after `model`
 /// (MF-ISSUE-042): a rotation or mirror can move the AABB's own min/max off

@@ -98,6 +98,9 @@ pub enum NavAction {
 pub struct ViewOutput {
     pub click: Option<Click>,
     pub action: Option<NavAction>,
+    /// Where the pointer rests over the 3D view (points from its top-left,
+    /// and the view's size), with no button held: what hover picks under.
+    pub pointer: Option<((f64, f64), (f64, f64))>,
 }
 
 /// One zoom step of the zoom buttons and keys.
@@ -202,6 +205,15 @@ impl Viewport {
                 size: (rect.width() as f64, rect.height() as f64),
                 shift: ui.input(|i| i.modifiers.shift),
             });
+        let pointer = response
+            .hover_pos()
+            .filter(|_| !ui.input(|i| i.pointer.any_down()))
+            .map(|p| {
+                (
+                    ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
+                    (rect.width() as f64, rect.height() as f64),
+                )
+            });
         handle_input(ui, &response, rect, cam, self.nav_mode);
 
         self.renderer
@@ -233,7 +245,11 @@ impl Viewport {
         );
         ui.painter().galley(at, hint, theme::TEXT_MUTED);
         let action = self.navigation_bar(ui, rect, cam);
-        ViewOutput { click, action }
+        ViewOutput {
+            click,
+            action,
+            pointer,
+        }
     }
 
     /// The on-screen navigation bar at the view's bottom-right, for people

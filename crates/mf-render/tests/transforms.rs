@@ -5,7 +5,7 @@
 
 use glam::{DMat4, DVec3, DVec4};
 use mf_fixtures::cube;
-use mf_render::{OrbitCamera, RenderError, model_matrix, offscreen, pick_loop, ray_pick};
+use mf_render::{Bvh, OrbitCamera, RenderError, model_matrix, offscreen, pick_loop, ray_pick};
 
 fn gpu_or_skip<T>(test: &str, r: Result<T, RenderError>) -> Option<T> {
     match r {
@@ -143,7 +143,7 @@ fn loop_pick_on_a_rotated_object() {
     let mid_world = ((a + b) * 0.5).truncate().to_array();
     let mid = mf_render::screen_position(&cam, origin, size, mid_world).unwrap();
     assert_eq!(
-        pick_loop(&m, &model, &cam, origin, size, mid, 8.0),
+        pick_loop(&m, &bvh_of(&m), &model, &cam, origin, size, mid, 8.0),
         Some(hole.id),
         "the rotated loop is still found at its world-space projection"
     );
@@ -257,4 +257,9 @@ fn shading_under_shear_matches_the_inverse_transpose_normal() {
         sheared_by_gpu, sheared_by_hand,
         "a shear tilts shaded normals by the inverse-transpose of its linear part"
     );
+}
+
+/// The BVH picking uses for `mesh`.
+fn bvh_of(mesh: &mf_geometry::Mesh) -> Bvh {
+    Bvh::build(mesh, &mf_runtime::RunContext::none()).unwrap()
 }

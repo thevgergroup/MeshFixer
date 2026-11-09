@@ -22,7 +22,7 @@ use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_render::{
-    FaceStates, GpuLines, GpuMesh, UploadStats, edge_line_vertices, loop_line_vertices,
+    Bvh, FaceStates, GpuLines, GpuMesh, UploadStats, edge_line_vertices, loop_line_vertices,
 };
 use mf_runtime::{CancelToken, Cancelled, JobPool, PoolChoice, RunContext};
 use mf_selection::SelectionKind;
@@ -367,6 +367,18 @@ pub enum Message {
         picked: Option<(SelectionKind, Vec<u32>)>,
         add: bool,
     },
+    /// What the pointer is over in the 3D view (see [`Workers::hover`]),
+    /// for hover request number `seq`.
+    Hovered {
+        seq: u64,
+        hover: Option<ViewHover>,
+    },
+    /// `object`'s revision `mesh` has its picking BVH.
+    BvhBuilt {
+        object: ObjectId,
+        mesh: Mesh,
+        bvh: Arc<Bvh>,
+    },
     /// Face states were written to a render mesh: the view redraws.
     StatesWritten,
     /// The analysis of `mesh` at `transform` panicked.
@@ -643,9 +655,10 @@ impl Workers {
         });
     }
 
-    /// Ray-cast pick on the lane (O(n) over faces, across every object). All
-    /// O(n) work (topology, ray casts) happens there, never on the UI
-    /// thread (MF-RT-001). `active` is reported when the click hits
+    /// Pick on the lane, across every object ([`pick_targets`]: BVH ray
+    /// casts, or brute force for a target whose BVH isn't built yet). All
+    /// the work (waiting for topology, ray casts) happens there, never on
+    /// the UI thread (MF-RT-001). `active` is reported when the click hits
     /// nothing, so a miss still clears the right object's selection; its
     /// mesh comes from `targets` if it has one there (an active object with
     /// no mesh, such as a non-mesh geometry kind, reports no mesh rather
@@ -679,7 +692,7 @@ impl Workers {
                     Some(hit) => Message::Picked {
                         object: hit.target.object,
                         mesh: Some(hit.target.mesh.clone()),
-                        picked: Some(hit.picked),
+                        picked: Some(hit.selection()),
                         add,
                     },
                     None => Message::Picked {
@@ -692,6 +705,43 @@ impl Workers {
                         add,
                     },
                 })
+            },
+        );
+    }
+
+    /// What the pointer is over in the 3D view, on the lane: the same pick
+    /// as a click ([`pick_targets`]), reported as hover number `seq` when
+    /// it lands on one of the active object's defects (a hole, a loose
+    /// piece, a drawn tangled edge), as `None` otherwise. The app keeps at
+    /// most one in flight and drops a result a newer pointer position has
+    /// made stale. Every target must have its BVH (the app only asks then).
+    #[allow(clippy::too_many_arguments)]
+    pub fn hover(
+        &self,
+        targets: Vec<PickTarget>,
+        cam: mf_render::OrbitCamera,
+        origin: glam::DVec3,
+        size: (f64, f64),
+        px: (f64, f64),
+        seq: u64,
+    ) {
+        spawn_on(
+            &self.lane,
+            &self.tx,
+            &self.repaint,
+            "hover",
+            false,
+            move || {
+                let hover = pick_targets(&targets, &cam, origin, size, px).and_then(|hit| {
+                    let defect = hit.defect()?;
+                    Some(ViewHover {
+                        object: hit.target.object,
+                        mesh: hit.target.mesh.clone(),
+                        target: hit.overlay_target(),
+                        defect,
+                    })
+                });
+                Some(Message::Hovered { seq, hover })
             },
         );
     }
@@ -840,42 +890,62 @@ fn build_overlay(
     gpu: &Gpu,
 ) -> Result<Message, Cancelled> {
     {
-        let origin = crate::app::mesh_origin(&mesh);
         let topo = mesh.topology_with(ctx)?;
-        let (mut lines, mut points) = (Vec::new(), Vec::new());
-        // The faces whose normals say which way the target faces.
-        let around: Vec<u32> = match &target {
+        // The target's vertices, and its outline as vertex pairs.
+        let (points, outline): (Vec<u32>, Vec<[u32; 2]>) = match &target {
             OverlayTarget::Loops(ids) => {
-                lines = loop_line_vertices(&mesh, origin, ids);
-                let mut edges = Vec::new();
+                let mut points = Vec::new();
+                let mut outline = Vec::new();
                 for l in topo.boundary_loops.iter().filter(|l| ids.contains(&l.id)) {
                     points.extend(l.vertices.iter().copied());
                     let n = l.vertices.len();
-                    edges.extend((0..n).map(|k| (l.vertices[k], l.vertices[(k + 1) % n])));
+                    outline.extend((0..n).map(|k| [l.vertices[k], l.vertices[(k + 1) % n]]));
                 }
-                faces_on_edges(&mesh, edges)
+                (points, outline)
             }
             OverlayTarget::Components(ids) => {
-                let ids: Vec<u32> = ids
+                let faces: Vec<u32> = ids
                     .iter()
                     .filter_map(|&c| topo.components.get(c as usize))
                     .flatten()
                     .copied()
                     .collect();
-                points.extend(face_corners(&mesh, &ids));
-                ids
+                (face_corners(&mesh, &faces).collect(), Vec::new())
             }
-            OverlayTarget::Faces(ids) => {
-                points.extend(face_corners(&mesh, ids));
-                ids.clone()
-            }
+            OverlayTarget::Faces(ids) => (face_corners(&mesh, ids).collect(), Vec::new()),
             OverlayTarget::Edges(edges) => {
-                lines = edge_line_vertices(&mesh, origin, edges);
-                points.extend(edges.iter().flatten().copied());
-                faces_on_edges(&mesh, edges.iter().map(|e| (e[0], e[1])).collect())
+                (edges.iter().flatten().copied().collect(), edges.clone())
             }
         };
-        let normal = facing(&mesh, &around);
+        // Lines are relative to a point of the target itself: O(1), and as
+        // precise as it gets (a whole-mesh bounding box is O(n), too slow
+        // for a hover over a 5M-triangle mesh).
+        let origin = points.first().map_or(glam::DVec3::ZERO, |&v| {
+            glam::DVec3::from(mesh.corner_position(v))
+        });
+        let lines = match &target {
+            OverlayTarget::Loops(ids) => loop_line_vertices(&mesh, origin, ids),
+            OverlayTarget::Edges(edges) => edge_line_vertices(&mesh, origin, edges),
+            OverlayTarget::Components(_) | OverlayTarget::Faces(_) => Vec::new(),
+        };
+        // Which way the target faces, for framing it (F): only a selection
+        // is framed, and finding a loop's faces is O(n).
+        let normal = match (&target, purpose) {
+            (_, OverlayPurpose::Hover) => None,
+            (OverlayTarget::Loops(_) | OverlayTarget::Edges(_), _) => facing(
+                &mesh,
+                &faces_on_edges(&mesh, outline.iter().map(|e| (e[0], e[1])).collect()),
+            ),
+            (OverlayTarget::Components(ids), _) => facing(
+                &mesh,
+                &ids.iter()
+                    .filter_map(|&c| topo.components.get(c as usize))
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<u32>>(),
+            ),
+            (OverlayTarget::Faces(ids), _) => facing(&mesh, ids),
+        };
         let bounds =
             points
                 .iter()
@@ -958,31 +1028,122 @@ pub struct PickTarget {
     pub object: ObjectId,
     pub mesh: Mesh,
     pub model: DMat4,
-    /// Its non-manifold edges are drawn, so a click can land on one.
+    /// Its picking BVH (MF-RENDER-004). `None` while it's still being
+    /// built for a new revision: a click then casts by brute force over
+    /// every face (explicitly, and only until the BVH arrives); hover
+    /// waits for it instead.
+    pub bvh: Option<Arc<Bvh>>,
+    /// Its defects (the active object, once analysed): what a hover can
+    /// name, and its tangled edges.
+    pub defects: Option<Arc<Defects>>,
+    /// Its tangled edges are drawn, so the pointer can land on one.
     pub tangled: bool,
 }
 
-/// What `pick_targets` found: which target (if any) and what on it.
+impl PickTarget {
+    /// Nearest face hit by a world-space ray, through the BVH when there
+    /// is one, else by brute force (see [`PickTarget::bvh`]).
+    fn ray_pick(&self, origin: [f64; 3], dir: [f64; 3]) -> Option<(mf_geometry::FaceId, f64)> {
+        match &self.bvh {
+            Some(bvh) => bvh.ray_pick(&self.mesh, origin, dir, &self.model),
+            None => mf_render::ray_pick(&self.mesh, &self.model, origin, dir),
+        }
+    }
+
+    /// The tangled edges drawn on it (and so pickable), with their faces.
+    fn tangled_edges(&self) -> Vec<([u32; 2], &[u32])> {
+        match (&self.defects, self.tangled) {
+            (Some(d), true) => d
+                .tangled
+                .iter()
+                .filter_map(|d| match d {
+                    Defect::Tangled { edge, faces } => Some((*edge, faces.as_slice())),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+}
+
+/// What the pointer landed on, on one target.
+enum Hit<'a> {
+    /// A boundary loop's edge (the loop).
+    Loop(u32),
+    /// A drawn tangled edge, and the faces that share it.
+    Tangled([u32; 2], &'a [u32]),
+    /// A face of this edge-connected component.
+    Component(u32),
+}
+
+/// What `pick_targets` found: which target and what on it.
 struct PickHit<'a> {
     target: &'a PickTarget,
-    picked: (SelectionKind, Vec<u32>),
+    hit: Hit<'a>,
 }
 
-/// An edge a click is near: a boundary loop's, or a drawn non-manifold one.
-enum EdgeHit {
-    Loop(u32),
-    Tangled([u32; 2]),
+impl PickHit<'_> {
+    /// What a click on it selects.
+    fn selection(&self) -> (SelectionKind, Vec<u32>) {
+        match self.hit {
+            Hit::Loop(id) => (SelectionKind::BoundaryLoop, vec![id]),
+            Hit::Tangled(_, faces) => {
+                let mut faces = faces.to_vec();
+                faces.sort_unstable();
+                faces.dedup();
+                (SelectionKind::Faces, faces)
+            }
+            Hit::Component(c) => (SelectionKind::Component, vec![c]),
+        }
+    }
+
+    /// What a hover over it outlines or tints.
+    fn overlay_target(&self) -> OverlayTarget {
+        match self.hit {
+            Hit::Loop(id) => OverlayTarget::Loops(vec![id]),
+            Hit::Tangled(edge, _) => OverlayTarget::Edges(vec![edge]),
+            Hit::Component(c) => OverlayTarget::Components(vec![c]),
+        }
+    }
+
+    /// The defect it is, if its object's defects are known and it is one
+    /// (the main body, for one, isn't).
+    fn defect(&self) -> Option<Defect> {
+        let defects = self.target.defects.as_ref()?;
+        match self.hit {
+            Hit::Loop(id) => defects.find(SelectionKind::BoundaryLoop, id).cloned(),
+            Hit::Component(c) => defects.find(SelectionKind::Component, c).cloned(),
+            Hit::Tangled(edge, _) => defects
+                .tangled
+                .iter()
+                .find(|d| matches!(d, Defect::Tangled { edge: e, .. } if *e == edge))
+                .cloned(),
+        }
+    }
 }
 
-/// Ray-cast pick across every object (O(n) over faces, O(objects) ray casts
-/// per candidate). An edge wins over a face: a boundary loop's edge (the
-/// loop is picked), or a drawn non-manifold edge (its incident faces are
-/// picked, as a face selection). Among edges within tolerance on any
+/// What the pointer is over in the 3D view: one of the active object's
+/// defects (see [`Workers::hover`]).
+#[derive(Debug, Clone)]
+pub struct ViewHover {
+    pub object: ObjectId,
+    /// The revision it was found on.
+    pub mesh: Mesh,
+    pub target: OverlayTarget,
+    pub defect: Defect,
+}
+
+/// The pick under `px` across every object: O(boundary and tangled edges)
+/// screen projections, plus BVH ray casts (O(log n) each; brute force for a
+/// target without its BVH yet). An edge wins over a face: a boundary
+/// loop's edge (the loop is picked), or a drawn tangled edge (its faces
+/// are picked, as a face selection). Among edges within tolerance on any
 /// object, the nearest one on screen wins, and it must be visible past
 /// *every* object's faces (not just its own mesh's), so a click on a front
 /// object's face can't select a hidden loop on an object behind it
 /// (MF-ISSUE-042). Otherwise the clicked face's component is picked. Pure
-/// function (no I/O), so it's directly testable.
+/// function (no I/O), so it's directly testable. Every target's topology
+/// must be computed (it's cached on the mesh).
 fn pick_targets<'a>(
     targets: &'a [PickTarget],
     cam: &mf_render::OrbitCamera,
@@ -993,27 +1154,29 @@ fn pick_targets<'a>(
     const TOLERANCE: f64 = 8.0;
     let eye = cam.eye();
     // (target, what, screen distance, point, endpoints)
-    let mut candidates: Vec<(&PickTarget, EdgeHit, f64, glam::DVec3, [u32; 2])> = Vec::new();
+    let mut candidates: Vec<(&PickTarget, Hit<'a>, f64, glam::DVec3, [u32; 2])> = Vec::new();
     for t in targets {
         for c in
             mf_render::loop_edge_candidates(&t.mesh, &t.model, cam, origin, size, px, TOLERANCE)
         {
             candidates.push((
                 t,
-                EdgeHit::Loop(c.loop_id),
+                Hit::Loop(c.loop_id),
                 c.screen_distance,
                 c.point,
                 c.endpoints,
             ));
         }
-        if t.tangled {
-            let edges = &t.mesh.topology().non_manifold_edges;
+        let tangled = t.tangled_edges();
+        if !tangled.is_empty() {
+            let edges: Vec<[u32; 2]> = tangled.iter().map(|(e, _)| *e).collect();
             for c in mf_render::edge_candidates(
-                &t.mesh, &t.model, cam, origin, size, px, TOLERANCE, edges,
+                &t.mesh, &t.model, cam, origin, size, px, TOLERANCE, &edges,
             ) {
+                let (edge, faces) = tangled[c.index];
                 candidates.push((
                     t,
-                    EdgeHit::Tangled(edges[c.index]),
+                    Hit::Tangled(edge, faces),
                     c.screen_distance,
                     c.point,
                     c.endpoints,
@@ -1024,36 +1187,36 @@ fn pick_targets<'a>(
     candidates.sort_by(|a, b| a.2.total_cmp(&b.2));
     let edge_hit = candidates.into_iter().find(|(_, _, _, point, endpoints)| {
         !targets.iter().any(|other| {
-            mf_render::edge_occluded(&other.mesh, &other.model, eye, *point, *endpoints)
+            mf_render::edge_occluded(
+                &other.mesh,
+                other.bvh.as_deref(),
+                &other.model,
+                eye,
+                *point,
+                *endpoints,
+            )
         })
     });
     if let Some((target, hit, ..)) = edge_hit {
-        let picked = match hit {
-            EdgeHit::Loop(id) => (SelectionKind::BoundaryLoop, vec![id]),
-            EdgeHit::Tangled([a, b]) => {
-                let mut faces = faces_on_edges(&target.mesh, vec![(a, b)]);
-                faces.sort_unstable();
-                (SelectionKind::Faces, faces)
-            }
-        };
-        return Some(PickHit { target, picked });
+        return Some(PickHit { target, hit });
     }
 
     let (ray_origin, dir) = cam.ray(origin, size, px);
     targets
         .iter()
         .filter_map(|t| {
-            let (f, dist) = mf_render::ray_pick(&t.mesh, &t.model, ray_origin, dir)?;
+            let (f, dist) = t.ray_pick(ray_origin, dir)?;
+            // Components list their faces sorted: O(components · log n).
             let component = t
                 .mesh
                 .topology()
                 .components
                 .iter()
-                .position(|c| c.contains(&f.0))?;
-            Some((t, (SelectionKind::Component, vec![component as u32]), dist))
+                .position(|c| c.binary_search(&f.0).is_ok())?;
+            Some((t, Hit::Component(component as u32), dist))
         })
         .min_by(|(.., a), (.., b)| a.total_cmp(b))
-        .map(|(target, picked, _)| PickHit { target, picked })
+        .map(|(target, hit, _)| PickHit { target, hit })
 }
 
 /// What to export: one mesh, or a whole 3MF model.
@@ -1163,6 +1326,8 @@ mod tests {
             object: ObjectId(1),
             mesh: back.clone(),
             model: DMat4::IDENTITY,
+            bvh: None,
+            defects: None,
             tangled: false,
         };
         // Front object: a solid cube directly above, z in [2,3], same XY
@@ -1172,6 +1337,8 @@ mod tests {
             object: ObjectId(2),
             mesh: front,
             model: DMat4::from_translation(DVec3::new(0.0, 0.0, 2.0)),
+            bvh: None,
+            defects: None,
             tangled: false,
         };
         let targets = vec![back_target, front_target];
@@ -1189,10 +1356,11 @@ mod tests {
 
         let hit = pick_targets(&targets, &cam, origin, size, mid);
         match hit {
-            Some(h) if h.picked.0 == SelectionKind::BoundaryLoop => {
+            Some(h) if h.selection().0 == SelectionKind::BoundaryLoop => {
                 panic!(
                     "picked loop {:?} on object {:?}, but the front cube's face hides it",
-                    h.picked, h.target.object
+                    h.selection(),
+                    h.target.object
                 );
             }
             _ => {}
@@ -1209,6 +1377,8 @@ mod tests {
             object: ObjectId(1),
             mesh: back.clone(),
             model: DMat4::IDENTITY,
+            bvh: None,
+            defects: None,
             tangled: false,
         }];
         let cam = overhead_camera(DVec3::new(0.5, 0.5, 1.5), 20.0);
@@ -1222,7 +1392,7 @@ mod tests {
 
         let hit = pick_targets(&targets, &cam, origin, size, mid);
         assert!(
-            matches!(hit, Some(h) if h.picked == (SelectionKind::BoundaryLoop, vec![hole.id])),
+            matches!(hit, Some(h) if h.selection() == (SelectionKind::BoundaryLoop, vec![hole.id])),
             "expected the hole's loop with nothing in front of it"
         );
     }

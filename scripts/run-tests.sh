@@ -17,6 +17,7 @@ cd "$(dirname "$0")/.."
 # package, test target, test-name filters (substrings; each is also
 # skipped in step 1).
 timing=(
+  "mf-render bvh face_pick_under_16ms_at_5m bvh_build_is_cancellable"
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"

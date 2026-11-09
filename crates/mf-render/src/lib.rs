@@ -4,6 +4,7 @@
 //! precision holds far from the world origin (MF-GEO-001). Render buffers
 //! are never read back as geometry.
 
+mod bvh;
 mod camera;
 mod gpu_mesh;
 pub mod offscreen;
@@ -13,6 +14,7 @@ mod target;
 mod timer;
 mod transform;
 
+pub use bvh::{Bvh, LEAF_MAX};
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,

@@ -1,11 +1,66 @@
-//! Picking (M3): boundary loops in screen space, faces by CPU ray cast.
-//! The ray cast is brute force over live faces; M4 adds acceleration for
-//! the < 16 ms budget at 5M triangles (MF-RENDER-004).
+//! Picking: boundary loops in screen space, faces by CPU ray cast. Ray
+//! casts and occlusion tests go through a [`Bvh`] (MF-RENDER-004: < 16 ms
+//! at 5M triangles). The brute-force versions here ([`ray_pick`], and
+//! [`edge_occluded`] without a BVH) walk every live face: they are the
+//! oracle the BVH is tested against, and what a caller uses, explicitly,
+//! while a new revision's BVH is still being built.
 
 use glam::{DMat4, DVec3, DVec4};
 use mf_geometry::{FaceId, Mesh};
 
-use crate::OrbitCamera;
+use crate::{Bvh, OrbitCamera};
+
+/// Hits nearer than this (along the ray) don't count: the ray's own start.
+pub(crate) const HIT_MIN: f64 = 1e-12;
+
+/// Möller–Trumbore, both sides: the distance along `o + t·d` at which it
+/// crosses triangle `abc` (in `d`'s units), if it does. The one triangle
+/// test the brute-force and BVH casts share, so they agree exactly.
+#[inline]
+pub(crate) fn intersect(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
+    let (e1, e2) = (b - a, c - a);
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-18 {
+        return None;
+    }
+    let inv_det = 1.0 / det;
+    let s = o - a;
+    let u = s.dot(p) * inv_det;
+    if !(0.0..=1.0).contains(&u) {
+        return None;
+    }
+    let q = s.cross(e1);
+    let v = d.dot(q) * inv_det;
+    if v < 0.0 || u + v > 1.0 {
+        return None;
+    }
+    Some(e2.dot(q) * inv_det)
+}
+
+/// The unit direction and length from `from` to `to`, unless they coincide.
+pub(crate) fn segment(from: DVec3, to: DVec3) -> Option<(DVec3, f64)> {
+    let v = to - from;
+    let len = v.length();
+    (len > 0.0).then(|| (v / len, len))
+}
+
+/// True if face `t` (unless `skip`ped) lies strictly between `from` and
+/// the point `len` along unit direction `d`.
+pub(crate) fn blocks(
+    mesh: &Mesh,
+    t: &[u32; 3],
+    from: DVec3,
+    d: DVec3,
+    len: f64,
+    skip: &impl Fn(&[u32; 3]) -> bool,
+) -> bool {
+    if skip(t) {
+        return false;
+    }
+    let [a, b, c] = t.map(|v| DVec3::from(mesh.corner_position(v)));
+    intersect(from, d, a, b, c).is_some_and(|t| t > HIT_MIN && t < len * (1.0 - 1e-9))
+}
 
 /// Pixel position (y down) of a world point, or `None` if it is behind the camera.
 pub fn screen_position(
@@ -158,24 +213,33 @@ pub fn edge_candidates(
 }
 
 /// True if some face of `mesh` (other than one touching `skip_vertices`)
-/// lies between `eye` and `point`, hiding it. `model` places `mesh` in
-/// world space.
+/// lies between `eye` and `point` (world space), hiding it. `model` places
+/// `mesh` in world space; the test runs in object space. With a `bvh`
+/// (built for this `mesh`) it visits only the faces near the segment;
+/// without one it walks every face (the oracle, and the explicit path for
+/// a revision whose BVH isn't built yet). Both give the same answer.
 pub fn edge_occluded(
     mesh: &Mesh,
+    bvh: Option<&Bvh>,
     model: &DMat4,
     eye: DVec3,
     point: DVec3,
     skip_vertices: [u32; 2],
 ) -> bool {
-    let to = point - eye;
-    let len = to.length();
-    if len == 0.0 {
-        return false;
+    let inv = model.inverse();
+    let from = (inv * DVec4::from((eye, 1.0))).truncate();
+    let to = (inv * DVec4::from((point, 1.0))).truncate();
+    let skip = |tri: &[u32; 3]| tri.contains(&skip_vertices[0]) || tri.contains(&skip_vertices[1]);
+    match bvh {
+        Some(bvh) => bvh.occluded(mesh, from, to, skip),
+        None => {
+            let Some((d, len)) = segment(from, to) else {
+                return false;
+            };
+            mesh.faces()
+                .any(|(_, t)| blocks(mesh, &t, from, d, len, &skip))
+        }
     }
-    let hit = first_hit(mesh, model, eye.to_array(), (to / len).to_array(), |tri| {
-        tri.contains(&skip_vertices[0]) || tri.contains(&skip_vertices[1])
-    });
-    hit.is_some_and(|(_, dist)| dist < len * (1.0 - 1e-9))
 }
 
 /// The traced boundary loop with a *visible* edge nearest to `px` on screen,
@@ -186,10 +250,12 @@ pub fn edge_occluded(
 /// both happen in world space. For a scene with more than this one mesh,
 /// use [`loop_edge_candidates`] and [`edge_occluded`] directly so every
 /// object in the scene can occlude a candidate, not just this one. Uses the
-/// mesh's topology (O(n) to compute) and a ray cast per candidate (O(faces)):
-/// call it off the UI thread.
+/// mesh's topology (O(n) to compute, then cached) and a BVH occlusion test
+/// per candidate (`bvh` is `mesh`'s): call it off the UI thread.
+#[allow(clippy::too_many_arguments)]
 pub fn pick_loop(
     mesh: &Mesh,
+    bvh: &Bvh,
     model: &DMat4,
     cam: &OrbitCamera,
     origin: DVec3,
@@ -200,39 +266,29 @@ pub fn pick_loop(
     let eye = cam.eye();
     loop_edge_candidates(mesh, model, cam, origin, size, px, tolerance)
         .into_iter()
-        .find(|c| !edge_occluded(mesh, model, eye, c.point, c.endpoints))
+        .find(|c| !edge_occluded(mesh, Some(bvh), model, eye, c.point, c.endpoints))
         .map(|c| c.loop_id)
 }
 
 /// Nearest live face hit by the ray (Möller–Trumbore, both sides), with its
-/// distance along the ray. `model` places the mesh in world space; `origin`
-/// and `dir` are world-space, and the reported distance is along the
-/// world-space ray (MF-ISSUE-042). Ties go to the lower face ID.
+/// distance along the ray, by brute force over every live face: the
+/// oracle for [`Bvh::ray_pick`] (which finds the same), and the explicit
+/// path while a revision's BVH is still being built. `model` places the
+/// mesh in world space; `origin` and `dir` are world-space, and the
+/// reported distance is along the world-space ray (MF-ISSUE-042). Ties go
+/// to the lower face ID.
 pub fn ray_pick(
     mesh: &Mesh,
     model: &DMat4,
     origin: [f64; 3],
     dir: [f64; 3],
 ) -> Option<(FaceId, f64)> {
-    first_hit(mesh, model, origin, dir, |_| false)
-}
-
-/// Nearest hit among faces for which `skip` is false. The ray is transformed
-/// into object space with `model`'s inverse (so the brute-force cast still
-/// walks the mesh's own triangles); the returned distance is rescaled back
-/// to the world-space ray `dir` gave.
-fn first_hit(
-    mesh: &Mesh,
-    model: &DMat4,
-    origin: [f64; 3],
-    dir: [f64; 3],
-    skip: impl Fn(&[u32; 3]) -> bool,
-) -> Option<(FaceId, f64)> {
+    // The ray is cast in object space (so it walks the mesh's own
+    // triangles); world-space `dir` is a unit vector, and object space may
+    // rescale it, so distances are converted back by `scale`.
     let inv = model.inverse();
     let o = (inv * DVec4::from((DVec3::from(origin), 1.0))).truncate();
     let d_obj = (inv * DVec4::from((DVec3::from(dir), 0.0))).truncate();
-    // World-space `dir` is a unit vector; object space may rescale it, so
-    // distances along `d_obj` are converted back by this factor.
     let scale = d_obj.length();
     if scale < 1e-18 {
         return None;
@@ -240,29 +296,12 @@ fn first_hit(
     let d = d_obj / scale;
     let mut best: Option<(FaceId, f64)> = None;
     for (id, t) in mesh.faces() {
-        if skip(&t) {
-            continue;
-        }
         let [a, b, c] = t.map(|v| DVec3::from(mesh.corner_position(v)));
-        let (e1, e2) = (b - a, c - a);
-        let p = d.cross(e2);
-        let det = e1.dot(p);
-        if det.abs() < 1e-18 {
+        let Some(raw) = intersect(o, d, a, b, c) else {
             continue;
-        }
-        let inv_det = 1.0 / det;
-        let s = o - a;
-        let u = s.dot(p) * inv_det;
-        if !(0.0..=1.0).contains(&u) {
-            continue;
-        }
-        let q = s.cross(e1);
-        let v = d.dot(q) * inv_det;
-        if v < 0.0 || u + v > 1.0 {
-            continue;
-        }
-        let dist = e2.dot(q) * inv_det / scale;
-        if dist > 1e-12 && best.is_none_or(|(_, bt)| dist < bt) {
+        };
+        let dist = raw / scale;
+        if dist > HIT_MIN && best.is_none_or(|(_, bt)| dist < bt) {
             best = Some((id, dist));
         }
     }

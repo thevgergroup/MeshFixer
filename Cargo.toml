@@ -61,6 +61,12 @@ opt-level = 2
 [profile.dev.package.mf-operations]
 opt-level = 2
 
+# Picking (the BVH build and its ray casts, MF-RENDER-004) runs in tests
+# and the app at release-like speed: the < 16 ms pick budget is measured
+# in the test harness.
+[profile.dev.package.mf-render]
+opt-level = 2
+
 # Cancellation checkpoints and the cancellable sort sit in every hot loop.
 [profile.dev.package.mf-runtime]
 opt-level = 2

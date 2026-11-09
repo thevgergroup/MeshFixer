@@ -8,7 +8,7 @@
 use glam::{DMat4, DVec3};
 use mf_fixtures::{cube, cube_with_missing_face};
 use mf_geometry::FaceId;
-use mf_render::{OrbitCamera, pick_loop, ray_pick, screen_position};
+use mf_render::{Bvh, OrbitCamera, pick_loop, ray_pick, screen_position};
 
 #[test]
 fn loop_pick_finds_nearest_edge_within_tolerance() {
@@ -26,6 +26,7 @@ fn loop_pick_finds_nearest_edge_within_tolerance() {
     assert_eq!(
         pick_loop(
             &m,
+            &bvh_of(&m),
             &DMat4::IDENTITY,
             &cam,
             origin,
@@ -36,13 +37,23 @@ fn loop_pick_finds_nearest_edge_within_tolerance() {
         Some(hole.id)
     );
     assert_eq!(
-        pick_loop(&m, &DMat4::IDENTITY, &cam, origin, size, (5.0, 5.0), 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            (5.0, 5.0),
+            8.0
+        ),
         None,
         "far from every loop"
     );
     assert_eq!(
         pick_loop(
             &cube(1.0),
+            &bvh_of(&cube(1.0)),
             &DMat4::IDENTITY,
             &cam,
             origin,
@@ -106,15 +117,38 @@ fn loop_pick_ignores_edges_behind_the_surface() {
 
     let mid = screen_position(&cam, origin, size, mid_world).unwrap();
     assert_eq!(
-        pick_loop(&m, &DMat4::IDENTITY, &cam, origin, size, mid, 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            mid,
+            8.0
+        ),
         Some(hole.id),
         "visible from above"
     );
     cam.pitch = -60f64.to_radians();
     let mid = screen_position(&cam, origin, size, mid_world).unwrap();
     assert_eq!(
-        pick_loop(&m, &DMat4::IDENTITY, &cam, origin, size, mid, 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            mid,
+            8.0
+        ),
         None,
         "hidden from below"
     );
+}
+
+/// The BVH picking uses for `mesh`.
+fn bvh_of(mesh: &mf_geometry::Mesh) -> Bvh {
+    Bvh::build(mesh, &mf_runtime::RunContext::none()).unwrap()
 }

@@ -355,6 +355,32 @@ pub fn replay_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
 }
 
 /// Help > Controls.
+/// The tooltip beside the pointer when it rests on a defect in the 3D
+/// view (MF-RENDER-004): what it is and its size, in the same words as
+/// its tree row (a hole's boundary edges and perimeter, a loose piece's
+/// triangles, a tangled edge's description).
+pub fn view_hover_tooltip(app: &MeshFixerApp, ctx: &egui::Context) {
+    let (Some(hover), Some(at)) = (app.view_hover(), app.view_pointer()) else {
+        return;
+    };
+    let copy = defect_copy(&hover.defect, app.session.document().units());
+    egui::Area::new(egui::Id::unique("view hover tooltip"))
+        .order(egui::Order::Tooltip)
+        .interactable(false)
+        .fixed_pos(at + egui::vec2(16.0, 16.0))
+        .constrain(true)
+        .show(ctx, |ui| {
+            egui::Frame::popup(ui.style()).show(ui, |ui| {
+                ui.strong(&copy.title);
+                ui.label(&copy.detail);
+                ui.label(
+                    RichText::new(format!("Click to select · Next: {}", copy.next_action))
+                        .color(theme::TEXT_MUTED),
+                );
+            });
+        });
+}
+
 pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     let mut open = app.show_controls;
     egui::Window::new("Controls")

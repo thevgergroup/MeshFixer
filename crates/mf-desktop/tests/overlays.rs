@@ -298,3 +298,111 @@ fn selecting_in_the_view_uploads_no_geometry() {
         "the face states changed"
     );
 }
+
+/// Moves the pointer to `pos` (no button) and lets a frame see it.
+fn point_at(h: &mut Harness<'_, MeshFixerApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos));
+    h.step();
+}
+
+/// The words the tooltip uses for the active object's `defect`.
+fn copy_of(app: &MeshFixerApp, defect: &Defect) -> mf_desktop::defects::DefectCopy {
+    mf_desktop::defects::defect_copy(defect, app.session.document().units())
+}
+
+/// MF-RENDER-004: hovering a hole in the view outlines it (the hover
+/// line layer) and a tooltip gives its size, in the tree's words; moving
+/// off the model clears both.
+#[test]
+fn hovering_a_hole_highlights_it_and_shows_its_size() {
+    require_gpu!("hovering_a_hole_highlights_it_and_shows_its_size");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(write(
+        dir.path(),
+        "open_box.obj",
+        &mf_fixtures::scaled(&mf_fixtures::cube_with_missing_face(), 10.0),
+    ));
+    wait_until(&mut h, "picking ready", MeshFixerApp::picking_ready);
+    let hole = h.state().current_analysis().unwrap().defects.holes[0].clone();
+    let Defect::Hole { loop_id, .. } = hole else {
+        panic!("a fillable hole: {hole:?}");
+    };
+    let copy = copy_of(h.state(), &hole);
+    assert!(copy.detail.contains("4 boundary edges"), "{copy:?}");
+    assert!(copy.detail.contains("40.0 mm perimeter"), "{copy:?}");
+
+    // A third of the way along one of its edges.
+    let mesh = h.state().active_mesh().unwrap().clone();
+    let topo = mesh.topology();
+    let l = topo
+        .boundary_loops
+        .iter()
+        .find(|l| l.id == loop_id)
+        .unwrap();
+    let (a, b) = (
+        mesh.corner_position(l.vertices[0]),
+        mesh.corner_position(l.vertices[1]),
+    );
+    let at = [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) / 3.0);
+    let pos = h.state().screen_point(at).unwrap();
+    point_at(&mut h, pos);
+    wait_until(&mut h, "hover outline", |a| {
+        a.view_hover()
+            .is_some_and(|v| v.target == mf_desktop::worker::OverlayTarget::Loops(vec![loop_id]))
+            && a.view_layers()
+                .iter()
+                .any(|l| l.color == mf_desktop::theme::HOVER)
+    });
+    // The tooltip: the hole's title (also its tree row) and its size.
+    assert_eq!(h.get_all_by_label(&copy.title).count(), 2, "{copy:?}");
+    h.get_by_label(&copy.detail);
+    assert!(h.state().selection.is_none(), "hovering selects nothing");
+
+    // Off the model: no hover, no tooltip.
+    let view = h.state().viewport.last_rect.unwrap();
+    point_at(&mut h, view.left_top() + egui::vec2(20.0, 20.0));
+    wait_until(&mut h, "hover cleared", |a| a.view_hover().is_none());
+    assert!(h.query_by_label(&copy.detail).is_none());
+    assert!(
+        !h.state()
+            .view_layers()
+            .iter()
+            .any(|l| l.color == mf_desktop::theme::HOVER)
+    );
+}
+
+/// Hovering a loose piece tints its faces (the HOVER state bit) and the
+/// tooltip gives its triangle count.
+#[test]
+fn hovering_a_loose_piece_tints_it_and_shows_its_triangle_count() {
+    require_gpu!("hovering_a_loose_piece_tints_it_and_shows_its_triangle_count");
+    let dir = tempfile::tempdir().unwrap();
+    let cube = mf_fixtures::translated(&mf_fixtures::cube(4.0), [14.0, 3.0, 0.0]);
+    let mut h = open(write(
+        dir.path(),
+        "plate_and_cube.obj",
+        &mf_fixtures::merge(&[mf_fixtures::grid(10), cube]),
+    ));
+    wait_until(&mut h, "picking ready", MeshFixerApp::picking_ready);
+    let piece_defect = h.state().current_analysis().unwrap().defects.loose[0].clone();
+    let copy = copy_of(h.state(), &piece_defect);
+    assert!(copy.detail.starts_with("12 triangles"), "{copy:?}");
+    let piece = h.state().active_mesh().unwrap().topology().components[1].clone();
+
+    let top = h.state().screen_point([16.0, 5.0, 4.0]).unwrap();
+    point_at(&mut h, top);
+    wait_until(&mut h, "hover tint", |a| {
+        a.view_hover()
+            .is_some_and(|v| v.target == mf_desktop::worker::OverlayTarget::Components(vec![1]))
+            && piece.iter().all(|&f| state(a, f) & FaceStates::HOVER != 0)
+    });
+    h.get_by_label(&copy.detail);
+
+    // Over the main body: not a defect, so nothing is hovered.
+    let body = h.state().screen_point([5.0, 5.0, 0.0]).unwrap();
+    point_at(&mut h, body);
+    wait_until(&mut h, "hover cleared", |a| {
+        a.view_hover().is_none() && piece.iter().all(|&f| state(a, f) & FaceStates::HOVER == 0)
+    });
+    assert!(h.query_by_label(&copy.detail).is_none());
+}

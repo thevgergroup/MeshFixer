@@ -7,6 +7,8 @@ repository.workspace = true
 
 [dependencies]
 mf-geometry.workspace = true
+mf-runtime.workspace = true
+rayon.workspace = true
 wgpu.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
@@ -16,3 +18,4 @@ thiserror.workspace = true
 
 [dev-dependencies]
 mf-fixtures.workspace = true
+mf-runtime.workspace = true
