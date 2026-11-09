@@ -8,12 +8,12 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use mf_desktop::worker::Message;
 use mf_desktop::{MeshFixerApp, Settings};
-use mf_geometry::{ContentHash, Mesh};
+use mf_geometry::ContentHash;
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
 use mf_runtime::{Cancelled, RunContext};
 
 fn panicking(
-    _: (Mesh, [f64; 12]),
+    _: mf_desktop::worker::AnalysisRequest,
     _: &RunContext,
     _: &mf_desktop::worker::Gpu,
 ) -> Result<Message, Cancelled> {

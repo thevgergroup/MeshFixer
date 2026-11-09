@@ -384,3 +384,61 @@ fn sources_must_be_faces_of_the_input_revision() {
         .is_ok()
     );
 }
+
+/// What a renderer may reuse (MF-RENDER-003): a face chunk is shared only if
+/// its faces *and* their liveness are, so a removal (which only flips a
+/// tombstone bit) still counts as a change to that chunk, and only to it.
+#[test]
+fn face_chunk_shared_includes_liveness() {
+    let m = uv_sphere(160, 320); // 101,760 faces: 4 face chunks
+    let mut e = m.edit();
+    e.remove_face(FaceId((CHUNK + 5) as u32)).unwrap();
+    let (removed, _) = e.finish().unwrap();
+    assert!(removed.shares_face_chunk(&m, 1), "storage is still shared");
+    let shared: Vec<bool> = (0..m.face_chunk_count())
+        .map(|i| removed.face_chunk_shared(&m, i))
+        .collect();
+    assert_eq!(shared, vec![true, false, true, true]);
+    assert!(m.face_chunk_shared(&m, 0));
+    assert!(
+        !m.face_chunk_shared(&m, m.face_chunk_count()),
+        "past the end"
+    );
+
+    // Appending a face copies the last chunk only.
+    let mut e = m.edit();
+    e.add_face([0, 1, 2], Sources::default()).unwrap();
+    let (added, _) = e.finish().unwrap();
+    let last = m.face_chunk_count() - 1;
+    assert!(added.face_chunk_shared(&m, last - 1));
+    assert!(!added.face_chunk_shared(&m, last));
+
+    let mut e = m.edit();
+    e.move_vertex(VertexId(40_000), [0.0, 0.0, 3.0]).unwrap();
+    let (moved, _) = e.finish().unwrap();
+    let vertex_shared: Vec<bool> = (0..m.position_chunk_count())
+        .map(|j| moved.vertex_chunk_shared(&m, j))
+        .collect();
+    assert_eq!(vertex_shared, vec![true, false]);
+    assert!((0..m.face_chunk_count()).all(|i| moved.face_chunk_shared(&m, i)));
+}
+
+/// Appending vertices copies the last vertex chunk, but keeps every
+/// position already in it: faces built for the old revision are still right.
+#[test]
+fn vertex_chunk_kept_survives_appends_not_moves() {
+    let m = uv_sphere(160, 320); // 50,882 vertices: 2 vertex chunks
+    let mut e = m.edit();
+    e.add_vertex([0.0, 0.0, 2.0]);
+    let (appended, _) = e.finish().unwrap();
+    assert!(!appended.vertex_chunk_shared(&m, 1), "copied on write");
+    assert!(appended.vertex_chunk_kept(&m, 1));
+    assert!(appended.vertex_chunk_kept(&m, 0));
+
+    let mut e = appended.edit();
+    e.move_vertex(VertexId(50_000), [0.0, 0.0, 3.0]).unwrap();
+    let (moved, _) = e.finish().unwrap();
+    assert!(!moved.vertex_chunk_kept(&m, 1));
+    assert!(!moved.vertex_chunk_kept(&appended, 1));
+    assert!(!m.vertex_chunk_kept(&m, 2), "past the end");
+}

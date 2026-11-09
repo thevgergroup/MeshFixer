@@ -15,9 +15,10 @@ mod transform;
 
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
-    GpuFaces, GpuLines, GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices,
-    boundary_line_vertices_skipping, chunk_ranges, edge_line_vertices, face_surface_vertices,
-    loop_line_vertices, surface_vertices,
+    ChunkVertices, GpuFaces, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
+    SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
+    chunk_ranges, edge_line_vertices, face_surface_vertices, loop_line_vertices, render_origin,
+    surface_vertices,
 };
 pub use pick::{
     LoopEdgeCandidate, edge_occluded, loop_edge_candidates, pick_loop, ray_pick, screen_position,

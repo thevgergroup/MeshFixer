@@ -34,6 +34,9 @@ struct FrameKey {
 /// One overlay to draw on an object (built by a worker; see app.rs).
 pub struct ViewLayer {
     pub object: ObjectId,
+    /// The local origin the layer's vertices are relative to (an overlay's
+    /// own; it needn't be the object's render mesh's).
+    pub origin: glam::DVec3,
     pub geometry: ViewGeometry,
     pub color: egui::Color32,
     /// Face layers: how much of `color` replaces the surface colour.
@@ -408,7 +411,7 @@ impl Viewport {
                             ViewGeometry::Faces(g) => LayerGeometry::Faces(g),
                         },
                         model: model_matrix(&o.transform),
-                        mesh_origin: o.render.origin,
+                        mesh_origin: l.origin,
                         color: theme::rgba(l.color),
                         strength: l.strength,
                     })
@@ -622,7 +625,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     let vertices = mf_render::MeshVertices::build(&mesh);
     let gpu = mf_render::GpuMesh::from_vertices(device, &vertices);
     let lines = GpuLines::upload(device, &vertices.lines);
-    let faces = GpuFaces::upload(device, &vertices.surface);
+    let faces = GpuFaces::upload(device, &vertices.surface());
     let target = RenderTarget::new(device, 8, 8, MSAA_SAMPLES).expect("an 8×8 target fits");
     let camera = OrbitCamera::fit(&mesh.bounding_box().expect("a triangle has bounds"));
     let model = glam::DMat4::IDENTITY;

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
-use crate::chunked::{Bits, Chunked};
+use crate::chunked::{Bits, CHUNK, Chunked};
 use crate::edit::MeshEdit;
 use crate::hash::ContentHash;
 use crate::ids::{FaceId, SlotRemap, VertexId};
@@ -447,6 +447,56 @@ impl Mesh {
 
     pub fn shares_position_chunk(&self, other: &Mesh, i: usize) -> bool {
         self.inner.positions.shares_chunk(&other.inner.positions, i)
+    }
+
+    /// True if face chunk `i` (slots `i·CHUNK..`) is the same in both
+    /// revisions: the same shared face storage *and* the same liveness, so
+    /// a removal, which only clears a tombstone bit, still counts as a
+    /// change (MF-RENDER-003). False past either mesh's end.
+    pub fn face_chunk_shared(&self, other: &Mesh, i: usize) -> bool {
+        self.inner.faces.shares_chunk(&other.inner.faces, i)
+            && self
+                .inner
+                .face_live
+                .range_eq(&other.inner.face_live, i * CHUNK, CHUNK)
+    }
+
+    /// True if vertex chunk `j` shares its positions with `other`'s (what a
+    /// face referencing it is drawn with). False past either mesh's end.
+    pub fn vertex_chunk_shared(&self, other: &Mesh, j: usize) -> bool {
+        self.shares_position_chunk(other, j)
+    }
+
+    /// True if every vertex slot `prev` has in vertex chunk `j` holds the
+    /// same position here: shared storage, or a copy that only appended
+    /// vertices (as a fill does to the last chunk). What faces built for
+    /// `prev` need to still be drawn right (MF-RENDER-003). O(1) when
+    /// shared, else a bitwise compare of the chunk.
+    pub fn vertex_chunk_kept(&self, prev: &Mesh, j: usize) -> bool {
+        if self.vertex_chunk_shared(prev, j) {
+            return true;
+        }
+        let (now, then) = (self.inner.positions.chunk(j), prev.inner.positions.chunk(j));
+        now.len() >= then.len()
+            && !then.is_empty()
+            && now
+                .iter()
+                .zip(then)
+                .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits))
+    }
+
+    /// Live faces in face chunk `i`, in ascending ID order.
+    pub fn faces_in_chunk(&self, i: usize) -> impl Iterator<Item = (FaceId, [u32; 3])> + '_ {
+        let live = &self.inner.face_live;
+        let base = i * CHUNK;
+        self.inner
+            .faces
+            .chunk(i)
+            .iter()
+            .enumerate()
+            .map(move |(k, t)| (base + k, *t))
+            .filter(move |(f, _)| live.get(*f))
+            .map(|(f, t)| (FaceId(f as u32), t))
     }
 
     /// True if both handles point at the same revision.

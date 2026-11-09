@@ -100,7 +100,7 @@ pub struct MeshFixerApp {
     /// Analyses keyed by revision identity (pointer, so recognizing a
     /// revision is O(1) on the UI thread).
     analyses: AnalysisCache<Analysis>,
-    analyzer: LatestWorker<(Mesh, [f64; 12])>,
+    analyzer: LatestWorker<worker::AnalysisRequest>,
     /// Last revision submitted for analysis.
     requested: Option<(Mesh, [f64; 12])>,
     /// The last revision whose analysis failed: not retried (it would fail
@@ -200,10 +200,10 @@ impl MeshFixerApp {
                 let ctx = cc.egui_ctx.clone();
                 LatestWorker::new(
                     workers.background(),
-                    move |request: (Mesh, [f64; 12]), run: &RunContext| {
+                    move |request: worker::AnalysisRequest, run: &RunContext| {
                         // A panic is reported for that revision, not left
                         // to abort the app (or to look like work forever).
-                        let (mesh, transform) = request.clone();
+                        let (mesh, transform) = (request.mesh.clone(), request.transform);
                         let analysed =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 analyze(request, run, &gpu)
@@ -1019,7 +1019,17 @@ impl MeshFixerApp {
             .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == transform)
         {
             self.requested = Some((mesh.clone(), transform));
-            self.analyzer.submit((mesh, transform));
+            // The new render mesh shares this object's chunks on screen.
+            let previous = self
+                .displayed
+                .as_ref()
+                .filter(|(object, _, _)| Some(*object) == self.active)
+                .map(|(_, _, render)| render.clone());
+            self.analyzer.submit(worker::AnalysisRequest {
+                mesh,
+                transform,
+                previous,
+            });
         }
         if self.camera.is_none() && self.view_request.is_none() {
             self.view_request = Some(ViewRequest::Reset);
@@ -1051,7 +1061,8 @@ impl MeshFixerApp {
             .collect();
         for (id, mesh) in stale {
             self.requested_vertices.insert(id, mesh.clone());
-            self.workers.build_vertices(id, mesh);
+            let previous = self.object_vertices.get(&id).map(|(_, r)| r.clone());
+            self.workers.build_vertices(id, mesh, previous);
         }
         // Drop vertices and in-flight requests for objects no longer in the document.
         let doc = self.session.document();
@@ -1321,14 +1332,16 @@ impl MeshFixerApp {
     /// The 3D view's overlays, bottom to top (theme.rs gives each its colour).
     pub fn view_layers(&self) -> Vec<ViewLayer> {
         let mut layers = Vec::new();
-        let faces = |object, faces: &Arc<mf_render::GpuFaces>, color, strength| ViewLayer {
+        let faces = |object, origin, faces: &Arc<mf_render::GpuFaces>, color, strength| ViewLayer {
             object,
+            origin,
             geometry: ViewGeometry::Faces(faces.clone()),
             color,
             strength,
         };
-        let lines = |object, lines: &Arc<mf_render::GpuLines>, color| ViewLayer {
+        let lines = |object, origin, lines: &Arc<mf_render::GpuLines>, color| ViewLayer {
             object,
+            origin,
             geometry: ViewGeometry::Lines(lines.clone()),
             color,
             strength: 1.0,
@@ -1345,6 +1358,7 @@ impl MeshFixerApp {
         if let Some((object, a)) = defects {
             layers.push(faces(
                 object,
+                a.render.origin,
                 &a.layers.loose,
                 theme::LOOSE_PIECE,
                 theme::LOOSE_PIECE_STRENGTH,
@@ -1353,6 +1367,7 @@ impl MeshFixerApp {
         if let Some((object, o)) = ready(OverlayPurpose::RecentRepair) {
             layers.push(faces(
                 object,
+                o.origin,
                 &o.faces,
                 theme::RECENT_REPAIR,
                 theme::RECENT_REPAIR_STRENGTH,
@@ -1361,6 +1376,7 @@ impl MeshFixerApp {
         if let Some((object, o)) = ready(OverlayPurpose::Selection) {
             layers.push(faces(
                 object,
+                o.origin,
                 &o.faces,
                 theme::SELECTED,
                 theme::SELECTED_FACE_STRENGTH,
@@ -1369,20 +1385,31 @@ impl MeshFixerApp {
         if let Some((object, o)) = ready(OverlayPurpose::Hover) {
             layers.push(faces(
                 object,
+                o.origin,
                 &o.faces,
                 theme::HOVER,
                 theme::HOVER_FACE_STRENGTH,
             ));
         }
         if let Some((object, a)) = defects {
-            layers.push(lines(object, &a.layers.cracks, theme::CRACK));
-            layers.push(lines(object, &a.layers.tangled, theme::NON_MANIFOLD));
+            layers.push(lines(
+                object,
+                a.render.origin,
+                &a.layers.cracks,
+                theme::CRACK,
+            ));
+            layers.push(lines(
+                object,
+                a.render.origin,
+                &a.layers.tangled,
+                theme::NON_MANIFOLD,
+            ));
         }
         if let Some((object, o)) = ready(OverlayPurpose::Selection) {
-            layers.push(lines(object, &o.lines, theme::SELECTED));
+            layers.push(lines(object, o.origin, &o.lines, theme::SELECTED));
         }
         if let Some((object, o)) = ready(OverlayPurpose::Hover) {
-            layers.push(lines(object, &o.lines, theme::HOVER));
+            layers.push(lines(object, o.origin, &o.lines, theme::HOVER));
         }
         // Overlays are built for the current revision: while the active
         // object still shows its previous one, they wouldn't line up.

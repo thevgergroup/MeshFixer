@@ -448,6 +448,19 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
         "the 3D view was redrawn as the camera moved"
     );
     eprintln!("commit frame: {:.1} ms", ms(frames[committed_at - 1].0));
+    // MF-RENDER-003: the filled revision's GPU chunks, mostly shared.
+    let view = app.object_views().into_iter().find(|v| v.active).unwrap();
+    let (surface, _) = view.render.gpu.surface_vertex_count();
+    let surface = (surface * std::mem::size_of::<mf_render::SurfaceVertex>()) as u64;
+    let upload = view.render.gpu.last_upload();
+    eprintln!(
+        "filled revision uploaded {} of {surface} surface bytes, {} line bytes",
+        upload.surface_bytes, upload.line_bytes
+    );
+    assert!(
+        upload.surface_bytes < surface / 10,
+        "a fill re-uploads only the chunks it appended to: {upload:?}"
+    );
     assert!(
         committed_at >= 10,
         "too few frames while the fill ran to judge: {committed_at}"

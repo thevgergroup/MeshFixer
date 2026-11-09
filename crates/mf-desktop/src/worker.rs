@@ -33,9 +33,12 @@ use crate::defects::{Defect, Defects};
 /// its GPU buffers, plus the bounds and local origin the app frames and
 /// places overlays with. No CPU copy of the vertices is kept.
 pub struct RenderMesh {
+    /// The revision the buffers were built for: a later revision's build
+    /// reuses every GPU chunk it shares with this one (MF-RENDER-003).
+    pub mesh: Mesh,
     /// Object-space bounds; `None` for an empty mesh.
     pub bounds: Option<Aabb>,
-    /// The local origin vertices (and overlays) are relative to.
+    /// The local origin vertices (and defect overlays) are relative to.
     pub origin: glam::DVec3,
     pub gpu: GpuMesh,
 }
@@ -112,17 +115,29 @@ struct Primer {
 
 impl RenderMesh {
     /// O(n) and a GPU upload: call it on a worker. `skip` leaves out the
-    /// boundary outlines of those loops (by ID). Generated and uploaded a
-    /// chunk at a time (see [`GpuMesh::from_mesh_paced`]).
-    pub fn build(gpu: &Gpu, mesh: &Mesh, skip: &[u32]) -> RenderMesh {
+    /// boundary outlines of those loops (by ID). `previous` is what the
+    /// view shows for this object now: every GPU chunk still valid for
+    /// `mesh` is shared with it rather than uploaded again, and only the
+    /// changed chunks are generated and uploaded, one at a time (see
+    /// [`GpuMesh::from_previous`]). Reuse is decided against `previous`'s
+    /// own revision, so it is right whatever the history between the two
+    /// (undo, redo, another branch).
+    pub fn build(
+        gpu: &Gpu,
+        mesh: &Mesh,
+        skip: &[u32],
+        previous: Option<&RenderMesh>,
+    ) -> RenderMesh {
         let bounds = mesh.bounding_box();
-        let origin = bounds.map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()));
+        let origin = mf_render::render_origin(previous.map(|p| p.origin), bounds);
         let render = RenderMesh {
+            mesh: mesh.clone(),
             bounds,
             origin,
-            gpu: GpuMesh::from_mesh_paced(
+            gpu: GpuMesh::from_previous(
                 &gpu.device,
                 &gpu.queue,
+                previous.map(|p| (&p.mesh, &p.gpu)),
                 mesh,
                 origin,
                 skip,
@@ -175,10 +190,13 @@ pub enum OverlayPurpose {
     RecentRepair,
 }
 
-/// An overlay's GPU buffers (vertices relative to the mesh's local origin),
-/// bounds and outward direction (object space; `None` when the faces
-/// around it face every way, like a closed piece).
+/// An overlay's GPU buffers (vertices relative to `origin`), bounds and
+/// outward direction (object space; `None` when the faces around it face
+/// every way, like a closed piece).
 pub struct Overlay {
+    /// The local origin its vertices are relative to: its own, since the
+    /// render mesh it's drawn over may keep an earlier revision's origin.
+    pub origin: glam::DVec3,
     pub lines: Arc<GpuLines>,
     pub faces: Arc<GpuFaces>,
     pub bounds: Option<Aabb>,
@@ -429,11 +447,12 @@ impl Workers {
 
     /// Render vertices only, for an object that isn't active
     /// (MF-ISSUE-042): it still needs to be drawn at its transform, but not
-    /// analysed.
-    pub fn build_vertices(&self, object: ObjectId, mesh: Mesh) {
+    /// analysed. `previous` is what the view draws for it now (see
+    /// [`RenderMesh::build`]).
+    pub fn build_vertices(&self, object: ObjectId, mesh: Mesh, previous: Option<Arc<RenderMesh>>) {
         let gpu = self.gpu.clone();
         self.spawn_background("render mesh", move || {
-            let render = Arc::new(RenderMesh::build(&gpu, &mesh, &[]));
+            let render = Arc::new(RenderMesh::build(&gpu, &mesh, &[], previous.as_deref()));
             Message::ObjectVertices {
                 object,
                 mesh,
@@ -545,17 +564,34 @@ fn fill_cap() -> usize {
         .expect("fill_holes declares a maximum max_loop_edges")
 }
 
+/// One revision to analyse.
+#[derive(Clone)]
+pub struct AnalysisRequest {
+    pub mesh: Mesh,
+    /// The object transform to measure with.
+    pub transform: [f64; 12],
+    /// What the view draws for the object now, whose GPU chunks the new
+    /// render mesh reuses where they're still valid (see
+    /// [`RenderMesh::build`]).
+    pub previous: Option<Arc<RenderMesh>>,
+}
+
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).
-pub type AnalyzeFn = fn((Mesh, [f64; 12]), &RunContext, &Gpu) -> Result<Message, Cancelled>;
+pub type AnalyzeFn = fn(AnalysisRequest, &RunContext, &Gpu) -> Result<Message, Cancelled>;
 
 /// Diagnostics, defects and render vertices for one revision (O(n), so off
 /// the UI thread). Measurements are made after the object's `transform`.
 /// Cancelled when a newer revision is submitted (see analysis.rs).
 pub fn analyze(
-    (mesh, transform): (Mesh, [f64; 12]),
+    request: AnalysisRequest,
     ctx: &RunContext,
     gpu: &Gpu,
 ) -> Result<Message, Cancelled> {
+    let AnalysisRequest {
+        mesh,
+        transform,
+        previous,
+    } = request;
     let diagnostics = mf_geometry::inspect_with(&mesh, ctx)?;
     ctx.checkpoint()?;
     let defects = crate::defects::classify(&mesh, &diagnostics, &transform, fill_cap());
@@ -566,7 +602,15 @@ pub fn analyze(
         .collect();
     ctx.checkpoint()?;
     // Cracks get only the crack colour: no hole outline under them.
-    let render = Arc::new(RenderMesh::build(gpu, &mesh, &crack_ids));
+    let render = Arc::new(RenderMesh::build(
+        gpu,
+        &mesh,
+        &crack_ids,
+        previous.as_deref(),
+    ));
+    // Let go of it here, on the worker: if the app already has, freeing
+    // its unshared buffers stays out of the UI thread.
+    drop(previous);
     ctx.checkpoint()?;
     let origin = render.origin;
     let tangled: Vec<[u32; 2]> = defects
@@ -685,6 +729,7 @@ fn build_overlay(
             mesh: mesh.clone(),
             target,
             overlay: Overlay {
+                origin,
                 lines: Arc::new(GpuLines::upload_paced(
                     &gpu.device,
                     &gpu.queue,
@@ -853,7 +898,11 @@ mod tests {
         let plate = mf_fixtures::plate_with_defects();
         let identity = mf_io::threemf::IDENTITY;
         let Ok(Message::Analyzed { analysis, .. }) = analyze(
-            (plate, identity),
+            AnalysisRequest {
+                mesh: plate,
+                transform: identity,
+                previous: None,
+            },
             &RunContext::none(),
             &Gpu::new(device, queue),
         ) else {

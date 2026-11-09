@@ -150,6 +150,11 @@ impl<T: Copy> Chunked<T> {
         self.chunks.len()
     }
 
+    /// The elements of chunk `i` (empty past the end).
+    pub fn chunk(&self, i: usize) -> &[T] {
+        self.chunks.get(i).map_or(&[], |c| &c.data)
+    }
+
     pub fn shares_chunk(&self, other: &Chunked<T>, i: usize) -> bool {
         match (self.chunks.get(i), other.chunks.get(i)) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -231,6 +236,32 @@ impl Bits {
         if new != w {
             self.words.set(i / 64, new);
         }
+    }
+
+    /// Word `w` (bits `64w..64w+64`); zero past the end, like the unused
+    /// bits of the last word.
+    fn word(&self, w: usize) -> u64 {
+        if w < self.words.len() {
+            self.words.get(w)
+        } else {
+            0
+        }
+    }
+
+    /// True if bits `start..start + len` are the same in both. `start`
+    /// must be a multiple of 64. O(len / 64), or O(1) when the words are
+    /// shared storage.
+    pub fn range_eq(&self, other: &Bits, start: usize, len: usize) -> bool {
+        debug_assert!(start.is_multiple_of(64));
+        let (first, end) = (start / 64, (start + len).div_ceil(64));
+        if end == first {
+            return true;
+        }
+        let chunk = first / CHUNK;
+        if (end - 1) / CHUNK == chunk && self.words.shares_chunk(&other.words, chunk) {
+            return true;
+        }
+        (first..end).all(|w| self.word(w) == other.word(w))
     }
 
     pub fn push(&mut self, value: bool) {

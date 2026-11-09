@@ -1,9 +1,12 @@
 use std::ops::Range;
+use std::sync::{Arc, Weak};
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use mf_geometry::Mesh;
+use mf_geometry::{Aabb, CHUNK, Mesh};
 use wgpu::util::DeviceExt;
+
+use crate::RenderError;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
@@ -22,10 +25,8 @@ fn local(p: [f64; 3], origin: DVec3) -> [f32; 3] {
     (DVec3::from(p) - origin).as_vec3().to_array()
 }
 
-/// Non-indexed, flat-shaded triangles relative to `origin`.
-///
-/// Temporary for M1: M4 replaces this with chunked, indexed buffers that
-/// support partial re-upload (MF-RENDER-003).
+/// Non-indexed, flat-shaded triangles relative to `origin`, for the whole
+/// mesh (the GPU holds them per face chunk: see [`ChunkVertices`]).
 pub fn surface_vertices(mesh: &Mesh, origin: DVec3) -> Vec<SurfaceVertex> {
     let mut out = Vec::with_capacity(mesh.triangle_count() * 3);
     for (_, t) in mesh.faces() {
@@ -83,39 +84,177 @@ pub fn boundary_line_vertices_skipping(
     out
 }
 
-/// CPU-side vertex data for one mesh revision. Building it is O(n), so
-/// frontends do it off the UI thread and only upload on the render thread
-/// (MF-RT-001).
+/// The vertices of one face chunk (face slots `i·CHUNK..(i+1)·CHUNK`),
+/// relative to the mesh's local origin: what one GPU chunk holds
+/// (MF-RENDER-003).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ChunkVertices {
+    /// Flat-shaded triangles of the chunk's live faces, in ID order.
+    pub surface: Vec<SurfaceVertex>,
+    /// The vertex chunks its faces reference, ascending: the chunk is only
+    /// valid for another revision if all of them are shared with it.
+    pub vertex_chunks: Vec<u32>,
+}
+
+impl ChunkVertices {
+    /// Face chunk `i` of `mesh`, relative to `origin`. O(faces in the chunk).
+    pub fn build(mesh: &Mesh, i: usize, origin: DVec3) -> ChunkVertices {
+        let slots = (mesh.face_slots() as usize).saturating_sub(i * CHUNK);
+        let mut surface = Vec::with_capacity(3 * slots.min(CHUNK));
+        let mut referenced = vec![false; mesh.position_chunk_count()];
+        for (_, t) in mesh.faces_in_chunk(i) {
+            push_face(&mut surface, mesh, t, origin);
+            for v in t {
+                referenced[v as usize / CHUNK] = true;
+            }
+        }
+        ChunkVertices {
+            surface,
+            vertex_chunks: (0..referenced.len() as u32)
+                .filter(|&j| referenced[j as usize])
+                .collect(),
+        }
+    }
+}
+
+/// Which face chunks built for `prev` are still right for `next`.
+struct Reuse<'a> {
+    prev: &'a Mesh,
+    next: &'a Mesh,
+    /// Per vertex chunk of `prev`: are all its positions kept in `next`?
+    kept: Vec<bool>,
+}
+
+impl<'a> Reuse<'a> {
+    fn new(prev: &'a Mesh, next: &'a Mesh) -> Reuse<'a> {
+        Reuse {
+            prev,
+            next,
+            kept: (0..prev.position_chunk_count())
+                .map(|j| next.vertex_chunk_kept(prev, j))
+                .collect(),
+        }
+    }
+
+    /// True if face chunk `i` built for `prev` is also face chunk `i` of
+    /// `next`: its faces (with their liveness) are shared, and every vertex
+    /// chunk they reference still holds the same positions (shared, or
+    /// only appended to). Decided by storage identity and content, so it
+    /// holds whatever the revisions' history (undo, redo, another branch).
+    fn chunk(&self, i: usize, vertex_chunks: &[u32]) -> bool {
+        self.next.face_chunk_shared(self.prev, i)
+            && vertex_chunks
+                .iter()
+                .all(|&j| self.kept.get(j as usize).copied().unwrap_or(false))
+    }
+}
+
+/// How far, in diagonals, a mesh may reach from its local origin before the
+/// origin is moved: `f32` local coordinates keep about 10⁻⁴ of a diagonal
+/// there (24-bit mantissa).
+pub const ORIGIN_REACH: f64 = 1.0e3;
+
+/// The local origin for a revision with `bounds`, given the one it replaces
+/// (`prev`): `prev` is kept, so chunks built relative to it stay valid,
+/// unless some point of `bounds` is more than [`ORIGIN_REACH`] diagonals
+/// from it; then (or with no `prev`) the centre of `bounds`.
+pub fn render_origin(prev: Option<DVec3>, bounds: Option<Aabb>) -> DVec3 {
+    let Some(b) = bounds else {
+        return prev.unwrap_or(DVec3::ZERO);
+    };
+    let reach = |o: DVec3| {
+        let (lo, hi) = (DVec3::from(b.min) - o, DVec3::from(b.max) - o);
+        lo.abs().max(hi.abs()).length()
+    };
+    match prev {
+        Some(o) if reach(o) <= ORIGIN_REACH * b.diagonal() => o,
+        _ => DVec3::from(b.center()),
+    }
+}
+
+/// CPU-side vertex data for one mesh revision, one entry per face chunk.
+/// Building it is O(n) (O(changed chunks) with [`MeshVertices::build_from`]),
+/// so frontends do it off the UI thread (MF-RT-001).
 #[derive(Debug, Clone)]
 pub struct MeshVertices {
     /// The mesh's bounding box (object space), so frontends can frame it
     /// without an O(n) pass on the UI thread.
-    pub bounds: Option<mf_geometry::Aabb>,
+    pub bounds: Option<Aabb>,
     pub origin: DVec3,
     pub triangle_count: usize,
-    pub surface: Vec<SurfaceVertex>,
+    /// One per face chunk; an unchanged chunk is the previous revision's
+    /// `Arc`, which is how [`GpuMesh::sync`] knows not to upload it.
+    pub chunks: Vec<Arc<ChunkVertices>>,
     pub lines: Vec<LineVertex>,
 }
 
 impl MeshVertices {
     pub fn build(mesh: &Mesh) -> MeshVertices {
-        MeshVertices::build_skipping(mesh, &[])
+        MeshVertices::build_from(None, mesh)
     }
 
     /// As [`MeshVertices::build`], without boundary outlines for the loops
     /// in `skip` (by ID).
     pub fn build_skipping(mesh: &Mesh, skip: &[u32]) -> MeshVertices {
-        let bounds = mesh.bounding_box();
-        let origin = bounds
-            .map(|b| DVec3::from(b.center()))
-            .unwrap_or(DVec3::ZERO);
+        MeshVertices::build_from_skipping(None, mesh, skip)
+    }
+
+    /// The vertices of `next`, reusing (the same `Arc`) every chunk of
+    /// `prev` (a revision and the vertices built for it) whose face chunk is
+    /// shared and whose referenced vertex chunks all are (or were only
+    /// appended to: see [`Mesh::vertex_chunk_kept`]); the rest are
+    /// rebuilt. The origin is `prev`'s unless `next` outgrows it (see
+    /// [`render_origin`]), in which case everything is rebuilt.
+    pub fn build_from(prev: Option<(&Mesh, &MeshVertices)>, next: &Mesh) -> MeshVertices {
+        MeshVertices::build_from_skipping(prev, next, &[])
+    }
+
+    /// As [`MeshVertices::build_from`], without boundary outlines for the
+    /// loops in `skip` (by ID).
+    pub fn build_from_skipping(
+        prev: Option<(&Mesh, &MeshVertices)>,
+        next: &Mesh,
+        skip: &[u32],
+    ) -> MeshVertices {
+        let bounds = next.bounding_box();
+        let origin = render_origin(prev.map(|(_, v)| v.origin), bounds);
+        if let Some((mesh, v)) = prev {
+            assert_eq!(
+                v.chunks.len(),
+                mesh.face_chunk_count(),
+                "previous vertices were built for another mesh"
+            );
+        }
+        let reuse = prev
+            .filter(|(_, v)| v.origin == origin)
+            .map(|(mesh, v)| (Reuse::new(mesh, next), v));
+        let chunks = (0..next.face_chunk_count())
+            .map(|i| match &reuse {
+                Some((reuse, v))
+                    if v.chunks
+                        .get(i)
+                        .is_some_and(|c| reuse.chunk(i, &c.vertex_chunks)) =>
+                {
+                    v.chunks[i].clone()
+                }
+                _ => Arc::new(ChunkVertices::build(next, i, origin)),
+            })
+            .collect();
         MeshVertices {
             bounds,
             origin,
-            triangle_count: mesh.triangle_count(),
-            surface: surface_vertices(mesh, origin),
-            lines: boundary_line_vertices_skipping(mesh, origin, skip),
+            triangle_count: next.triangle_count(),
+            chunks,
+            lines: boundary_line_vertices_skipping(next, origin, skip),
         }
+    }
+
+    /// Every chunk's surface vertices, concatenated (a copy).
+    pub fn surface(&self) -> Vec<SurfaceVertex> {
+        self.chunks
+            .iter()
+            .flat_map(|c| c.surface.iter().copied())
+            .collect()
     }
 }
 
@@ -272,27 +411,99 @@ pub fn loop_line_vertices(mesh: &Mesh, origin: DVec3, loop_ids: &[u32]) -> Vec<L
     out
 }
 
-/// GPU buffers for one mesh revision, split into chunks under the device's
-/// maximum buffer size. Building one creates and fills its buffers, which
-/// for a big mesh is hundreds of megabytes: wgpu devices are `Send + Sync`,
-/// so frontends build it on a worker, never the UI thread (MF-RT-001).
+/// Bytes uploaded by one update of a [`GpuMesh`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct UploadStats {
+    /// Surface vertices of the face chunks that were (re)built.
+    pub surface_bytes: u64,
+    /// Per-face state (selection and overlay tints); none yet.
+    pub state_bytes: u64,
+    /// Boundary outlines (always rebuilt: they're small).
+    pub line_bytes: u64,
+}
+
+impl UploadStats {
+    pub fn total(&self) -> u64 {
+        self.surface_bytes + self.state_bytes + self.line_bytes
+    }
+}
+
+/// One face chunk on the GPU: one buffer set per face chunk (split further
+/// only under a tiny buffer limit). Shared, through `Arc`, by every
+/// revision that reuses it.
+#[derive(Clone)]
+struct GpuChunk {
+    /// What it was uploaded from, for identity only: a `Weak` keeps the
+    /// address from being reused without keeping the vertices in memory.
+    source: Weak<ChunkVertices>,
+    vertex_chunks: Arc<[u32]>,
+    buffers: Arc<[(wgpu::Buffer, u32)]>,
+}
+
+/// GPU buffers for one mesh revision: one set per face chunk, so a new
+/// revision re-uploads only the chunks that changed (MF-RENDER-003), and
+/// shares the rest with the revision it replaces. Creating and filling
+/// buffers for a big mesh is hundreds of megabytes: wgpu devices are
+/// `Send + Sync`, so frontends do it on a worker, never the UI thread
+/// (MF-RT-001).
 pub struct GpuMesh {
     pub origin: DVec3,
     pub triangle_count: usize,
-    pub(crate) surface: Vec<(wgpu::Buffer, u32)>,
+    chunks: Vec<GpuChunk>,
     pub(crate) lines: Vec<(wgpu::Buffer, u32)>,
+    /// Largest buffer made.
+    max_bytes: u64,
+    /// Uploads are waited for every this many bytes (see
+    /// [`GpuMesh::from_vertices_paced`]).
+    pace_bytes: u64,
+    last: UploadStats,
+    total: u64,
 }
 
 impl GpuMesh {
+    fn new(origin: DVec3, max_bytes: u64, pace_bytes: u64) -> GpuMesh {
+        GpuMesh {
+            origin,
+            triangle_count: 0,
+            chunks: Vec::new(),
+            lines: Vec::new(),
+            max_bytes,
+            pace_bytes,
+            last: UploadStats::default(),
+            total: 0,
+        }
+    }
+
+    /// Every surface buffer and its vertex count, in face-chunk order.
+    pub(crate) fn surface_buffers(&self) -> impl Iterator<Item = &(wgpu::Buffer, u32)> {
+        self.chunks.iter().flat_map(|c| c.buffers.iter())
+    }
+
     /// Surface vertices uploaded (three per face), and in how many buffers.
     pub fn surface_vertex_count(&self) -> (usize, usize) {
-        let n = self.surface.iter().map(|(_, n)| *n as usize).sum();
-        (n, self.surface.len())
+        let n = self.surface_buffers().map(|(_, n)| *n as usize).sum();
+        (n, self.surface_buffers().count())
     }
 
     /// Boundary-outline vertices uploaded (two per edge).
     pub fn line_vertex_count(&self) -> usize {
         self.lines.iter().map(|(_, n)| *n as usize).sum()
+    }
+
+    /// Face chunks held (one per face chunk of the mesh).
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// What the last update (or the first build) uploaded.
+    pub fn last_upload(&self) -> UploadStats {
+        self.last
+    }
+
+    /// Bytes uploaded for this mesh and every revision it was updated
+    /// from, cumulatively (metrics and tests).
+    pub fn total_uploaded(&self) -> u64 {
+        self.total
     }
 
     pub fn upload(device: &wgpu::Device, mesh: &Mesh) -> GpuMesh {
@@ -308,15 +519,19 @@ impl GpuMesh {
         v: &MeshVertices,
         max_bytes: u64,
     ) -> GpuMesh {
-        GpuMesh::build(device, None, v, max_bytes)
+        let mut gpu = GpuMesh::new(v.origin, max_bytes, u64::MAX);
+        let mut up = Uploader::new(device, None, &gpu);
+        gpu.apply(&mut up, v);
+        gpu.finish(up, v.triangle_count);
+        gpu
     }
 
     /// As [`GpuMesh::from_vertices`], for a worker thread, in buffers of at
-    /// most `chunk_bytes`, each one's upload submitted and waited for
-    /// before the next is made. A buffer's contents reach the GPU as a copy
-    /// queued with the next submit, whoever makes it: made all at once, a
+    /// most `chunk_bytes`, the uploads submitted and waited for every
+    /// `chunk_bytes`. A buffer's contents reach the GPU as a copy queued
+    /// with the next submit, whoever makes it: made all at once, a
     /// 5M-triangle mesh's copy (hundreds of megabytes) would land in a UI
-    /// frame. Paced, no frame waits for more than one chunk's copy.
+    /// frame. Paced, no frame waits for more than `chunk_bytes` of copies.
     ///
     /// Panics if the device is lost while waiting (callers on workers
     /// report the panic).
@@ -326,15 +541,44 @@ impl GpuMesh {
         v: &MeshVertices,
         chunk_bytes: u64,
     ) -> GpuMesh {
-        GpuMesh::build(device, Some(queue), v, chunk_bytes)
+        let mut gpu = GpuMesh::new(v.origin, chunk_bytes, chunk_bytes);
+        let mut up = Uploader::new(device, Some(queue), &gpu);
+        gpu.apply(&mut up, v);
+        gpu.finish(up, v.triangle_count);
+        gpu
+    }
+
+    /// Make the GPU side equal `v`: uploads exactly the chunks whose `Arc`
+    /// differs from the one on the GPU (all of them if the origin moved),
+    /// drops chunks past `v`'s count, and re-uploads the outlines. Paced
+    /// like the constructor this mesh was made with.
+    pub fn sync(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        v: &MeshVertices,
+    ) -> UploadStats {
+        let mut up = Uploader::new(device, Some(queue), self);
+        self.apply(&mut up, v);
+        self.finish(up, v.triangle_count);
+        self.last
+    }
+
+    fn apply(&mut self, up: &mut Uploader<'_>, v: &MeshVertices) {
+        let same_origin = self.origin == v.origin;
+        self.origin = v.origin;
+        self.refresh(
+            up,
+            v.chunks.len(),
+            |i, c| same_origin && std::ptr::eq(c.source.as_ptr(), Arc::as_ptr(&v.chunks[i])),
+            |i| v.chunks[i].clone(),
+        );
+        self.lines = up.lines(&v.lines);
     }
 
     /// As [`GpuMesh::from_vertices_paced`], straight from `mesh` (vertices
-    /// relative to `origin`, no outlines for the loops in `skip`): the
-    /// surface is generated one chunk at a time, so at most one chunk's
-    /// vertices exist on the CPU, not the whole mesh's (hundreds of
-    /// megabytes at 5M triangles). Same buffers as
-    /// [`MeshVertices::build_skipping`] then [`GpuMesh::from_vertices`].
+    /// relative to `origin`, no outlines for the loops in `skip`). See
+    /// [`GpuMesh::from_previous`].
     pub fn from_mesh_paced(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -343,51 +587,208 @@ impl GpuMesh {
         skip: &[u32],
         chunk_bytes: u64,
     ) -> GpuMesh {
-        let stride = std::mem::size_of::<SurfaceVertex>() as u64;
-        let max = chunk_bytes.min(device.limits().max_buffer_size);
-        let faces_per_chunk = ((max / (3 * stride)).max(1)) as usize;
-        let mut surface = Vec::new();
-        let mut batch: Vec<SurfaceVertex> = Vec::with_capacity(faces_per_chunk * 3);
-        let several = mesh.triangle_count() > faces_per_chunk;
-        let mut faces = mesh.faces().peekable();
-        while faces.peek().is_some() {
-            batch.clear();
-            for (_, t) in faces.by_ref().take(faces_per_chunk) {
-                push_face(&mut batch, mesh, t, origin);
-            }
-            surface.extend(upload_chunks(device, None, "mf surface", &batch, max, 3));
-            if several {
-                flush(device, queue);
-            }
-        }
-        let lines = boundary_line_vertices_skipping(mesh, origin, skip);
-        GpuMesh {
-            origin,
-            triangle_count: mesh.triangle_count(),
-            surface,
-            lines: upload_chunks(device, Some(queue), "mf boundary lines", &lines, max, 2),
-        }
+        GpuMesh::from_previous(device, queue, None, mesh, origin, skip, chunk_bytes)
     }
 
-    fn build(
+    /// The GPU mesh for `next`, made on a worker from `prev`: the revision
+    /// on screen and its GPU mesh, which is left as it is (it may still be
+    /// drawn). Every chunk of `prev` that is still valid for `next` (see
+    /// [`MeshVertices::build_from`]) is shared, not uploaded; the others
+    /// are generated and uploaded one chunk at a time, so at most one
+    /// chunk's vertices exist on the CPU, not the whole mesh's (hundreds
+    /// of megabytes at 5M triangles). Uploads are paced every
+    /// `chunk_bytes` (see [`GpuMesh::from_vertices_paced`]). With an
+    /// `origin` other than `prev`'s, nothing is reused.
+    ///
+    /// Gives the same buffers as [`MeshVertices::build_from_skipping`] then
+    /// [`GpuMesh::sync`]; [`GpuMesh::last_upload`] says what was uploaded.
+    pub fn from_previous(
         device: &wgpu::Device,
-        pace: Option<&wgpu::Queue>,
-        v: &MeshVertices,
-        max_bytes: u64,
+        queue: &wgpu::Queue,
+        prev: Option<(&Mesh, &GpuMesh)>,
+        next: &Mesh,
+        origin: DVec3,
+        skip: &[u32],
+        chunk_bytes: u64,
     ) -> GpuMesh {
-        GpuMesh {
-            origin: v.origin,
-            triangle_count: v.triangle_count,
-            surface: upload_chunks(device, pace, "mf surface", &v.surface, max_bytes, 3),
-            lines: upload_chunks(device, pace, "mf boundary lines", &v.lines, max_bytes, 2),
+        let mut gpu = GpuMesh::new(origin, chunk_bytes, chunk_bytes);
+        let mut reuse = None;
+        if let Some((mesh, shown)) = prev {
+            assert_eq!(
+                shown.chunks.len(),
+                mesh.face_chunk_count(),
+                "the previous GPU mesh was built for another mesh"
+            );
+            gpu.chunks = shown.chunks.clone();
+            gpu.total = shown.total;
+            reuse = (shown.origin == origin).then(|| Reuse::new(mesh, next));
         }
+        let mut up = Uploader::new(device, Some(queue), &gpu);
+        gpu.refresh(
+            &mut up,
+            next.face_chunk_count(),
+            |i, c| reuse.as_ref().is_some_and(|r| r.chunk(i, &c.vertex_chunks)),
+            |i| Arc::new(ChunkVertices::build(next, i, origin)),
+        );
+        let lines = boundary_line_vertices_skipping(next, origin, skip);
+        gpu.lines = up.lines(&lines);
+        gpu.finish(up, next.triangle_count());
+        gpu
+    }
+
+    /// Keep each of the first `n` chunks that `keep` says is still valid,
+    /// upload `build(i)` in place of the others, and drop any past `n`.
+    fn refresh(
+        &mut self,
+        up: &mut Uploader<'_>,
+        n: usize,
+        keep: impl Fn(usize, &GpuChunk) -> bool,
+        build: impl Fn(usize) -> Arc<ChunkVertices>,
+    ) {
+        let mut old = std::mem::take(&mut self.chunks).into_iter();
+        self.chunks = (0..n)
+            .map(|i| match old.next() {
+                Some(c) if keep(i, &c) => c,
+                _ => up.surface(&build(i)),
+            })
+            .collect();
+    }
+
+    /// The last uploads (under `pace_bytes`) aren't waited for: they go
+    /// with the next submit, which on the desktop is the worker's priming
+    /// draw. (Waiting for them here measured slower first UI frames.)
+    fn finish(&mut self, up: Uploader<'_>, triangle_count: usize) {
+        self.triangle_count = triangle_count;
+        self.last = up.stats;
+        self.total += up.stats.total();
+    }
+
+    /// Read face chunk `i`'s surface vertices back from the GPU: what was
+    /// actually uploaded (tests and diagnostics; waits for the GPU).
+    pub fn read_surface(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        i: usize,
+    ) -> Result<Vec<SurfaceVertex>, RenderError> {
+        let Some(chunk) = self.chunks.get(i) else {
+            return Err(RenderError::Readback(format!(
+                "no face chunk {i} (there are {})",
+                self.chunks.len()
+            )));
+        };
+        let mut out = Vec::new();
+        for (buffer, _) in chunk.buffers.iter() {
+            let readback = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mf surface readback"),
+                size: buffer.size(),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = device.create_command_encoder(&Default::default());
+            encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, buffer.size());
+            queue.submit([encoder.finish()]);
+            let (tx, rx) = std::sync::mpsc::channel();
+            readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                // allow-swallow: the receiver is read right after this; a send can only fail if it was dropped
+                let _ = tx.send(r);
+            });
+            device
+                .poll(wgpu::PollType::Wait {
+                    submission_index: None,
+                    timeout: None,
+                })
+                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            rx.recv()
+                .map_err(|e| RenderError::Readback(e.to_string()))?
+                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            let data = readback
+                .get_mapped_range(..)
+                .map_err(|e| RenderError::Readback(e.to_string()))?;
+            out.extend_from_slice(bytemuck::cast_slice::<u8, SurfaceVertex>(&data));
+            drop(data);
+            readback.unmap();
+        }
+        Ok(out)
     }
 }
 
-/// Vertex buffers for `data`, split under `max_bytes` (and the device's
-/// limit) without splitting a primitive. With `pace`, and more than one
-/// buffer, each buffer's upload is submitted and waited for before the next
-/// is made (see [`GpuMesh::from_vertices_paced`]).
+/// Surface buffers can be read back ([`GpuMesh::read_surface`]).
+const SURFACE: wgpu::BufferUsages = wgpu::BufferUsages::VERTEX.union(wgpu::BufferUsages::COPY_SRC);
+
+/// Creates and fills buffers for one update, counting the bytes and, when
+/// paced, waiting for the uploads every `pace_bytes`.
+struct Uploader<'a> {
+    device: &'a wgpu::Device,
+    pace: Option<&'a wgpu::Queue>,
+    pace_bytes: u64,
+    max_bytes: u64,
+    unflushed: u64,
+    stats: UploadStats,
+}
+
+impl<'a> Uploader<'a> {
+    fn new(device: &'a wgpu::Device, pace: Option<&'a wgpu::Queue>, gpu: &GpuMesh) -> Self {
+        Uploader {
+            device,
+            pace,
+            pace_bytes: gpu.pace_bytes,
+            max_bytes: gpu.max_bytes.min(device.limits().max_buffer_size),
+            unflushed: 0,
+            stats: UploadStats::default(),
+        }
+    }
+
+    fn surface(&mut self, v: &Arc<ChunkVertices>) -> GpuChunk {
+        let buffers = self.buffers("mf surface", &v.surface, 3, SURFACE);
+        self.stats.surface_bytes += std::mem::size_of_val(&v.surface[..]) as u64;
+        GpuChunk {
+            source: Arc::downgrade(v),
+            vertex_chunks: v.vertex_chunks.clone().into(),
+            buffers: buffers.into(),
+        }
+    }
+
+    fn lines(&mut self, lines: &[LineVertex]) -> Vec<(wgpu::Buffer, u32)> {
+        self.stats.line_bytes += std::mem::size_of_val(lines) as u64;
+        self.buffers("mf boundary lines", lines, 2, wgpu::BufferUsages::VERTEX)
+    }
+
+    /// Vertex buffers for `data`, split under the buffer limit without
+    /// splitting a primitive.
+    fn buffers<T: Pod>(
+        &mut self,
+        label: &str,
+        data: &[T],
+        primitive: u32,
+        usage: wgpu::BufferUsages,
+    ) -> Vec<(wgpu::Buffer, u32)> {
+        let stride = std::mem::size_of::<T>() as u64;
+        chunk_ranges(data.len() as u32, stride, self.max_bytes, primitive)
+            .into_iter()
+            .map(|r| {
+                let buffer = self
+                    .device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some(label),
+                        contents: bytemuck::cast_slice(&data[r.start as usize..r.end as usize]),
+                        usage,
+                    });
+                self.unflushed += stride * r.len() as u64;
+                if let Some(queue) = self.pace
+                    && self.unflushed >= self.pace_bytes
+                {
+                    flush(self.device, queue);
+                    self.unflushed = 0;
+                }
+                (buffer, r.len() as u32)
+            })
+            .collect()
+    }
+}
+
+/// Vertex buffers for `data` (overlays), as [`Uploader::buffers`]: paced
+/// with `pace` every `max_bytes`.
 fn upload_chunks<T: Pod>(
     device: &wgpu::Device,
     pace: Option<&wgpu::Queue>,
@@ -396,25 +797,15 @@ fn upload_chunks<T: Pod>(
     max_bytes: u64,
     primitive: u32,
 ) -> Vec<(wgpu::Buffer, u32)> {
-    let stride = std::mem::size_of::<T>() as u64;
-    let max_bytes = max_bytes.min(device.limits().max_buffer_size);
-    let ranges = chunk_ranges(data.len() as u32, stride, max_bytes, primitive);
-    // One chunk's copy may land in someone's frame anyway: only pace more.
-    let pace = pace.filter(|_| ranges.len() > 1);
-    ranges
-        .into_iter()
-        .map(|r| {
-            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some(label),
-                contents: bytemuck::cast_slice(&data[r.start as usize..r.end as usize]),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-            if let Some(queue) = pace {
-                flush(device, queue);
-            }
-            (buffer, r.len() as u32)
-        })
-        .collect()
+    let mut up = Uploader {
+        device,
+        pace,
+        pace_bytes: max_bytes,
+        max_bytes: max_bytes.min(device.limits().max_buffer_size),
+        unflushed: 0,
+        stats: UploadStats::default(),
+    };
+    up.buffers(label, data, primitive, wgpu::BufferUsages::VERTEX)
 }
 
 /// Submit the uploads made so far and wait until the GPU has them.

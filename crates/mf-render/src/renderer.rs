@@ -426,7 +426,7 @@ impl MeshRenderer {
             };
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(pipeline);
-            for (buf, count) in &item.mesh.surface {
+            for (buf, count) in item.mesh.surface_buffers() {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }
