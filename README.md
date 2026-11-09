@@ -7,7 +7,7 @@ Status: **Phase 0 spike.** See `docs/spec/phase0-spec.md` and `docs/plan/phase0-
 ```bash
 cargo run -p mf-desktop -- model.stl     # desktop app
 cargo run -p mf-cli -- inspect model.stl # CLI
-scripts/check.sh                         # same checks as CI; fast by default (skips timing/5M tests, CI runs them); --full before a milestone close or when touching performance/timing code
+scripts/check.sh                         # same checks as CI's push job; fast (skips timing/5M tests). Heavy tests run on demand: Actions → "Heavy tests", or scripts/check.sh --full
 scripts/run-tests.sh                     # all tests; timing tests run alone afterwards (--fast to skip them)
 ```
 

@@ -1,0 +1,186 @@
+name: Heavy tests
+# On demand only (owner ruling, 2026-11-09): run once work is complete and
+# proven, e.g. before merging a milestone PR or at milestone close. It runs the
+# full test suite (incl. timing, cancellation, frame-gate and 5M-triangle
+# tests) on all three OSes, the 400 MB memory gate, the evidence bundle and
+# the cross-OS replay check. Never on push, PR or a schedule.
+on:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  full-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux is the required GPU environment: Mesa lavapipe (software
+          # Vulkan) runs every render and GUI test, and skips fail the build.
+          # It also fetches the real scan fixtures, so their tests can't skip.
+          - os: ubuntu-24.04
+            require_gpu: "1"
+            require_fixtures: "1"
+          - os: macos-latest
+            require_gpu: "0"
+            require_fixtures: "0"
+          - os: windows-latest
+            require_gpu: "0"
+            require_fixtures: "0"
+    runs-on: ${{ matrix.os }}
+    env:
+      MF_REQUIRE_GPU: ${{ matrix.require_gpu }}
+      MF_REQUIRE_FIXTURES: ${{ matrix.require_fixtures }}
+      MF_SKIP_LOG: ${{ github.workspace }}/skipped-tests.txt
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux GUI and software-Vulkan deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev mesa-vulkan-drivers
+      - name: Real scan fixtures (hash-verified)
+        if: runner.os == 'Linux'
+        uses: actions/cache@v6
+        with:
+          path: fixtures/real
+          key: real-fixtures-${{ hashFiles('fixtures/manifest.txt') }}
+      - name: Fixture fetcher tests (hash checks, plain-file entries)
+        if: runner.os == 'Linux'
+        run: scripts/test-fetch-fixtures.sh
+      - name: Fetch real scan fixtures
+        if: runner.os == 'Linux'
+        run: scripts/fetch-fixtures.sh
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: No unreviewed error swallowing (MF-ISSUE-004/022)
+        if: runner.os == 'Linux'
+        run: |
+          scripts/test-check-swallowed.sh
+          scripts/check-swallowed-defaults.sh
+      - name: Test (full suite; timing tests run on their own afterwards, see scripts/run-tests.sh)
+        shell: bash
+        run: |
+          set -o pipefail
+          scripts/run-tests.sh 2>&1 | tee test-output.txt
+      - name: Gated frames (worst frame and where its time went)
+        if: always()
+        shell: bash
+        run: |
+          { echo "### Gated frames on ${RUNNER_OS}"; echo '```'; grep -E "worst frame|first frame drawing" test-output.txt || echo "no gated-frame output"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Test summary
+        if: always()
+        shell: bash
+        run: scripts/ci-test-summary.sh test-output.txt "$MF_SKIP_LOG"
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: test-results-${{ matrix.os }}
+          path: |
+            test-output.txt
+            skipped-tests.txt
+          if-no-files-found: warn
+
+  memory-gate:
+    # MF-GEO-002: a mesh of 5M requested triangles (the damaged-sphere
+    # fixture makes ≈4.8M) plus its cached topology stays within 400 MB,
+    # counted by the allocator. Process RSS and GPU buffers of a
+    # realistic session are reported (evidence job), not gated.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p mf-cli
+      - name: Working set at 5M requested (≈4.8M actual) triangles (fails above 400 MB)
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/meshfixer bench memory --triangles 5000000 --json | tee memory.json
+          { echo "### Memory at 5M requested (≈4.8M actual) triangles"; echo '```'; cat memory.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          if ! jq -e '.allocator_installed and .working_set_bytes <= 400 * 1048576' memory.json > /dev/null; then
+            echo "::error::working set $(jq .working_set_bytes memory.json) bytes is over the 400 MB budget"
+            exit 1
+          fi
+
+  evidence:
+    # Durable milestone evidence: screenshots, sample repaired model,
+    # diagnostics and benchmark numbers with machine info.
+    runs-on: ubuntu-24.04
+    env:
+      MF_REQUIRE_GPU: "1"
+      MF_REQUIRE_FIXTURES: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev mesa-vulkan-drivers
+      - run: cargo build --release -p mf-cli
+      - name: Generate evidence
+        run: scripts/evidence.sh evidence
+      - name: GUI workflow screenshots
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
+      - name: Realistic 5M-requested (≈4.8M actual) session memory (process RSS and GPU buffers, reported)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test memory -- --nocapture
+      - name: Real scan fixtures (hash-verified)
+        uses: actions/cache@v6
+        with:
+          path: fixtures/real
+          key: real-fixtures-${{ hashFiles('fixtures/manifest.txt') }}
+      - name: Fetch real scan fixtures
+        run: scripts/fetch-fixtures.sh
+      - name: Real scan before/after renders
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-operations --test real_scan
+      - name: Messy-model collection results (evidence/messy/results.json)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-operations --test messy_corpus -- --test-threads=1 --nocapture
+      - name: Surgical GUI frames (select hole, fill, undo, refill)
+        run: |
+          mkdir -p evidence/surgical
+          MF_ARTIFACTS=$PWD/evidence/surgical cargo test -p mf-desktop --test surgical
+      - uses: actions/upload-artifact@v7
+        with:
+          name: milestone-evidence
+          path: evidence/
+      - name: Command log for cross-OS replay
+        run: |
+          mkdir -p xos
+          target/release/meshfixer gen-fixture damaged xos/scan.stl --triangles 200000 --seed 5
+          target/release/meshfixer run xos/scan.stl \
+            --op mesh.remove_small_components --param max_triangles=100 \
+            --op mesh.fill_holes --param refine=true --param fill_style=smooth \
+            --save-log xos/session.mfx.log -o xos/linux-result.stl
+          target/release/meshfixer replay xos/session.mfx.log
+      - uses: actions/upload-artifact@v7
+        with:
+          name: replay-fixture
+          path: xos/
+
+  replay-cross-os:
+    # MF-CMD-005 cross-platform level: a log written on Linux must replay on
+    # macOS and Windows as Exact or Equivalent (the summary says which). The
+    # log includes a refined fill_holes, which computes new vertex positions
+    # (MF-ISSUE-025).
+    needs: evidence
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p mf-cli
+      - uses: actions/download-artifact@v8
+        with:
+          name: replay-fixture
+          path: xos
+      - name: Replay Linux log
+        shell: bash
+        run: |
+          set -o pipefail
+          target/release/meshfixer replay xos/session.mfx.log | tee replay.txt
+          { echo "### Cross-OS replay on ${RUNNER_OS}"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"

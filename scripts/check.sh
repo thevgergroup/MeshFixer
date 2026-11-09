@@ -1,13 +1,11 @@
 #!/usr/bin/env bash
-# Run the same checks as CI's test job before pushing.
+# Run the same checks as CI's push job before pushing.
 #
 # Fast by default: tests run via `scripts/run-tests.sh --fast`, which skips
-# the hardcoded timing/heavy (5M-triangle) test groups — CI always runs
-# them on every push, so this just keeps local commits from taking
-# 15-25 minutes. Run `scripts/check.sh --full` instead before closing out a
-# milestone, or whenever you touch performance- or timing-sensitive code
-# (cancellation, checkpoints, frame budgets, memory budgets) so those
-# tests are verified locally too, not just in CI.
+# the timing/heavy (5M-triangle) test groups. Those run ON DEMAND only, once
+# work is complete and proven (owner ruling, 2026-11-09): GitHub Actions →
+# "Heavy tests" → Run workflow (heavy.yml), e.g. before merging a milestone,
+# or locally with `scripts/check.sh --full`. Never after every change.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

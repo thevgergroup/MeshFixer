@@ -66,13 +66,19 @@ for entry in "${timing[@]}"; do
 done
 
 status=0
-echo "=== step 1: workspace tests in parallel (timing tests excluded) ==="
+echo "=== step 1: workspace tests in parallel (timing tests and GUI tests excluded) ==="
 # --no-fail-fast: a failing test target must not stop the rest of the
 # workspace from running, or a single failure hides every other result.
-cargo test --workspace --no-fail-fast -- "${skips[@]}" || status=1
+cargo test --workspace --exclude mf-desktop --no-fail-fast -- "${skips[@]}" || status=1
+
+echo "=== step 1b: desktop GUI tests, one at a time ==="
+# The egui_kittest GUI tests drive real frames on a shared GPU device and wait
+# on wall-clock conditions; run in parallel (especially on a loaded machine)
+# they time out at random. One at a time they are deterministic.
+cargo test -p mf-desktop --no-fail-fast -- --test-threads=1 "${skips[@]}" || status=1
 
 if [ "$fast" -eq 1 ]; then
-  echo "fast mode: ${#timing[@]} heavy/timing test groups skipped — CI runs them on every push (scripts/check.sh --full to run them locally)"
+  echo "fast mode: ${#timing[@]} heavy/timing test groups skipped — run them on demand: Actions → "Heavy tests" (heavy.yml) or scripts/check.sh --full"
   exit $status
 fi
 
