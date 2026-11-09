@@ -3,9 +3,13 @@
 //!
 //! This crate is the foundation for M4's background work: a [`JobPool`]
 //! wraps a named `rayon` thread pool, [`CancelToken`]/[`RunContext`] let
-//! long-running operations check for user cancellation cheaply and often,
-//! and [`Progress`] lets a frontend observe a monotonic stage/fraction
-//! without locking.
+//! long-running operations check for user cancellation cheaply and often
+//! (a single atomic load, no locks), and [`Progress`] lets a frontend
+//! observe a monotonic `(stage, fraction)` pair that is always internally
+//! consistent — reading never blocks writing or vice versa, and the pair
+//! is never torn — via one atomic word holding both stage identity and
+//! fraction together (a private stage-name table is the one place a lock
+//! is used, and only for the cold path of a never-seen-before stage name).
 //!
 //! Nothing here introduces nondeterminism: the pool only schedules work
 //! that callers already parallelise deterministically (e.g. with
@@ -126,16 +130,24 @@ impl JobPool {
     pub fn new(threads: Option<usize>) -> (Self, PoolChoice) {
         // `available_parallelism` only errs when the OS cannot answer at
         // all (e.g. a heavily sandboxed environment); 1 core is then the
-        // only safe assumption, not a guess hiding a real failure.
-        let cores = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(1);
+        // only safe assumption, not a guess hiding a real failure. Whether
+        // that happened is surfaced below in `reason` (not silently
+        // conflated with a genuine single-core machine), per MF-RT-004's
+        // "shown in diagnostics" requirement.
+        // allow-swallow: fallback surfaced in `reason`, see above.
+        let detected_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
+        let cores = detected_cores.unwrap_or(1);
+        let cores_unknown = detected_cores.is_none();
 
-        let (chosen, reason): (usize, &'static str) = match threads {
-            None => (cores.saturating_sub(1).max(1), "default: all cores but one"),
-            Some(0) => (1, "requested 0 threads; using 1"),
-            Some(n) if n > cores => (n, "requested more threads than cores"),
-            Some(n) => (n, "requested thread count honoured"),
+        let (chosen, reason): (usize, &'static str) = match (threads, cores_unknown) {
+            (None, true) => (
+                1,
+                "default: all cores but one (core count unavailable; assumed 1 core, using 1 thread)",
+            ),
+            (None, false) => (cores.saturating_sub(1).max(1), "default: all cores but one"),
+            (Some(0), _) => (1, "requested 0 threads; using 1"),
+            (Some(n), _) if n > cores => (n, "requested more threads than cores"),
+            (Some(n), _) => (n, "requested thread count honoured"),
         };
 
         let pool = rayon::ThreadPoolBuilder::new()
@@ -163,15 +175,11 @@ impl JobPool {
 }
 
 /// Packs a stage index and a fraction (0..=1, scaled to a fixed-point
-/// integer) into one `u64` so [`Progress`] can be updated and read with
-/// plain atomics: no locks, no allocation, lock-free for readers.
+/// integer) into one `u64` so [`Progress`] can update "which stage" and
+/// "how far along" as a single atomic unit: no locks, no allocation,
+/// lock-free for readers, and no window where a reader or a stale writer
+/// can observe one half of the pair updated and not the other.
 const FRACTION_SCALE: u64 = 1_000_000;
-
-/// A `(stage, fraction)` update, as sent over a [`Progress::channel`].
-type ProgressUpdate = (&'static str, f64);
-
-/// The optional fan-out sink a [`Progress`] sends updates to.
-type ProgressSink = Arc<std::sync::Mutex<Option<mpsc::Sender<ProgressUpdate>>>>;
 
 fn pack(stage_index: u32, fraction: f64) -> u64 {
     let scaled = (fraction.clamp(0.0, 1.0) * FRACTION_SCALE as f64).round() as u64;
@@ -184,6 +192,52 @@ fn unpack(bits: u64) -> (u32, f64) {
     (stage_index, scaled as f64 / FRACTION_SCALE as f64)
 }
 
+/// A `(stage, fraction)` update, as sent over a [`Progress::channel`].
+type ProgressUpdate = (&'static str, f64);
+
+/// The optional fan-out sink a [`Progress`] sends updates to.
+type ProgressSink = Arc<std::sync::Mutex<Option<mpsc::Sender<ProgressUpdate>>>>;
+
+/// An append-only table mapping stage names to stable indices, so a stage's
+/// *identity* can live in the same atomic as its fraction (see [`pack`]).
+/// Lookup/insert takes a brief lock only when a never-seen-before stage
+/// name is reported; reading an already-known index back out (via
+/// [`StageTable::name`]) never blocks a concurrent insert because entries
+/// are only ever appended, never mutated or removed, so a snapshot of the
+/// `Vec` taken under a read lock stays valid after the lock is released.
+#[derive(Debug, Default)]
+struct StageTable {
+    names: std::sync::RwLock<Vec<&'static str>>,
+}
+
+impl StageTable {
+    fn index_of(&self, stage: &'static str) -> u32 {
+        {
+            let names = self.names.read().expect("stage table lock poisoned");
+            if let Some(index) = names.iter().position(|&s| s == stage) {
+                return index as u32;
+            }
+        }
+        // Not seen before: upgrade to a write lock. Re-check first, since
+        // another thread may have inserted the same stage name while we
+        // only held (and released) the read lock above.
+        let mut names = self.names.write().expect("stage table lock poisoned");
+        if let Some(index) = names.iter().position(|&s| s == stage) {
+            return index as u32;
+        }
+        names.push(stage);
+        (names.len() - 1) as u32
+    }
+
+    fn name(&self, index: u32) -> &'static str {
+        let names = self.names.read().expect("stage table lock poisoned");
+        names
+            .get(index as usize)
+            .copied()
+            .unwrap_or("<unknown stage>")
+    }
+}
+
 /// Lock-free, monotonic progress reporting for one background job.
 ///
 /// Within a single stage (the same `stage` string reported consecutively),
@@ -191,19 +245,18 @@ fn unpack(bits: u64) -> (u32, f64) {
 /// (e.g. a stale update racing a newer one). Starting a new stage resets
 /// the monotonic floor. The fraction is always clamped to `0.0..=1.0`.
 ///
-/// `report` and `snapshot` are both plain atomic operations: no locks, so
-/// readers (e.g. a UI polling every frame) never block a writer and vice
-/// versa.
+/// `report` and `snapshot` each resolve to a single atomic operation on
+/// the packed `(stage index, fraction)` word (plus, for `report`, an
+/// amortised one-time stage-name lookup/insert): no locks held across the
+/// two atomic operations, so readers (e.g. a UI polling every frame)
+/// never block a writer and vice versa, and a reader can never observe a
+/// stage paired with another stage's fraction.
 #[derive(Debug, Clone)]
 pub struct Progress {
-    // Bit-packed (stage index, fraction) for the atomic fast path.
+    // Bit-packed (stage index, fraction), updated as a single atomic unit.
     state: Arc<AtomicU64>,
-    // The current stage's name. Stored separately because `&'static str`
-    // does not fit in an atomic; swapping it is guarded by its own lock so
-    // a reader never observes a torn write. `report` holds this lock only
-    // long enough to compare-and-possibly-swap one pointer, so it never
-    // blocks `snapshot` for longer than that.
-    stage: Arc<std::sync::RwLock<&'static str>>,
+    // Stage names behind their stable index (see `pack`/`unpack`).
+    stages: Arc<StageTable>,
     // Fan-out sink for `channel()` readers, if any is attached. Sending is
     // best-effort: a report must never fail just because no reader is
     // attached, or a reader was dropped.
@@ -239,9 +292,11 @@ impl Progress {
     /// Updates have nowhere to go until a reader is attached via
     /// [`Progress::channel`]; `report` and `snapshot` work regardless.
     pub fn new() -> Self {
+        let stages = StageTable::default();
+        let empty_index = stages.index_of("");
         Self {
-            state: Arc::new(AtomicU64::new(pack(0, 0.0))),
-            stage: Arc::new(std::sync::RwLock::new("")),
+            state: Arc::new(AtomicU64::new(pack(empty_index, 0.0))),
+            stages: Arc::new(stages),
             sink: Arc::new(std::sync::Mutex::new(None)),
         }
     }
@@ -249,30 +304,38 @@ impl Progress {
     /// Reports progress within `stage`. `fraction` is clamped to
     /// `0.0..=1.0` and, within the same stage, never allowed to move
     /// backwards from what was last reported.
+    ///
+    /// Stage identity and fraction are committed together in a single CAS
+    /// loop on the packed atomic, so a writer only ever applies a
+    /// same-stage "never go backwards" update if the stage it read is
+    /// still the current one by the time it commits; if a concurrent
+    /// transition to a different stage won the race first, this writer's
+    /// CAS fails, it re-reads the now-current (different) stage/fraction,
+    /// and retries — it can never clobber a fresh stage's reset fraction
+    /// with a stale value computed against the old stage.
     pub fn report(&self, stage: &'static str, fraction: f64) {
         let clamped = fraction.clamp(0.0, 1.0);
+        let stage_index = self.stages.index_of(stage);
 
-        let stage_changed = {
-            let current = *self.stage.read().expect("progress stage lock poisoned");
-            current != stage
-        };
+        let updated = self
+            .state
+            .try_update(Ordering::Release, Ordering::Acquire, |bits| {
+                let (current_index, current_fraction) = unpack(bits);
+                let next_fraction = if current_index == stage_index {
+                    // Same stage as the atomic currently holds: never move
+                    // the fraction backwards.
+                    clamped.max(current_fraction)
+                } else {
+                    // A different stage than what's currently live (either
+                    // a genuine transition, or this stage hasn't won the
+                    // race to become current yet): reset the floor.
+                    clamped
+                };
+                Some(pack(stage_index, next_fraction))
+            })
+            .expect("try_update closure always returns Some");
+        let (_, reported_fraction) = unpack(updated);
 
-        if stage_changed {
-            *self.stage.write().expect("progress stage lock poisoned") = stage;
-            // New stage: reset the monotonic floor outright.
-            self.state.store(pack(0, clamped), Ordering::Release);
-        } else {
-            // Same stage: never move the fraction backwards.
-            self.state
-                .try_update(Ordering::Release, Ordering::Acquire, |bits| {
-                    let (idx, current_fraction) = unpack(bits);
-                    let next = clamped.max(current_fraction);
-                    Some(pack(idx, next))
-                })
-                .expect("try_update closure always returns Some");
-        }
-
-        let (_, reported_fraction) = unpack(self.state.load(Ordering::Acquire));
         let sink = self.sink.lock().expect("progress sink lock poisoned");
         if let Some(sender) = sink.as_ref() {
             // allow-swallow: best-effort fan-out; a dropped reader must not fail reporting.
@@ -280,14 +343,14 @@ impl Progress {
         }
     }
 
-    /// Reads the current `(stage, fraction)`. Lock-free: a single atomic
-    /// load for the fraction and a brief read-lock for the stage name
-    /// (readers never block other readers, and never block
-    /// [`Progress::report`] for longer than a pointer copy).
+    /// Reads the current `(stage, fraction)`. Lock-free on the fast path:
+    /// a single atomic load for the packed word, then a stage-name lookup
+    /// that never blocks a concurrent `report` (stage names are only ever
+    /// appended, never rewritten, so the lookup's read lock and a writer's
+    /// insert cannot race on the same entry).
     pub fn snapshot(&self) -> (&'static str, f64) {
-        let stage = *self.stage.read().expect("progress stage lock poisoned");
-        let (_, fraction) = unpack(self.state.load(Ordering::Acquire));
-        (stage, fraction)
+        let (stage_index, fraction) = unpack(self.state.load(Ordering::Acquire));
+        (self.stages.name(stage_index), fraction)
     }
 
     /// Attaches a fresh reader to this progress tracker and returns it

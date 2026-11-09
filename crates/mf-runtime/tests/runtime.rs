@@ -67,6 +67,60 @@ fn progress_is_monotonic_and_clamped() {
 }
 
 #[test]
+fn progress_snapshot_never_tears_under_concurrent_reports() {
+    // Two stages with disjoint fraction ranges, so any snapshot that pairs
+    // the "wrong" stage with the "wrong" fraction range proves stage and
+    // fraction were updated/read as two separable pieces of state rather
+    // than one atomic unit (a torn read, or a stale same-stage write that
+    // lands after a concurrent stage transition).
+    //
+    // "low": fraction always in [0.0, 0.1]. "high": fraction always in
+    // [0.5, 1.0]. A correct snapshot is always ("low", f <= 0.1) or
+    // ("high", f >= 0.5) — never ("low", f > 0.1) or ("high", f < 0.5).
+    const ITERS: usize = 20_000;
+
+    for attempt in 0..20 {
+        let progress = Progress::new();
+        let reporter_progress = progress.clone();
+        let snapshot_progress = progress.clone();
+
+        let reporter = std::thread::spawn(move || {
+            for i in 0..ITERS {
+                if i % 2 == 0 {
+                    reporter_progress.report("low", (i % 100) as f64 / 1000.0);
+                } else {
+                    reporter_progress.report("high", 0.5 + (i % 100) as f64 / 1000.0);
+                }
+            }
+        });
+
+        let reader = std::thread::spawn(move || {
+            let mut torn = Vec::new();
+            for _ in 0..ITERS {
+                let (stage, fraction) = snapshot_progress.snapshot();
+                let bad = match stage {
+                    "low" => fraction > 0.1,
+                    "high" => fraction < 0.5,
+                    _ => false,
+                };
+                if bad {
+                    torn.push((stage, fraction));
+                }
+            }
+            torn
+        });
+
+        reporter.join().expect("reporter thread panicked");
+        let torn = reader.join().expect("reader thread panicked");
+
+        assert!(
+            torn.is_empty(),
+            "attempt {attempt}: observed torn (stage, fraction) pairs: {torn:?}"
+        );
+    }
+}
+
+#[test]
 fn checkpoint_fails_after_cancel() {
     let cancel = CancelToken::new();
     let ctx = RunContext {
