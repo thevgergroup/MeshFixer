@@ -279,7 +279,7 @@ fn operations(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context) {
         .iter()
         .filter(|s| !s.is_read_only())
         .collect();
-    egui::ComboBox::from_id_salt("op")
+    egui::ComboBox::from_label("Operation")
         .selected_text(app.selected_op.clone())
         .show_ui(ui, |ui| {
             for s in &specs {
