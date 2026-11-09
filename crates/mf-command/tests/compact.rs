@@ -178,3 +178,73 @@ fn compact_is_replayable_exact() {
         .content_hash();
     assert_eq!(original, replayed);
 }
+
+/// Boundary-loop selections translate across a compaction both ways (M4
+/// Task 9 review P2): a loop is followed through its vertices, which the
+/// compaction renumbers.
+#[test]
+fn compact_translates_boundary_loop_selections() {
+    // An island first, then a 6×6 grid with two one-cell holes: three
+    // loops (the rim and two holes), every vertex renumbered by compaction.
+    let n = 6;
+    let mut e = mf_fixtures::grid(n).edit();
+    e.remove_face(FaceId(2 * (n + 1))).unwrap();
+    e.remove_face(FaceId(2 * (4 * n + 4))).unwrap();
+    let holed = e.finish().unwrap().0;
+    let part = merge(&[translated(&tetrahedron(), [50.0, 0.0, 0.0]), holed]);
+    let mut s = Session::new();
+    let id = s.add_geometry(mf_command::Geometry::Mesh(part), "part".into(), None);
+    remove_island(&mut s, id);
+    let before = s.current();
+    let holey = mesh(&s, id);
+    s.execute(invocation(id, "mesh.compact", &[])).unwrap();
+    let after = s.current();
+    let compact = mesh(&s, id);
+    let remap = s.node(after).unwrap().provenance[&id]
+        .remap
+        .clone()
+        .unwrap();
+
+    let loops_before = holey.topology().boundary_loops.clone();
+    let loops_after = compact.topology().boundary_loops.clone();
+    assert_eq!(loops_before.len(), 3);
+    let vertex_set = |vs: &[u32]| {
+        let mut v = vs.to_vec();
+        v.sort_unstable();
+        v
+    };
+    for l in &loops_before {
+        let sel = Selection {
+            object: id,
+            revision: before,
+            kind: SelectionKind::BoundaryLoop,
+            ids: vec![l.id],
+        };
+        // Forward: the loop whose vertices are this loop's, renumbered.
+        let Translation::Mapped(m) = s.translate(&sel, after) else {
+            panic!("loop {}: {:?}", l.id, s.translate(&sel, after));
+        };
+        assert_eq!(m.ids.len(), 1);
+        let renumbered: Vec<u32> = l
+            .vertices
+            .iter()
+            .map(|&v| remap.vertices[v as usize].unwrap().0)
+            .collect();
+        assert_eq!(
+            vertex_set(&loops_after[m.ids[0] as usize].vertices),
+            vertex_set(&renumbered),
+            "loop {}",
+            l.id
+        );
+        // Backward: the same loop again.
+        let back = Selection {
+            revision: after,
+            ids: m.ids.clone(),
+            ..sel.clone()
+        };
+        match s.translate(&back, before) {
+            Translation::Mapped(b) => assert_eq!(b.ids, vec![l.id]),
+            other => panic!("loop {} back: {other:?}", l.id),
+        }
+    }
+}

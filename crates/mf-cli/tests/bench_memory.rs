@@ -1,12 +1,15 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! The 5M memory gate (MF-GEO-002, MF-ISSUE-019): the working set (the mesh
+//! The 5M memory gate (MF-GEO-002, MF-ISSUE-019). "5M" is the requested
+//! size: the damaged-sphere fixture cuts holes, leaving ≈4.8M triangles
+//! (the JSON reports both): the working set (the mesh
 //! plus its cached topology) stays within 400 MB. The same command is CI's
 //! memory gate job. Heavy (a 5M mesh): run serially, see scripts/run-tests.sh.
 
 use std::process::Command;
 
-/// MF-GEO-002: mesh plus cached topology at 5M triangles.
+/// MF-GEO-002: mesh plus cached topology at 5M requested (≈4.8M actual)
+/// triangles.
 const WORKING_SET_BUDGET: u64 = 400 << 20;
 
 #[test]

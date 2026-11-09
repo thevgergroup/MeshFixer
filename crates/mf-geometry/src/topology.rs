@@ -4,7 +4,7 @@
 //! authoritative state. Sorted arrays are used instead of hash maps so the
 //! results are deterministic (MF-CMD-005).
 
-use mf_runtime::{Cancelled, RunContext, Ticker, indices, par_sort_unstable_by_key};
+use mf_runtime::{Cancelled, RunContext, TICK_INTERVAL, Ticker, indices, par_sort_unstable_by_key};
 use rayon::prelude::*;
 
 use crate::ids::FaceId;
@@ -92,13 +92,14 @@ fn prev_corner(h: u32) -> u32 {
 /// vertex's bucket. It lives only while the topology is built.
 struct EdgeIndex<'m> {
     mesh: &'m Mesh,
+    ctx: &'m RunContext,
     /// Vertex `v`'s bucket is `half_edges[offsets[v]..offsets[v + 1]]`.
     offsets: Vec<u32>,
     half_edges: Vec<u32>,
 }
 
 impl<'m> EdgeIndex<'m> {
-    fn build(mesh: &'m Mesh, ctx: &RunContext) -> Result<EdgeIndex<'m>, Cancelled> {
+    fn build(mesh: &'m Mesh, ctx: &'m RunContext) -> Result<EdgeIndex<'m>, Cancelled> {
         let faces = &mesh.inner().faces;
         let vertex_slots = mesh.vertex_slots() as usize;
         let faces_total = mesh.face_count();
@@ -168,23 +169,37 @@ impl<'m> EdgeIndex<'m> {
         }
         ctx.progress.report(STAGE, 0.2);
         let offsets_ref = &offsets;
+        // A vertex can carry most of the mesh's edges (a hub): its bucket
+        // is sorted with the cancellable sort, and small buckets
+        // checkpoint every `TICK_INTERVAL` half-edges sorted (MF-RT-002).
+        const BIG_BUCKET: usize = TICK_INTERVAL as usize;
         blocks.into_par_iter().try_for_each(|(v0, block)| {
             ctx.checkpoint()?;
             let base = offsets_ref[v0] as usize;
             let v1 = (v0 + BLOCK).min(vertex_slots);
+            let mut since_checkpoint = 0;
             for v in v0..v1 {
                 let (s, e) = (
                     offsets_ref[v] as usize - base,
                     offsets_ref[v + 1] as usize - base,
                 );
-                if e - s > 1 {
-                    block[s..e].sort_unstable_by_key(|&h| (high(h), h));
+                let bucket = &mut block[s..e];
+                if bucket.len() > BIG_BUCKET {
+                    par_sort_unstable_by_key(bucket, ctx, |&h| (high(h), h))?;
+                } else if bucket.len() > 1 {
+                    bucket.sort_unstable_by_key(|&h| (high(h), h));
+                    since_checkpoint += bucket.len();
+                    if since_checkpoint >= BIG_BUCKET {
+                        ctx.checkpoint()?;
+                        since_checkpoint = 0;
+                    }
                 }
             }
             Ok(())
         })?;
         Ok(EdgeIndex {
             mesh,
+            ctx,
             offsets,
             half_edges,
         })
@@ -242,8 +257,15 @@ impl<'m> EdgeIndex<'m> {
     ) -> Result<(), Cancelled> {
         let v = self.ends(corner).0;
         let mut via = via;
+        let mut steps = 0u32;
         loop {
             tick.tick()?;
+            // A step is a binary search in a bucket that can be huge (a
+            // hub vertex's): checkpoint more often than the ticker does.
+            steps += 1;
+            if steps.is_multiple_of(WALK_CHECKPOINT) {
+                self.ctx.checkpoint()?;
+            }
             let Some(m) = self.mate(via) else {
                 return Ok(());
             };
@@ -291,6 +313,9 @@ impl<'m> EdgeIndex<'m> {
 }
 
 const STAGE: &str = "topology";
+
+/// Fan-walk steps between checkpoints (see [`EdgeIndex::walk`]).
+const WALK_CHECKPOINT: u32 = 2048;
 
 impl Topology {
     /// Heap bytes retained by this topology.

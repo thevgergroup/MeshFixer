@@ -238,3 +238,122 @@ fn pinched_pairing_never_pairs_a_fan_with_itself() {
         d.boundary_loops
     );
 }
+
+/// Non-manifold vertices from corner fans alone (no >2-face edge), and the
+/// look-alikes that are manifold (M4 Task 9 review I1). Each case is a
+/// mesh and its expected `non_manifold_vertices`.
+mod fans {
+    use mf_geometry::{Mesh, Topology};
+
+    fn nmv(positions: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>) -> usize {
+        let topo = Topology::compute(&Mesh::new(positions, triangles).unwrap());
+        assert!(topo.non_manifold_edges.is_empty(), "{topo:?}");
+        topo.non_manifold_vertices
+    }
+
+    /// A closed fan around hub `base`: a pyramid with apex `base` and rim
+    /// `base + 1..=4`, closed by a two-triangle base, offset by `d`.
+    fn closed_fan(base: u32, d: [f64; 3]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+        let p = vec![
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        let p = p
+            .into_iter()
+            .map(|q| [q[0] + d[0], q[1] + d[1], q[2] + d[2]])
+            .collect();
+        let b = |i: u32| base + i;
+        let t = vec![
+            [b(0), b(1), b(2)],
+            [b(0), b(2), b(3)],
+            [b(0), b(3), b(4)],
+            [b(0), b(4), b(1)],
+            [b(1), b(3), b(2)],
+            [b(1), b(4), b(3)],
+        ];
+        (p, t)
+    }
+
+    #[test]
+    fn two_closed_solids_touching_at_a_vertex() {
+        // Two pyramids (octahedron halves closed by a base) sharing apex 0.
+        let (mut p, mut t) = closed_fan(0, [0.0; 3]);
+        // The second one, upside down, reusing vertex 0 as its apex.
+        let base = p.len() as u32;
+        for q in [
+            [1.0, 0.0, 2.0],
+            [0.0, 1.0, 2.0],
+            [-1.0, 0.0, 2.0],
+            [0.0, -1.0, 2.0],
+        ] {
+            p.push(q);
+        }
+        let r = |i: u32| base + i;
+        t.extend([
+            [0, r(1), r(0)],
+            [0, r(2), r(1)],
+            [0, r(3), r(2)],
+            [0, r(0), r(3)],
+            [r(0), r(1), r(2)],
+            [r(0), r(2), r(3)],
+        ]);
+        assert_eq!(nmv(p, t), 1);
+    }
+
+    #[test]
+    fn bowtie() {
+        let p = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 1.0, 0.0],
+            [1.0, -1.0, 0.0],
+            [-1.0, 1.0, 0.0],
+            [-1.0, -1.0, 0.0],
+        ];
+        assert_eq!(nmv(p, vec![[0, 2, 1], [0, 3, 4]]), 1);
+    }
+
+    #[test]
+    fn closed_fan_plus_a_triangle_touching_only_its_hub() {
+        let (mut p, mut t) = closed_fan(0, [0.0; 3]);
+        p.extend([[3.0, 3.0, 1.0], [3.0, 4.0, 1.0]]);
+        t.push([0, 5, 6]);
+        assert_eq!(nmv(p, t), 1);
+    }
+
+    #[test]
+    fn manifold_look_alikes_have_none() {
+        // Open fan: four triangles around hub 0, rim not closed.
+        let p = vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, -1.0, 0.0],
+        ];
+        let open = vec![[0, 1, 2], [0, 2, 3], [0, 3, 4]];
+        assert_eq!(nmv(p.clone(), open.clone()), 0, "open fan");
+        // Closed fan (around the hub of a closed solid).
+        let (cp, ct) = closed_fan(0, [0.0; 3]);
+        assert_eq!(nmv(cp.clone(), ct.clone()), 0, "closed fan");
+        // Inconsistent orientation: one face of the closed fan flipped.
+        let mut flipped = ct.clone();
+        flipped[1] = [flipped[1][0], flipped[1][2], flipped[1][1]];
+        assert_eq!(nmv(cp.clone(), flipped), 0, "inconsistent fan");
+        // A face and its flipped duplicate: a closed two-face sheet.
+        let tri = vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]];
+        assert_eq!(
+            nmv(tri.clone(), vec![[0, 1, 2], [0, 2, 1]]),
+            0,
+            "flipped pair"
+        );
+        // Same-orientation duplicate pair.
+        assert_eq!(nmv(tri, vec![[0, 1, 2], [0, 1, 2]]), 0, "duplicate pair");
+        // A collapsed face at the hub doesn't count as a fan.
+        let mut collapsed = open;
+        collapsed.push([0, 0, 1]);
+        assert_eq!(nmv(p, collapsed), 0, "collapsed face at the hub");
+    }
+}

@@ -21,10 +21,11 @@ timing=(
   "mf-desktop checkpoint_b checkpoint_b_5m_mesh checkpoint_b_real_scan"
   "mf-desktop checkpoint_b_followup checkpoint_b_followup_real_scan"
   "mf-geometry topology_pool a_second_caller_never_waits_for_another_threads_computation topology_requests_on_one_pool_all_finish"
+  "mf-geometry topology_cancel topology_checkpoints_every_100ms_around_a_million_face_hub"
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
-  # 5M memory measurements: alone, so no other test's 5M mesh is in memory
+  # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"
   "mf-cli bench_memory working_set_under_400mb_at_5m"

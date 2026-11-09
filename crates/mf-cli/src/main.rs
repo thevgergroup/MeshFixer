@@ -502,7 +502,8 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
 }
 
 /// `bench memory`: what a mesh and its cached topology keep on the heap
-/// (MF-GEO-002, gated at 400 MB for 5M triangles in CI) and how far the
+/// (MF-GEO-002, gated at 400 MB in CI for 5M requested triangles, which
+/// the damaged-sphere fixture turns into ≈4.8M) and how far the
 /// topology build peaks above the mesh (MF-ISSUE-019). Bytes are counted by
 /// the allocator, not estimated. The mesh is the damaged sphere fixture,
 /// generated in memory.

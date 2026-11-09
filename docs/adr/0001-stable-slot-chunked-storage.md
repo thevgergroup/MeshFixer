@@ -78,11 +78,11 @@ The remaining large transient is topology construction (468 MB), tracked as MF-I
 
 ### After M4 Task 9 (topology build, MF-ISSUE-019)
 
-| 4.8M tri (damaged sphere) | Before | After |
+| 5M requested, 4.8M actual (damaged sphere) | Before | After |
 |---|---|---|
 | topology build peak (above the mesh) | 466 MB | **104 MB** (gate ≤ 150 MB) |
 | topology (retained) | 32 MB | 18 MB |
-| **working set (gate ≤ 400 MB at 5M)** | ~145 MB | **131 MB** |
+| **working set (gate ≤ 400 MB at 5M requested, ≈4.8M actual)** | ~145 MB | **131 MB** |
 | topology build wall time (all cores, test profile) | 0.62 s | 0.37 s |
 
 Half-edges are no longer sorted as 16-byte records: a counting sort buckets their 4-byte IDs by low vertex, each bucket is sorted by (high vertex, half-edge) reading the vertices back from the mesh, and whether a vertex has one corner fan is checked by walking the fan of one of its corners across two-face edges (in parallel over vertices) instead of collecting fans in a corner union-find plus a sorted fan array. The result is identical, and faster. `meshfixer bench memory` reports these figures and CI's `memory-gate` job fails the working set above 400 MB.

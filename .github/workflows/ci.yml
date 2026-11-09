@@ -78,8 +78,9 @@ jobs:
           if-no-files-found: warn
 
   memory-gate:
-    # MF-GEO-002: a 5M-triangle mesh plus its cached topology stays within
-    # 400 MB, counted by the allocator. Process RSS and GPU buffers of a
+    # MF-GEO-002: a mesh of 5M requested triangles (the damaged-sphere
+    # fixture makes ≈4.8M) plus its cached topology stays within 400 MB,
+    # counted by the allocator. Process RSS and GPU buffers of a
     # realistic session are reported (evidence job), not gated.
     runs-on: ubuntu-24.04
     steps:
@@ -87,12 +88,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.99.1
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release -p mf-cli
-      - name: Working set at 5M triangles (fails above 400 MB)
+      - name: Working set at 5M requested (≈4.8M actual) triangles (fails above 400 MB)
         shell: bash
         run: |
           set -o pipefail
           target/release/meshfixer bench memory --triangles 5000000 --json | tee memory.json
-          { echo "### Memory at 5M triangles"; echo '```'; cat memory.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Memory at 5M requested (≈4.8M actual) triangles"; echo '```'; cat memory.json; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
           if ! jq -e '.allocator_installed and .working_set_bytes <= 400 * 1048576' memory.json > /dev/null; then
             echo "::error::working set $(jq .working_set_bytes memory.json) bytes is over the 400 MB budget"
             exit 1
@@ -115,7 +116,7 @@ jobs:
         run: scripts/evidence.sh evidence
       - name: GUI workflow screenshots
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
-      - name: Realistic 5M session memory (process RSS and GPU buffers, reported)
+      - name: Realistic 5M-requested (≈4.8M actual) session memory (process RSS and GPU buffers, reported)
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test memory -- --nocapture
       - name: Real scan fixtures (hash-verified)
         uses: actions/cache@v6

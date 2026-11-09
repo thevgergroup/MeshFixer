@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! What a realistic 5M-triangle session holds (M4 Task 9, MF-GEO-002): open,
+//! What a realistic session on 5M requested triangles (the damaged-sphere
+//! fixture leaves ≈4.8M) holds (M4 Task 9, MF-GEO-002): open,
 //! fill holes, undo, redo, select. Reported, not gated (yet): the process's
 //! RSS and the GPU buffers, next to the counted storage figure the 400 MB
 //! gate is about (`meshfixer bench memory`), so the two can't be confused.

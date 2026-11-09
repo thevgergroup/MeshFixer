@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! The topology build's transient memory at 5M triangles (MF-GEO-003,
+//! The topology build's transient memory at 5M requested triangles (the
+//! damaged-sphere fixture cuts holes, leaving ≈4.8M; asserted below) (MF-GEO-003,
 //! MF-ISSUE-019). Its own binary: the counting allocator is process-wide.
 //! Heavy (a 5M mesh): run serially, see scripts/run-tests.sh.
 
@@ -11,7 +12,8 @@ use mf_metrics::{CountingAlloc, measure};
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
-/// MF-ISSUE-019: building the topology of a 5M-triangle mesh peaks at most
+/// MF-ISSUE-019: building the topology of a 5M-requested (≈4.8M actual)
+/// mesh peaks at most
 /// this far above what was live before it started.
 const TOPOLOGY_PEAK_BUDGET: u64 = 150 << 20;
 
