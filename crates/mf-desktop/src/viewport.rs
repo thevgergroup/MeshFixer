@@ -84,7 +84,42 @@ pub struct Click {
     pub shift: bool,
 }
 
+/// What a plain primary-button drag does in the 3D view (the navigation
+/// bar's mode switch). Option/Alt + drag always zooms, Shift + drag pans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavMode {
+    Orbit,
+    Pan,
+    Zoom,
+}
+
+/// A camera move asked for from the navigation bar that needs the app
+/// (it knows the selection and every object's bounds).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavAction {
+    FrameSelection,
+    ResetView,
+}
+
+/// What happened in the viewport this frame.
+#[derive(Debug, Default)]
+pub struct ViewOutput {
+    pub click: Option<Click>,
+    pub action: Option<NavAction>,
+}
+
+/// One zoom step of the zoom buttons and keys.
+pub const ZOOM_STEP: f64 = 1.25;
+/// Holding a zoom button repeats after this long (seconds)…
+const REPEAT_DELAY: f64 = 0.4;
+/// …every this long.
+const REPEAT_EVERY: f64 = 0.12;
+
 pub struct Viewport {
+    /// What a plain primary drag does.
+    pub nav_mode: NavMode,
+    /// A held zoom button: (zoom in?, when it was pressed, repeats applied).
+    hold: Option<(bool, f64, u32)>,
     render_state: RenderState,
     renderer: MeshRenderer,
     target: Option<RenderTarget>,
@@ -108,6 +143,8 @@ impl Viewport {
             palette,
         );
         Viewport {
+            nav_mode: NavMode::Orbit,
+            hold: None,
             render_state,
             renderer,
             target: None,
@@ -129,7 +166,7 @@ impl Viewport {
         camera: &mut Option<OrbitCamera>,
         objects: &[ObjectView],
         options: ViewOptions<'_>,
-    ) -> Option<Click> {
+    ) -> ViewOutput {
         let ViewOptions {
             show_boundaries,
             layers,
@@ -155,7 +192,7 @@ impl Viewport {
                 egui::FontId::proportional(16.0),
                 theme::TEXT_MUTED,
             );
-            return None;
+            return ViewOutput::default();
         };
         self.last_rect = Some(rect);
         let click = response
@@ -167,7 +204,7 @@ impl Viewport {
                 size: (rect.width() as f64, rect.height() as f64),
                 shift: ui.input(|i| i.modifiers.shift),
             });
-        handle_input(ui, &response, rect, cam);
+        handle_input(ui, &response, rect, cam, self.nav_mode);
 
         // Clamp to the device limit; egui scales the image up if needed.
         let ppp = ui.ctx().pixels_per_point();
@@ -195,7 +232,7 @@ impl Viewport {
         }
         // The controls hint, on a backdrop so it reads over the model.
         let hint = ui.painter().layout_no_wrap(
-            "Drag: orbit · right-drag: pan · wheel: zoom · F: frame · Home: reset · Help > Controls"
+            "Drag: orbit · Shift/right-drag: pan · Option/Alt-drag or wheel: zoom · +/−: zoom · F: frame · Home or Cmd+0: reset · Help > Controls"
                 .to_owned(),
             egui::FontId::proportional(12.0),
             theme::TEXT_MUTED,
@@ -207,7 +244,108 @@ impl Viewport {
             theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85),
         );
         ui.painter().galley(at, hint, theme::TEXT_MUTED);
-        click
+        let action = self.navigation_bar(ui, rect, cam);
+        ViewOutput { click, action }
+    }
+
+    /// The on-screen navigation bar at the view's bottom-right, for people
+    /// without a mouse wheel: drag mode (Orbit / Pan / Zoom), zoom out / in
+    /// (hold to repeat), frame selection and reset view. Camera maths only.
+    fn navigation_bar(
+        &mut self,
+        ui: &egui::Ui,
+        rect: egui::Rect,
+        cam: &mut OrbitCamera,
+    ) -> Option<NavAction> {
+        let mut action = None;
+        let mut zoom_steps = 0i32;
+        let mut held = None;
+        egui::Area::new(egui::Id::unique("navigation bar"))
+            .order(egui::Order::Middle)
+            .pivot(egui::Align2::RIGHT_BOTTOM)
+            .fixed_pos(rect.right_bottom() - egui::vec2(10.0, 10.0))
+            .constrain_to(rect)
+            .show(ui.ctx(), |ui| {
+                egui::Frame::new()
+                    .fill(theme::VIEWPORT_BACKGROUND.gamma_multiply(0.92))
+                    .stroke(egui::Stroke::new(
+                        1.0,
+                        theme::TEXT_MUTED.gamma_multiply(0.4),
+                    ))
+                    .corner_radius(6.0)
+                    .inner_margin(6.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            for (mode, label, tip) in [
+                                (NavMode::Orbit, "Orbit", "Drag orbits"),
+                                (NavMode::Pan, "Pan", "Drag pans (or Shift + drag)"),
+                                (
+                                    NavMode::Zoom,
+                                    "Zoom",
+                                    "Drag up/down zooms (or Option/Alt + drag)",
+                                ),
+                            ] {
+                                if ui
+                                    .selectable_label(self.nav_mode == mode, label)
+                                    .on_hover_text(tip)
+                                    .clicked()
+                                {
+                                    self.nav_mode = mode;
+                                }
+                            }
+                            ui.separator();
+                            for (zoom_in, text, label, tip) in [
+                                (false, "−", "Zoom out", "Zoom out (−); hold to repeat"),
+                                (true, "+", "Zoom in", "Zoom in (+ or =); hold to repeat"),
+                            ] {
+                                let r = labelled(ui.button(text), label).on_hover_text(tip);
+                                if r.clicked() {
+                                    zoom_steps += if zoom_in { 1 } else { -1 };
+                                }
+                                if r.is_pointer_button_down_on() {
+                                    held = Some(zoom_in);
+                                }
+                            }
+                            ui.separator();
+                            if labelled(ui.button("Frame"), "Frame selection")
+                                .on_hover_text("Frame selection (F)")
+                                .clicked()
+                            {
+                                action = Some(NavAction::FrameSelection);
+                            }
+                            if labelled(ui.button("Reset"), "Reset view")
+                                .on_hover_text("Reset view (Home, or Cmd/Ctrl+0)")
+                                .clicked()
+                            {
+                                action = Some(NavAction::ResetView);
+                            }
+                        });
+                    });
+            });
+        // Holding a zoom button repeats the step.
+        let now = ui.input(|i| i.time);
+        match (held, self.hold) {
+            (Some(zoom_in), Some((was_in, start, done))) if zoom_in == was_in => {
+                let due = if now - start < REPEAT_DELAY {
+                    0
+                } else {
+                    ((now - start - REPEAT_DELAY) / REPEAT_EVERY) as u32 + 1
+                };
+                let sign = if zoom_in { 1 } else { -1 };
+                zoom_steps += sign * (due.saturating_sub(done)) as i32;
+                self.hold = Some((zoom_in, start, due.max(done)));
+                ui.ctx().request_repaint();
+            }
+            (Some(zoom_in), _) => {
+                self.hold = Some((zoom_in, now, 0));
+                ui.ctx().request_repaint();
+            }
+            (None, _) => self.hold = None,
+        }
+        if zoom_steps != 0 {
+            cam.zoom(ZOOM_STEP.powi(-zoom_steps));
+        }
+        action
     }
 
     fn render(
@@ -371,17 +509,44 @@ impl Viewport {
 /// two-finger drags as scroll events; the unit tells them apart (points:
 /// trackpad, lines or pages: wheel). Momentum after the fingers lift is
 /// ignored so the view stops when you stop.
-fn handle_input(ui: &egui::Ui, response: &egui::Response, rect: egui::Rect, cam: &mut OrbitCamera) {
+fn handle_input(
+    ui: &egui::Ui,
+    response: &egui::Response,
+    rect: egui::Rect,
+    cam: &mut OrbitCamera,
+    mode: NavMode,
+) {
     let h = rect.height().max(1.0) as f64;
     let size = (rect.width() as f64, rect.height() as f64);
     let delta = response.drag_delta();
-    let pan = response.dragged_by(egui::PointerButton::Secondary)
+    let (alt, shift, origin) =
+        ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.pointer.press_origin()));
+    let primary = response.dragged_by(egui::PointerButton::Primary);
+    let drag = if response.dragged_by(egui::PointerButton::Secondary)
         || response.dragged_by(egui::PointerButton::Middle)
-        || (response.dragged_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.shift));
-    if pan {
-        cam.pan(delta.x as f64 / h, delta.y as f64 / h);
-    } else if response.dragged_by(egui::PointerButton::Primary) {
-        cam.orbit(delta.x as f64 * 0.01, delta.y as f64 * 0.01);
+    {
+        Some(NavMode::Pan)
+    } else if primary && alt {
+        // One-button devices: Option/Alt + drag zooms, Shift + drag pans.
+        Some(NavMode::Zoom)
+    } else if primary && shift {
+        Some(NavMode::Pan)
+    } else if primary {
+        Some(mode)
+    } else {
+        None
+    };
+    match drag {
+        Some(NavMode::Pan) => cam.pan(delta.x as f64 / h, delta.y as f64 / h),
+        Some(NavMode::Orbit) => cam.orbit(delta.x as f64 * 0.01, delta.y as f64 * 0.01),
+        Some(NavMode::Zoom) if delta.y != 0.0 => {
+            // Up zooms in, toward where the drag started.
+            let at = origin.map_or((size.0 * 0.5, size.1 * 0.5), |p| {
+                ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64)
+            });
+            cam.zoom_at((delta.y as f64 * 0.01).exp(), size, at);
+        }
+        Some(NavMode::Zoom) | None => {}
     }
     if !response.hovered() {
         return;
@@ -432,4 +597,11 @@ fn handle_input(ui: &egui::Ui, response: &egui::Response, rect: egui::Rect, cam:
             }
         }
     }
+}
+
+/// Give a symbol button an accessible name (and the name tests find it by).
+fn labelled(response: egui::Response, label: &str) -> egui::Response {
+    let enabled = response.enabled();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
+    response
 }

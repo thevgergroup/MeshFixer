@@ -13,7 +13,9 @@ use mf_spec::ParamValue;
 use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::defects::{Defect, operation_label};
 use crate::theme;
-use crate::viewport::{Click, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport};
+use crate::viewport::{
+    Click, NavAction, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
+};
 use crate::worker::{self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
@@ -133,6 +135,8 @@ impl MeshFixerApp {
 
         let (tx, rx) = channel::<Message>();
         theme::apply(&cc.egui_ctx);
+        // Cmd/Ctrl + / − / 0 belong to the 3D view, not to scaling the UI.
+        cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -1209,10 +1213,11 @@ impl eframe::App for MeshFixerApp {
         self.resolve_view_request();
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
-        let typing = ctx.memory(|m| m.focused().is_some());
-        let (undo, redo, frame, home, escape) = ctx.input_mut(|i| {
+        // …and to an open popup or menu.
+        let typing = ctx.memory(|m| m.focused().is_some()) || egui::Popup::is_any_open(&ctx);
+        let (undo, redo, frame, home, escape, zoom) = ctx.input_mut(|i| {
             if typing {
-                return (false, false, false, false, false);
+                return (false, false, false, false, false, 0);
             }
             let escape = i.key_pressed(egui::Key::Escape);
             let redo = i.consume_key(
@@ -1221,8 +1226,21 @@ impl eframe::App for MeshFixerApp {
             );
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
             let frame = i.key_pressed(egui::Key::F);
-            let home = i.key_pressed(egui::Key::Home);
-            (undo, redo, frame, home, escape)
+            // Cmd/Ctrl+0 resets too: Home needs Fn+← on Mac laptops.
+            let home = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Num0)
+                || i.key_pressed(egui::Key::Home);
+            let zoom_in = i.consume_key(egui::Modifiers::NONE, egui::Key::Plus)
+                || i.consume_key(egui::Modifiers::SHIFT, egui::Key::Plus)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Equals);
+            let zoom_out = i.consume_key(egui::Modifiers::NONE, egui::Key::Minus);
+            (
+                undo,
+                redo,
+                frame,
+                home,
+                escape,
+                i32::from(zoom_in) - i32::from(zoom_out),
+            )
         });
         if escape {
             self.clear_selection();
@@ -1233,6 +1251,12 @@ impl eframe::App for MeshFixerApp {
             self.undo();
         }
         if !ctx.egui_wants_keyboard_input() {
+            // + / = and − zoom toward the view centre, one step per press.
+            if zoom != 0
+                && let Some(cam) = self.camera.as_mut()
+            {
+                cam.zoom(ZOOM_STEP.powi(-zoom));
+            }
             if home {
                 self.fit_camera();
             } else if frame {
@@ -1260,7 +1284,7 @@ impl eframe::App for MeshFixerApp {
         let show_boundaries = self.show_boundaries;
         let updating = self.is_analyzing();
         let layers = self.view_layers();
-        let click = egui::CentralPanel::no_frame()
+        let out = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
                 self.viewport.show(
                     ui,
@@ -1275,7 +1299,12 @@ impl eframe::App for MeshFixerApp {
                 )
             })
             .inner;
-        if let Some(c) = click
+        match out.action {
+            Some(NavAction::FrameSelection) => self.frame_target(),
+            Some(NavAction::ResetView) => self.fit_camera(),
+            None => {}
+        }
+        if let Some(c) = out.click
             && self.busy.is_none()
         {
             self.click(&ctx, c);

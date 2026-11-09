@@ -313,8 +313,9 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                 ui,
                 "Mouse",
                 &[
-                    ("Left-drag", "Orbit"),
-                    ("Right- or middle-drag", "Pan"),
+                    ("Left-drag", "Orbit (or Pan / Zoom: the view's mode switch)"),
+                    ("Right- or middle-drag, or Shift + drag", "Pan"),
+                    ("Option/Alt + drag up/down", "Zoom"),
                     ("Wheel", "Zoom to the cursor"),
                     ("Click", "Select a hole or piece (Shift adds)"),
                 ],
@@ -330,10 +331,20 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
             );
             group(
                 ui,
+                "On screen (bottom-right of the view)",
+                &[
+                    ("Orbit / Pan / Zoom", "What a plain drag does"),
+                    ("− / +", "Zoom out / in (hold to repeat)"),
+                    ("Frame / Reset", "Frame the selection / reset the view"),
+                ],
+            );
+            group(
+                ui,
                 "Shortcuts",
                 &[
+                    ("+ or = / −", "Zoom in / out"),
                     ("F", "Frame the selection (or everything)"),
-                    ("Home", "Reset the view"),
+                    ("Home or Cmd/Ctrl+0", "Reset the view"),
                     ("Esc", "Clear the selection"),
                     ("Cmd+Z / Shift+Cmd+Z", "Undo / Redo"),
                 ],

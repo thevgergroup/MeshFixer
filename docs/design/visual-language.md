@@ -116,18 +116,28 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
 
 ## Camera controls (Help ▸ Controls)
 
+Every move works without a mouse wheel: on a trackpad, with a one-button mouse, or from the keyboard (M4 Task 2a).
+
 | Input | Action |
 |---|---|
-| Left-drag | orbit |
-| Right- or middle-drag (or Shift + left-drag) | pan |
+| Left-drag | orbit, or pan or zoom when the navigation bar's mode is Pan or Zoom |
+| Right- or middle-drag, or Shift + left-drag | pan |
+| Option/Alt + left-drag (up/down) | zoom toward where the drag started (up zooms in) |
 | Mouse wheel | zoom towards the point under the cursor |
 | Two-finger drag (trackpad) | orbit |
 | Shift + two-finger drag | pan |
 | Pinch | zoom towards the cursor |
+| + or = / − | zoom in / out, 1.25× toward the view centre |
 | F | frame the target (or everything when nothing is targeted), keeping the view direction |
-| Home | reset the view: the default angle, everything in view |
+| Home, or Cmd/Ctrl+0 | reset the view: the default angle, everything in view (Home needs Fn+← on Mac laptops) |
 | Esc | clear the selection |
 
+- **Navigation bar.** It sits at the 3D view's bottom-right, inside the view, drawn with the theme tokens. Each control has an accessible name and a tooltip naming its shortcut.
+  - "Orbit / Pan / Zoom": a mode switch (default Orbit) that sets what a plain left-drag does. The current mode shows in the selected (cyan) style, because it is the selected option.
+  - "Zoom out" (−) and "Zoom in" (+): 1.25× toward the view centre per click. Holding a button repeats every 0.12 s after 0.4 s.
+  - "Frame selection" (F) and "Reset view" (Home).
+- **Keys stay with text and menus.** Navigation keys only act when no text field or popup (menu) has focus.
+- **No UI scaling.** egui's Cmd/Ctrl + / − / 0 UI scaling is turned off, so those keys belong to the 3D view.
 - **Mouse versus trackpad.** egui reports a mouse wheel and a two-finger drag both as scroll events. The unit tells them apart:
   - points means a trackpad, so the view orbits (or pans with Shift);
   - lines or pages means a wheel, so the view zooms.
