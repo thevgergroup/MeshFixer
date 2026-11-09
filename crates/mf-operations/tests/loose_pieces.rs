@@ -4,8 +4,9 @@
 //! largest piece as well as by a triangle count, so the defaults leave a
 //! design made of many parts (or unwelded soup) alone, while the specks
 //! around a scan are still removed. What a run would remove is previewed
-//! from the component sizes alone, and a removal that takes more than half
-//! of the pieces or more than 10% of the triangles needs confirmation.
+//! from the component sizes alone, and a removal that takes more than 3%
+//! of the triangles, or most of the pieces and more than 2% of the
+//! triangles, needs confirmation.
 
 use std::collections::BTreeMap;
 
@@ -93,31 +94,21 @@ fn the_preview_matches_the_run_and_asks_before_large_removals() {
         }
     );
     assert_eq!((pieces, triangles), (5, 60));
-    // Five of seven pieces is more than half: Apply asks first.
+    // Five of seven pieces and 2.9% of the triangles: Apply asks first.
     assert!(preview.needs_confirmation(), "{preview:?}");
-    // More than half of the pieces needs confirmation…
-    let many = RemovalPreview {
-        pieces: 4,
-        of_pieces: 7,
-        triangles: 1,
+    // The rule (fix round 1, I3): more than 3% of the triangles, or more
+    // than half of the pieces and more than 2% of the triangles.
+    let p = |pieces, triangles| RemovalPreview {
+        pieces,
+        of_pieces: 100,
+        triangles,
         of_triangles: 1000,
     };
-    assert!(many.needs_confirmation());
-    // …and so does more than 10% of the triangles.
-    let heavy = RemovalPreview {
-        pieces: 1,
-        of_pieces: 7,
-        triangles: 101,
-        of_triangles: 1000,
-    };
-    assert!(heavy.needs_confirmation());
-    let fine = RemovalPreview {
-        pieces: 3,
-        of_pieces: 7,
-        triangles: 100,
-        of_triangles: 1000,
-    };
-    assert!(!fine.needs_confirmation());
+    assert!(p(1, 31).needs_confirmation(), "over 3% of the triangles");
+    assert!(!p(1, 30).needs_confirmation());
+    assert!(p(51, 21).needs_confirmation(), "most pieces, over 2%");
+    assert!(!p(51, 20).needs_confirmation(), "most pieces, but specks");
+    assert!(!p(50, 25).needs_confirmation(), "half the pieces, under 3%");
 }
 
 fn s_total(mesh: &Mesh) -> u64 {
@@ -163,8 +154,8 @@ fn real(name: &str, test: &str) -> Option<Mesh> {
 /// MF-ISSUE-052: on the multi-part dress and the unwelded soup, the
 /// defaults no longer delete most of the model without asking: the dress's
 /// 1,050 trim parts (under 1% of its body each) and the soup's 1,972
-/// single triangles are still candidates, but taking more than half of
-/// the pieces asks for confirmation first.
+/// single triangles are still candidates, but taking most of the pieces
+/// and over 2% of the triangles asks for confirmation first.
 #[test]
 fn defaults_keep_the_design_parts_of_messy_models() {
     for file in [
@@ -182,8 +173,7 @@ fn defaults_keep_the_design_parts_of_messy_models() {
         );
         println!("{file}: {preview:?}");
         assert!(
-            preview.needs_confirmation()
-                || (2 * pieces <= preview.of_pieces && 10 * triangles <= preview.of_triangles),
+            preview.needs_confirmation(),
             "{file}: the defaults remove {pieces} of {} pieces ({triangles} of {} triangles) \
              without asking",
             preview.of_pieces,
@@ -205,6 +195,8 @@ fn scan_specks_are_still_removed_by_default() {
     println!("site3: {preview:?}");
     assert!(pieces > 0, "the specks are removed");
     assert!(10 * triangles <= preview.of_triangles, "{preview:?}");
+    // Routine cleanup (1% of the triangles) doesn't ask (fix round 1, I3).
+    assert!(!preview.needs_confirmation(), "{preview:?}");
 }
 
 /// The indexed preview agrees with running the operation, for any

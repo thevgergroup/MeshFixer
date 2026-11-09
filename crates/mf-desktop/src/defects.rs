@@ -703,6 +703,9 @@ pub struct HoleView {
     pub fillable: Vec<(usize, u32)>,
     /// Loop id → position in `listed`.
     position: std::collections::HashMap<u32, usize>,
+    /// Each group's holes fill_holes can close (loop ids, in list order):
+    /// what its "Fill all N" fills, and so its N.
+    fillable_in: [Vec<u32>; 5],
 }
 
 impl HoleView {
@@ -713,6 +716,16 @@ impl HoleView {
             .position(|g| *g == group)
             .expect("ALL lists every group");
         self.groups[i].clone()
+    }
+
+    /// The loop ids `group`'s "Fill all N" fills (pinched holes and holes
+    /// over the fill cap are listed but left out).
+    pub fn group_fillable(&self, group: HoleGroup) -> &[u32] {
+        let i = HoleGroup::ALL
+            .iter()
+            .position(|g| *g == group)
+            .expect("ALL lists every group");
+        &self.fillable_in[i]
     }
 
     /// Where loop `id` is in [`HoleView::listed`], if it's listed. O(1).
@@ -751,6 +764,11 @@ pub fn hole_view(defects: &Defects, openings: &[u32]) -> HoleView {
                 && defects.pinched.binary_search(&id).is_err()
             {
                 view.fillable.push((*edges, id));
+                let g = HoleGroup::ALL
+                    .iter()
+                    .position(|g| *g == HoleGroup::of(*edges))
+                    .expect("ALL lists every group");
+                view.fillable_in[g].push(id);
             }
         }
     }
@@ -1211,6 +1229,24 @@ mod tests {
         assert_eq!(view.listed, vec![0, 1]);
         assert_eq!(view.group(HoleGroup::Tiny), 1..2);
         assert_eq!(view.batch(3), (1, 1));
+    }
+
+    /// A group's "Fill all N" counts only the holes Apply fills: a pinched
+    /// hole is listed but left out (fix round 1, P3).
+    #[test]
+    fn a_groups_fill_count_leaves_out_pinched_holes() {
+        let mesh = holed_grid();
+        let mut d = classify(&mesh, &mf_geometry::inspect(&mesh), &IDENTITY, 1000);
+        let (_, small) = d.holes[1].selection().unwrap();
+        d.pinched = vec![small];
+        let view = hole_view(&d, &[]);
+        assert_eq!(view.group(HoleGroup::Tiny).len(), 1, "still listed");
+        assert!(view.group_fillable(HoleGroup::Tiny).is_empty());
+        let view = hole_view(
+            &classify(&mesh, &mf_geometry::inspect(&mesh), &IDENTITY, 1000),
+            &[],
+        );
+        assert_eq!(view.group_fillable(HoleGroup::Tiny), &[small]);
     }
 
     #[test]

@@ -96,32 +96,31 @@ impl UnitPrompt {
 /// `true` to import at the chosen unit, `false` for Cancel or Esc.
 pub fn show(prompt: &mut UnitPrompt, ctx: &egui::Context) -> Option<bool> {
     let mut answer = None;
-    egui::Window::new(format!("Units for {}", prompt.name))
-        .id(egui::Id::unique("unit prompt"))
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.label("This file doesn't say what unit its numbers are in.");
-            ui.label(
-                RichText::new("Pick the one that gives the size you expect:")
-                    .color(theme::TEXT_MUTED),
-            );
-            ui.add_space(6.0);
-            for unit in OFFERED {
-                ui.radio_value(&mut prompt.choice, unit, size_row(unit, prompt.extent));
+    // Modal: nothing behind it answers until the unit is chosen.
+    egui::Modal::new(egui::Id::unique("unit prompt")).show(ctx, |ui| {
+        ui.heading(format!("Units for {}", prompt.name));
+        ui.label("This file doesn't say what unit its numbers are in.");
+        ui.label(
+            RichText::new("Pick the one that gives the size you expect:").color(theme::TEXT_MUTED),
+        );
+        ui.add_space(6.0);
+        for unit in OFFERED {
+            ui.radio_value(&mut prompt.choice, unit, size_row(unit, prompt.extent));
+        }
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Import").clicked() {
+                answer = Some(true);
             }
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Import").clicked() {
-                    answer = Some(true);
-                }
-                if ui.button("Cancel").on_hover_text("Esc").clicked() {
-                    answer = Some(false);
-                }
-            });
+            if ui.button("Cancel").on_hover_text("Esc").clicked() {
+                answer = Some(false);
+            }
         });
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+    });
+    // Esc cancels; a click outside the dialog doesn't (the choice matters).
+    if answer.is_none()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
         answer = Some(false);
     }
     answer

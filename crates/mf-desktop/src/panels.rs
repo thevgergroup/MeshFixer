@@ -14,7 +14,27 @@ use crate::defects::{
 use crate::theme;
 
 /// What an empty document says, in the tree and the 3D view.
-pub const EMPTY_STATE: &str = "Open a mesh (Cmd+O) or drop a file here";
+pub fn empty_state() -> String {
+    format!(
+        "Open a mesh ({}) or drop a file here",
+        shortcut_text(egui::Modifiers::COMMAND, egui::Key::O)
+    )
+}
+
+/// A shortcut as this platform writes it: "Cmd+Z" on macOS, "Ctrl+Z"
+/// elsewhere (names, not symbols: the bundled fonts have no ⌘).
+pub fn shortcut_text(modifiers: egui::Modifiers, key: egui::Key) -> String {
+    shortcut_text_for(modifiers, key, cfg!(target_os = "macos"))
+}
+
+fn shortcut_text_for(modifiers: egui::Modifiers, key: egui::Key, mac: bool) -> String {
+    let mods = egui::ModifierNames::NAMES.format(&modifiers, mac);
+    if mods.is_empty() {
+        key.name().to_owned()
+    } else {
+        format!("{mods}+{}", key.name())
+    }
+}
 
 /// Panel widths (points). With the bottom bar, they leave the 3D view at
 /// least 60% of a 1440×900 window.
@@ -27,7 +47,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui.menu_button("File", |ui| {
                 let idle = app.busy.is_none();
                 if ui
-                    .add_enabled(idle, egui::Button::new("Open…").shortcut_text("Cmd+O"))
+                    .add_enabled(idle, egui::Button::new("Open…").shortcut_text(shortcut_text(egui::Modifiers::COMMAND, egui::Key::O)))
                     .clicked()
                 {
                     app.open_dialog();
@@ -62,7 +82,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 if ui
                     .add_enabled(
                         idle && app.session.can_undo(),
-                        egui::Button::new("Undo").shortcut_text("Cmd+Z"),
+                        egui::Button::new("Undo").shortcut_text(undo_keys()),
                     )
                     .clicked()
                 {
@@ -72,7 +92,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 if ui
                     .add_enabled(
                         idle && app.session.can_redo(),
-                        egui::Button::new("Redo").shortcut_text("Shift+Cmd+Z"),
+                        egui::Button::new("Redo").shortcut_text(redo_keys()),
                     )
                     .clicked()
                 {
@@ -167,14 +187,14 @@ pub fn history_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             let idle = app.busy.is_none();
             if ui
                 .add_enabled(idle && app.session.can_undo(), egui::Button::new("Undo"))
-                .on_hover_text("Cmd+Z")
+                .on_hover_text(undo_keys())
                 .clicked()
             {
                 app.undo();
             }
             if ui
                 .add_enabled(idle && app.session.can_redo(), egui::Button::new("Redo"))
-                .on_hover_text("Shift+Cmd+Z")
+                .on_hover_text(redo_keys())
                 .clicked()
             {
                 app.redo();
@@ -355,30 +375,29 @@ pub fn confirm_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
         return;
     };
     let mut answer = None;
-    egui::Window::new("Remove these pieces?")
-        .collapsible(false)
-        .resizable(false)
-        .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
-        .show(ctx, |ui| {
-            ui.set_max_width(360.0);
-            ui.label(&message);
-            ui.add_space(6.0);
-            ui.horizontal(|ui| {
-                if ui.button("Remove them").clicked() {
-                    answer = Some(true);
-                }
-                if ui
-                    .button("Keep them")
-                    .on_hover_text(
-                        "Esc; raise Max relative size or lower Max triangles to remove fewer",
-                    )
-                    .clicked()
-                {
-                    answer = Some(false);
-                }
-            });
+    // Modal: Apply and the tree behind it don't answer until it's answered.
+    egui::Modal::new(egui::Id::unique("confirm removal")).show(ctx, |ui| {
+        ui.set_max_width(360.0);
+        ui.heading("Remove these pieces?");
+        ui.label(&message);
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            if ui.button("Remove them").clicked() {
+                answer = Some(true);
+            }
+            if ui
+                .button("Keep them")
+                .on_hover_text("Esc. To remove fewer, lower Max relative size or Max triangles.")
+                .clicked()
+            {
+                answer = Some(false);
+            }
         });
-    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+    });
+    // Esc keeps them; a stray click outside the question doesn't answer it.
+    if answer.is_none()
+        && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+    {
         answer = Some(false);
     }
     if let Some(go) = answer {
@@ -582,6 +601,17 @@ pub fn metrics_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     app.show_metrics = open;
 }
 
+fn undo_keys() -> String {
+    shortcut_text(egui::Modifiers::COMMAND, egui::Key::Z)
+}
+
+fn redo_keys() -> String {
+    shortcut_text(
+        egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+        egui::Key::Z,
+    )
+}
+
 pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     let mut open = app.show_controls;
     egui::Window::new("Controls")
@@ -589,6 +619,12 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
         .resizable(false)
         .collapsible(false)
         .show(ctx, |ui| {
+            let reset = format!(
+                "Home or {}",
+                shortcut_text(egui::Modifiers::COMMAND, egui::Key::Num0)
+            );
+            let undo = format!("{} / {}", undo_keys(), redo_keys());
+            let open = shortcut_text(egui::Modifiers::COMMAND, egui::Key::O);
             let group = |ui: &mut egui::Ui, title: &str, rows: &[(&str, &str)]| {
                 ui.strong(title);
                 egui::Grid::new(title).num_columns(2).show(ui, |ui| {
@@ -635,18 +671,18 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                 &[
                     ("+ or = / −", "Zoom in / out"),
                     ("F", "Frame the selection (or everything)"),
-                    ("Home or Cmd/Ctrl+0", "Reset the view"),
+                    (&reset, "Reset the view"),
                     (
                         "Esc",
                         "Cancel the running job; otherwise clear the selection",
                     ),
-                    ("Cmd+Z / Shift+Cmd+Z", "Undo / Redo"),
+                    (&undo, "Undo / Redo"),
                     ("N / Shift+N", "Select and frame the next / previous hole"),
                     (
                         "B, then drag",
                         "Select the visible holes in a box (Shift adds)",
                     ),
-                    ("Cmd+O", "Open a mesh (or drop a file on the window)"),
+                    (&open, "Open a mesh (or drop a file on the window)"),
                 ],
             );
         });
@@ -759,7 +795,7 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .collect();
     if objects.is_empty() {
-        ui.weak(EMPTY_STATE);
+        ui.weak(empty_state());
     }
     for (id, name, tris) in objects {
         let active = app.active == Some(id);
@@ -937,10 +973,28 @@ fn tree_row_sized(
 /// where the scroll area shows them: the rest is empty space of the right
 /// height, so every row is reachable by scrolling and a frame costs
 /// O(rows shown), whatever `n` (MF-RT-001).
-fn virtual_rows(ui: &mut egui::Ui, n: usize, mut draw: impl FnMut(&mut egui::Ui, usize)) {
+fn virtual_rows(ui: &mut egui::Ui, n: usize, draw: impl FnMut(&mut egui::Ui, usize)) {
+    virtual_rows_to(ui, n, None, draw);
+}
+
+/// [`virtual_rows`], scrolling row `reveal` (if any) into view: its place
+/// is known from its index, laid out or not.
+fn virtual_rows_to(
+    ui: &mut egui::Ui,
+    n: usize,
+    reveal: Option<usize>,
+    mut draw: impl FnMut(&mut egui::Ui, usize),
+) {
     let row = ui.spacing().interact_size.y;
     let pitch = row + ui.spacing().item_spacing.y;
     let top = ui.cursor().min.y;
+    if let Some(k) = reveal.filter(|&k| k < n) {
+        let at = egui::Rect::from_min_size(
+            egui::pos2(ui.cursor().min.x, top + k as f32 * pitch),
+            egui::vec2(ui.available_width(), row),
+        );
+        ui.scroll_to_rect(at, Some(egui::Align::Center));
+    }
     let clip = ui.clip_rect();
     let first = (((clip.top() - top) / pitch).floor().max(0.0) as usize).min(n);
     let last = ((((clip.bottom() - top) / pitch).ceil().max(0.0) as usize) + 1).min(n);
@@ -1043,6 +1097,7 @@ fn holes_tree(
     defects: &std::sync::Arc<crate::defects::Defects>,
     units: mf_io::threemf::Unit,
 ) {
+    let reveal = app.take_reveal();
     let Some(view) = app.hole_view_of(object).cloned() else {
         ui.horizontal(|ui| {
             ui.spinner();
@@ -1059,6 +1114,7 @@ fn holes_tree(
     egui::CollapsingHeader::new(text)
         .id_salt((object.0, "Holes"))
         .default_open(!view.listed.is_empty())
+        .open(reveal.map(|_| true))
         .show(ui, |ui| {
             if !view.listed.is_empty() {
                 ui.horizontal(|ui| {
@@ -1095,9 +1151,18 @@ fn holes_tree(
                         ui.weak("Needs a large-hole method (not yet available)");
                         return;
                     }
-                    let fill = format!("Fill all {n} {} {plural}", group.adjective());
+                    // N is what Apply fills: pinched holes are left out.
+                    let k = view.group_fillable(group).len();
+                    let fill = format!(
+                        "Fill all {k} {} {}",
+                        group.adjective(),
+                        if k == 1 { "hole" } else { "holes" }
+                    );
                     if ui
-                        .add_enabled(app.busy.is_none(), egui::Button::new(&fill).small())
+                        .add_enabled(
+                            app.busy.is_none() && k > 0,
+                            egui::Button::new(&fill).small(),
+                        )
                         .on_hover_text("One step: one Undo brings them all back")
                         .clicked()
                     {
@@ -1133,11 +1198,17 @@ fn holes_tree(
                     continue;
                 }
                 let rows = &view.listed[range.clone()];
+                // The row N / Shift+N just selected, if it's in this group.
+                let reveal = reveal
+                    .and_then(|id| view.position(id))
+                    .filter(|p| range.contains(p))
+                    .map(|p| p - range.start);
                 egui::CollapsingHeader::new(format!("{} ({})", group.title(), rows.len()))
                     .id_salt((object.0, "hole group", group.title()))
                     .default_open(true)
+                    .open(reveal.map(|_| true))
                     .show(ui, |ui| {
-                        virtual_rows(ui, rows.len(), |ui, k| {
+                        virtual_rows_to(ui, rows.len(), reveal, |ui, k| {
                             let d = &defects.holes[rows[k]];
                             let pinched = d
                                 .selection()
@@ -1699,4 +1770,23 @@ fn details_section(app: &MeshFixerApp, ui: &mut egui::Ui) {
                     );
                 });
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shortcut text names the platform's keys (fix round 1, P4): Cmd on
+    /// macOS, Ctrl elsewhere, in the platform's order.
+    #[test]
+    fn shortcut_text_is_platform_correct() {
+        use egui::{Key, Modifiers};
+        let undo = Modifiers::COMMAND;
+        let redo = Modifiers::COMMAND | Modifiers::SHIFT;
+        assert_eq!(shortcut_text_for(undo, Key::Z, true), "Cmd+Z");
+        assert_eq!(shortcut_text_for(undo, Key::Z, false), "Ctrl+Z");
+        assert_eq!(shortcut_text_for(redo, Key::Z, true), "Shift+Cmd+Z");
+        assert_eq!(shortcut_text_for(redo, Key::Z, false), "Ctrl+Shift+Z");
+        assert_eq!(shortcut_text_for(Modifiers::NONE, Key::F, true), "F");
+    }
 }

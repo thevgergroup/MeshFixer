@@ -2,13 +2,14 @@
 
 //! Removing loose pieces safely (MF-ISSUE-052): with "Remove loose
 //! pieces" open, Properties previews what Apply would remove and the view
-//! tints just those pieces; a removal of more than half the pieces or
-//! more than 10% of the triangles asks first, in plain words.
+//! tints just those pieces; a removal of more than 3% of the triangles (or
+//! most pieces and more than 2%) asks first, in plain words.
 
 use std::time::{Duration, Instant};
 
+use eframe::egui;
 use egui_kittest::Harness;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use mf_desktop::MeshFixerApp;
 use mf_render::FaceStates;
 
@@ -105,13 +106,46 @@ fn remove_loose_pieces_previews_tints_and_asks_before_a_large_removal() {
                 .all(|&f| state(a, f) & FaceStates::LOOSE_PIECE == 0)
     });
 
-    // Five of seven pieces is more than half: Apply asks first.
+    // Five of seven pieces and 2.9% of the triangles: Apply asks first.
     let before = h.state().session.current();
     h.get_by_label("Apply").click();
     h.run();
+    // The share of the triangles is always given (fix round 1, I3).
     h.get_by_label(
-        "This would delete 5 of 7 parts of 'dress'. These may be part of the design, not debris.",
+        "This would delete 5 of 7 parts of 'dress' (2.9% of its triangles). These may be \
+         part of the design, not debris.",
     );
+    // The question is modal: the tree behind it doesn't answer (P4).
+    let piece = h
+        .get_all_by_role(egui::accesskit::Role::Button)
+        .find(|n| {
+            n.accesskit_node()
+                .label()
+                .is_some_and(|l| l.starts_with("Piece "))
+        })
+        .unwrap()
+        .rect()
+        .center();
+    h.event(egui::Event::PointerMoved(piece));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: piece,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    assert!(h.state().selection.is_none(), "the tree is blocked");
+    assert!(h.state().confirmation().is_some(), "still asking");
+    // Keep them says how to remove fewer, the right way round (I2).
+    let keep = h.get_by_label("Keep them").rect().center();
+    h.event(egui::Event::PointerMoved(keep));
+    for _ in 0..60 {
+        h.step();
+    }
+    h.get_by_label("Esc. To remove fewer, lower Max relative size or Max triangles.");
     h.get_by_label("Keep them").click();
     h.run();
     assert_eq!(h.state().session.current(), before, "nothing removed");

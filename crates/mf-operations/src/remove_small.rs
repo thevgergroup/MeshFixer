@@ -23,11 +23,15 @@ pub struct RemovalPreview {
 }
 
 impl RemovalPreview {
-    /// A removal of more than half of the pieces or more than 10% of the
-    /// triangles may be taking parts of the design, not debris: the user
-    /// confirms it first.
+    /// A removal of more than 3% of the triangles, or of more than half of
+    /// the pieces and more than 2% of the triangles, may be taking parts of
+    /// the design, not debris: the user confirms it first. Clearing a
+    /// scan's specks (most pieces, ~1% of the triangles) doesn't ask, so
+    /// the question stays rare enough to be read (controller ruling, Task
+    /// 12 fix round 1).
     pub fn needs_confirmation(&self) -> bool {
-        2 * self.pieces > self.of_pieces || 10 * self.triangles > self.of_triangles
+        let share = |pct: u64| 100 * self.triangles > pct * self.of_triangles;
+        share(3) || (2 * self.pieces > self.of_pieces && share(2))
     }
 }
 

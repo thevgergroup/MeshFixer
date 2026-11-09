@@ -349,6 +349,8 @@ pub struct MeshFixerApp {
     marker_query: Option<(MarkerQuery, u64)>,
     /// The latest markers (request number, markers).
     markers: Option<(u64, Arc<worker::Markers>)>,
+    /// A hole (loop id) N / Shift+N selected: the tree scrolls to its row.
+    reveal: Option<u32>,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -523,6 +525,7 @@ impl MeshFixerApp {
             marker_worker,
             marker_query: None,
             markers: None,
+            reveal: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -920,8 +923,8 @@ impl MeshFixerApp {
         Vec::new()
     }
 
-    /// Apply, unless it would remove more than half of the pieces or more
-    /// than 10% of the triangles (MF-ISSUE-052): then it asks first
+    /// Apply, unless it would remove more than 3% of the triangles, or most
+    /// of the pieces and more than 2% (MF-ISSUE-052): then it asks first
     /// ([`Self::confirmation`]).
     pub fn apply(&mut self, tool: &Tool) {
         if tool.op_id == "mesh.remove_small_components"
@@ -934,16 +937,11 @@ impl MeshFixerApp {
                 .and_then(|id| self.session.document().object(id))
                 .map_or_else(String::new, |o| o.name.clone());
             let share = 100.0 * p.triangles as f64 / p.of_triangles.max(1) as f64;
-            let triangles = if 10 * p.triangles > p.of_triangles {
-                format!(", {share:.0}% of its triangles")
-            } else {
-                String::new()
-            };
             self.confirm = Some(Confirm {
                 tool: tool.clone(),
                 message: format!(
-                    "This would delete {} of {} parts of '{name}'{triangles}. \
-                     These may be part of the design, not debris.",
+                    "This would delete {} of {} parts of '{name}' ({share:.1}% of its \
+                     triangles). These may be part of the design, not debris.",
                     thousands(p.pieces),
                     thousands(p.of_pieces),
                 ),
@@ -2855,8 +2853,14 @@ impl MeshFixerApp {
             (Some(i), false) => (i + n - 1) % n,
         };
         if let Some(d) = self.listed_hole(next) {
+            self.reveal = d.selection().map(|(_, id)| id);
             self.tree_find(&TreeItem::Defect(object, d));
         }
+    }
+
+    /// The hole whose row the tree should scroll to (once).
+    pub fn take_reveal(&mut self) -> Option<u32> {
+        self.reveal.take()
     }
 
     /// Fill these holes (loop ids of the active revision) as one command.
@@ -2936,20 +2940,8 @@ impl MeshFixerApp {
 
     /// The listed holes of `group` that fill_holes can close (loop ids).
     pub fn group_fillable(&self, group: crate::defects::HoleGroup) -> Vec<u32> {
-        let (Some(view), Some(a)) = (self.hole_view(), self.current_analysis()) else {
-            return Vec::new();
-        };
-        view.listed[view.group(group)]
-            .iter()
-            .filter_map(|&i| match &a.defects.holes[i] {
-                Defect::Hole { loop_id, .. }
-                    if a.defects.pinched.binary_search(loop_id).is_err() =>
-                {
-                    Some(*loop_id)
-                }
-                _ => None,
-            })
-            .collect()
+        self.hole_view()
+            .map_or_else(Vec::new, |v| v.group_fillable(group).to_vec())
     }
 
     /// Mark these holes (loop ids of the active revision) as intentional
@@ -3021,8 +3013,11 @@ impl MeshFixerApp {
             return;
         }
         let key = self.marker_query.map_or(1, |(_, k)| k + 1);
+        // Without every BVH a marker could show for a hidden hole: wait.
+        let Some(occluders) = self.occluders() else {
+            return;
+        };
         let (defects, view) = (a.defects.clone(), view.clone());
-        let occluders = self.occluders();
         self.marker_query = Some((query, key));
         self.marker_worker.submit(worker::MarkerRequest {
             key,
@@ -3035,21 +3030,22 @@ impl MeshFixerApp {
         });
     }
 
-    /// Every object's revision, BVH (if built) and placement: what can
-    /// hide a hole.
-    fn occluders(&self) -> Vec<(Mesh, Option<Arc<Bvh>>, glam::DMat4)> {
+    /// Every object's revision, picking BVH and placement: what can hide a
+    /// hole. `None` until every object's current revision has its BVH (a
+    /// hole can't be called visible before then).
+    fn occluders(&self) -> Option<Vec<(Mesh, Arc<Bvh>, glam::DMat4)>> {
         self.session
             .document()
             .objects()
             .iter()
-            .filter_map(|o| {
-                let mesh = o.mesh()?.clone();
+            .filter_map(|o| Some((o, o.mesh()?)))
+            .map(|(o, mesh)| {
                 let bvh = self
                     .bvhs
                     .get(&o.id)
-                    .filter(|(m, _)| Mesh::ptr_eq(m, &mesh))
-                    .map(|(_, b)| b.clone());
-                Some((mesh, bvh, model_matrix(&o.transform)))
+                    .filter(|(m, _)| Mesh::ptr_eq(m, mesh))
+                    .map(|(_, b)| b.clone())?;
+                Some((mesh.clone(), bvh, model_matrix(&o.transform)))
             })
             .collect()
     }
@@ -3068,8 +3064,11 @@ impl MeshFixerApp {
         let Some(mesh) = self.active_mesh().cloned() else {
             return;
         };
+        let Some(occluders) = self.occluders() else {
+            self.status = Some("Picking isn't ready yet: try the box again in a moment".into());
+            return;
+        };
         let (defects, view) = (a.defects.clone(), view.clone());
-        let occluders = self.occluders();
         self.workers.box_select(
             object, mesh, defects, view, cam, b.size, b.rect, occluders, b.add,
         );
@@ -3235,11 +3234,12 @@ impl MeshFixerApp {
         self.refresh_markers();
 
         let objects = self.object_views();
+        let empty = crate::panels::empty_state();
         let placeholder = match self.active_mesh() {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
             Some(_) if self.analysis_failed_for_active() => "Couldn't analyse this object",
             Some(_) => "Analyzing…",
-            None => crate::panels::EMPTY_STATE,
+            None => empty.as_str(),
         };
         let show_boundaries = self.defect_shown(self.shown.holes);
         let updating = self.is_analyzing();

@@ -914,7 +914,7 @@ impl Workers {
         cam: mf_render::OrbitCamera,
         size: (f64, f64),
         rect: eframe::egui::Rect,
-        occluders: Vec<(Mesh, Option<Arc<Bvh>>, DMat4)>,
+        occluders: Vec<(Mesh, Arc<Bvh>, DMat4)>,
         add: bool,
     ) {
         spawn_on(
@@ -1148,8 +1148,9 @@ pub struct MarkerRequest {
     pub camera: mf_render::OrbitCamera,
     /// The 3D view's rectangle (window points).
     pub rect: eframe::egui::Rect,
-    /// Every object's revision, BVH and placement, for what hides a hole.
-    pub occluders: Vec<(Mesh, Option<Arc<Bvh>>, DMat4)>,
+    /// Every object's revision, picking BVH and placement: what hides a
+    /// hole (the app asks only once every BVH is built).
+    pub occluders: Vec<(Mesh, Arc<Bvh>, DMat4)>,
     pub color: eframe::egui::Color32,
 }
 
@@ -1191,10 +1192,7 @@ pub fn markers(req: &MarkerRequest, ctx: &RunContext) -> Result<Markers, Cancell
         let dist = to.length();
         let dir = to / dist;
         let hidden = req.occluders.iter().any(|(m, bvh, model)| {
-            let hit = match bvh {
-                Some(b) => b.ray_pick(m, eye.to_array(), dir.to_array(), model),
-                None => None,
-            };
+            let hit = bvh.ray_pick(m, eye.to_array(), dir.to_array(), model);
             hit.is_some_and(|(_, t)| t < dist * (1.0 - 1e-6) - place.bounds.diagonal())
         });
         if hidden {
@@ -1228,7 +1226,7 @@ fn box_holes(
     cam: &mf_render::OrbitCamera,
     size: (f64, f64),
     rect: eframe::egui::Rect,
-    occluders: &[(Mesh, Option<Arc<Bvh>>, DMat4)],
+    occluders: &[(Mesh, Arc<Bvh>, DMat4)],
 ) -> Vec<u32> {
     let eye = cam.eye();
     let mut out = Vec::new();
@@ -1250,11 +1248,7 @@ fn box_holes(
         let dir = to / dist;
         let slack = place.bounds.diagonal().max(dist * 1e-6);
         let hidden = occluders.iter().any(|(m, bvh, model)| {
-            let hit = match bvh {
-                Some(b) => b.ray_pick(m, eye.to_array(), dir.to_array(), model),
-                // The app only box-selects once every BVH is built.
-                None => None,
-            };
+            let hit = bvh.ray_pick(m, eye.to_array(), dir.to_array(), model);
             hit.is_some_and(|(_, t)| t < dist - slack)
         });
         if !hidden {

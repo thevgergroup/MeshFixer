@@ -703,3 +703,78 @@ fn every_operation_parameter_has_a_tooltip() {
         h.run();
     }
 }
+
+/// Fix round 1, P2: before every object's picking BVH is built, a box
+/// selection can't tell which holes are hidden, so it says so rather than
+/// select hidden ones; the overview's markers wait too.
+#[test]
+fn box_select_waits_for_picking() {
+    require_gpu!("box_select_waits_for_picking");
+    // One background thread: the analysis runs first, the BVH after it.
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|cc| {
+            let settings = mf_desktop::Settings {
+                threads: Some(1),
+                ..mf_desktop::Settings::default()
+            };
+            MeshFixerApp::with_settings(cc, None, settings).unwrap()
+        });
+    h.state_mut().show_hole_overview = true;
+    h.state_mut()
+        .import_model(model(plate(500, 1.0, &[(10, 10, 1), (40, 40, 1)])));
+    wait_until(&mut h, "the holes listed", |a| {
+        a.hole_view().is_some() && a.camera.is_some() && a.viewport.last_rect.is_some()
+    });
+    assert!(!h.state().picking_ready(), "the BVH is still being built");
+    assert!(h.state().hole_markers().is_none_or(|m| m.is_empty()));
+    let view = h.state().viewport.last_rect.unwrap();
+    let (a, b) = (
+        view.left_top() + egui::vec2(5.0, 5.0),
+        view.right_bottom() - egui::vec2(60.0, 60.0),
+    );
+    key(&mut h, egui::Key::B, egui::Modifiers::NONE);
+    h.event(egui::Event::PointerMoved(a));
+    h.step();
+    press(&mut h, a, true);
+    for t in 1..=5 {
+        h.event(egui::Event::PointerMoved(a + (b - a) * (t as f32 / 5.0)));
+        h.step();
+    }
+    press(&mut h, b, false);
+    if h.state().picking_ready() {
+        panic!("the BVH finished during the drag: make the plate bigger");
+    }
+    assert!(selected_loops(h.state()).is_empty());
+    assert_eq!(
+        h.state().status.as_deref(),
+        Some("Picking isn't ready yet: try the box again in a moment")
+    );
+}
+
+/// Fix round 1, P1: the tree scrolls to the row N / Shift+N selects.
+#[test]
+fn next_hole_scrolls_the_tree_to_its_row() {
+    require_gpu!("next_hole_scrolls_the_tree_to_its_row");
+    let mut h = opened(three_hundred_holes());
+    let last = listed(h.state()).pop().unwrap();
+    let label = row(h.state(), &last);
+    assert!(
+        h.query_by_label(&label).is_none(),
+        "the last of 301 rows starts out of sight (not laid out)"
+    );
+    // Shift+N from nothing selected: the last hole.
+    key(&mut h, egui::Key::N, egui::Modifiers::SHIFT);
+    settle_camera(&mut h);
+    h.run_steps(60);
+    assert_eq!(selected_loops(h.state()), vec![loop_id(&last)]);
+    let r = h.get_by_label(&label).rect();
+    let tree = h.get_by_label("Objects & Defects").rect();
+    let view = h.state().viewport.last_rect.unwrap();
+    assert!(
+        r.right() <= view.left() + 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
+        "the row is in view in the tree: {r:?}"
+    );
+}

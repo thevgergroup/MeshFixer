@@ -266,6 +266,9 @@ pub struct RevisionNode {
     pub document: Document,
     /// How each changed object's geometry differs from the parent revision.
     pub provenance: BTreeMap<ObjectId, Provenance>,
+    /// A "mark intentional openings" step: the object and the loop ids it
+    /// set (logged, so replay reaches the same marks).
+    pub openings: Option<(ObjectId, Vec<u32>)>,
 }
 
 /// History as a DAG of immutable document states. Undo and redo move a
@@ -296,6 +299,7 @@ impl Session {
                 import: None,
                 document: Document::default(),
                 provenance: BTreeMap::new(),
+                openings: None,
             }],
             cursor: RevisionId(0),
             next_object: 1,
@@ -468,6 +472,7 @@ impl Session {
             }),
             document,
             provenance: BTreeMap::new(),
+            openings: None,
         });
         id
     }
@@ -639,6 +644,7 @@ impl Session {
             import: None,
             document,
             provenance: BTreeMap::from([(c.target, provenance)]),
+            openings: None,
         });
         Ok(CommitOutcome::NewRevision {
             report: c.output.report,
@@ -706,6 +712,10 @@ impl Session {
         let Some(document) = self.document().with_openings(object, openings) else {
             return false;
         };
+        let marks = document
+            .object(object)
+            .map(|o| o.openings.clone())
+            .expect("with_openings found the object");
         self.push(RevisionNode {
             id: RevisionId(0),
             parent: None,
@@ -715,6 +725,7 @@ impl Session {
             import: None,
             document,
             provenance: BTreeMap::new(),
+            openings: Some((object, marks)),
         });
         true
     }

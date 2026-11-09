@@ -131,6 +131,14 @@ fn cancelling_the_unit_prompt_imports_nothing() {
         a.unit_prompt().is_some()
     });
     h.run();
+    // Modal (fix round 1, P4): the menu bar behind it doesn't open.
+    h.get_by_label("File").click();
+    h.run();
+    assert!(
+        !egui::Popup::is_any_open(&h.ctx),
+        "the File menu opened behind it"
+    );
+    assert!(h.state().unit_prompt().is_some());
     h.key_press(egui::Key::Escape);
     h.run();
     assert!(h.state().unit_prompt().is_none());

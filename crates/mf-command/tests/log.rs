@@ -251,3 +251,101 @@ fn replay_names_a_missing_target_object() {
         other => panic!("{other:?}"),
     }
 }
+
+/// A 12×12 plate with three square holes (and its rim), saved as STL and
+/// imported: (session, object, source path).
+fn holed_plate(dir: &Path) -> (Session, mf_command::ObjectId) {
+    let n = 12;
+    let mut e = mf_fixtures::grid(n).edit();
+    for (i, j) in [(1u32, 1u32), (5, 1), (2, 6)] {
+        let f = 2 * (j * n + i);
+        e.remove_face(mf_geometry::FaceId(f)).unwrap();
+        e.remove_face(mf_geometry::FaceId(f + 1)).unwrap();
+    }
+    let mesh = e.finish().unwrap().0;
+    let src = dir.join("plate.stl");
+    write_path(&mesh, &src, Format::StlBinary).unwrap();
+    let mut s = Session::new();
+    let id = s.import(read_path(&src).unwrap(), "plate".into());
+    (s, id)
+}
+
+/// The 4-edge holes of `id`'s current mesh, as loop ids by lowest vertex.
+fn small_holes(s: &Session, id: mf_command::ObjectId) -> Vec<u32> {
+    let m = s.document().object(id).unwrap().mesh().unwrap().clone();
+    let topo = m.topology();
+    let mut h: Vec<(u32, u32)> = topo
+        .boundary_loops
+        .iter()
+        .filter(|l| l.edge_count == 4)
+        .map(|l| (*l.vertices.iter().min().unwrap(), l.id))
+        .collect();
+    h.sort_unstable();
+    h.into_iter().map(|(_, id)| id).collect()
+}
+
+fn fill(s: &mut Session, id: mf_command::ObjectId, hole: u32) {
+    s.execute(Invocation {
+        selection: Some(mf_selection::Selection {
+            object: id,
+            revision: s.current(),
+            kind: mf_selection::SelectionKind::BoundaryLoop,
+            ids: vec![hole],
+        }),
+        op_id: "mesh.fill_holes".into(),
+        target: id,
+        raw_params: BTreeMap::new(),
+    })
+    .unwrap();
+}
+
+/// Task 12 fix round 1, C1: marking an intentional opening is in the log,
+/// so a hole fill recorded after it replays (its selection isn't bound to
+/// a revision number the replay doesn't reach), and the marks come back.
+#[test]
+fn a_log_with_a_marked_opening_replays_exactly_with_its_marks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, id) = holed_plate(dir.path());
+    let holes = small_holes(&s, id);
+    assert!(s.set_openings(id, vec![holes[0]], "Mark intentional opening".into()));
+    fill(&mut s, id, holes[1]);
+    let log = dir.path().join("s.mfx.log");
+    s.save_log(&log).unwrap();
+    let report = replay(&log).unwrap();
+    assert_eq!(report.results.len(), 1);
+    assert!(
+        matches!(report.results[0].1, Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    let marks = &report.session.document().object(id).unwrap().openings;
+    assert_eq!(marks, &s.document().object(id).unwrap().openings);
+    assert_eq!(marks.len(), 1);
+}
+
+/// A log saved on a branch made after an undo replays: replay numbers its
+/// revisions afresh, so recorded selections are re-bound once the input
+/// is verified.
+#[test]
+fn a_log_saved_after_undo_and_branch_replays_exactly() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, id) = holed_plate(dir.path());
+    let holes = small_holes(&s, id);
+    fill(&mut s, id, holes[0]);
+    s.undo();
+    fill(&mut s, id, holes[1]);
+    // Bound to the branch's revision (r3), which replay calls r2.
+    let left = small_holes(&s, id);
+    fill(&mut s, id, *left.last().unwrap());
+    let log = dir.path().join("s.mfx.log");
+    s.save_log(&log).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(
+            report.results[..],
+            [(_, Verdict::Exact), (_, Verdict::Exact)]
+        ),
+        "{:?}",
+        report.results
+    );
+}

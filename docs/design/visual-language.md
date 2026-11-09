@@ -151,10 +151,11 @@ Sculpts and scans often have hundreds of holes. The tree's **Holes** section (co
 | Tiny holes | up to 8 | as above |
 
 - A group fill is one `fill_holes` command on those loops: one Undo brings them all back. A hole that passes through one point twice (MF-ISSUE-051) is listed but left out of fills.
+- N / Shift+N scroll the tree to the hole's row as well as framing it. A group's "Fill all N" counts exactly the holes it fills.
 - Every hole row has **Fill** at its right (that hole alone, one step); a loose piece's row has **Remove island**. Rows are virtualised: only the rows in view are laid out, so every one of thousands is reachable by scrolling and a frame costs the same however many there are.
 - **Fill all holes** (Properties, nothing selected) has a **Fill holes up to [N] edges** slider and a live preview ("353 holes · 4 left open"); Apply fills those holes as one command on their loops. (Before a big model's holes are listed, an object with no marked openings fills them as a whole-object run.)
-- **Intentional openings:** "Mark as intentional opening" (a selected hole or several, or a group's "Mark intentional") is an undoable step that changes no geometry. Marked openings are stored on the object and follow later edits like a selection; they're left out of hole counts, groups, the slider, Fill all holes and the overview, and listed under **Intentional openings** with **Unmark**. (The command log doesn't record marks yet.)
-- **Selecting several:** Shift-click adds a hole; B (or the navigation bar's **Select** mode) then a drag selects every visible hole whose centre is in the box. Properties then says "N holes selected" with one **Fill holes (N)**.
+- **Intentional openings:** "Mark as intentional opening" (a selected hole or several, or a group's "Mark intentional") is an undoable step that changes no geometry. Marked openings are stored on the object and follow later edits like a selection; they're left out of hole counts, groups, the slider, Fill all holes and the overview's markers, and listed under **Intentional openings** with **Unmark**. The command log records each mark, so a session replays with them.
+- **Selecting several:** Shift-click adds a hole; B (or the navigation bar's **Select** mode) then a drag selects every visible hole whose centre is in the box (until every object's picking data is built it says "Picking isn't ready yet" instead of guessing). Properties then says "N holes selected" with one **Fill holes (N)**.
 - **View ▸ Show hole overview:** faces within one ring of a hole get a faint hole tint (state bit `HOLE_NEIGHBOURHOOD`, `HOLE` at strength 0.3, under every other tint), and each listed hole under 4 points across on screen, and not hidden behind the model, gets a fixed-size orange marker, so tiny holes show when zoomed out. The markers are worked out on a worker whenever the camera moves.
 - Tool summaries lead with plain words ("Closes holes with new triangles matched to the mesh around them.") and the spec's engineering summary follows, smaller; every parameter's tooltip is its spec description.
 
@@ -164,11 +165,11 @@ STL and OBJ files don't say what their numbers measure. Opening one asks, in a d
 
 ## Removing loose pieces safely (MF-ISSUE-052)
 
-"Remove loose pieces" (the whole object) only removes a piece that is under **Max triangles** *and* no bigger than **Max relative size** (default 1%) of the largest piece, so a design made of many parts keeps them. While the tool is open, Properties says what Apply would do ("Removes 1,050 of 1,100 pieces (6.4% of triangles)") and the view tints just those pieces. If that is more than half of the pieces or more than 10% of the triangles, Apply asks first: "This would delete 1,050 of 1,100 parts of 'verlan dress'. These may be part of the design, not debris." with **Remove them** and **Keep them** (Esc keeps them).
+"Remove loose pieces" (the whole object) only removes a piece that is under **Max triangles** *and* no bigger than **Max relative size** (default 1%) of the largest piece, so a design made of many parts keeps them. While the tool is open, Properties says what Apply would do ("Removes 1,050 of 1,100 pieces (6.4% of triangles)") and the view tints just those pieces. If that is more than 3% of the triangles, or more than half of the pieces and more than 2% of the triangles, Apply asks first, in a modal dialog: "This would delete 1,050 of 1,100 parts of 'verlan dress' (6.4% of its triangles). These may be part of the design, not debris." with **Remove them** and **Keep them** (Esc keeps them). Clearing a scan's specks (most pieces, about 1% of the triangles) doesn't ask, so the question stays rare enough to be read.
 
 ## Messages
 
-Every error ends with what to do next ("…Split it in another tool, or ask us to raise the limit."; "…Choose another location and try again."). An empty document says how to start: "Open a mesh (Cmd+O) or drop a file here" (the bundled fonts have no ⌘ glyph). A file dropped on the window opens, one at a time.
+Every error ends with what to do next ("…Split it in another tool, or ask us to raise the limit."; "…Choose another location and try again."). An empty document says how to start: "Open a mesh (Cmd+O) or drop a file here". Shortcuts are written the platform's way, by name (Cmd on macOS, Ctrl elsewhere; the bundled fonts have no ⌘ glyph). The unit and removal dialogs are modal: nothing behind them answers until they're answered. A file dropped on the window opens, one at a time.
 
 ## Metrics (View ▸ Metrics)
 
