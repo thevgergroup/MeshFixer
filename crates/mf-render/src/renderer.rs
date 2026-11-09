@@ -2,7 +2,7 @@ use bytemuck::{Pod, Zeroable};
 use glam::Vec4;
 
 use crate::camera::OrbitCamera;
-use crate::gpu_mesh::{GpuMesh, LineVertex, SurfaceVertex};
+use crate::gpu_mesh::{GpuLines, GpuMesh, LineVertex, SurfaceVertex};
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -23,6 +23,7 @@ pub struct RenderTargetFormat {
 pub struct MeshRenderer {
     surface_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
+    highlight_pipeline: wgpu::RenderPipeline,
     uniforms: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
 }
@@ -125,9 +126,21 @@ impl MeshRenderer {
             })],
             wgpu::PrimitiveTopology::LineList,
         );
+        let highlight_pipeline = pipeline(
+            "mf highlight lines",
+            "vs_line",
+            "fs_highlight",
+            &[Some(wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<LineVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            })],
+            wgpu::PrimitiveTopology::LineList,
+        );
         MeshRenderer {
             surface_pipeline,
             line_pipeline,
+            highlight_pipeline,
             uniforms,
             bind_group,
         }
@@ -143,7 +156,13 @@ impl MeshRenderer {
         queue.write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&u));
     }
 
-    pub fn paint(&self, pass: &mut wgpu::RenderPass<'_>, mesh: &GpuMesh, show_boundaries: bool) {
+    pub fn paint(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        mesh: &GpuMesh,
+        show_boundaries: bool,
+        highlight: Option<&GpuLines>,
+    ) {
         pass.set_bind_group(0, &self.bind_group, &[]);
         pass.set_pipeline(&self.surface_pipeline);
         for (buf, count) in &mesh.surface {
@@ -153,6 +172,13 @@ impl MeshRenderer {
         if show_boundaries {
             pass.set_pipeline(&self.line_pipeline);
             for (buf, count) in &mesh.lines {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..*count, 0..1);
+            }
+        }
+        if let Some(h) = highlight {
+            pass.set_pipeline(&self.highlight_pipeline);
+            for (buf, count) in &h.chunks {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..*count, 0..1);
             }

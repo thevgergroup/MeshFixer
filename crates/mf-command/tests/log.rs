@@ -20,6 +20,7 @@ fn setup(dir: &Path) -> Session {
     let mut s = Session::new();
     let id = s.import(read_path(&src).unwrap(), "scan".into());
     s.execute(Invocation {
+        selection: None,
         op_id: "mesh.remove_small_components".into(),
         target: id,
         raw_params: BTreeMap::from([("max_triangles".into(), "5".into())]),

@@ -13,15 +13,25 @@ pub struct Analysis {
     pub diagnostics: Diagnostics,
     pub vertices: Arc<MeshVertices>,
 }
-use mf_io::{Format, Imported, IoError};
+use mf_io::{Format, ImportedModel, IoError};
 use mf_render::MeshVertices;
+use mf_selection::SelectionKind;
 
 pub enum Message {
-    Imported(Result<Imported, IoError>, String),
+    Imported(Result<ImportedModel, IoError>),
     Completed(Box<Result<Completed, CommandError>>),
-    Analyzed { mesh: Mesh, analysis: Analysis },
+    Analyzed {
+        mesh: Mesh,
+        analysis: Analysis,
+    },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
+    /// What a click picked (see [`pick`]), for the revision it was made on.
+    Picked {
+        mesh: Mesh,
+        picked: Option<(SelectionKind, u32)>,
+        add: bool,
+    },
 }
 
 fn spawn(
@@ -40,14 +50,7 @@ fn spawn(
 }
 
 pub fn import(tx: &Sender<Message>, ctx: &eframe::egui::Context, path: PathBuf) {
-    let name = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("object")
-        .to_owned();
-    spawn(tx, ctx, move || {
-        Message::Imported(mf_io::read_path(&path), name)
-    });
+    spawn(tx, ctx, move || Message::Imported(mf_io::read_model(&path)));
 }
 
 pub fn run(tx: &Sender<Message>, ctx: &eframe::egui::Context, prepared: Prepared) {
@@ -88,14 +91,51 @@ pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
     });
 }
 
-pub fn export(
+/// Ray-cast pick on a worker (O(n) over faces).
+/// What a click picked: a visible boundary loop near the cursor, else the
+/// component of the face under it. All O(n) work (topology, ray casts)
+/// happens here, never on the UI thread (MF-RT-001).
+#[allow(clippy::too_many_arguments)]
+pub fn pick(
     tx: &Sender<Message>,
     ctx: &eframe::egui::Context,
     mesh: Mesh,
-    path: PathBuf,
-    format: Format,
+    cam: mf_render::OrbitCamera,
+    origin: glam::DVec3,
+    size: (f64, f64),
+    px: (f64, f64),
+    add: bool,
 ) {
     spawn(tx, ctx, move || {
-        Message::Exported(mf_io::write_path(&mesh, &path, format).map(|()| path))
+        let picked = match mf_render::pick_loop(&mesh, &cam, origin, size, px, 8.0) {
+            Some(id) => Some((SelectionKind::BoundaryLoop, id)),
+            None => {
+                let (ray_origin, dir) = cam.ray(origin, size, px);
+                mf_render::ray_pick(&mesh, ray_origin, dir).and_then(|(f, _)| {
+                    mesh.topology()
+                        .components
+                        .iter()
+                        .position(|c| c.contains(&f.0))
+                        .map(|c| (SelectionKind::Component, c as u32))
+                })
+            }
+        };
+        Message::Picked { mesh, picked, add }
+    });
+}
+
+/// What to export: one mesh, or a whole 3MF model.
+pub enum ExportJob {
+    Mesh(Mesh, Format),
+    Model(mf_io::threemf::Model),
+}
+
+pub fn export(tx: &Sender<Message>, ctx: &eframe::egui::Context, job: ExportJob, path: PathBuf) {
+    spawn(tx, ctx, move || {
+        let result = match &job {
+            ExportJob::Mesh(mesh, format) => mf_io::write_path(mesh, &path, *format),
+            ExportJob::Model(model) => mf_io::write_model_path(model, &path),
+        };
+        Message::Exported(result.map(|()| path))
     });
 }

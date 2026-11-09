@@ -7,14 +7,16 @@
 mod camera;
 mod gpu_mesh;
 pub mod offscreen;
+mod pick;
 mod renderer;
 mod target;
 
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
-    GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices, chunk_ranges,
-    surface_vertices,
+    GpuLines, GpuMesh, LineVertex, MeshVertices, SurfaceVertex, boundary_line_vertices,
+    chunk_ranges, loop_line_vertices, surface_vertices,
 };
+pub use pick::{pick_loop, ray_pick, screen_position};
 pub use renderer::{MeshRenderer, RenderTargetFormat};
 pub use target::RenderTarget;
 

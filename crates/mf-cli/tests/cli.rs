@@ -244,3 +244,192 @@ fn run_rejects_param_before_any_op() {
     ]);
     assert_eq!(out.status.code(), Some(2));
 }
+
+#[test]
+fn select_arg_parses_and_reaches_the_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("three.stl");
+    let m = merge(&[
+        cube(1.0),
+        translated(&tetrahedron(), [5.0, 0.0, 0.0]),
+        translated(&tetrahedron(), [9.0, 0.0, 0.0]),
+    ]);
+    write_path(&m, &input, Format::StlBinary).unwrap();
+    let out = dir.path().join("out.stl");
+    let log = dir.path().join("s.mfx.log");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.remove_small_components",
+        "--param",
+        "max_triangles=5",
+        "--select",
+        "component:1",
+        "--save-log",
+        log.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let after = mf_io::read_path(&out).unwrap().mesh;
+    assert_eq!(
+        after.topology().components.len(),
+        2,
+        "only component 1 removed"
+    );
+    let commands = std::fs::read_to_string(log.join("commands.jsonl")).unwrap();
+    assert!(commands.contains("\"kind\":\"component\""), "{commands}");
+
+    // The single-operation subcommand accepts it too.
+    let out2 = dir.path().join("out2.stl");
+    let r = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        out2.to_str().unwrap(),
+        "--max-triangles",
+        "5",
+        "--select",
+        "component:2",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(
+        mf_io::read_path(&out2)
+            .unwrap()
+            .mesh
+            .topology()
+            .components
+            .len(),
+        2
+    );
+
+    // Malformed selections are usage errors.
+    let bad = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        "x.stl",
+        "--select",
+        "bogus",
+    ]);
+    assert_eq!(bad.status.code(), Some(2));
+}
+
+#[test]
+fn run_on_3mf_keeps_every_object() {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                name: "a".into(),
+                mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
+                transform: IDENTITY,
+            },
+            ModelObject {
+                name: "b".into(),
+                mesh: tetrahedron(),
+                transform: IDENTITY,
+            },
+        ],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "remove-small-components",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--max-triangles",
+        "5",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    assert_eq!(back.objects.len(), 2, "every object is written back");
+    assert_eq!(
+        back.objects[0].mesh.triangle_count(),
+        12,
+        "the first object was repaired"
+    );
+    assert_eq!(
+        back.objects[1].mesh.triangle_count(),
+        4,
+        "other objects are untouched"
+    );
+    let inspect = meshfixer(&["inspect", input.to_str().unwrap(), "--json"]);
+    assert!(
+        inspect.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inspect.stderr)
+    );
+}
+
+/// Triangular holes (3-edge loops) as (id, centroid), by id.
+fn holes(path: &str) -> Vec<(u64, Vec<f64>)> {
+    let out = meshfixer(&["inspect", path, "--json"]);
+    assert!(out.status.success());
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let mut h: Vec<(u64, Vec<f64>)> = v["boundary_loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|l| l["edge_count"] == 3)
+        .map(|l| {
+            let c = l["centroid"].as_array().unwrap();
+            (
+                l["id"].as_u64().unwrap(),
+                c.iter().map(|x| x.as_f64().unwrap()).collect(),
+            )
+        })
+        .collect();
+    h.sort_by_key(|(id, _)| *id);
+    h
+}
+
+#[test]
+fn select_ids_in_later_steps_refer_to_the_imported_mesh() {
+    // A grid with three triangular holes. Filling the first renumbers the
+    // loops after it, so the second step's IDs must be translated from the
+    // imported revision, not read in the current one.
+    let dir = tempfile::tempdir().unwrap();
+    let n = 8;
+    let cell = |i: u32, j: u32| 2 * (j * n + i);
+    let mut e = mf_fixtures::grid(n).edit();
+    for (i, j) in [(1, 1), (4, 1), (4, 5)] {
+        e.remove_face(mf_geometry::FaceId(cell(i, j))).unwrap();
+    }
+    let input = dir.path().join("holes.obj");
+    write_path(&e.finish().unwrap().0, &input, Format::Obj).unwrap();
+    let input = input.to_str().unwrap();
+    let before = holes(input);
+    assert_eq!(before.len(), 3);
+    let out_path = dir.path().join("out.obj");
+    let out = meshfixer(&[
+        "run",
+        input,
+        "--op",
+        "mesh.fill_holes",
+        "--select",
+        &format!("loop:{}", before[0].0),
+        "--op",
+        "mesh.fill_holes",
+        "--select",
+        &format!("loop:{}", before[1].0),
+        "-o",
+        out_path.to_str().unwrap(),
+    ]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let after = holes(out_path.to_str().unwrap());
+    assert_eq!(after.len(), 1, "{after:?}");
+    assert_eq!(
+        after[0].1, before[2].1,
+        "the third hole is the one left open"
+    );
+}

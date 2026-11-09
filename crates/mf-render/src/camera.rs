@@ -62,10 +62,32 @@ impl OrbitCamera {
     }
 
     pub fn view_proj(&self, aspect: f32, origin: DVec3) -> Mat4 {
+        self.view_proj_f64(aspect as f64, origin).as_mat4()
+    }
+
+    /// View-projection in `f64`, relative to `origin` (picking needs the
+    /// precision the GPU matrix doesn't have).
+    pub fn view_proj_f64(&self, aspect: f64, origin: DVec3) -> DMat4 {
         let view = DMat4::look_at_rh(self.eye() - origin, self.target - origin, DVec3::Z);
         let near = (self.distance - 2.0 * self.radius).max(self.distance * 1e-3);
         let far = self.distance + 2.0 * self.radius;
-        let proj = DMat4::perspective_rh(self.fov_y, aspect.max(1e-3) as f64, near, far);
-        (proj * view).as_mat4()
+        let proj = DMat4::perspective_rh(self.fov_y, aspect.max(1e-3), near, far);
+        proj * view
+    }
+
+    /// World-space ray through pixel `px` of a `size` viewport (pixels, y down).
+    /// Returns (origin, unit direction).
+    pub fn ray(&self, origin: DVec3, size: (f64, f64), px: (f64, f64)) -> ([f64; 3], [f64; 3]) {
+        let inv = self
+            .view_proj_f64(size.0 / size.1.max(1.0), origin)
+            .inverse();
+        let ndc_x = 2.0 * px.0 / size.0 - 1.0;
+        let ndc_y = 1.0 - 2.0 * px.1 / size.1;
+        let unproject = |z: f64| {
+            let p = inv * glam::DVec4::new(ndc_x, ndc_y, z, 1.0);
+            p.truncate() / p.w + origin
+        };
+        let (near, far) = (unproject(0.0), unproject(1.0));
+        (near.to_array(), (far - near).normalize_or_zero().to_array())
     }
 }

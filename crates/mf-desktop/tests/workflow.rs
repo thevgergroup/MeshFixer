@@ -78,6 +78,9 @@ fn open_inspect_apply_undo_redo() {
     harness.run_steps(5);
     assert_eq!(harness.state().viewport.frames_rendered, rendered);
 
+    // Choose the operation explicitly; the panel's default is the first spec.
+    harness.state_mut().selected_op = "mesh.remove_small_components".into();
+    harness.run_steps(2);
     harness.get_by_label("Apply").click();
     wait_until(&mut harness, "operation + re-analysis", |a| {
         a.session.history_labels().len() == 3 && components(a).is_some_and(|c| c < before)

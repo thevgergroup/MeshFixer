@@ -18,6 +18,7 @@ fn dummy_kind_rejected_by_mesh_ops() {
     );
     let err = s
         .execute(Invocation {
+            selection: None,
             op_id: "mesh.inspect".into(),
             target: id,
             raw_params: BTreeMap::new(),

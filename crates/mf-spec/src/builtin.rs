@@ -10,6 +10,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/mesh.inspect.yaml"),
     ),
     (
+        "mesh.fill_holes.yaml",
+        include_str!("../../../specs/operations/mesh.fill_holes.yaml"),
+    ),
+    (
         "mesh.remove_small_components.yaml",
         include_str!("../../../specs/operations/mesh.remove_small_components.yaml"),
     ),

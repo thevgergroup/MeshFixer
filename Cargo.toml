@@ -23,6 +23,8 @@ mf-selection = { path = "crates/mf-selection" }
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
 rayon = "1.12"
+zip = { version = "9.4", default-features = false, features = ["deflate"] }
+quick-xml = "0.42"
 serde_json = { version = "1", features = ["float_roundtrip"] }
 serde-saphyr = "2.1"
 clap = { version = "4.6", features = ["string"] }
@@ -44,3 +46,15 @@ unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+
+# The geometry hot paths are optimised even in test builds so tests on real
+# scans (1M triangles) run in seconds, not minutes. Debug assertions and
+# overflow checks stay on.
+[profile.dev.package.mf-geometry]
+opt-level = 2
+
+[profile.dev.package.mf-io]
+opt-level = 2
+
+[profile.dev.package.mf-operations]
+opt-level = 2

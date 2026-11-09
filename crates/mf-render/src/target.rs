@@ -3,7 +3,7 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+use crate::{GpuLines, GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -113,6 +113,7 @@ impl RenderTarget {
         renderer: &MeshRenderer,
         mesh: Option<(&GpuMesh, &OrbitCamera)>,
         show_boundaries: bool,
+        highlight: Option<&GpuLines>,
     ) {
         if let Some((gpu, camera)) = mesh {
             renderer.prepare(queue, gpu, camera, self.width as f32 / self.height as f32);
@@ -153,7 +154,7 @@ impl RenderTarget {
                 multiview_mask: None,
             });
             if let Some((gpu, _)) = mesh {
-                renderer.paint(&mut pass, gpu, show_boundaries);
+                renderer.paint(&mut pass, gpu, show_boundaries, highlight);
             }
         }
         queue.submit([encoder.finish()]);

@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://meshfixer.dev/schema/geometry-test.schema.json",
+  "title": "MeshFixer declarative geometry test cases (MF-SPEC-004)",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "given", "when", "expect"],
+    "properties": {
+      "name": { "type": "string", "minLength": 1 },
+      "given": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "fixture": { "type": "string" },
+          "file": { "type": "string" }
+        },
+        "oneOf": [{ "required": ["fixture"] }, { "required": ["file"] }]
+      },
+      "select": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "loop_containing_vertex": { "type": "integer", "minimum": 0 },
+          "component_containing_face": { "type": "integer", "minimum": 0 },
+          "faces": { "type": "array", "items": { "type": "integer", "minimum": 0 } }
+        },
+        "minProperties": 1,
+        "maxProperties": 1
+      },
+      "when": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["op"],
+        "properties": {
+          "op": { "type": "string" },
+          "params": { "type": "object", "additionalProperties": { "type": ["number", "boolean"] } }
+        }
+      },
+      "expect": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": { "type": ["number", "boolean", "string"] }
+      }
+    }
+  }
+}

@@ -26,6 +26,7 @@ fn damaged() -> Mesh {
 
 fn remove(target: ObjectId, max: &str) -> Invocation {
     Invocation {
+        selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,
         raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),
@@ -144,6 +145,7 @@ fn read_only_does_not_create_revision() {
     let rev = s.revision();
     let out = s
         .execute(Invocation {
+            selection: None,
             op_id: "mesh.inspect".into(),
             target: id,
             raw_params: BTreeMap::new(),

@@ -96,7 +96,7 @@ pub fn render_image_with_chunk_limit(
         .as_ref()
         .filter(|_| !mesh.is_empty())
         .map(|c| (&gpu, c));
-    target.draw(&device, &queue, &renderer, drawable, show_boundaries);
+    target.draw(&device, &queue, &renderer, drawable, show_boundaries, None);
     read_back(&device, &queue, &target)
 }
 

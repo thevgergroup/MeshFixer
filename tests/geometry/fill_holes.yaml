@@ -1,0 +1,54 @@
+# mesh.fill_holes (MF-OP-001/002/003). Grid vertex (i, j) = j*(n+1) + i.
+- name: cube missing a face closes exactly (no refinement)
+  given: { fixture: cube_with_missing_face }
+  when: { op: mesh.fill_holes, params: { refine: false } }
+  expect:
+    is_closed: true
+    is_manifold: true
+    inconsistent_orientation_edges: 0
+    signed_volume: 1.0
+    untouched_outside_target: true
+    provenance_total: true
+
+- name: cube missing a face closes with refinement on
+  given: { fixture: cube_with_missing_face }
+  when: { op: mesh.fill_holes }
+  expect:
+    is_closed: true
+    is_manifold: true
+    inconsistent_orientation_edges: 0
+    untouched_outside_target: true
+
+- name: fill one of two holes, leave the other
+  given: { fixture: two_holes_grid }
+  select: { loop_containing_vertex: 8 }        # vertex (1,1) of the 6x6 grid
+  when: { op: mesh.fill_holes, params: { refine: false } }
+  expect:
+    boundary_loops: 2                          # outer rim + the other hole
+    is_manifold: true
+    untouched_outside_target: true
+    provenance_total: true
+
+- name: whole object fills small holes, skips the rim
+  given: { fixture: two_holes_grid }
+  when: { op: mesh.fill_holes, params: { refine: false, max_loop_edges: 10 } }
+  expect:
+    boundary_loops: 1
+    boundary_edges: 24
+    untouched_outside_target: true
+
+- name: fill one of two holes that touch at a vertex
+  given: { fixture: pinched_holes_grid }
+  select: { loop_containing_vertex: 6 }        # vertex (1,1) of the 4x4 grid
+  when: { op: mesh.fill_holes, params: { refine: false } }
+  expect:
+    boundary_loops: 2
+    untraced_boundary_edges: 0
+    is_manifold: true
+    untouched_outside_target: true
+
+- name: a loop larger than max_loop_edges fails by name
+  given: { fixture: cube_with_missing_face }
+  select: { loop_containing_vertex: 4 }
+  when: { op: mesh.fill_holes, params: { max_loop_edges: 3 } }
+  expect: { error: loop_too_large }

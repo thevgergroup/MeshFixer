@@ -7,6 +7,7 @@
 use mf_geometry::{FaceId, Mesh, Provenance};
 use mf_spec::{Params, SpecError};
 
+mod fill_holes;
 mod inspect;
 mod remove_small;
 
@@ -50,7 +51,11 @@ pub trait Operation: Send + Sync {
     fn execute(&self, input: &Mesh, target: &Target, params: &Params) -> Result<OpOutput, OpError>;
 }
 
-static REGISTRY: &[&dyn Operation] = &[&inspect::Inspect, &remove_small::RemoveSmallComponents];
+static REGISTRY: &[&dyn Operation] = &[
+    &fill_holes::FillHoles,
+    &inspect::Inspect,
+    &remove_small::RemoveSmallComponents,
+];
 
 pub fn registry() -> &'static [&'static dyn Operation] {
     REGISTRY

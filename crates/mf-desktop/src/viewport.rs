@@ -6,7 +6,9 @@ use std::sync::Arc;
 
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
-use mf_render::{GpuMesh, MeshRenderer, MeshVertices, OrbitCamera, RenderTarget};
+use mf_render::{
+    GpuLines, GpuMesh, LineVertex, MeshRenderer, MeshVertices, OrbitCamera, RenderTarget,
+};
 
 pub const MSAA_SAMPLES: u32 = 4;
 
@@ -15,6 +17,27 @@ struct FrameKey {
     camera: OrbitCamera,
     show_boundaries: bool,
     size: (u32, u32),
+    /// Identity of the highlight line set (0 = none).
+    highlight: usize,
+}
+
+/// How to draw the view this frame.
+pub struct ViewOptions<'a> {
+    pub show_boundaries: bool,
+    pub highlight: Option<&'a Arc<Vec<LineVertex>>>,
+    /// The geometry shown is from the previous revision while the current one is analysed.
+    pub updating: bool,
+    /// Text shown when there's nothing to draw.
+    pub placeholder: &'a str,
+}
+
+/// A primary click in the viewport (not a drag), in points relative to the
+/// viewport's top-left, with the viewport size in points.
+#[derive(Debug, Clone, Copy)]
+pub struct Click {
+    pub px: (f64, f64),
+    pub size: (f64, f64),
+    pub shift: bool,
 }
 
 pub struct Viewport {
@@ -23,7 +46,10 @@ pub struct Viewport {
     target: Option<RenderTarget>,
     texture: Option<egui::TextureId>,
     uploaded: Option<(Arc<MeshVertices>, GpuMesh)>,
+    highlight: Option<(Arc<Vec<LineVertex>>, GpuLines)>,
     last_frame: Option<FrameKey>,
+    /// Where the 3D view was last drawn (for picking and screen projections).
+    pub last_rect: Option<egui::Rect>,
     /// Frames actually rendered (for tests and the debug readout).
     pub frames_rendered: u64,
 }
@@ -37,7 +63,9 @@ impl Viewport {
             target: None,
             texture: None,
             uploaded: None,
+            highlight: None,
             last_frame: None,
+            last_rect: None,
             frames_rendered: 0,
         }
     }
@@ -48,17 +76,23 @@ impl Viewport {
         ui: &mut egui::Ui,
         camera: &mut Option<OrbitCamera>,
         vertices: Option<&Arc<MeshVertices>>,
-        show_boundaries: bool,
-        updating: bool,
-        placeholder: &str,
-    ) {
+        options: ViewOptions<'_>,
+    ) -> Option<Click> {
+        let ViewOptions {
+            show_boundaries,
+            highlight,
+            updating,
+            placeholder,
+        } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
         let (Some(cam), Some(vertices)) = (camera.as_mut(), vertices) else {
             // Nothing to draw: release GPU buffers for a vanished object
             // (MF-ISSUE-009).
             self.uploaded = None;
+            self.highlight = None;
             self.last_frame = None;
+            self.last_rect = None;
             ui.painter()
                 .rect_filled(rect, 0.0, egui::Color32::from_rgb(38, 41, 46));
             ui.painter().text(
@@ -68,8 +102,18 @@ impl Viewport {
                 egui::FontId::proportional(16.0),
                 egui::Color32::GRAY,
             );
-            return;
+            return None;
         };
+        self.last_rect = Some(rect);
+        let click = response
+            .clicked()
+            .then(|| response.interact_pointer_pos())
+            .flatten()
+            .map(|p| Click {
+                px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
+                size: (rect.width() as f64, rect.height() as f64),
+                shift: ui.input(|i| i.modifiers.shift),
+            });
         handle_input(ui, &response, rect, cam);
 
         // Clamp to the device limit; egui scales the image up if needed.
@@ -79,7 +123,7 @@ impl Viewport {
             (rect.width() * ppp).round().clamp(1.0, max) as u32,
             (rect.height() * ppp).round().clamp(1.0, max) as u32,
         );
-        let texture = self.render(*cam, vertices, show_boundaries, size);
+        let texture = self.render(*cam, vertices, show_boundaries, highlight, size);
         ui.painter().image(
             texture,
             rect,
@@ -102,6 +146,7 @@ impl Viewport {
             egui::FontId::proportional(12.0),
             egui::Color32::from_gray(140),
         );
+        click
     }
 
     fn render(
@@ -109,6 +154,7 @@ impl Viewport {
         camera: OrbitCamera,
         vertices: &Arc<MeshVertices>,
         show_boundaries: bool,
+        highlight: Option<&Arc<Vec<LineVertex>>>,
         size: (u32, u32),
     ) -> egui::TextureId {
         let device = &self.render_state.device;
@@ -149,10 +195,23 @@ impl Viewport {
             dirty = true;
         }
 
+        // Highlight lines upload separately from the mesh (MF-RENDER-003).
+        match highlight {
+            None => self.highlight = None,
+            Some(lines) => {
+                if !matches!(&self.highlight, Some((h, _)) if Arc::ptr_eq(h, lines)) {
+                    self.highlight = Some((lines.clone(), GpuLines::upload(device, lines)));
+                }
+            }
+        }
         let key = FrameKey {
             camera,
             show_boundaries,
             size,
+            highlight: self
+                .highlight
+                .as_ref()
+                .map_or(0, |(h, _)| Arc::as_ptr(h) as usize),
         };
         dirty |= self.last_frame != Some(key);
 
@@ -163,6 +222,7 @@ impl Viewport {
                 &self.renderer,
                 Some((gpu, &camera)),
                 show_boundaries,
+                self.highlight.as_ref().map(|(_, g)| g),
             );
             self.last_frame = Some(key);
             self.frames_rendered += 1;

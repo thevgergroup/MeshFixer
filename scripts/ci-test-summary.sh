@@ -17,7 +17,7 @@ verified=$((passed - skipped))
 {
   echo "### Tests on ${RUNNER_OS:-local}"
   echo ""
-  echo "| Verified passes | Skipped (no GPU) | Failed |"
+  echo "| Verified passes | Skipped (no GPU or fixture) | Failed |"
   echo "|---|---|---|"
   echo "| $verified | $skipped | $failed |"
   if [ "$skipped" -gt 0 ]; then

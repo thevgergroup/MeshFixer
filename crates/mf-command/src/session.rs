@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mf_document::{Document, Geometry, Object, ObjectId, RevisionId};
+use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, RevisionId, Unit};
 use mf_geometry::{Mesh, Provenance};
-use mf_io::{Imported, SourceInfo};
+use mf_io::threemf::ModelObject;
+use mf_io::{Imported, ImportedModel, SourceInfo};
 use mf_operations::{OpError, OpOutput, Operation, Target};
-use mf_selection::{Selection, Step, TranslateError, Translation};
+use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
 use crate::record::{
@@ -17,7 +18,32 @@ use crate::record::{
 pub struct Invocation {
     pub op_id: String,
     pub target: ObjectId,
+    /// What part of the object to act on; `None` is the whole object. Must be
+    /// bound to the current revision (translate it first).
+    pub selection: Option<Selection>,
     pub raw_params: BTreeMap<String, String>,
+}
+
+/// The operation target a selection describes.
+pub fn target_of(sel: &Selection) -> Target {
+    match sel.kind {
+        SelectionKind::Object => Target::WholeObject,
+        SelectionKind::Faces => {
+            Target::Faces(sel.ids.iter().map(|&f| mf_geometry::FaceId(f)).collect())
+        }
+        SelectionKind::Component => Target::Components(sel.ids.clone()),
+        SelectionKind::BoundaryLoop => Target::Loops(sel.ids.clone()),
+    }
+}
+
+/// Name of a selection kind in operation specs' `target.kinds`.
+fn spec_kind(kind: SelectionKind) -> Option<&'static str> {
+    match kind {
+        SelectionKind::Object => None,
+        SelectionKind::Faces => Some("face_set"),
+        SelectionKind::Component => Some("component"),
+        SelectionKind::BoundaryLoop => Some("boundary_loop"),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -36,6 +62,56 @@ pub enum CommandError {
     StaleInput { expected: u64, actual: u64 },
     #[error("{op} does not support {kind} geometry")]
     UnsupportedGeometry { op: String, kind: String },
+    #[error("the selection is for object {selection}, but the command targets {target}")]
+    SelectionMismatch {
+        selection: ObjectId,
+        target: ObjectId,
+    },
+    #[error(
+        "the selection is bound to revision {selection}, but the document is at {current}; translate it first"
+    )]
+    StaleSelection {
+        selection: RevisionId,
+        current: RevisionId,
+    },
+    #[error("{op} can't target {kind}")]
+    UnsupportedTarget { op: String, kind: String },
+    #[error("revision {0} does not exist")]
+    UnknownRevision(RevisionId),
+    #[error("the recorded selection can't be applied to revision {onto}: {reason}")]
+    Untranslatable { onto: RevisionId, reason: String },
+    #[error(
+        "the command was recorded with {op} version {recorded}, but this build has version {current}"
+    )]
+    OperationVersion {
+        op: String,
+        recorded: u32,
+        current: u32,
+    },
+}
+
+/// Why a translation can't be used to re-execute a command.
+fn untranslatable_reason(t: &Translation) -> String {
+    match t {
+        Translation::Mapped(_) | Translation::Partial { .. } => "it translated".into(),
+        Translation::Ambiguous { candidates } => {
+            format!("it is ambiguous between {candidates:?}")
+        }
+        Translation::Failed(e) => match e {
+            TranslateError::NoPath => "the revisions aren't connected".into(),
+            TranslateError::ObjectMissing => "the object doesn't exist there".into(),
+            TranslateError::AllLost { lost } => {
+                format!("every selected element was removed ({lost:?})")
+            }
+            TranslateError::LoopClosed { faces } => {
+                format!("the boundary loop was closed (by {} faces)", faces.len())
+            }
+            TranslateError::KindNotTranslatable => "its kind can't be translated".into(),
+            TranslateError::NotInSource { ids } => {
+                format!("{ids:?} aren't elements of the selection's own revision")
+            }
+        },
+    }
 }
 
 /// A validated command, ready to run on any thread.
@@ -44,7 +120,8 @@ pub struct Prepared {
     target: ObjectId,
     op: &'static dyn Operation,
     input: Mesh,
-    selection: Target,
+    target_spec: Target,
+    selection: Option<Selection>,
     params: Params,
 }
 
@@ -59,7 +136,7 @@ impl Prepared {
         let start = Instant::now();
         let output = self
             .op
-            .execute(&self.input, &self.selection, &self.params)?;
+            .execute(&self.input, &self.target_spec, &self.params)?;
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6).
         let input_hash = self.input.content_hash().to_hex();
@@ -77,6 +154,7 @@ impl Prepared {
             target: self.target,
             op_id: self.op.id(),
             op_version: self.op.version(),
+            selection: self.selection,
             params: self.params,
             output,
             input_hash,
@@ -93,6 +171,7 @@ pub struct Completed {
     pub target: ObjectId,
     pub op_id: &'static str,
     pub op_version: u32,
+    pub selection: Option<Selection>,
     pub params: Params,
     pub output: OpOutput,
     input_hash: String,
@@ -222,7 +301,66 @@ impl Session {
     }
 
     pub fn import(&mut self, imported: Imported, name: String) -> ObjectId {
-        self.add_geometry(Geometry::Mesh(imported.mesh), name, Some(imported.source))
+        self.add_object(
+            Geometry::Mesh(imported.mesh),
+            name,
+            Some(imported.source),
+            0,
+            IDENTITY_TRANSFORM,
+            None,
+        )
+    }
+
+    /// Import every object of a model (one revision per object, so each
+    /// import can be replayed from its part of the source file). Returns the
+    /// new object IDs and any warnings (the file's own, plus a unit mismatch).
+    pub fn import_model(&mut self, model: ImportedModel) -> (Vec<ObjectId>, Vec<String>) {
+        let mut warnings = model.warnings;
+        let first_import = self.document().objects().is_empty();
+        if !first_import && self.document().units() != model.unit {
+            warnings.push(format!(
+                "{} uses {:?} but the document uses {:?}; coordinates are not converted",
+                model.source.path.display(),
+                model.unit,
+                self.document().units()
+            ));
+        }
+        let ids = model
+            .objects
+            .into_iter()
+            .enumerate()
+            .map(|(part, o)| {
+                let units = first_import.then_some(model.unit);
+                self.add_object(
+                    Geometry::Mesh(o.mesh),
+                    o.name,
+                    Some(model.source.clone()),
+                    part,
+                    o.transform,
+                    units,
+                )
+            })
+            .collect();
+        (ids, warnings)
+    }
+
+    /// Import one object of a source file (used by replay).
+    pub fn import_object(
+        &mut self,
+        object: ModelObject,
+        unit: Unit,
+        source: SourceInfo,
+        part: usize,
+    ) -> ObjectId {
+        let units = self.document().objects().is_empty().then_some(unit);
+        self.add_object(
+            Geometry::Mesh(object.mesh),
+            object.name,
+            Some(source),
+            part,
+            object.transform,
+            units,
+        )
     }
 
     /// Add an object of any geometry kind (a history entry, like an import).
@@ -232,14 +370,30 @@ impl Session {
         name: String,
         source: Option<SourceInfo>,
     ) -> ObjectId {
+        self.add_object(geometry, name, source, 0, IDENTITY_TRANSFORM, None)
+    }
+
+    fn add_object(
+        &mut self,
+        geometry: Geometry,
+        name: String,
+        source: Option<SourceInfo>,
+        part: usize,
+        transform: [f64; 12],
+        units: Option<Unit>,
+    ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
-        let document = self.document().with_object(Object {
+        let mut document = self.document().with_object(Object {
             id,
             name: name.clone(),
             geometry,
             source: source.clone(),
+            transform,
         });
+        if let Some(u) = units {
+            document = document.with_units(u);
+        }
         self.push(RevisionNode {
             id: RevisionId(0),
             parent: None,
@@ -250,6 +404,7 @@ impl Session {
                 object: id,
                 name,
                 source,
+                part,
             }),
             document,
             provenance: BTreeMap::new(),
@@ -260,13 +415,26 @@ impl Session {
     pub fn prepare(&self, inv: Invocation) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(&inv.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
-        let op = mf_operations::find(&inv.op_id)
-            .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
         let params = spec.validate(&inv.raw_params)?;
+        self.prepare_validated(&inv.op_id, inv.target, inv.selection, params)
+    }
+
+    /// As [`Session::prepare`], with parameters already validated.
+    fn prepare_validated(
+        &self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        params: Params,
+    ) -> Result<Prepared, CommandError> {
+        let spec = mf_spec::builtin::get(op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
+        let op = mf_operations::find(op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
         let object = self
             .document()
-            .object(inv.target)
-            .ok_or(CommandError::UnknownObject(inv.target))?;
+            .object(target)
+            .ok_or(CommandError::UnknownObject(target))?;
         let kind = object.geometry.kind().as_str();
         let unsupported = || CommandError::UnsupportedGeometry {
             op: spec.id.clone(),
@@ -278,12 +446,47 @@ impl Session {
         // Every Phase 0 operation is a mesh operation; the spec check above
         // guarantees the object is a mesh here.
         let input = object.mesh().ok_or_else(unsupported)?.clone();
+        let target_spec = match &selection {
+            None if spec.target.whole_object => Target::WholeObject,
+            None => {
+                return Err(CommandError::UnsupportedTarget {
+                    op: spec.id.clone(),
+                    kind: "the whole object".into(),
+                });
+            }
+            Some(sel) => {
+                if sel.object != target {
+                    return Err(CommandError::SelectionMismatch {
+                        selection: sel.object,
+                        target,
+                    });
+                }
+                if sel.revision != self.cursor {
+                    return Err(CommandError::StaleSelection {
+                        selection: sel.revision,
+                        current: self.cursor,
+                    });
+                }
+                let allowed = match spec_kind(sel.kind) {
+                    None => spec.target.whole_object,
+                    Some(k) => spec.target.kinds.iter().any(|x| x == k),
+                };
+                if !allowed {
+                    return Err(CommandError::UnsupportedTarget {
+                        op: spec.id.clone(),
+                        kind: spec_kind(sel.kind).unwrap_or("the whole object").into(),
+                    });
+                }
+                target_of(sel)
+            }
+        };
         Ok(Prepared {
             base_revision: self.cursor,
-            target: inv.target,
+            target,
             op,
             input,
-            selection: Target::WholeObject,
+            target_spec,
+            selection,
             params,
         })
     }
@@ -340,7 +543,7 @@ impl Session {
             op_id: c.op_id.to_owned(),
             op_version: c.op_version,
             target: c.target,
-            selection: None,
+            selection: c.selection.clone(),
             params: c.params.clone(),
             input_revision,
             input_hash: c.input_hash,
@@ -383,6 +586,58 @@ impl Session {
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
         let completed = self.prepare(inv)?.run()?;
         self.commit(completed)
+    }
+
+    /// Run a recorded command again on another revision (MF-HIST-002): the
+    /// same operation and parameters, with its selection translated to
+    /// `onto` (MF-SEL-003). A translation that keeps some or all of the
+    /// selection proceeds; anything else is an error naming why. On success
+    /// the cursor is on the new revision (a child of `onto`); on failure it
+    /// hasn't moved.
+    pub fn reexecute(
+        &mut self,
+        record: &CommandRecord,
+        onto: RevisionId,
+    ) -> Result<CommitOutcome, CommandError> {
+        if self.node(onto).is_none() {
+            return Err(CommandError::UnknownRevision(onto));
+        }
+        let op = mf_operations::find(&record.op_id)
+            .ok_or_else(|| CommandError::UnknownOperation(record.op_id.clone()))?;
+        if op.version() != record.op_version {
+            return Err(CommandError::OperationVersion {
+                op: record.op_id.clone(),
+                recorded: record.op_version,
+                current: op.version(),
+            });
+        }
+        let selection = match &record.selection {
+            None => None,
+            Some(sel) => match self.translate(sel, onto) {
+                Translation::Mapped(s) | Translation::Partial { mapped: s, .. } => Some(s),
+                other => {
+                    return Err(CommandError::Untranslatable {
+                        onto,
+                        reason: untranslatable_reason(&other),
+                    });
+                }
+            },
+        };
+        let back = self.cursor;
+        self.checkout(onto);
+        let result = self
+            .prepare_validated(
+                &record.op_id,
+                record.target,
+                selection,
+                record.params.clone(),
+            )
+            .and_then(Prepared::run)
+            .and_then(|c| self.commit(c));
+        if result.is_err() {
+            self.checkout(back);
+        }
+        result
     }
 
     pub fn can_undo(&self) -> bool {
