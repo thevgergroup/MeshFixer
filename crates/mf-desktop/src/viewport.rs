@@ -79,6 +79,17 @@ pub struct ViewOptions<'a> {
     pub frame: u64,
     /// How the selection is drawn besides its tint and outline.
     pub cue: SelectionCue,
+    /// The hole overview's markers (window points), drawn over the view.
+    pub markers: Option<Arc<egui::Mesh>>,
+}
+
+/// A box dragged in Select mode (or after B): `rect` in points from the
+/// view's top-left, of a view of `size` points; `add` with Shift.
+#[derive(Debug, Clone, Copy)]
+pub struct BoxSelect {
+    pub rect: egui::Rect,
+    pub size: (f64, f64),
+    pub add: bool,
 }
 
 /// A primary click in the viewport (not a drag), in points relative to the
@@ -97,6 +108,8 @@ pub enum NavMode {
     Orbit,
     Pan,
     Zoom,
+    /// A drag draws a box that selects the visible holes in it.
+    Select,
 }
 
 /// A camera move asked for from the navigation bar that needs the app
@@ -115,6 +128,8 @@ pub struct ViewOutput {
     /// Where the pointer rests over the 3D view (points from its top-left,
     /// and the view's size), with no button held: what hover picks under.
     pub pointer: Option<((f64, f64), (f64, f64))>,
+    /// A box selection finished this frame.
+    pub box_select: Option<BoxSelect>,
 }
 
 /// One zoom step of the zoom buttons and keys.
@@ -138,6 +153,10 @@ pub struct Viewport {
     pub last_rect: Option<egui::Rect>,
     /// Frames actually rendered (for tests and the debug readout).
     pub frames_rendered: u64,
+    /// B: the next drag box-selects, whatever the mode.
+    pub box_once: bool,
+    /// Where the box being dragged started (window points).
+    box_from: Option<egui::Pos2>,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
     /// The last frame that redrew the 3D view, and whether it was timed.
@@ -165,6 +184,8 @@ impl Viewport {
             last_frame: None,
             last_rect: None,
             frames_rendered: 0,
+            box_once: false,
+            box_from: None,
         }
     }
 
@@ -185,6 +206,7 @@ impl Viewport {
             placeholder,
             frame,
             cue,
+            markers,
         } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -229,7 +251,36 @@ impl Viewport {
                     (rect.width() as f64, rect.height() as f64),
                 )
             });
-        handle_input(ui, &response, rect, cam, self.nav_mode);
+        let selecting = self.box_once || self.nav_mode == NavMode::Select;
+        let mut box_select = None;
+        if selecting && response.drag_started_by(egui::PointerButton::Primary) {
+            self.box_from = ui.input(|i| i.pointer.press_origin());
+        }
+        let to = response
+            .interact_pointer_pos()
+            .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+        if let (true, Some(from), Some(to)) = (selecting, self.box_from, to) {
+            let r = egui::Rect::from_two_pos(from, to);
+            if response.drag_stopped() {
+                box_select = Some(BoxSelect {
+                    rect: r.translate(-rect.left_top().to_vec2()),
+                    size: (rect.width() as f64, rect.height() as f64),
+                    add: ui.input(|i| i.modifiers.shift),
+                });
+                self.box_from = None;
+                self.box_once = false;
+            } else {
+                ui.painter()
+                    .rect_filled(r, 0.0, theme::SELECTED.gamma_multiply(0.12));
+                ui.painter().rect_stroke(
+                    r,
+                    0.0,
+                    egui::Stroke::new(1.0, theme::SELECTED),
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        handle_input(ui, &response, rect, cam, self.nav_mode, selecting);
 
         self.renderer
             .set_pixels_per_point(ui.ctx().pixels_per_point());
@@ -252,6 +303,9 @@ impl Viewport {
         // The controls hint, on a backdrop so it reads over the model. Kept
         // short so it clears the navigation bar at the bottom-right; Help >
         // Controls lists everything.
+        if let Some(m) = markers {
+            ui.painter().add(egui::Shape::Mesh(m));
+        }
         let hint = controls_hint(ui);
         let at = rect.left_bottom() + egui::vec2(8.0, -8.0 - hint.size().y);
         ui.painter().rect_filled(
@@ -265,6 +319,7 @@ impl Viewport {
             click,
             action,
             pointer,
+            box_select,
         }
     }
 
@@ -303,6 +358,11 @@ impl Viewport {
                                     NavMode::Zoom,
                                     "Zoom",
                                     "Drag up/down zooms (or Option/Alt + drag)",
+                                ),
+                                (
+                                    NavMode::Select,
+                                    "Select",
+                                    "Drag a box: selects the visible holes in it (B for one box; Shift adds)",
                                 ),
                             ] {
                                 if ui
@@ -567,13 +627,15 @@ fn handle_input(
     rect: egui::Rect,
     cam: &mut OrbitCamera,
     mode: NavMode,
+    selecting: bool,
 ) {
     let h = rect.height().max(1.0) as f64;
     let size = (rect.width() as f64, rect.height() as f64);
     let delta = response.drag_delta();
     let (alt, shift, origin) =
         ui.input(|i| (i.modifiers.alt, i.modifiers.shift, i.pointer.press_origin()));
-    let primary = response.dragged_by(egui::PointerButton::Primary);
+    // A box selection owns the primary drag.
+    let primary = response.dragged_by(egui::PointerButton::Primary) && !selecting;
     let drag = if response.dragged_by(egui::PointerButton::Secondary)
         || response.dragged_by(egui::PointerButton::Middle)
     {
@@ -598,7 +660,7 @@ fn handle_input(
             });
             cam.zoom_at((delta.y as f64 * 0.01).exp(), size, at);
         }
-        Some(NavMode::Zoom) | None => {}
+        Some(NavMode::Zoom | NavMode::Select) | None => {}
     }
     if !response.hovered() {
         return;

@@ -143,6 +143,9 @@ pub struct Prepared {
     target_spec: Target,
     selection: Option<Selection>,
     params: Params,
+    /// The target's intentional openings at the input revision, translated
+    /// to the output by `run` (on the worker: it needs the new topology).
+    openings: Vec<u32>,
 }
 
 impl Prepared {
@@ -179,6 +182,29 @@ impl Prepared {
             .change
             .as_ref()
             .map_or(0, |(m, p)| (m.face_count() - p.created_faces.len()) as u64);
+        let openings = match &output.change {
+            Some((m, p)) if !self.openings.is_empty() => {
+                let sel = Selection {
+                    object: self.target,
+                    revision: self.base_revision,
+                    kind: SelectionKind::BoundaryLoop,
+                    ids: self.openings.clone(),
+                };
+                // The output's revision id isn't known yet; only the ids matter.
+                match mf_selection::resolve(
+                    &sel,
+                    &self.input,
+                    m,
+                    &[Step::Forward(p)],
+                    self.base_revision,
+                ) {
+                    Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
+                    // Filled, removed or merged away: no longer a hole to mark.
+                    Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+                }
+            }
+            _ => self.openings.clone(),
+        };
         Ok(Completed {
             base_revision: self.base_revision.0,
             target: self.target,
@@ -191,6 +217,7 @@ impl Prepared {
             input_structure_hash,
             output_hashes,
             kept,
+            openings,
             duration: start.elapsed(),
         })
     }
@@ -208,6 +235,8 @@ pub struct Completed {
     input_structure_hash: String,
     output_hashes: Option<(String, String)>,
     kept: u64,
+    /// The target's intentional openings, translated to the output.
+    pub openings: Vec<u32>,
     pub duration: Duration,
 }
 
@@ -420,6 +449,7 @@ impl Session {
             geometry,
             source: source.clone(),
             transform,
+            openings: Vec::new(),
         });
         if let Some(u) = units {
             document = document.with_units(u);
@@ -518,6 +548,7 @@ impl Session {
             target_spec,
             selection,
             params,
+            openings: object.openings.clone(),
         })
     }
 
@@ -564,6 +595,7 @@ impl Session {
         let document = self
             .document()
             .with_geometry(c.target, Geometry::Mesh(mesh))
+            .and_then(|d| d.with_openings(c.target, c.openings.clone()))
             .ok_or(CommandError::UnknownObject(c.target))?;
         let id = CommandId(self.next_command);
         self.next_command += 1;
@@ -664,6 +696,27 @@ impl Session {
             self.checkout(back);
         }
         result
+    }
+
+    /// Mark `openings` (boundary-loop ids of `object`'s current mesh) as
+    /// its intentional openings, replacing any marked before: a document
+    /// command that changes no geometry, undone like any other. `label`
+    /// names the history step. False if the object doesn't exist.
+    pub fn set_openings(&mut self, object: ObjectId, openings: Vec<u32>, label: String) -> bool {
+        let Some(document) = self.document().with_openings(object, openings) else {
+            return false;
+        };
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+        });
+        true
     }
 
     pub fn can_undo(&self) -> bool {

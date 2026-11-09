@@ -184,19 +184,22 @@ fn history_breadcrumb_jumps_to_a_revision() {
         a.session.current() != imported && a.current_analysis().is_some()
     });
     let filled = h.state().session.current();
+    // "Fill all holes" fills the listed holes as one step on those loops:
+    // the rim and the two holes.
+    const FILLED: &str = "Fill holes (3)";
 
     // Both steps are in the breadcrumb, the current one highlighted.
-    assert_eq!(crumb_selected(&h, "Fill all holes"), Some(true));
+    assert_eq!(crumb_selected(&h, FILLED), Some(true));
     assert_eq!(crumb_selected(&h, "Import two_holes"), Some(false));
 
     // Click the import step: the document jumps back to it.
     click_crumb(&mut h, "Import two_holes");
     assert_eq!(h.state().session.current(), imported);
     assert_eq!(crumb_selected(&h, "Import two_holes"), Some(true));
-    assert_eq!(crumb_selected(&h, "Fill all holes"), Some(false));
+    assert_eq!(crumb_selected(&h, FILLED), Some(false));
 
     // And forward again (the later step stays reachable, greyed).
-    click_crumb(&mut h, "Fill all holes");
+    click_crumb(&mut h, FILLED);
     assert_eq!(h.state().session.current(), filled);
 }
 

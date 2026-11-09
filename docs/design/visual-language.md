@@ -124,10 +124,10 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
 | Kind | Title | Tree row (name · size) | Detail | Next action |
 |---|---|---|---|---|
 | hole | "Hole N: small opening" (or "large opening" above 200 edges) | "Hole N · 42 edges · 12.4 mm" | "42 boundary edges · 12.4 mm perimeter" | "Fill hole" |
-| slit | "Narrow crack" | "Narrow crack · 8 edges" | "Edges almost touch · 8 edges" | "Needs edge stitching (not yet available)" |
+| slit | "Narrow crack" | "Narrow crack · 8 edges" | "Edges almost touch · 8 edges" | "Slit: needs welding (not yet available)" |
 | island | "Loose piece" | "Piece N · N triangles · 0.420 mm" (numbered; largest dimension) | "N triangles, 0.420 mm across, not connected to the model" | "Remove piece" |
 | non-manifold | "Tangled edge" | "Tangled edge · 3 faces" | "More than two faces share this edge · 3 faces" | "Select the faces involved" |
-| over cap | "Very large opening" | "Very large opening · 1500 edges · 88.0 mm" | (as hole) | "Needs the large-hole method (not yet available)" |
+| over cap | "Very large opening" | "Very large opening · 1500 edges · 88.0 mm" | (as hole) | "Needs a large-hole method (not yet available)" |
 
 - **Measurements** are in the document's units: the unit chosen when a unitless file (STL, OBJ) was opened (see "Units" below), or µm, cm, in, ft or m from a 3MF. They are given to three significant figures (12.4, 3.41, 0.500), and as whole numbers from 100 up. A perimeter that overflowed reads "perimeter too large to measure".
 - **Classification** runs on the analysis worker, never the UI thread (MF-RT-001):
@@ -135,8 +135,28 @@ One function, `defects::defect_copy`, words every defect for the tree, Propertie
   - A loop with more edges than fill_holes can take (the spec's `max_loop_edges` maximum, 1000) is **over cap**.
   - Every component after the largest is a **loose piece**.
   - Each non-manifold edge is a **tangled edge**, listed with the faces that share it.
-- **Numbering:** "Hole N" counts holes in the tree's order.
+- **Numbering:** holes are listed largest first (by edge count), and a first analysis numbers them in that order. Numbers are stable (M4 Task 12): a hole is identified across revisions by its lowest corner and edge count, keeps its number after other holes are filled (fill Hole 1 and Hole 3 is still "Hole 3"), and gets it back when an undo reopens it; new holes get the next number.
 - **Operation names** come from `defects::operation_label` and use the same words in Properties and the history breadcrumb: Fill hole / Fill holes (n) / Fill all holes, and Remove piece / Remove pieces (n) / Remove loose pieces.
+
+## The defect browser at scale (M4 Task 12)
+
+Sculpts and scans often have hundreds of holes. The tree's **Holes** section (counted without the intentional openings) starts with **Previous / Next** (Shift+N / N), then a line per size group with its count and actions, then each group's rows:
+
+| Group | Edges | Actions |
+|---|---|---|
+| Too large for the current method | over 1000 | none: "Needs a large-hole method (not yet available)" (MF-ISSUE-043) |
+| Large holes | 201–1000 | "Fill all N large holes", "Mark intentional" |
+| Medium holes | 31–200 | as above |
+| Small holes | 9–30 | as above |
+| Tiny holes | up to 8 | as above |
+
+- A group fill is one `fill_holes` command on those loops: one Undo brings them all back. A hole that passes through one point twice (MF-ISSUE-051) is listed but left out of fills.
+- Every hole row has **Fill** at its right (that hole alone, one step); a loose piece's row has **Remove island**. Rows are virtualised: only the rows in view are laid out, so every one of thousands is reachable by scrolling and a frame costs the same however many there are.
+- **Fill all holes** (Properties, nothing selected) has a **Fill holes up to [N] edges** slider and a live preview ("353 holes · 4 left open"); Apply fills those holes as one command on their loops. (Before a big model's holes are listed, an object with no marked openings fills them as a whole-object run.)
+- **Intentional openings:** "Mark as intentional opening" (a selected hole or several, or a group's "Mark intentional") is an undoable step that changes no geometry. Marked openings are stored on the object and follow later edits like a selection; they're left out of hole counts, groups, the slider, Fill all holes and the overview, and listed under **Intentional openings** with **Unmark**. (The command log doesn't record marks yet.)
+- **Selecting several:** Shift-click adds a hole; B (or the navigation bar's **Select** mode) then a drag selects every visible hole whose centre is in the box. Properties then says "N holes selected" with one **Fill holes (N)**.
+- **View ▸ Show hole overview:** faces within one ring of a hole get a faint hole tint (state bit `HOLE_NEIGHBOURHOOD`, `HOLE` at strength 0.3, under every other tint), and each listed hole under 4 points across on screen, and not hidden behind the model, gets a fixed-size orange marker, so tiny holes show when zoomed out. The markers are worked out on a worker whenever the camera moves.
+- Tool summaries lead with plain words ("Closes holes with new triangles matched to the mesh around them.") and the spec's engineering summary follows, smaller; every parameter's tooltip is its spec description.
 
 ## Units (MF-ISSUE-045)
 
@@ -175,10 +195,13 @@ Every move works without a mouse wheel: on a trackpad, with a one-button mouse, 
 | Shift + two-finger drag | pan |
 | Pinch | zoom towards the cursor |
 | + or = / − | zoom in / out, 1.25× toward the view centre |
-| F | frame the target (or everything when nothing is targeted), keeping the view direction |
+| F | frame the target (or everything when nothing is targeted), keeping the view direction, with the same 200 ms eased move as the tree |
+| N / Shift+N | select and frame the next / previous hole in the list's order |
+| B, then drag | select the visible holes whose centre is inside the box (Shift adds); the navigation bar's Select mode makes every drag do this |
+| Cmd+O | open a mesh (or drop a file on the window) |
 | Double-click a tree row, or Enter on it | select it and frame it (animated; see the layout section) |
 | Home, or Cmd/Ctrl+0 | reset the view: the default angle, everything in view (Home needs Fn+← on Mac laptops) |
-| Esc | cancel the running job; otherwise clear the selection |
+| Esc | cancel the running job; otherwise clear the selection. Esc that closes a menu or dialog does only that (MF-ISSUE-041) |
 
 - **Navigation bar.** It sits at the 3D view's bottom-right, inside the view, drawn with the theme tokens. Each control has an accessible name and a tooltip naming its shortcut.
   - "Orbit / Pan / Zoom": a mode switch (default Orbit) that sets what a plain left-drag does. The current mode shows in the selected (cyan) style, because it is the selected option.

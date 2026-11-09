@@ -63,6 +63,12 @@ pub struct Defects {
     /// Every piece's size, indexed so "Remove loose pieces" can preview
     /// any thresholds in O(log n) (MF-ISSUE-052).
     pub pieces: mf_operations::ComponentSizes,
+    /// Holes that pass through a vertex twice (a pinched point): fill_holes
+    /// can't close them yet (MF-ISSUE-051). Loop ids, sorted.
+    pub pinched: Vec<u32>,
+    /// The object's hole numbering after this revision (see
+    /// [`classify_numbered`]).
+    pub numbers: std::sync::Arc<HoleNumbers>,
     /// (loop id, is a crack, index in `holes` or `cracks`), sorted by id.
     loop_index: Vec<(u32, bool, usize)>,
     /// Where each defect is, for framing it: `places.holes[i]` is
@@ -188,6 +194,27 @@ pub fn classify(
     transform: &[f64; 12],
     fill_cap: usize,
 ) -> Defects {
+    classify_numbered(
+        mesh,
+        diagnostics,
+        transform,
+        fill_cap,
+        &HoleNumbers::default(),
+    )
+}
+
+/// As [`classify`], numbering holes stably (addendum C): a hole keeps the
+/// number `numbers` (the object's numbering so far) gave it, and a new
+/// one gets the next number, in list order. Holes are listed largest
+/// first (by edge count), so a first analysis numbers them that way. The
+/// numbering it ends with is [`Defects::numbers`].
+pub fn classify_numbered(
+    mesh: &Mesh,
+    diagnostics: &Diagnostics,
+    transform: &[f64; 12],
+    fill_cap: usize,
+    numbers: &HoleNumbers,
+) -> Defects {
     let topo = mesh.topology();
     let model = mf_render::model_matrix(transform);
     let linear = DMat3::from_mat4(model);
@@ -233,6 +260,7 @@ pub fn classify(
         flip,
         &mut loop_places,
     );
+    let mut keys: Vec<HoleKey> = Vec::new();
     for (l, place) in topo.boundary_loops.iter().zip(loop_places) {
         if vector_area(mesh, &l.vertices) < min_area {
             out.places.cracks.push(place);
@@ -244,9 +272,13 @@ pub fn classify(
             continue;
         }
         out.places.holes.push(place);
-        let number = out.holes.len() + 1;
+        if !unique_vertices(&l.vertices) {
+            out.pinched.push(l.id);
+        }
+        // Numbered below, once sorted.
+        let number = 0;
         let (loop_id, edges, perimeter) = (l.id, l.edge_count, perimeter(&l.vertices));
-        out.loop_index.push((l.id, false, out.holes.len()));
+        keys.push(hole_key(mesh, &l.vertices, edges));
         out.holes.push(if edges > fill_cap {
             Defect::OverCap {
                 number,
@@ -263,6 +295,8 @@ pub fn classify(
             }
         });
     }
+    number_holes(&mut out, keys, numbers);
+    out.pinched.sort_unstable();
     out.loop_index.sort_unstable_by_key(|(id, ..)| *id);
     // Components are ordered largest first: the first is the model.
     out.main_body_triangles = topo.components.first().map_or(0, Vec::len);
@@ -311,6 +345,119 @@ pub fn classify(
     }
     out.world_size = world_size(mesh, &model);
     out
+}
+
+/// What identifies a hole across revisions: its lexicographically smallest
+/// corner (exact bits) and edge count. Kept elements keep their positions
+/// (ADR-0001), compaction included, so a hole another command didn't
+/// touch has the same key in every revision.
+pub type HoleKey = ([u64; 3], usize);
+
+fn hole_key(mesh: &Mesh, vertices: &[u32], edges: usize) -> HoleKey {
+    let lowest = vertices
+        .iter()
+        .map(|&v| mesh.corner_position(v))
+        .min_by(|a, b| {
+            a[0].total_cmp(&b[0])
+                .then(a[1].total_cmp(&b[1]))
+                .then(a[2].total_cmp(&b[2]))
+        })
+        .map_or([0; 3], |p| p.map(f64::to_bits));
+    (lowest, edges)
+}
+
+/// An object's hole numbers so far (addendum C): numbers only ever get
+/// added, so a hole is "Hole 3" in every revision it's open in, and
+/// undoing a fill brings its hole back under its old number.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HoleNumbers {
+    by_key: std::collections::HashMap<HoleKey, usize>,
+    next: usize,
+}
+
+impl HoleNumbers {
+    /// Numbers handed out so far.
+    pub fn issued(&self) -> usize {
+        self.next
+    }
+}
+
+/// Sorts `out.holes` (and their places) largest first, numbers them from
+/// `numbers`, and indexes them. `keys[i]` is `out.holes[i]`'s key.
+fn number_holes(out: &mut Defects, keys: Vec<HoleKey>, numbers: &HoleNumbers) {
+    let mut next = numbers.clone();
+    let mut entries: Vec<(Defect, Option<Place>, HoleKey, Option<usize>)> =
+        std::mem::take(&mut out.holes)
+            .into_iter()
+            .zip(std::mem::take(&mut out.places.holes))
+            .zip(keys)
+            .map(|((d, p), k)| {
+                let n = next.by_key.get(&k).copied();
+                (d, p, k, n)
+            })
+            .collect();
+    let edges = |d: &Defect| match d {
+        Defect::Hole { edges, .. } | Defect::OverCap { edges, .. } => *edges,
+        _ => 0,
+    };
+    // Largest first; among equals, numbered ones in number order, then new
+    // ones by key (deterministic).
+    entries.sort_by(|a, b| {
+        edges(&b.0)
+            .cmp(&edges(&a.0))
+            .then(a.3.unwrap_or(usize::MAX).cmp(&b.3.unwrap_or(usize::MAX)))
+            .then(a.2.cmp(&b.2))
+    });
+    let mut used = std::collections::HashSet::new();
+    for (d, place, key, known) in entries {
+        // Two holes with one key (a pinched pair) don't share a number.
+        let n = match known.filter(|n| used.insert(*n)) {
+            Some(n) => n,
+            None => {
+                next.next += 1;
+                used.insert(next.next);
+                next.by_key.insert(key, next.next);
+                next.next
+            }
+        };
+        let d = match d {
+            Defect::Hole {
+                loop_id,
+                edges,
+                perimeter,
+                ..
+            } => Defect::Hole {
+                number: n,
+                loop_id,
+                edges,
+                perimeter,
+            },
+            Defect::OverCap {
+                loop_id,
+                edges,
+                perimeter,
+                ..
+            } => Defect::OverCap {
+                number: n,
+                loop_id,
+                edges,
+                perimeter,
+            },
+            other => other,
+        };
+        if let Some((_, loop_id)) = d.selection() {
+            out.loop_index.push((loop_id, false, out.holes.len()));
+        }
+        out.holes.push(d);
+        out.places.holes.push(place);
+    }
+    out.numbers = std::sync::Arc::new(next);
+}
+
+fn unique_vertices(vertices: &[u32]) -> bool {
+    let mut v = vertices.to_vec();
+    v.sort_unstable();
+    v.windows(2).all(|w| w[0] != w[1])
 }
 
 /// The bounding box of `points`; `None` if there are none or one isn't
@@ -480,6 +627,179 @@ fn vector_area(mesh: &Mesh, loop_vertices: &[u32]) -> f64 {
     (sum * 0.5).length()
 }
 
+/// The size groups the browser sorts holes into (M4 Task 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HoleGroup {
+    /// Over 1000 edges: too large for the current fill (MF-ISSUE-043).
+    TooLarge,
+    /// 201–1000 edges.
+    Large,
+    /// 31–200 edges.
+    Medium,
+    /// 9–30 edges.
+    Small,
+    /// Up to 8 edges.
+    Tiny,
+}
+
+impl HoleGroup {
+    /// Largest first: the order holes are listed in.
+    pub const ALL: [HoleGroup; 5] = [
+        HoleGroup::TooLarge,
+        HoleGroup::Large,
+        HoleGroup::Medium,
+        HoleGroup::Small,
+        HoleGroup::Tiny,
+    ];
+
+    pub fn of(edges: usize) -> HoleGroup {
+        match edges {
+            0..=8 => HoleGroup::Tiny,
+            9..=30 => HoleGroup::Small,
+            31..=200 => HoleGroup::Medium,
+            201..=1000 => HoleGroup::Large,
+            _ => HoleGroup::TooLarge,
+        }
+    }
+
+    /// Its tree header: "Tiny holes (up to 8 edges)".
+    pub fn title(self) -> &'static str {
+        match self {
+            HoleGroup::TooLarge => "Too large for the current method (over 1000 edges)",
+            HoleGroup::Large => "Large holes (201–1000 edges)",
+            HoleGroup::Medium => "Medium holes (31–200 edges)",
+            HoleGroup::Small => "Small holes (9–30 edges)",
+            HoleGroup::Tiny => "Tiny holes (up to 8 edges)",
+        }
+    }
+
+    /// The word for its group action: "Fill all 312 tiny holes".
+    pub fn adjective(self) -> &'static str {
+        match self {
+            HoleGroup::TooLarge => "very large",
+            HoleGroup::Large => "large",
+            HoleGroup::Medium => "medium",
+            HoleGroup::Small => "small",
+            HoleGroup::Tiny => "tiny",
+        }
+    }
+}
+
+/// How the browser lists one revision's holes, given the intentional
+/// openings marked on it: built on a worker (O(holes)), read every frame.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HoleView {
+    /// The marks it was made for (loop ids, sorted).
+    pub openings: Vec<u32>,
+    /// Indices into [`Defects::holes`] of the holes listed (every hole not
+    /// marked), largest first: the tree's, N's and the groups' order.
+    pub listed: Vec<usize>,
+    /// Indices into [`Defects::holes`] of the marked openings.
+    pub marked: Vec<usize>,
+    /// Each [`HoleGroup`]'s range of `listed` (in `HoleGroup::ALL` order).
+    groups: [std::ops::Range<usize>; 5],
+    /// (edges, loop id) of every listed hole fill_holes can close, fewest
+    /// edges first: the batch fill's candidates.
+    pub fillable: Vec<(usize, u32)>,
+    /// Loop id → position in `listed`.
+    position: std::collections::HashMap<u32, usize>,
+}
+
+impl HoleView {
+    /// `group`'s holes: a range of [`HoleView::listed`].
+    pub fn group(&self, group: HoleGroup) -> std::ops::Range<usize> {
+        let i = HoleGroup::ALL
+            .iter()
+            .position(|g| *g == group)
+            .expect("ALL lists every group");
+        self.groups[i].clone()
+    }
+
+    /// Where loop `id` is in [`HoleView::listed`], if it's listed. O(1).
+    pub fn position(&self, id: u32) -> Option<usize> {
+        self.position.get(&id).copied()
+    }
+
+    /// Holes a batch fill up to `max_edges` edges closes, and the listed
+    /// ones it leaves open. O(log n).
+    pub fn batch(&self, max_edges: usize) -> (usize, usize) {
+        let k = self.fillable.partition_point(|(e, _)| *e <= max_edges);
+        (k, self.listed.len() - k)
+    }
+}
+
+/// How `defects`' holes are listed with `openings` (loop ids) marked as
+/// intentional. O(holes); run it on a worker.
+pub fn hole_view(defects: &Defects, openings: &[u32]) -> HoleView {
+    let mut openings = openings.to_vec();
+    openings.sort_unstable();
+    openings.dedup();
+    let mut view = HoleView {
+        openings,
+        ..HoleView::default()
+    };
+    for (i, d) in defects.holes.iter().enumerate() {
+        let Some((_, id)) = d.selection() else {
+            continue;
+        };
+        if view.openings.binary_search(&id).is_ok() {
+            view.marked.push(i);
+        } else {
+            view.position.insert(id, view.listed.len());
+            view.listed.push(i);
+            if let Defect::Hole { edges, .. } = d
+                && defects.pinched.binary_search(&id).is_err()
+            {
+                view.fillable.push((*edges, id));
+            }
+        }
+    }
+    view.fillable.sort_unstable();
+    // Holes are sorted largest first, so each group is a run of `listed`.
+    let edges = |i: usize| match &defects.holes[i] {
+        Defect::Hole { edges, .. } | Defect::OverCap { edges, .. } => *edges,
+        _ => 0,
+    };
+    let mut start = 0;
+    for (g, group) in HoleGroup::ALL.iter().enumerate() {
+        let end = start
+            + view.listed[start..]
+                .iter()
+                .take_while(|&&i| HoleGroup::of(edges(i)) == *group)
+                .count();
+        view.groups[g] = start..end;
+        start = end;
+    }
+    view
+}
+
+/// A parameter's name in Properties: "max_loop_edges" → "Max loop edges"
+/// (the batch fill calls its edge limit "Fill holes up to").
+pub fn param_label(op_id: &str, param: &str) -> String {
+    if (op_id, param) == ("mesh.fill_holes", "max_loop_edges") {
+        return "Fill holes up to".into();
+    }
+    let spaced = param.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => spaced,
+    }
+}
+
+/// What a tool does, in plain words first (the spec's engineering
+/// summary follows it in Properties).
+pub fn tool_summary(op_id: &str) -> Option<&'static str> {
+    Some(match op_id {
+        "mesh.fill_holes" => "Closes holes with new triangles matched to the mesh around them.",
+        "mesh.remove_small_components" => {
+            "Deletes small pieces that aren't connected to the model, such as scan specks."
+        }
+        "mesh.compact" => "Frees the space earlier edits left unused. The shape doesn't change.",
+        _ => return None,
+    })
+}
+
 /// The defect's words, in plain language: its title, its tree row (a short
 /// name and its size, so a speck is recognisable before you zoom to it),
 /// its measurements and next action. Measurements are in the document's
@@ -526,14 +846,14 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             "Very large opening".into(),
             around(*edges, *perimeter),
             hole_detail(*edges, *perimeter, units),
-            "Needs the large-hole method (not yet available)",
+            "Needs a large-hole method (not yet available)",
         ),
         Defect::Crack { edges, .. } => copy(
             "Narrow crack".into(),
             "Narrow crack".into(),
             count(*edges, "edge"),
             format!("Edges almost touch · {}", count(*edges, "edge")),
-            "Needs edge stitching (not yet available)",
+            "Slit: needs welding (not yet available)",
         ),
         Defect::LoosePiece {
             component,
@@ -844,6 +1164,55 @@ mod tests {
         assert_eq!(d.place(&d.loose[0]).unwrap().facing, None);
     }
 
+    /// The browser's size groups (M4 Task 12): tiny ≤ 8, small ≤ 30,
+    /// medium ≤ 200, large ≤ 1000, too large above.
+    #[test]
+    fn hole_groups_split_at_the_stated_sizes() {
+        for (edges, group) in [
+            (3, HoleGroup::Tiny),
+            (8, HoleGroup::Tiny),
+            (9, HoleGroup::Small),
+            (30, HoleGroup::Small),
+            (31, HoleGroup::Medium),
+            (200, HoleGroup::Medium),
+            (201, HoleGroup::Large),
+            (1000, HoleGroup::Large),
+            (1001, HoleGroup::TooLarge),
+        ] {
+            assert_eq!(HoleGroup::of(edges), group, "{edges} edges");
+        }
+    }
+
+    /// Holes are listed largest first and numbered that way on a first
+    /// analysis; a later analysis keeps the numbers (addendum C).
+    #[test]
+    fn holes_are_numbered_largest_first_and_keep_their_numbers() {
+        let mesh = holed_grid();
+        let d = classify(&mesh, &mf_geometry::inspect(&mesh), &IDENTITY, 1000);
+        let numbers: Vec<(usize, usize)> = d
+            .holes
+            .iter()
+            .map(|h| match h {
+                Defect::Hole { number, edges, .. } => (*number, *edges),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(numbers, vec![(1, 24), (2, 3)]);
+        let again = classify_numbered(
+            &mesh,
+            &mf_geometry::inspect(&mesh),
+            &IDENTITY,
+            1000,
+            &d.numbers,
+        );
+        assert_eq!(again.holes, d.holes);
+        assert_eq!(again.numbers.issued(), 2);
+        let view = hole_view(&d, &[]);
+        assert_eq!(view.listed, vec![0, 1]);
+        assert_eq!(view.group(HoleGroup::Tiny), 1..2);
+        assert_eq!(view.batch(3), (1, 1));
+    }
+
     #[test]
     fn defect_copy_matches_the_table() {
         assert_eq!(
@@ -888,7 +1257,7 @@ mod tests {
             s(
                 "Narrow crack",
                 "Edges almost touch · 8 edges",
-                "Needs edge stitching (not yet available)"
+                "Slit: needs welding (not yet available)"
             )
         );
         assert_eq!(
@@ -924,7 +1293,7 @@ mod tests {
             s(
                 "Very large opening",
                 "1500 boundary edges · 88.0 mm perimeter",
-                "Needs the large-hole method (not yet available)"
+                "Needs a large-hole method (not yet available)"
             )
         );
         // Measurements use the document's units.

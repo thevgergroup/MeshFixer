@@ -17,7 +17,7 @@ use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::defects::{Defect, operation_label, thousands};
+use crate::defects::{Defect, HoleNumbers, HoleView, count, operation_label, thousands};
 use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
@@ -332,6 +332,32 @@ pub struct MeshFixerApp {
     unit_prompt: Option<UnitPrompt>,
     /// An Apply waiting for confirmation.
     confirm: Option<Confirm>,
+    /// Each object's hole numbering so far (addendum C), from its latest
+    /// analysis.
+    hole_numbers: BTreeMap<ObjectId, Arc<HoleNumbers>>,
+    /// The holes listed for the active revision after a mark changed (the
+    /// analysis has the list for the marks it was asked with).
+    hole_list: Option<(Arc<crate::defects::Defects>, Arc<HoleView>)>,
+    /// The last list asked for: (revision, marks).
+    hole_list_requested: Option<(Arc<crate::defects::Defects>, Vec<u32>)>,
+    /// View ▸ Show hole overview: a faint tint around every hole and a
+    /// marker at each one too small to see.
+    pub show_hole_overview: bool,
+    /// Works out the overview's markers on the background pool.
+    marker_worker: LatestWorker<worker::MarkerRequest>,
+    /// What the markers were last asked for, and its number.
+    marker_query: Option<(MarkerQuery, u64)>,
+    /// The latest markers (request number, markers).
+    markers: Option<(u64, Arc<worker::Markers>)>,
+}
+
+/// What the hole overview's markers depend on: a change asks again.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct MarkerQuery {
+    camera: OrbitCamera,
+    rect: egui::Rect,
+    defects: usize,
+    view: usize,
 }
 
 impl MeshFixerApp {
@@ -387,6 +413,20 @@ impl MeshFixerApp {
                     Ok(())
                 },
                 |()| {},
+            )
+        };
+        let marker_worker = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            LatestWorker::new(
+                workers.background(),
+                |req: worker::MarkerRequest, run: &RunContext| {
+                    Ok((req.key, Arc::new(worker::markers(&req, run)?)))
+                },
+                move |(key, markers)| {
+                    // allow-swallow: the receiver only disappears while the app is closing
+                    let _ = tx.send(Message::Markers { key, markers });
+                    ctx.request_repaint();
+                },
             )
         };
         let mut app = MeshFixerApp {
@@ -476,6 +516,13 @@ impl MeshFixerApp {
             ask_units: settings.unit_prompt,
             unit_prompt: None,
             confirm: None,
+            hole_numbers: BTreeMap::new(),
+            hole_list: None,
+            hole_list_requested: None,
+            show_hole_overview: false,
+            marker_worker,
+            marker_query: None,
+            markers: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -862,8 +909,10 @@ impl MeshFixerApp {
             let largest = triangles.into_iter().max().map_or(0, |t| t as i64);
             return vec![tool(
                 "mesh.remove_small_components",
+                // Chosen pieces: the relative limit is for whole-object runs.
                 BTreeMap::from([
                     ("max_triangles".into(), ParamValue::Int(largest + 1)),
+                    ("max_relative_size".into(), ParamValue::Float(100.0)),
                     ("keep_largest".into(), ParamValue::Bool(true)),
                 ]),
             )];
@@ -919,8 +968,41 @@ impl MeshFixerApp {
     }
 
     /// Validate on the UI thread, run on a worker, commit when it returns.
+    /// "Fill all holes" fills the listed holes up to its size limit as one
+    /// command on those loops: never a marked opening, and one undo.
     fn run_tool(&mut self, tool: &Tool) {
         let Some(target) = self.active else { return };
+        // Until the holes are listed (a big model's analysis takes a few
+        // seconds) an object with no marked openings fills them as a
+        // whole-object run: the same holes, as fill_holes chooses them.
+        let listed = self.shared_hole_view().cloned();
+        if tool.op_id == "mesh.fill_holes"
+            && tool.selection.is_none()
+            && (listed.is_some() || !self.active_openings().is_empty())
+        {
+            let Some(view) = listed else {
+                self.status = Some(
+                    "Still listing the holes, so the intentional openings can be left open: \
+                     try again in a moment"
+                        .into(),
+                );
+                return;
+            };
+            let limit = match self.params_for("mesh.fill_holes").get("max_loop_edges") {
+                Some(ParamValue::Int(n)) => *n,
+                other => panic!("fill_holes' max_loop_edges is an integer, got {other:?}"),
+            };
+            let (k, _) = view.batch(limit.max(0) as usize);
+            let ids: Vec<u32> = view.fillable[..k].iter().map(|(_, id)| *id).collect();
+            if ids.is_empty() {
+                self.status = Some(format!(
+                    "No holes of {limit} edges or fewer to fill. Raise \"Fill holes up to\"."
+                ));
+                return;
+            }
+            self.fill_loops_up_to(ids, Some(limit), Some(tool.label.clone()));
+            return;
+        }
         let mut params = self.params_for(&tool.op_id).clone();
         params.extend(tool.fixed.clone());
         let raw_params = params
@@ -1561,7 +1643,58 @@ impl MeshFixerApp {
                 ));
                 self.analysis_failed = Some((mesh, transform));
             }
+            Message::HoleView { defects, view } => {
+                if let Some(old) = self.hole_list.replace((defects, view)) {
+                    self.workers.discard(old);
+                }
+            }
+            Message::BoxPicked {
+                object,
+                mesh,
+                ids,
+                add,
+            } => {
+                let current = self
+                    .session
+                    .document()
+                    .object(object)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|m| Mesh::ptr_eq(m, &mesh));
+                if current {
+                    if ids.is_empty() {
+                        if !add {
+                            self.clear_selection();
+                        }
+                    } else {
+                        self.set_active(object);
+                        self.select(object, SelectionKind::BoundaryLoop, ids, add);
+                    }
+                }
+            }
+            Message::Markers { key, markers } => {
+                if self.marker_query.is_some_and(|(_, k)| k == key) {
+                    self.markers = Some((key, markers));
+                }
+            }
             Message::Analyzed { mesh, analysis } => {
+                // The object's numbering grows with each analysis.
+                let object = self
+                    .session
+                    .document()
+                    .objects()
+                    .iter()
+                    .find(|o| o.mesh().is_some_and(|m| Mesh::ptr_eq(m, &mesh)))
+                    .map(|o| o.id);
+                if let Some(object) = object {
+                    let numbers = &analysis.defects.numbers;
+                    let newer = self
+                        .hole_numbers
+                        .get(&object)
+                        .is_none_or(|n| numbers.issued() >= n.issued());
+                    if newer {
+                        self.hole_numbers.insert(object, numbers.clone());
+                    }
+                }
                 if self
                     .requested
                     .as_ref()
@@ -1648,11 +1781,16 @@ impl MeshFixerApp {
             let object = self.active.expect("an active object has a mesh here");
             let inputs = self.state_inputs(object, &mesh);
             self.state_seq += 1;
+            // allow-swallow: an object with no numbering yet numbers its holes from 1
+            let numbers = self.hole_numbers.get(&object).cloned().unwrap_or_default();
+            let openings = self.active_openings();
             self.analyzer.submit(worker::AnalysisRequest {
                 mesh,
                 transform,
                 previous,
                 states: Some((inputs, self.state_seq)),
+                numbers,
+                openings,
             });
         }
         if self.camera.is_none() && self.view_request.is_none() {
@@ -1856,11 +1994,24 @@ impl MeshFixerApp {
                 *cam = Some(OrbitCamera::fit(&bb))
             }
             (Some(bb), _, Some(cam)) => {
-                cam.frame(&bb);
+                // F moves there with the same eased move as the tree.
+                let from = *cam;
+                let mut to = from;
+                to.frame(&bb);
                 // Framing a speck mustn't clip away the model around it.
                 if let Some(scene) = scene {
-                    cam.radius = clip_radius(cam.target, cam.radius, &scene);
+                    to.radius = clip_radius(to.target, to.radius, &scene);
                 }
+                self.moving = Some(Moving {
+                    path: CameraMove {
+                        from,
+                        to,
+                        start: self.now,
+                        duration: FRAME_MOVE_SECONDS,
+                    },
+                    last: from,
+                    pulse: None,
+                });
             }
         }
     }
@@ -2215,6 +2366,10 @@ impl MeshFixerApp {
                 .get(mesh)
                 .map_or_else(|| Arc::from([]), |a| a.tangled_faces.clone()),
             loose_limit: self.loose_limit(),
+            hole_ring: self
+                .show_hole_overview
+                .then(|| self.analyses.get(mesh).map(|a| a.hole_ring.clone()))
+                .flatten(),
         }
     }
 
@@ -2339,6 +2494,7 @@ impl MeshFixerApp {
                 recent: Arc::from([]),
                 tangled: Arc::from([]),
                 loose_limit: None,
+                hole_ring: None,
             };
             if render.wants_states(&inputs) {
                 self.state_seq += 1;
@@ -2619,6 +2775,307 @@ impl MeshFixerApp {
     }
 }
 
+/// The browser: holes listed, marked, filled, walked and box-selected
+/// (M4 Task 12).
+impl MeshFixerApp {
+    /// The active object's intentional openings at this revision.
+    pub fn active_openings(&self) -> Vec<u32> {
+        self.active
+            .and_then(|id| self.session.document().object(id))
+            .map_or_else(Vec::new, |o| o.openings.clone())
+    }
+
+    /// How the browser lists the active revision's holes with its marks,
+    /// if that's ready.
+    pub fn hole_view(&self) -> Option<&HoleView> {
+        self.shared_hole_view().map(Arc::as_ref)
+    }
+
+    fn shared_hole_view(&self) -> Option<&Arc<HoleView>> {
+        self.hole_view_of(self.active?)
+    }
+
+    /// How the browser lists object `id`'s holes at its current revision
+    /// and marks, if that's ready: its indices are into that revision's
+    /// analysis' `defects.holes`.
+    pub fn hole_view_of(&self, id: ObjectId) -> Option<&Arc<HoleView>> {
+        let a = self.analysis_of(id)?;
+        let object = self.session.document().object(id)?;
+        if a.hole_view.openings == object.openings {
+            return Some(&a.hole_view);
+        }
+        let (defects, view) = self.hole_list.as_ref()?;
+        (Arc::ptr_eq(defects, &a.defects) && view.openings == object.openings).then_some(view)
+    }
+
+    /// Ask for the hole list when the marks changed and the mesh didn't.
+    fn refresh_hole_list(&mut self) {
+        if self.hole_view().is_some() {
+            return;
+        }
+        let Some(a) = self.current_analysis() else {
+            return;
+        };
+        let (defects, openings) = (a.defects.clone(), self.active_openings());
+        let asked = self
+            .hole_list_requested
+            .as_ref()
+            .is_some_and(|(d, o)| Arc::ptr_eq(d, &defects) && *o == openings);
+        if !asked {
+            self.hole_list_requested = Some((defects.clone(), openings.clone()));
+            self.workers.hole_view(defects, openings);
+        }
+    }
+
+    /// The listed hole at `index` of [`HoleView::listed`].
+    fn listed_hole(&self, index: usize) -> Option<Defect> {
+        let view = self.hole_view()?;
+        let i = *view.listed.get(index)?;
+        Some(self.current_analysis()?.defects.holes.get(i)?.clone())
+    }
+
+    /// N / Shift+N: select the next (or previous) listed hole after the
+    /// selected one, and frame it.
+    pub fn next_hole(&mut self, forward: bool) {
+        let (Some(object), Some(view)) = (self.active, self.hole_view()) else {
+            return;
+        };
+        let n = view.listed.len();
+        if n == 0 {
+            return;
+        }
+        let at = self
+            .current_selection()
+            .filter(|s| s.kind == SelectionKind::BoundaryLoop && s.ids.len() == 1)
+            .and_then(|s| view.position(s.ids[0]));
+        let next = match (at, forward) {
+            (None, true) => 0,
+            (None, false) => n - 1,
+            (Some(i), true) => (i + 1) % n,
+            (Some(i), false) => (i + n - 1) % n,
+        };
+        if let Some(d) = self.listed_hole(next) {
+            self.tree_find(&TreeItem::Defect(object, d));
+        }
+    }
+
+    /// Fill these holes (loop ids of the active revision) as one command.
+    pub fn fill_loops(&mut self, ids: Vec<u32>) {
+        self.fill_loops_up_to(ids, None, None);
+    }
+
+    /// As [`Self::fill_loops`], with `max_loop_edges` set to `limit` (the
+    /// batch fill's), or else to fit the largest of them.
+    /// `label` names the job (the status line, View ▸ Metrics).
+    fn fill_loops_up_to(&mut self, ids: Vec<u32>, limit: Option<i64>, label: Option<String>) {
+        let (Some(object), Some(a)) = (self.active, self.current_analysis()) else {
+            return;
+        };
+        if ids.is_empty() {
+            return;
+        }
+        let largest = ids
+            .iter()
+            .filter_map(
+                |&id| match a.defects.find(SelectionKind::BoundaryLoop, id) {
+                    Some(Defect::Hole { edges, .. }) => Some(*edges as i64),
+                    _ => None,
+                },
+            )
+            .max()
+            .unwrap_or(3);
+        let default = spec_default("mesh.fill_holes", "max_loop_edges");
+        let n = ids.len();
+        let tool = Tool {
+            op_id: "mesh.fill_holes".into(),
+            label: label.unwrap_or_else(|| {
+                operation_label("mesh.fill_holes", Some((SelectionKind::BoundaryLoop, n)))
+                    .expect("fill_holes has plain words")
+            }),
+            selection: Some(Selection {
+                object,
+                revision: self.session.current(),
+                kind: SelectionKind::BoundaryLoop,
+                ids,
+            }),
+            fixed: BTreeMap::from([(
+                "max_loop_edges".into(),
+                ParamValue::Int(limit.unwrap_or(largest.max(default))),
+            )]),
+        };
+        self.run_tool(&tool);
+    }
+
+    /// One click on a loose piece's row: remove it.
+    pub fn remove_piece(&mut self, component: u32, triangles: usize) {
+        let Some(object) = self.active else { return };
+        let tool = Tool {
+            op_id: "mesh.remove_small_components".into(),
+            label: operation_label(
+                "mesh.remove_small_components",
+                Some((SelectionKind::Component, 1)),
+            )
+            .expect("remove_small_components has plain words"),
+            selection: Some(Selection {
+                object,
+                revision: self.session.current(),
+                kind: SelectionKind::Component,
+                ids: vec![component],
+            }),
+            fixed: BTreeMap::from([
+                (
+                    "max_triangles".into(),
+                    ParamValue::Int(triangles as i64 + 1),
+                ),
+                ("max_relative_size".into(), ParamValue::Float(100.0)),
+                ("keep_largest".into(), ParamValue::Bool(true)),
+            ]),
+        };
+        self.run_tool(&tool);
+    }
+
+    /// The listed holes of `group` that fill_holes can close (loop ids).
+    pub fn group_fillable(&self, group: crate::defects::HoleGroup) -> Vec<u32> {
+        let (Some(view), Some(a)) = (self.hole_view(), self.current_analysis()) else {
+            return Vec::new();
+        };
+        view.listed[view.group(group)]
+            .iter()
+            .filter_map(|&i| match &a.defects.holes[i] {
+                Defect::Hole { loop_id, .. }
+                    if a.defects.pinched.binary_search(loop_id).is_err() =>
+                {
+                    Some(*loop_id)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Mark these holes (loop ids of the active revision) as intentional
+    /// openings, an undoable step; or unmark them (`mark` false).
+    pub fn mark_openings(&mut self, ids: &[u32], mark: bool) {
+        let Some(object) = self.active else { return };
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let mut openings = self.active_openings();
+        if mark {
+            openings.extend_from_slice(ids);
+        } else {
+            openings.retain(|o| !ids.contains(o));
+        }
+        let n = ids.len();
+        let label = match (mark, n) {
+            (true, 1) => "Mark intentional opening".to_owned(),
+            (true, n) => format!("Mark {n} intentional openings"),
+            (false, 1) => "Unmark opening".to_owned(),
+            (false, n) => format!("Unmark {n} openings"),
+        };
+        if self.session.set_openings(object, openings, label) {
+            // A marked hole is no longer a target for hole tools.
+            if mark {
+                self.clear_selection();
+            }
+            self.after_history_move();
+            self.status = Some(if mark {
+                format!(
+                    "Marked {} as intentional: left out of hole counts and fills",
+                    count(n, "opening")
+                )
+            } else {
+                format!("{} listed as holes again", count(n, "opening"))
+            });
+        }
+    }
+
+    /// The overview's markers (window points), while it's shown.
+    pub fn hole_markers(&self) -> Option<&[egui::Pos2]> {
+        if !self.show_hole_overview {
+            return None;
+        }
+        self.markers.as_ref().map(|(_, m)| m.positions.as_slice())
+    }
+
+    /// Ask for the overview's markers when what they depend on changed.
+    fn refresh_markers(&mut self) {
+        if !self.show_hole_overview {
+            self.marker_query = None;
+            return;
+        }
+        let (Some(a), Some(view), Some(camera), Some(rect)) = (
+            self.current_analysis(),
+            self.shared_hole_view(),
+            self.camera,
+            self.viewport.last_rect,
+        ) else {
+            return;
+        };
+        let query = MarkerQuery {
+            camera,
+            rect,
+            defects: Arc::as_ptr(&a.defects) as usize,
+            view: Arc::as_ptr(view) as usize,
+        };
+        if self.marker_query.is_some_and(|(q, _)| q == query) {
+            return;
+        }
+        let key = self.marker_query.map_or(1, |(_, k)| k + 1);
+        let (defects, view) = (a.defects.clone(), view.clone());
+        let occluders = self.occluders();
+        self.marker_query = Some((query, key));
+        self.marker_worker.submit(worker::MarkerRequest {
+            key,
+            defects,
+            view,
+            camera,
+            rect,
+            occluders,
+            color: theme::HOLE,
+        });
+    }
+
+    /// Every object's revision, BVH (if built) and placement: what can
+    /// hide a hole.
+    fn occluders(&self) -> Vec<(Mesh, Option<Arc<Bvh>>, glam::DMat4)> {
+        self.session
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh()?.clone();
+                let bvh = self
+                    .bvhs
+                    .get(&o.id)
+                    .filter(|(m, _)| Mesh::ptr_eq(m, &mesh))
+                    .map(|(_, b)| b.clone());
+                Some((mesh, bvh, model_matrix(&o.transform)))
+            })
+            .collect()
+    }
+
+    /// A box drawn in the view (Select mode, or B): select the visible
+    /// listed holes whose centre is inside it (on a worker).
+    fn box_select(&mut self, b: crate::viewport::BoxSelect) {
+        let (Some(object), Some(cam), Some(a), Some(view)) = (
+            self.active,
+            self.camera,
+            self.current_analysis(),
+            self.shared_hole_view(),
+        ) else {
+            return;
+        };
+        let Some(mesh) = self.active_mesh().cloned() else {
+            return;
+        };
+        let (defects, view) = (a.defects.clone(), view.clone());
+        let occluders = self.occluders();
+        self.workers.box_select(
+            object, mesh, defects, view, cam, b.size, b.rect, occluders, b.add,
+        );
+    }
+}
+
 impl eframe::App for MeshFixerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = Instant::now();
@@ -2682,6 +3139,25 @@ impl MeshFixerApp {
             } else if open {
                 self.open_dialog();
             }
+        }
+        let (next, previous, boxed) = ctx.input_mut(|i| {
+            if typing {
+                return (false, false, false);
+            }
+            // Shift+N first: a plain N would match it too.
+            let previous = i.consume_key(egui::Modifiers::SHIFT, egui::Key::N);
+            let next = i.consume_key(egui::Modifiers::NONE, egui::Key::N);
+            (
+                next,
+                previous,
+                i.consume_key(egui::Modifiers::NONE, egui::Key::B),
+            )
+        });
+        if next || previous {
+            self.next_hole(next);
+        }
+        if boxed {
+            self.viewport.box_once = true;
         }
         let (undo, redo, frame, home, escape, zoom) = ctx.input_mut(|i| {
             if typing {
@@ -2753,8 +3229,10 @@ impl MeshFixerApp {
         crate::panels::confirm_window(self, &ctx);
         self.refresh_metrics();
         crate::panels::metrics_window(self, &ctx);
+        self.refresh_hole_list();
         self.refresh_overlays();
         self.refresh_states();
+        self.refresh_markers();
 
         let objects = self.object_views();
         let placeholder = match self.active_mesh() {
@@ -2789,6 +3267,10 @@ impl MeshFixerApp {
                         placeholder,
                         frame: frame_index,
                         cue,
+                        markers: self
+                            .show_hole_overview
+                            .then(|| self.markers.as_ref().map(|(_, m)| m.mesh.clone()))
+                            .flatten(),
                     },
                 )
             })
@@ -2803,6 +3285,11 @@ impl MeshFixerApp {
         {
             self.click(c);
         }
+        if let Some(b) = out.box_select
+            && self.busy.is_none()
+        {
+            self.box_select(b);
+        }
         self.update_hover(out.pointer);
         if self.hover.is_none() {
             crate::panels::view_hover_tooltip(self, &ctx);
@@ -2816,6 +3303,8 @@ impl MeshFixerApp {
             || self.pulse.is_some()
             || self.tree_hold.is_some_and(|(_, until)| self.now < until)
             || overlays_pending
+            || (self.show_hole_overview && self.hole_view().is_none())
+            || (self.current_analysis().is_some() && self.hole_view().is_none())
         {
             ctx.request_repaint();
         }

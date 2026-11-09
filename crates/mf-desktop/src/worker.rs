@@ -27,7 +27,7 @@ use mf_render::{
 use mf_runtime::{CancelToken, Cancelled, JobPool, PoolChoice, RunContext};
 use mf_selection::SelectionKind;
 
-use crate::defects::{Defect, Defects};
+use crate::defects::{Defect, Defects, HoleNumbers, HoleView};
 
 /// What the 3D view needs to draw one mesh revision, built on a worker:
 /// its GPU buffers, plus the bounds and local origin the app frames and
@@ -252,6 +252,9 @@ pub struct StateInputs {
     /// remove are tinted as loose (MF-ISSUE-052); `None`: every piece but
     /// the main body.
     pub loose_limit: Option<LooseLimit>,
+    /// The faces around the holes (View ▸ Show hole overview), from the
+    /// analysis; `None` while the overview is off.
+    pub hole_ring: Option<Arc<[u32]>>,
 }
 
 /// Which pieces "Remove loose pieces" would remove: every piece but the
@@ -295,6 +298,9 @@ pub fn face_states(
             }
         }
     }
+    if let Some(ring) = &inputs.hole_ring {
+        set(ring, FaceStates::HOLE_NEIGHBOURHOOD);
+    }
     set(&inputs.tangled, FaceStates::NON_MANIFOLD_ADJ);
     set(&inputs.recent, FaceStates::RECENT_REPAIR);
     for (target, bit) in [
@@ -336,6 +342,12 @@ pub struct Analysis {
     pub tangled_faces: Arc<[u32]>,
     /// Defect overlays in the 3D view, relative to `vertices.origin`.
     pub layers: DefectLayers,
+    /// How the browser lists the holes with the openings marked when it
+    /// was asked for (a later mark gets its own, [`Workers::hole_view`]).
+    pub hole_view: Arc<HoleView>,
+    /// Every face with a corner on a hole (not a crack), sorted: the hole
+    /// overview's tint.
+    pub hole_ring: Arc<[u32]>,
 }
 
 /// Line overlays for the defects the 3D view colours (theme.rs): cracks
@@ -433,6 +445,24 @@ pub enum Message {
     StatesWritten,
     /// A mesh's topology was computed and cached ([`Workers::warm_topology`]).
     TopologyCached,
+    /// `defects`' holes listed with `view.openings` marked.
+    HoleView {
+        defects: Arc<Defects>,
+        view: Arc<HoleView>,
+    },
+    /// What a box selection picked on `object`'s revision `mesh`: the
+    /// visible holes inside the box (loop ids).
+    BoxPicked {
+        object: ObjectId,
+        mesh: Mesh,
+        ids: Vec<u32>,
+        add: bool,
+    },
+    /// The hole overview's screen markers for request `key`.
+    Markers {
+        key: u64,
+        markers: Arc<Markers>,
+    },
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -863,6 +893,48 @@ impl Workers {
         );
     }
 
+    /// List `defects`' holes with `openings` marked (after a mark changed
+    /// and the mesh didn't), on the background pool.
+    pub fn hole_view(&self, defects: Arc<Defects>, openings: Vec<u32>) {
+        self.spawn_background("hole list", move || {
+            let view = Arc::new(crate::defects::hole_view(&defects, &openings));
+            Message::HoleView { defects, view }
+        });
+    }
+
+    /// Box selection (see [`box_holes`]) on the lane: `rect` in view
+    /// points of a `size` view.
+    #[allow(clippy::too_many_arguments)]
+    pub fn box_select(
+        &self,
+        object: ObjectId,
+        mesh: Mesh,
+        defects: Arc<Defects>,
+        view: Arc<HoleView>,
+        cam: mf_render::OrbitCamera,
+        size: (f64, f64),
+        rect: eframe::egui::Rect,
+        occluders: Vec<(Mesh, Option<Arc<Bvh>>, DMat4)>,
+        add: bool,
+    ) {
+        spawn_on(
+            &self.lane,
+            &self.tx,
+            &self.repaint,
+            "box select",
+            false,
+            move || {
+                let ids = box_holes(&defects, &view, &cam, size, rect, &occluders);
+                Some(Message::BoxPicked {
+                    object,
+                    mesh,
+                    ids,
+                    add,
+                })
+            },
+        );
+    }
+
     /// Export on the pool; cancelling leaves no file behind (see
     /// [`mf_io::write_path_with`]).
     pub fn export(&self, job: ExportJob, path: PathBuf, ctx: RunContext) {
@@ -917,6 +989,10 @@ pub struct AnalysisRequest {
     /// The face states to give the new render mesh before it's shown (and
     /// their request number), so it never appears without its tints.
     pub states: Option<(StateInputs, u64)>,
+    /// The object's hole numbering so far (addendum C).
+    pub numbers: Arc<HoleNumbers>,
+    /// The object's intentional openings at this revision.
+    pub openings: Vec<u32>,
 }
 
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).
@@ -935,10 +1011,15 @@ pub fn analyze(
         transform,
         previous,
         states,
+        numbers,
+        openings,
     } = request;
     let diagnostics = mf_geometry::inspect_with(&mesh, ctx)?;
     ctx.checkpoint()?;
-    let defects = crate::defects::classify(&mesh, &diagnostics, &transform, fill_cap());
+    let defects =
+        crate::defects::classify_numbered(&mesh, &diagnostics, &transform, fill_cap(), &numbers);
+    let hole_view = Arc::new(crate::defects::hole_view(&defects, &openings));
+    let hole_ring = hole_ring(&mesh, &defects, ctx)?;
     let crack_ids: Vec<u32> = defects
         .cracks
         .iter()
@@ -1004,11 +1085,184 @@ pub fn analyze(
         defects: Arc::new(defects),
         tangled_faces,
         layers,
+        hole_view,
+        hole_ring,
     };
     Ok(Message::Analyzed {
         mesh,
         analysis: Box::new(analysis),
     })
+}
+
+/// Every face with a corner on one of `defects`' holes (cracks aren't
+/// holes), sorted. O(n) with a small constant: a vertex bitmap, then one
+/// pass over the faces.
+fn hole_ring(mesh: &Mesh, defects: &Defects, ctx: &RunContext) -> Result<Arc<[u32]>, Cancelled> {
+    let topo = mesh.topology_with(ctx)?;
+    let mut on = vec![false; mesh.vertex_slots() as usize];
+    let mut any = false;
+    for l in &topo.boundary_loops {
+        if matches!(
+            defects.find(SelectionKind::BoundaryLoop, l.id),
+            Some(Defect::Hole { .. } | Defect::OverCap { .. })
+        ) {
+            any = true;
+            for &v in &l.vertices {
+                on[v as usize] = true;
+            }
+        }
+    }
+    if !any {
+        return Ok(Arc::from([]));
+    }
+    let mut tick = ctx.ticker();
+    let mut faces = Vec::new();
+    for (f, t) in mesh.faces() {
+        tick.tick()?;
+        if t.iter().any(|&v| on[v as usize]) {
+            faces.push(f.0);
+        }
+    }
+    Ok(faces.into())
+}
+
+/// The hole overview's markers: a fixed-size dot at each listed hole too
+/// small to see (under [`MARKER_BELOW`] points across on screen) and not
+/// hidden behind the model, as one egui mesh in window points.
+#[derive(Debug, Default)]
+pub struct Markers {
+    pub positions: Vec<eframe::egui::Pos2>,
+    pub mesh: Arc<eframe::egui::Mesh>,
+}
+
+/// A hole under this many points across on screen gets a marker.
+pub const MARKER_BELOW: f64 = 4.0;
+/// A marker's radius (points).
+const MARKER_RADIUS: f32 = 3.0;
+
+/// What the overview's markers are worked out from.
+pub struct MarkerRequest {
+    pub key: u64,
+    pub defects: Arc<Defects>,
+    pub view: Arc<HoleView>,
+    pub camera: mf_render::OrbitCamera,
+    /// The 3D view's rectangle (window points).
+    pub rect: eframe::egui::Rect,
+    /// Every object's revision, BVH and placement, for what hides a hole.
+    pub occluders: Vec<(Mesh, Option<Arc<Bvh>>, DMat4)>,
+    pub color: eframe::egui::Color32,
+}
+
+/// The overview's markers for `req`: O(holes) projections and ray casts
+/// (O(log n) each through the BVHs), on a worker.
+pub fn markers(req: &MarkerRequest, ctx: &RunContext) -> Result<Markers, Cancelled> {
+    use eframe::egui;
+    let cam = &req.camera;
+    let size = (req.rect.width() as f64, req.rect.height() as f64);
+    let eye = cam.eye();
+    // Points per world unit at unit depth.
+    let focal = size.1 * 0.5 / (cam.fov_y * 0.5).tan();
+    let mut out = Markers::default();
+    let mut mesh = egui::Mesh::default();
+    let mut tick = ctx.ticker();
+    for &i in &req.view.listed {
+        tick.tick()?;
+        let d = &req.defects.holes[i];
+        let Some(place) = req.defects.place(d) else {
+            continue;
+        };
+        let centre = glam::DVec3::from(place.bounds.center());
+        let depth = (centre - eye).dot(-cam.view_dir());
+        if depth <= 0.0 {
+            continue;
+        }
+        if place.bounds.diagonal() * focal / depth >= MARKER_BELOW {
+            continue;
+        }
+        let Some((x, y)) = mf_render::screen_position(cam, cam.target, size, centre.to_array())
+        else {
+            continue;
+        };
+        let p = req.rect.left_top() + egui::vec2(x as f32, y as f32);
+        if !req.rect.contains(p) {
+            continue;
+        }
+        let to = centre - eye;
+        let dist = to.length();
+        let dir = to / dist;
+        let hidden = req.occluders.iter().any(|(m, bvh, model)| {
+            let hit = match bvh {
+                Some(b) => b.ray_pick(m, eye.to_array(), dir.to_array(), model),
+                None => None,
+            };
+            hit.is_some_and(|(_, t)| t < dist * (1.0 - 1e-6) - place.bounds.diagonal())
+        });
+        if hidden {
+            continue;
+        }
+        out.positions.push(p);
+        let r = MARKER_RADIUS;
+        let base = mesh.vertices.len() as u32;
+        for v in [
+            p + egui::vec2(0.0, -r),
+            p + egui::vec2(r, 0.0),
+            p + egui::vec2(0.0, r),
+            p + egui::vec2(-r, 0.0),
+        ] {
+            mesh.colored_vertex(v, req.color);
+        }
+        mesh.add_triangle(base, base + 1, base + 2);
+        mesh.add_triangle(base, base + 2, base + 3);
+    }
+    out.mesh = Arc::new(mesh);
+    Ok(out)
+}
+
+/// The visible listed holes of `defects` whose screen-space centre falls
+/// in `rect` (view points): their loop ids, sorted. A hole is hidden when
+/// a surface of any object lies between the eye and its centre.
+#[allow(clippy::too_many_arguments)]
+fn box_holes(
+    defects: &Defects,
+    view: &HoleView,
+    cam: &mf_render::OrbitCamera,
+    size: (f64, f64),
+    rect: eframe::egui::Rect,
+    occluders: &[(Mesh, Option<Arc<Bvh>>, DMat4)],
+) -> Vec<u32> {
+    let eye = cam.eye();
+    let mut out = Vec::new();
+    for &i in &view.listed {
+        let d = &defects.holes[i];
+        let (Some(place), Some((_, id))) = (defects.place(d), d.selection()) else {
+            continue;
+        };
+        let centre = glam::DVec3::from(place.bounds.center());
+        let Some((x, y)) = mf_render::screen_position(cam, cam.target, size, centre.to_array())
+        else {
+            continue;
+        };
+        if !rect.contains(eframe::egui::pos2(x as f32, y as f32)) {
+            continue;
+        }
+        let to = centre - eye;
+        let dist = to.length();
+        let dir = to / dist;
+        let slack = place.bounds.diagonal().max(dist * 1e-6);
+        let hidden = occluders.iter().any(|(m, bvh, model)| {
+            let hit = match bvh {
+                Some(b) => b.ray_pick(m, eye.to_array(), dir.to_array(), model),
+                // The app only box-selects once every BVH is built.
+                None => None,
+            };
+            hit.is_some_and(|(_, t)| t < dist - slack)
+        });
+        if !hidden {
+            out.push(id);
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// An overlay for `target` on `mesh` (see [`Workers::build_overlay`]).
@@ -1445,6 +1699,8 @@ mod tests {
                 transform: identity,
                 previous: None,
                 states: None,
+                numbers: Arc::default(),
+                openings: Vec::new(),
             },
             &RunContext::none(),
             &Gpu::new(device, queue),

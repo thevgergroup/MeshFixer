@@ -120,7 +120,7 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
     harness.step();
     wait_shown(&mut harness, "fill");
     let b = harness.state().session.current();
-    assert_ne!(a, b, "the fill committed");
+    assert_ne!(a, b, "the fill committed ({:?})", harness.state().status);
     let filled = assert_view_is_a_full_rebuild(harness.state(), &rs, "filled");
     eprintln!(
         "fill on {} triangles: {} of {full} surface bytes",
