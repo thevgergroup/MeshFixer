@@ -75,6 +75,14 @@ fn dihedral(n1: [f64; 3], n2: [f64; 3]) -> f64 {
     dot(n1, n2).clamp(-1.0, 1.0).acos()
 }
 
+/// Heap bytes of the dynamic-programming tables for an `n`-vertex loop.
+pub fn table_bytes(n: usize) -> u64 {
+    let per_cell = std::mem::size_of::<Weight>()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<[f64; 3]>();
+    (per_cell * n * n) as u64
+}
+
 /// Triangulate the polygon `p[0..n]` (the loop's vertices in loop order).
 /// `outer[k]` is the unit normal of the existing face across boundary edge
 /// `k → k+1` (`k = n-1` is the closing edge `n-1 → 0`).

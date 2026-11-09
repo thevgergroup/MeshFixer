@@ -420,3 +420,42 @@ fn ticker_checkpoints_every_32k_ticks() {
     }
     assert!(ok < 32_768, "{ok}");
 }
+
+/// The probe measures gaps between checkpoints from *any* thread, so with
+/// several workers one silent worker hides behind the others; its cancel
+/// latency is invisible. On a one-thread pool every gap is that thread's,
+/// so the probe sees the true worst gap. Gap tests therefore run there.
+#[test]
+fn a_one_thread_pool_shows_the_gap_a_busy_pool_hides() {
+    use rayon::prelude::*;
+    use std::time::Duration;
+    const SILENT: Duration = Duration::from_millis(150);
+    let work = |ctx: &RunContext| {
+        (0..8).into_par_iter().for_each(|i| {
+            if i == 0 {
+                // A long stretch with no checkpoint.
+                std::thread::sleep(SILENT);
+            } else {
+                for _ in 0..200 {
+                    ctx.checkpoint().unwrap();
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+        ctx.checkpoint().unwrap();
+    };
+
+    let (pool, _) = JobPool::new(Some(8));
+    let (ctx, probe) = RunContext::instrumented();
+    pool.install(|| work(&ctx));
+    let hidden = probe.max_gap();
+
+    let (pool, _) = JobPool::new(Some(1));
+    let (ctx, probe) = RunContext::instrumented();
+    pool.install(|| work(&ctx));
+    let seen = probe.max_gap();
+
+    eprintln!("8 threads: worst gap {hidden:?}; 1 thread: {seen:?} (silent stretch {SILENT:?})");
+    assert!(hidden < SILENT, "8 threads saw {hidden:?}");
+    assert!(seen >= SILENT, "1 thread saw only {seen:?}");
+}

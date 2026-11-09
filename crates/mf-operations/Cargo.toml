@@ -18,6 +18,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+mf-metrics.workspace = true
 mf-io.workspace = true
 mf-render.workspace = true
 serde.workspace = true

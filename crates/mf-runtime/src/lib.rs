@@ -282,7 +282,9 @@ impl ProbeState {
 
 /// Read side of [`RunContext::instrumented`]. Gaps are measured between
 /// consecutive checkpoints from any thread, starting at the probe's
-/// creation.
+/// creation. With several threads, one worker's long silence is hidden by
+/// the others' checkpoints, so to measure the worst gap run the work on a
+/// one-thread pool ([`JobPool::new`]`(Some(1))`).
 #[derive(Debug, Clone)]
 pub struct CheckpointProbe(Arc<ProbeState>);
 

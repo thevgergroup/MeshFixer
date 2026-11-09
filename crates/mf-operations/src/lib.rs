@@ -9,6 +9,11 @@ pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
 mod fill_holes;
+
+/// Most bytes `mesh.fill_holes` spends on triangulation tables at once:
+/// holes are triangulated in parallel only while their summed O(n²)
+/// tables fit (one hole bigger than this runs alone).
+pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
 mod remove_small;
 

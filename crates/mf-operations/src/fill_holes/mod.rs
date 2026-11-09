@@ -16,7 +16,10 @@ use mf_spec::Params;
 use rayon::prelude::*;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
+use crate::{
+    OpError, OpOutput, Operation, RunContext, TRIANGULATION_BUDGET_BYTES, Target,
+    unsupported_target,
+};
 
 pub struct FillHoles;
 
@@ -256,20 +259,39 @@ impl Operation for FillHoles {
             ctx.progress.report(stage, n as f64 / total.max(1) as f64);
         };
         ctx.progress.report("triangulating", 0.0);
-        let triangulations: Vec<Option<Vec<[usize; 3]>>> = (0..total)
-            .into_par_iter()
-            .map(|li| {
-                let tris = triangulate::triangulate(
-                    &points[li],
-                    &normals[li],
-                    &existing[li],
-                    min_area,
-                    ctx,
-                )?;
-                loop_done("triangulating");
-                Ok(tris)
-            })
-            .collect::<Result<_, Cancelled>>()?;
+        // Each table is O(n²) (12 MB at 500 edges): run consecutive loops in
+        // parallel only while their tables fit the budget together, so peak
+        // memory doesn't grow with the thread count.
+        let mut triangulations: Vec<Option<Vec<[usize; 3]>>> = Vec::with_capacity(total);
+        let mut start = 0;
+        while start < total {
+            let mut end = start + 1;
+            let mut bytes = triangulate::table_bytes(points[start].len());
+            while end < total {
+                let next = triangulate::table_bytes(points[end].len());
+                if bytes + next > TRIANGULATION_BUDGET_BYTES {
+                    break;
+                }
+                bytes += next;
+                end += 1;
+            }
+            let batch: Vec<Option<Vec<[usize; 3]>>> = (start..end)
+                .into_par_iter()
+                .map(|li| {
+                    let tris = triangulate::triangulate(
+                        &points[li],
+                        &normals[li],
+                        &existing[li],
+                        min_area,
+                        ctx,
+                    )?;
+                    loop_done("triangulating");
+                    Ok(tris)
+                })
+                .collect::<Result<_, Cancelled>>()?;
+            triangulations.extend(batch);
+            start = end;
+        }
         ctx.progress.report("triangulating", 1.0);
 
         if refine {

@@ -17,7 +17,7 @@ use mf_command::{CommandError, CommitOutcome, Completed, Invocation, ObjectId, P
 use mf_fixtures::{DamageSpec, damaged_sphere};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::{Format, Imported, IoError, SourceInfo, SourcePrecision};
-use mf_runtime::{CheckpointProbe, RunContext};
+use mf_runtime::{CheckpointProbe, JobPool, RunContext};
 
 const BIG: usize = 5_000_000;
 /// MF-RT-002 via the M4 plan: cancel returns within 250 ms.
@@ -219,40 +219,97 @@ fn cancel_to_stop_within_250ms_on_5m_import_and_fill() {
     }
 }
 
+/// Runs `job` with an instrumented context on a pool of `threads` and
+/// returns the largest checkpoint gap (with the run's own ends included).
+fn largest_gap<T: Send>(
+    threads: usize,
+    job: impl FnOnce(&RunContext) -> T + Send,
+) -> (T, CheckpointProbe) {
+    let (pool, _) = JobPool::new(Some(threads));
+    let (ctx, probe) = RunContext::instrumented();
+    let out = pool.install(|| {
+        ctx.checkpoint().unwrap();
+        let out = job(&ctx);
+        ctx.checkpoint().unwrap();
+        out
+    });
+    (out, probe)
+}
+
+/// MF-RT-002 on a one-thread pool, where every gap the probe sees is the
+/// gap of the one thread doing the work (with more threads, one silent
+/// worker hides behind the others: see mf-runtime's
+/// `a_one_thread_pool_shows_the_gap_a_busy_pool_hides`). The default pool
+/// size is measured too.
 #[test]
 fn checkpoints_at_least_every_100ms() {
     let _guard = heavy();
-    // fill_holes on 5M triangles, topology included.
-    let mesh = big_mesh();
-    mesh.release_topology();
-    let (s, id) = session_with(mesh);
-    let prepared = s.prepare(fill(id)).unwrap();
-    let (ctx, probe) = RunContext::instrumented();
-    ctx.checkpoint().unwrap();
-    let completed = prepared.run(&ctx).unwrap();
-    ctx.checkpoint().unwrap();
-    eprintln!("fill_holes: {}", describe(&probe));
-    assert!(
-        probe.max_gap() <= CHECKPOINT_BUDGET,
-        "fill_holes: {}",
-        describe(&probe)
-    );
-    drop(completed);
-
-    // Import of the same mesh as a 5M binary STL.
     let dir = tempfile::tempdir().unwrap();
     let path = write_big_stl(dir.path());
-    let (ctx, probe) = RunContext::instrumented();
-    ctx.checkpoint().unwrap();
-    let model = mf_io::read_model_with(&path, &ctx).unwrap();
-    ctx.checkpoint().unwrap();
-    eprintln!("import: {}", describe(&probe));
-    assert!(
-        probe.max_gap() <= CHECKPOINT_BUDGET,
-        "import: {}",
-        describe(&probe)
-    );
-    assert_eq!(model.objects[0].mesh.face_count(), big_mesh().face_count());
+    let default_threads = JobPool::new(None).1.threads;
+    let mut failures = Vec::new();
+    for threads in [1, default_threads] {
+        // fill_holes on 5M triangles, topology included.
+        let mesh = big_mesh();
+        mesh.release_topology();
+        let (s, id) = session_with(mesh);
+        let prepared = s.prepare(fill(id)).unwrap();
+        let (completed, probe) = largest_gap(threads, move |ctx| prepared.run(ctx));
+        completed.unwrap();
+        eprintln!("fill_holes, {threads} thread(s): {}", describe(&probe));
+        if probe.max_gap() > CHECKPOINT_BUDGET {
+            failures.push(format!(
+                "fill_holes, {threads} thread(s): {}",
+                describe(&probe)
+            ));
+        }
+
+        // Import of the same mesh as a 5M binary STL.
+        let p = path.clone();
+        let (model, probe) = largest_gap(threads, move |ctx| mf_io::read_model_with(&p, ctx));
+        assert_eq!(
+            model.unwrap().objects[0].mesh.face_count(),
+            big_mesh().face_count()
+        );
+        eprintln!("import, {threads} thread(s): {}", describe(&probe));
+        if probe.max_gap() > CHECKPOINT_BUDGET {
+            failures.push(format!("import, {threads} thread(s): {}", describe(&probe)));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
+}
+
+/// A cancelled topology computation caches nothing, and the next
+/// uncancelled one is complete.
+#[test]
+fn cancelled_topology_is_not_cached() {
+    let _guard = heavy();
+    let mesh = big_mesh();
+    mesh.release_topology();
+    for at in [0.2, 0.7] {
+        let ctx = RunContext::none();
+        let m = mesh.clone();
+        let rx = spawn(&ctx, move |ctx| m.topology_with(ctx).map(|_| ()));
+        let (result, _) = cancel_when(&ctx, &rx, "topology", |stage, f| {
+            stage == "topology" && f >= at
+        });
+        assert!(result.is_err(), "at {at}: not cancelled");
+        assert!(!mesh.has_cached_topology(), "at {at}: cached after cancel");
+    }
+    // Through an operation too.
+    let (s, id) = session_with(mesh.clone());
+    let prepared = s.prepare(fill(id)).unwrap();
+    let ctx = RunContext::none();
+    let rx = spawn(&ctx, move |ctx| prepared.run(ctx).map(|_| ()));
+    let (result, _) = cancel_when(&ctx, &rx, "fill", |stage, f| {
+        stage == "topology" && f >= 0.5
+    });
+    assert!(matches!(result, Err(CommandError::Cancelled)));
+    assert!(!mesh.has_cached_topology(), "cached after a cancelled fill");
+
+    let topo = mesh.topology();
+    assert!(mesh.has_cached_topology());
+    assert_eq!(*topo, mf_geometry::Topology::compute(&mesh));
 }
 
 /// Every update a context's progress sends, in order.
@@ -378,60 +435,90 @@ fn cancel_racing_completion_has_one_outcome() {
     let base = s.current();
     let base_hash = hash_of(&s, id);
 
-    // How long an uncancelled run takes, to aim the cancels around its end.
+    // The full result, and how long an uncancelled run takes, measured the
+    // way the iterations run (spawned thread included), to aim the cancels
+    // around its end.
     let mut runs = Vec::new();
+    let mut full_hash = None;
     for _ in 0..5 {
         let prepared = s.prepare(fill(id)).unwrap();
         let start = Instant::now();
-        prepared.run(&RunContext::none()).unwrap();
+        let completed = std::thread::spawn(move || prepared.run(&RunContext::none()))
+            .join()
+            .unwrap()
+            .unwrap();
         runs.push(start.elapsed());
+        let hash = completed.output.change.as_ref().unwrap().0.content_hash();
+        assert_eq!(
+            *full_hash.get_or_insert(hash),
+            hash,
+            "fill isn't deterministic"
+        );
     }
+    let full_hash = full_hash.unwrap();
     runs.sort();
     let typical = runs[runs.len() / 2];
 
+    // Offsets are uniform in [0.5, 1.5] × `scale` × the typical run. If a
+    // round of 200 never sees one of the two outcomes (a busy machine moves
+    // completion), the window is moved and the round repeated, up to
+    // ROUNDS times. Every iteration of every round is checked.
+    const ROUNDS: usize = 5;
     let mut rng = Rng(0x5EED);
-    let (mut cancelled, mut committed) = (0, 0);
-    for i in 0..200 {
-        assert_eq!(s.current(), base);
-        let revisions = s.revisions().len();
-        let prepared = s.prepare(fill(id)).unwrap();
-        // Uniform in [0.5, 1.5] × the typical run time.
-        let offset = typical.mul_f64(0.5 + (rng.next() % 1000) as f64 / 1000.0);
-        let ctx = RunContext::none();
-        let worker = {
-            let ctx = ctx.clone();
-            std::thread::spawn(move || prepared.run(&ctx))
-        };
-        let start = Instant::now();
-        while start.elapsed() < offset {
-            std::hint::spin_loop();
-        }
-        ctx.cancel.cancel();
-        match worker.join().unwrap() {
-            Err(CommandError::Cancelled) => {
-                cancelled += 1;
-                assert_eq!(hash_of(&s, id), base_hash, "iteration {i}");
-                assert_eq!(s.revisions().len(), revisions, "iteration {i}");
+    let mut scale = 1.0f64;
+    let mut history = Vec::new();
+    for round in 0..ROUNDS {
+        let (mut cancelled, mut committed) = (0, 0);
+        for i in 0..200 {
+            assert_eq!(s.current(), base);
+            let revisions = s.revisions().len();
+            let prepared = s.prepare(fill(id)).unwrap();
+            let offset = typical.mul_f64(scale * (0.5 + (rng.next() % 1000) as f64 / 1000.0));
+            let ctx = RunContext::none();
+            let worker = {
+                let ctx = ctx.clone();
+                std::thread::spawn(move || prepared.run(&ctx))
+            };
+            let start = Instant::now();
+            while start.elapsed() < offset {
+                std::hint::spin_loop();
             }
-            Ok(completed) => {
-                committed += 1;
-                // The cancel came too late to matter: the result commits.
-                let outcome = s.commit(completed).unwrap();
-                assert!(
-                    matches!(outcome, CommitOutcome::NewRevision { .. }),
-                    "iteration {i}"
-                );
-                assert_eq!(s.revisions().len(), revisions + 1, "iteration {i}");
-                assert_ne!(hash_of(&s, id), base_hash, "iteration {i}");
-                assert!(s.undo());
+            ctx.cancel.cancel();
+            let at = format!("round {round}, iteration {i}");
+            match worker.join().unwrap() {
+                Err(CommandError::Cancelled) => {
+                    cancelled += 1;
+                    assert_eq!(hash_of(&s, id), base_hash, "{at}");
+                    assert_eq!(s.revisions().len(), revisions, "{at}");
+                }
+                Ok(completed) => {
+                    committed += 1;
+                    // The cancel came too late to matter: the whole result
+                    // (never a partial one) commits as one revision.
+                    let outcome = s.commit(completed).unwrap();
+                    assert!(matches!(outcome, CommitOutcome::NewRevision { .. }), "{at}");
+                    assert_eq!(s.revisions().len(), revisions + 1, "{at}");
+                    assert_eq!(
+                        hash_of(&s, id),
+                        full_hash,
+                        "{at}: a partial result committed"
+                    );
+                    assert!(s.undo());
+                }
+                Err(other) => panic!("{at}: a third outcome: {other:?}"),
             }
-            Err(other) => panic!("iteration {i}: a third outcome: {other:?}"),
         }
+        eprintln!(
+            "round {round}: typical run {typical:?} x {scale:.2}: \
+             {cancelled} cancelled, {committed} committed"
+        );
+        history.push((scale, cancelled, committed));
+        if cancelled > 0 && committed > 0 {
+            return;
+        }
+        scale *= if committed == 0 { 4.0 } else { 0.25 };
     }
-    eprintln!("typical run {typical:?}: {cancelled} cancelled, {committed} committed");
-    assert_eq!(cancelled + committed, 200);
-    assert!(
-        cancelled > 0 && committed > 0,
-        "{cancelled} cancelled, {committed} committed"
+    panic!(
+        "no round of 200 saw both outcomes; (scale, cancelled, committed) per round: {history:?}"
     );
 }
