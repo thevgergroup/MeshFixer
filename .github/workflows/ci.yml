@@ -61,6 +61,8 @@ jobs:
         shell: bash
         run: |
           set -o pipefail
+          # No --fast: CI always runs everything on every push, even though
+          # scripts/check.sh is fast (skips timing/heavy tests) by default locally.
           scripts/run-tests.sh 2>&1 | tee test-output.txt
       - name: Gated frames (worst frame and where its time went)
         if: always()

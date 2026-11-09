@@ -1,7 +1,23 @@
 #!/usr/bin/env bash
 # Run the same checks as CI's test job before pushing.
+#
+# Fast by default: tests run via `scripts/run-tests.sh --fast`, which skips
+# the hardcoded timing/heavy (5M-triangle) test groups — CI always runs
+# them on every push, so this just keeps local commits from taking
+# 15-25 minutes. Run `scripts/check.sh --full` instead before closing out a
+# milestone, or whenever you touch performance- or timing-sensitive code
+# (cancellation, checkpoints, frame budgets, memory budgets) so those
+# tests are verified locally too, not just in CI.
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+mode="--fast"
+case "${1:-}" in
+  --full) mode="" ;;
+  "") ;;
+  *) echo "usage: $0 [--full]" >&2; exit 2 ;;
+esac
+
 toolchain="$HOME/.rustup/toolchains/$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)-$(rustc -vV | sed -n 's/^host: //p')/bin"
 [ -d "$toolchain" ] && export PATH="$toolchain:$PATH"
 cargo fmt --all --check
@@ -10,10 +26,16 @@ scripts/test-check-swallowed.sh > /dev/null
 scripts/test-fetch-fixtures.sh > /dev/null
 scripts/check-swallowed-defaults.sh
 cargo deny check licenses 2>/dev/null
-# Timing tests run on their own after the rest (scripts/run-tests.sh).
+# Timing tests run on their own after the rest (scripts/run-tests.sh), unless
+# running in fast mode (the default here), which skips them entirely.
+# A unique temp file per run (not a fixed path) so concurrent check.sh runs
+# (e.g. another agent/session testing at the same time) can't clobber or
+# interleave each other's output.
+test_log="$(mktemp "${TMPDIR:-/tmp}/meshfixer-check-tests.XXXXXX")"
+trap 'rm -f "$test_log"' EXIT
 tests=0
-scripts/run-tests.sh > /tmp/meshfixer-check-tests.txt 2>&1 || tests=$?
-grep -E "^test result: FAILED|panicked|worst frame" /tmp/meshfixer-check-tests.txt || true
-scripts/ci-test-summary.sh /tmp/meshfixer-check-tests.txt "${MF_SKIP_LOG:-/nonexistent}"
-! grep -q "^test result: FAILED" /tmp/meshfixer-check-tests.txt
+scripts/run-tests.sh $mode > "$test_log" 2>&1 || tests=$?
+grep -E "^test result: FAILED|panicked|worst frame|fast mode:" "$test_log" || true
+scripts/ci-test-summary.sh "$test_log" "${MF_SKIP_LOG:-/nonexistent}"
+! grep -q "^test result: FAILED" "$test_log"
 [ "$tests" -eq 0 ]

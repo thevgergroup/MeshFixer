@@ -11,8 +11,20 @@
 # few steps); isolating them keeps their thresholds meaningful without
 # widening them. The heavy 5M memory tests run there too. Both steps
 # always run; the exit status is non-zero if either failed.
+#
+# --fast: run step 1 only (still excluding the timing list below) and skip
+# step 2 entirely. For local iteration; CI always runs both steps via a
+# plain (no-flag) invocation, so the timing/5M tests are verified on every
+# push regardless of this flag.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+
+fast=0
+case "${1:-}" in
+  --fast) fast=1 ;;
+  "") ;;
+  *) echo "usage: $0 [--fast]" >&2; exit 2 ;;
+esac
 
 # package, test target, test-name filters (substrings; each is also
 # skipped in step 1).
@@ -48,11 +60,18 @@ done
 
 status=0
 echo "=== step 1: workspace tests in parallel (timing tests excluded) ==="
-cargo test --workspace -- "${skips[@]}" || status=1
+# --no-fail-fast: a failing test target must not stop the rest of the
+# workspace from running, or a single failure hides every other result.
+cargo test --workspace --no-fail-fast -- "${skips[@]}" || status=1
+
+if [ "$fast" -eq 1 ]; then
+  echo "fast mode: ${#timing[@]} heavy/timing test groups skipped — CI runs them on every push (scripts/check.sh --full to run them locally)"
+  exit $status
+fi
 
 echo "=== step 2: timing tests, one at a time ==="
 for entry in "${timing[@]}"; do
   read -r -a words <<<"$entry"
-  cargo test -p "${words[0]}" --test "${words[1]}" -- --test-threads=1 --nocapture "${words[@]:2}" || status=1
+  cargo test -p "${words[0]}" --test "${words[1]}" --no-fail-fast -- --test-threads=1 --nocapture "${words[@]:2}" || status=1
 done
 exit $status
