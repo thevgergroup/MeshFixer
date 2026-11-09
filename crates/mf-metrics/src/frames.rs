@@ -24,6 +24,10 @@ pub enum GpuTime {
     /// Timed; the result hasn't been read back yet.
     Pending,
     Measured(Duration),
+    /// Drawn, but no usable time: no free read-back to time it with, a
+    /// timestamp the GPU skipped or wrote out of order, or a failed
+    /// read-back. Counted, never a zero or a guess.
+    Unusable,
 }
 
 /// One frame's record.
@@ -86,9 +90,15 @@ impl Percentiles {
 pub enum GpuSummary {
     /// The device can't time GPU work.
     Unsupported,
-    /// Supported, but no timed frame has been read back yet.
-    NoSamples,
-    Measured(Percentiles),
+    /// Of the frames that drew on the GPU: percentiles of the measured ones
+    /// (`None` if none yet; `count()` says how many), how many have no
+    /// usable time, and how many are still being read back. So a report
+    /// can say "p95 from 23 of 180 frames (157 unusable)".
+    Supported {
+        measured: Option<Percentiles>,
+        unusable: usize,
+        pending: usize,
+    },
 }
 
 /// The last [`FRAME_HISTORY`] frames.
@@ -143,6 +153,16 @@ impl FrameTimes {
         }
     }
 
+    /// Frame `index` drew on the GPU but has no usable time. Ignored for a
+    /// frame that is no longer kept, or that wasn't timed.
+    pub fn set_gpu_unusable(&mut self, index: u64) {
+        if let Some(f) = self.frame_mut(index)
+            && f.gpu == GpuTime::Pending
+        {
+            f.gpu = GpuTime::Unusable;
+        }
+    }
+
     fn frame_mut(&mut self, index: u64) -> Option<&mut FrameSample> {
         let first = self.frames.front()?.index;
         // allow-swallow: an index too far ahead to fit is simply not a kept frame
@@ -174,6 +194,7 @@ impl FrameTimes {
         if self.frames.iter().any(|f| f.gpu == GpuTime::Unsupported) {
             return GpuSummary::Unsupported;
         }
+        let count = |want: GpuTime| self.frames.iter().filter(|f| f.gpu == want).count();
         let measured = self
             .frames
             .iter()
@@ -182,9 +203,10 @@ impl FrameTimes {
                 _ => None,
             })
             .collect();
-        match Percentiles::of(measured) {
-            Some(p) => GpuSummary::Measured(p),
-            None => GpuSummary::NoSamples,
+        GpuSummary::Supported {
+            measured: Percentiles::of(measured),
+            unusable: count(GpuTime::Unusable),
+            pending: count(GpuTime::Pending),
         }
     }
 }

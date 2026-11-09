@@ -9,11 +9,12 @@ use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
 use mf_metrics::GpuTime;
 use mf_render::{
-    GpuFaces, GpuLines, GpuMesh, GpuTimer, Layer, LayerGeometry, LineVertex, MeshRenderer,
-    MeshVertices, OrbitCamera, Palette, RenderTarget, SurfaceVertex, model_matrix,
+    GpuFaces, GpuLines, GpuTimer, Layer, LayerGeometry, MeshRenderer, OrbitCamera, Palette,
+    RenderTarget, model_matrix,
 };
 
 use crate::theme;
+use crate::worker::RenderMesh;
 
 pub const MSAA_SAMPLES: u32 = 4;
 
@@ -24,6 +25,8 @@ struct FrameKey {
     size: (u32, u32),
     /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
+    /// Each object drawn and the identity of its render mesh.
+    objects: Vec<(ObjectId, usize)>,
     /// Identity and colour of each overlay layer, in draw order.
     layers: Vec<(ObjectId, usize, [u8; 4], u32)>,
 }
@@ -37,9 +40,10 @@ pub struct ViewLayer {
     pub strength: f32,
 }
 
+/// An overlay's GPU buffers, built on a worker (the view never uploads).
 pub enum ViewGeometry {
-    Lines(Arc<Vec<LineVertex>>),
-    Faces(Arc<Vec<SurfaceVertex>>),
+    Lines(Arc<GpuLines>),
+    Faces(Arc<GpuFaces>),
 }
 
 impl ViewGeometry {
@@ -51,16 +55,11 @@ impl ViewGeometry {
     }
 }
 
-/// A layer's GPU buffers, kept while the same vertex set is drawn.
-enum GpuLayer {
-    Lines(GpuLines),
-    Faces(GpuFaces),
-}
-
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
 pub struct ObjectView {
     pub id: ObjectId,
-    pub vertices: Arc<MeshVertices>,
+    /// Built on a worker, GPU buffers included (MF-RT-001).
+    pub render: Arc<RenderMesh>,
     pub transform: [f64; 12],
     pub active: bool,
 }
@@ -127,10 +126,6 @@ pub struct Viewport {
     renderer: MeshRenderer,
     target: Option<RenderTarget>,
     texture: Option<egui::TextureId>,
-    /// GPU meshes uploaded for the objects drawn last frame, by object id.
-    uploaded: Vec<(ObjectId, Arc<MeshVertices>, GpuMesh)>,
-    /// Overlay buffers by vertex-set identity (the `Arc` keeps it alive).
-    layers: Vec<(usize, GpuLayer)>,
     last_frame: Option<FrameKey>,
     /// Where the 3D view was last drawn (for picking and screen projections).
     pub last_rect: Option<egui::Rect>,
@@ -138,17 +133,18 @@ pub struct Viewport {
     pub frames_rendered: u64,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
-    /// The last frame that redrew the 3D view.
-    redrawn: Option<u64>,
+    /// The last frame that redrew the 3D view, and whether it was timed.
+    redrawn: Option<(u64, bool)>,
 }
 
 impl Viewport {
     pub fn new(render_state: RenderState, palette: Palette) -> Viewport {
-        let renderer = MeshRenderer::new(
+        let mut renderer = MeshRenderer::new(
             &render_state.device,
             RenderTarget::format(MSAA_SAMPLES),
             palette,
         );
+        warm_up(&render_state.device, &render_state.queue, &mut renderer);
         let timer = GpuTimer::new(&render_state.device, &render_state.queue);
         Viewport {
             timer,
@@ -159,8 +155,6 @@ impl Viewport {
             renderer,
             target: None,
             texture: None,
-            uploaded: Vec::new(),
-            layers: Vec::new(),
             last_frame: None,
             last_rect: None,
             frames_rendered: 0,
@@ -190,10 +184,13 @@ impl Viewport {
             // Nothing ready to draw yet (no camera, or no object's vertices
             // are in hand): release GPU buffers for a vanished document
             // (MF-ISSUE-009).
-            self.uploaded.clear();
-            self.layers.clear();
             self.last_frame = None;
             self.last_rect = None;
+            let size = self.target_size(ui, rect);
+            self.ensure_target(size);
+            // Laid out, not painted, so the first frame that draws a model
+            // doesn't also rasterize this text's glyphs (MF-RT-001).
+            let _warm = (controls_hint(ui), updating_text(ui));
             ui.painter()
                 .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
             ui.painter().text(
@@ -217,14 +214,9 @@ impl Viewport {
             });
         handle_input(ui, &response, rect, cam, self.nav_mode);
 
-        // Clamp to the device limit; egui scales the image up if needed.
-        let ppp = ui.ctx().pixels_per_point();
-        self.renderer.set_pixels_per_point(ppp);
-        let max = RenderTarget::max_dimension(&self.render_state.device) as f32;
-        let size = (
-            (rect.width() * ppp).round().clamp(1.0, max) as u32,
-            (rect.height() * ppp).round().clamp(1.0, max) as u32,
-        );
+        self.renderer
+            .set_pixels_per_point(ui.ctx().pixels_per_point());
+        let size = self.target_size(ui, rect);
         let texture = self.render(*cam, objects, show_boundaries, &layers, size, frame);
         ui.painter().image(
             texture,
@@ -233,23 +225,16 @@ impl Viewport {
             egui::Color32::WHITE,
         );
         if updating {
-            ui.painter().text(
+            ui.painter().galley(
                 rect.left_top() + egui::vec2(8.0, 8.0),
-                egui::Align2::LEFT_TOP,
-                "Updating view…",
-                egui::FontId::proportional(14.0),
+                updating_text(ui),
                 theme::TEXT_MUTED,
             );
         }
         // The controls hint, on a backdrop so it reads over the model. Kept
         // short so it clears the navigation bar at the bottom-right; Help >
         // Controls lists everything.
-        let hint = ui.painter().layout_no_wrap(
-            "Drag: orbit · Shift-drag: pan · Alt-drag: zoom · F: frame · Help > Controls"
-                .to_owned(),
-            egui::FontId::proportional(12.0),
-            theme::TEXT_MUTED,
-        );
+        let hint = controls_hint(ui);
         let at = rect.left_bottom() + egui::vec2(8.0, -8.0 - hint.size().y);
         ui.painter().rect_filled(
             egui::Rect::from_min_size(at, hint.size()).expand(4.0),
@@ -370,95 +355,26 @@ impl Viewport {
         size: (u32, u32),
         frame: u64,
     ) -> egui::TextureId {
+        let mut dirty = self.ensure_target(size);
         let device = &self.render_state.device;
-        let mut dirty = false;
 
-        let resize = self
-            .target
-            .as_ref()
-            .is_none_or(|t| (t.width, t.height) != size);
-        if resize {
-            let target = RenderTarget::new(device, size.0, size.1, MSAA_SAMPLES)
-                .expect("viewport size is clamped to the device limit");
-            let mut egui_renderer = self.render_state.renderer.write();
-            let id = match self.texture {
-                Some(id) => {
-                    egui_renderer.update_egui_texture_from_wgpu_texture(
-                        device,
-                        target.view(),
-                        wgpu::FilterMode::Linear,
-                        id,
-                    );
-                    id
-                }
-                None => egui_renderer.register_native_texture(
-                    device,
-                    target.view(),
-                    wgpu::FilterMode::Linear,
-                ),
-            };
-            self.texture = Some(id);
-            self.target = Some(target);
-            dirty = true;
-        }
-
-        // Upload only objects whose vertex set changed; drop ones no longer
-        // in the document. Vertex data was built on a worker thread.
-        let mut uploaded = Vec::with_capacity(objects.len());
-        for o in objects {
-            let existing = self
-                .uploaded
-                .iter()
-                .position(|(id, v, _)| *id == o.id && Arc::ptr_eq(v, &o.vertices));
-            let entry = match existing {
-                Some(i) => self.uploaded.swap_remove(i),
-                None => {
-                    dirty = true;
-                    (
-                        o.id,
-                        o.vertices.clone(),
-                        GpuMesh::from_vertices(device, &o.vertices),
-                    )
-                }
-            };
-            uploaded.push(entry);
-        }
-        // Anything left in `self.uploaded` belonged to an object no longer
-        // drawn this frame (removed, or no longer the active/ready one).
-        dirty |= !self.uploaded.is_empty();
-        self.uploaded = uploaded;
-
-        // Overlays upload separately from the meshes (MF-RENDER-003), and
-        // only when their vertex set changes. Layers on an object that isn't
-        // drawn this frame are skipped.
+        // Every buffer was built on a worker (MF-RT-001): nothing is
+        // created or uploaded here. Layers on an object that isn't drawn
+        // this frame are skipped.
         let drawn: Vec<&ViewLayer> = layers
             .iter()
             .filter(|l| objects.iter().any(|o| o.id == l.object))
             .collect();
-        let mut kept = Vec::with_capacity(drawn.len());
-        for l in &drawn {
-            let id = l.geometry.identity();
-            let entry = match self.layers.iter().position(|(i, _)| *i == id) {
-                Some(i) => self.layers.swap_remove(i),
-                None => (
-                    id,
-                    match &l.geometry {
-                        ViewGeometry::Lines(v) => GpuLayer::Lines(GpuLines::upload(device, v)),
-                        ViewGeometry::Faces(v) => GpuLayer::Faces(GpuFaces::upload(device, v)),
-                    },
-                ),
-            };
-            kept.push(entry);
-        }
-        self.layers = kept;
         let key = FrameKey {
             camera,
             show_boundaries,
             size,
-            // Content changes (a new vertex set, an object added or
-            // removed) already set `dirty` above; this only needs to catch
-            // a change of *which* object is active (dimming changes).
+            // Which object is active changes the dimming.
             active: objects.iter().find(|o| o.active).map(|o| o.id),
+            objects: objects
+                .iter()
+                .map(|o| (o.id, Arc::as_ptr(&o.render) as usize))
+                .collect(),
             layers: drawn
                 .iter()
                 .map(|l| {
@@ -476,31 +392,29 @@ impl Viewport {
         if dirty && let Some(target) = &self.target {
             let items: Vec<mf_render::DrawItem<'_>> = objects
                 .iter()
-                .zip(&self.uploaded)
-                .map(|(o, (_, _, gpu))| mf_render::DrawItem {
-                    mesh: gpu,
+                .map(|o| mf_render::DrawItem {
+                    mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
                     inactive: !o.active,
                 })
                 .collect();
             let gpu_layers: Vec<Layer<'_>> = drawn
                 .iter()
-                .zip(&self.layers)
-                .filter_map(|(l, (_, gpu))| {
+                .filter_map(|l| {
                     let o = objects.iter().find(|o| o.id == l.object)?;
                     Some(Layer {
-                        geometry: match gpu {
-                            GpuLayer::Lines(g) => LayerGeometry::Lines(g),
-                            GpuLayer::Faces(g) => LayerGeometry::Faces(g),
+                        geometry: match &l.geometry {
+                            ViewGeometry::Lines(g) => LayerGeometry::Lines(g),
+                            ViewGeometry::Faces(g) => LayerGeometry::Faces(g),
                         },
                         model: model_matrix(&o.transform),
-                        mesh_origin: o.vertices.origin,
+                        mesh_origin: o.render.origin,
                         color: theme::rgba(l.color),
                         strength: l.strength,
                     })
                 })
                 .collect();
-            target.draw_timed(
+            let timed = target.draw_timed(
                 device,
                 &self.render_state.queue,
                 &mut self.renderer,
@@ -510,7 +424,7 @@ impl Viewport {
                 &gpu_layers,
                 self.timer.as_mut().map(|t| (t, frame)),
             );
-            self.redrawn = Some(frame);
+            self.redrawn = Some((frame, timed));
             self.last_frame = Some(key);
             self.frames_rendered += 1;
         }
@@ -520,9 +434,56 @@ impl Viewport {
 }
 
 impl Viewport {
-    /// GPU times of earlier frames that have been read back since the last
-    /// call, as (frame, time). Never waits for the GPU.
-    pub fn collect_gpu_times(&mut self) -> Vec<(u64, std::time::Duration)> {
+    /// The render target for `size` (pixels), made or remade if needed;
+    /// returns whether it was. Also made while there's nothing to draw, so
+    /// the first frame that draws a model doesn't pay for it (MF-RT-001).
+    fn ensure_target(&mut self, size: (u32, u32)) -> bool {
+        if self
+            .target
+            .as_ref()
+            .is_some_and(|t| (t.width, t.height) == size)
+        {
+            return false;
+        }
+        let device = &self.render_state.device;
+        let target = RenderTarget::new(device, size.0, size.1, MSAA_SAMPLES)
+            .expect("viewport size is clamped to the device limit");
+        let mut egui_renderer = self.render_state.renderer.write();
+        let id = match self.texture {
+            Some(id) => {
+                egui_renderer.update_egui_texture_from_wgpu_texture(
+                    device,
+                    target.view(),
+                    wgpu::FilterMode::Linear,
+                    id,
+                );
+                id
+            }
+            None => egui_renderer.register_native_texture(
+                device,
+                target.view(),
+                wgpu::FilterMode::Linear,
+            ),
+        };
+        self.texture = Some(id);
+        self.target = Some(target);
+        true
+    }
+
+    /// The target size (pixels) for a view of `rect`, clamped to the
+    /// device limit; egui scales the image up if needed.
+    fn target_size(&self, ui: &egui::Ui, rect: egui::Rect) -> (u32, u32) {
+        let ppp = ui.ctx().pixels_per_point();
+        let max = RenderTarget::max_dimension(&self.render_state.device) as f32;
+        (
+            (rect.width() * ppp).round().clamp(1.0, max) as u32,
+            (rect.height() * ppp).round().clamp(1.0, max) as u32,
+        )
+    }
+
+    /// Earlier frames read back since the last call, with their GPU time
+    /// or `None` if it was unusable. Never waits for the GPU.
+    pub fn collect_gpu_times(&mut self) -> Vec<(u64, Option<std::time::Duration>)> {
         match self.timer.as_mut() {
             Some(t) => t.collect(&self.render_state.device),
             None => Vec::new(),
@@ -542,12 +503,11 @@ impl Viewport {
         if self.timer.is_none() {
             return GpuTime::Unsupported;
         }
-        // A redraw that couldn't be timed (every read-back was busy) stays
-        // pending for good: its time is unknown, never zero.
-        if self.redrawn == Some(frame) {
-            GpuTime::Pending
-        } else {
-            GpuTime::NotRendered
+        match self.redrawn {
+            Some((f, true)) if f == frame => GpuTime::Pending,
+            // Redrawn, but every read-back was busy: no time to be had.
+            Some((f, false)) if f == frame => GpuTime::Unusable,
+            _ => GpuTime::NotRendered,
         }
     }
 }
@@ -646,6 +606,69 @@ fn handle_input(
             }
         }
     }
+}
+
+/// Draws a single triangle once, offscreen, through every pipeline the view
+/// uses (surface, outlines, line and face overlays, dimmed objects), so the
+/// first frame that draws a real model doesn't also wait for the driver to
+/// get them ready: ~25 ms of GPU wait on Metal, measured (MF-RT-001). It
+/// isn't waited for here either.
+fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRenderer) {
+    let mesh = mf_geometry::Mesh::new(
+        vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        vec![[0, 1, 2]],
+    )
+    .expect("a triangle is a valid mesh");
+    let vertices = mf_render::MeshVertices::build(&mesh);
+    let gpu = mf_render::GpuMesh::from_vertices(device, &vertices);
+    let lines = GpuLines::upload(device, &vertices.lines);
+    let faces = GpuFaces::upload(device, &vertices.surface);
+    let target = RenderTarget::new(device, 8, 8, MSAA_SAMPLES).expect("an 8×8 target fits");
+    let camera = OrbitCamera::fit(&mesh.bounding_box().expect("a triangle has bounds"));
+    let model = glam::DMat4::IDENTITY;
+    let items = [false, true].map(|inactive| mf_render::DrawItem {
+        mesh: &gpu,
+        model,
+        inactive,
+    });
+    let layer = |geometry| Layer {
+        geometry,
+        model,
+        mesh_origin: vertices.origin,
+        color: [1.0; 4],
+        strength: 1.0,
+    };
+    let layers = [
+        layer(LayerGeometry::Lines(&lines)),
+        layer(LayerGeometry::Faces(&faces)),
+    ];
+    target.draw(
+        device,
+        queue,
+        renderer,
+        Some(&camera),
+        &items,
+        true,
+        &layers,
+    );
+}
+
+/// The controls hint at the view's bottom-left.
+fn controls_hint(ui: &egui::Ui) -> Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        "Drag: orbit · Shift-drag: pan · Alt-drag: zoom · F: frame · Help > Controls".to_owned(),
+        egui::FontId::proportional(12.0),
+        theme::TEXT_MUTED,
+    )
+}
+
+/// Shown while the view still draws an object's previous revision.
+fn updating_text(ui: &egui::Ui) -> Arc<egui::Galley> {
+    ui.painter().layout_no_wrap(
+        "Updating view…".to_owned(),
+        egui::FontId::proportional(14.0),
+        theme::TEXT_MUTED,
+    )
 }
 
 /// Give a symbol button an accessible name (and the name tests find it by).

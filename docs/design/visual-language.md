@@ -42,7 +42,9 @@ Someone who has used Meshmixer or Fusion should understand the screen without an
   - While an import, operation or export runs, the status line shows the job, its stage in plain words and a percentage ("Fill all holes… · filling 42%"), a neutral progress bar (`PROGRESS`), and a **Cancel** button at the far right. Esc does the same as Cancel while a job runs, before it would clear the selection; otherwise Esc clears the selection as before. A job that reports no progress (replay) shows a spinner and has no Cancel.
   - After Cancel the button gives way to "Cancelling…" until the job stops (within 250 ms), then the status reads exactly "Cancelled: document unchanged" (for an export: "Cancelled: nothing exported"). A job that finished before the cancel reached it keeps its result, and the status starts "Finished before it could be cancelled".
   - Stage words: reading the file, joining corners, finding edges, checking, filling, smoothing the patches, removing pieces, writing the file.
-  - Help shows how many cores background work uses ("Background work: 11 of 12 cores (default: all cores but one)"); `meshfixer-desktop --threads N` changes it.
+  - Help shows how many cores background work uses and how they are split ("Background work: 11 of 12 cores (default: all cores but one): 8 for the running job, 3 for analysis and display"); `meshfixer-desktop --threads N` changes the total.
+  - While a new revision is analysed (after an operation, undo or redo), the 3D view keeps showing the object's previous revision with "Updating view…", without the selection and defect overlays (they belong to the new revision); the new one replaces it in a single frame once its GPU buffers are ready.
+  - An operation's result is summarised in words in the status line ("Filled 11 holes with 115181 new faces; 201 left open (too large or can't be filled)"). If an object can't be analysed, an error banner says so and the panels say "Couldn't analyse this object" instead of "Analyzing…".
 - **There is no operation drop-down.** You reach operations from the target.
 - The default window is 1440 × 900 points.
 

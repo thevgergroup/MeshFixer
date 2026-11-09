@@ -111,10 +111,14 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 }
                 ui.separator();
                 // MF-RT-004: the thread budget, shown in diagnostics.
-                let pool = app.pool_choice();
+                let pools = app.pool_sizes();
                 ui.weak(format!(
-                    "Background work: {} of {} cores ({})",
-                    pool.threads, pool.cores, pool.reason
+                    "Background work: {} of {} cores ({}): {} for the running job, {} for analysis and display",
+                    pools.budget.threads,
+                    pools.budget.cores,
+                    pools.budget.reason,
+                    pools.jobs,
+                    pools.background
                 ));
             });
         });
@@ -479,10 +483,14 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let Some(object) = app.active else { return };
     let Some(analysis) = app.current_analysis() else {
-        ui.horizontal(|ui| {
-            ui.spinner();
-            ui.weak("Analyzing…");
-        });
+        if app.analysis_failed_for_active() {
+            ui.weak("Couldn't analyse this object");
+        } else {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.weak("Analyzing…");
+            });
+        }
         return;
     };
     let defects = analysis.defects.clone();
@@ -513,7 +521,15 @@ fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .default_open(!list.is_empty())
             .show(ui, |ui| {
                 for d in list.iter().take(MAX_ROWS) {
-                    defect_row(app, ui, object, d, units);
+                    // A row scrolled out of sight only takes its space:
+                    // laying out hundreds of new rows in the frame a big
+                    // analysis arrives costs milliseconds (MF-RT-001).
+                    let size = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
+                    if ui.is_rect_visible(egui::Rect::from_min_size(ui.cursor().min, size)) {
+                        defect_row(app, ui, object, d, units);
+                    } else {
+                        ui.allocate_space(size);
+                    }
                 }
                 if list.len() > MAX_ROWS {
                     ui.weak(format!("…and {} more", list.len() - MAX_ROWS));
@@ -667,7 +683,11 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     };
     ui.label(RichText::new(&object.name).strong().size(16.0));
     let Some(a) = analysis else {
-        ui.weak("Analyzing…");
+        ui.weak(if app.analysis_failed_for_active() {
+            "Couldn't analyse this object"
+        } else {
+            "Analyzing…"
+        });
         return;
     };
     let d = &a.diagnostics;

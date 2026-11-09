@@ -51,7 +51,7 @@ fn timed_draws_report_a_gpu_time_per_frame() {
         model: DMat4::IDENTITY,
         inactive: false,
     }];
-    let mut times = Vec::new();
+    let mut samples = Vec::new();
     for frame in 0..20 {
         let timed = target.draw_timed(
             &device,
@@ -70,24 +70,44 @@ fn timed_draws_report_a_gpu_time_per_frame() {
                 timeout: None,
             })
             .unwrap();
-        times.extend(timer.collect(&device));
+        samples.extend(timer.collect(&device));
     }
-    // Every frame is accounted for: timed, or (Metal sometimes skips a
-    // write) counted as failed. Never a zero time. The pass is small, which
-    // Metal times fine (see timer.rs on heavy passes).
-    eprintln!(
-        "{} of 20 frames timed, {} unusable",
-        times.len(),
-        timer.failed
-    );
-    assert_eq!(times.len() as u64 + timer.failed, 20);
-    assert!(times.len() >= 10, "most frames are timed: {times:?}");
-    assert!(times.windows(2).all(|w| w[0].0 < w[1].0), "in frame order");
-    assert!(times.iter().all(|(_, t)| !t.is_zero()), "{times:?}");
+    // Every frame comes back, with a time or marked unusable (Metal
+    // sometimes skips a write); never a zero time. The pass is small,
+    // which Metal times fine (see timer.rs on heavy passes).
+    let frames: Vec<u64> = samples.iter().map(|(f, _)| *f).collect();
+    assert_eq!(frames, (0..20).collect::<Vec<_>>(), "every frame, in order");
+    let times: Vec<_> = samples.iter().filter_map(|(_, t)| *t).collect();
+    let unusable = samples.len() - times.len();
+    eprintln!("{} of 20 frames timed, {unusable} unusable", times.len());
+    assert_eq!(unusable as u64, timer.failed);
+    assert!(times.len() >= 10, "most frames are timed: {samples:?}");
+    assert!(times.iter().all(|t| !t.is_zero()), "{times:?}");
     assert!(
-        times
-            .iter()
-            .all(|(_, t)| *t < std::time::Duration::from_secs(1)),
+        times.iter().all(|t| *t < std::time::Duration::from_secs(1)),
         "{times:?}"
     );
+}
+
+/// Generating and uploading a chunk at a time (for workers) gives the same
+/// vertices as building them all first, in buffers no bigger than asked.
+#[test]
+fn paced_upload_from_the_mesh_matches_the_whole_upload() {
+    let Some((device, queue)) = device(wgpu::Features::empty()) else {
+        mf_fixtures::skip::gpu_unavailable("paced_upload_from_the_mesh_matches_the_whole_upload");
+        return;
+    };
+    let mesh = mf_fixtures::cube_with_missing_face();
+    let whole = GpuMesh::from_vertices(&device, &MeshVertices::build(&mesh));
+    let origin = glam::DVec3::from(mesh.bounding_box().unwrap().center());
+    let stride = std::mem::size_of::<mf_render::SurfaceVertex>() as u64;
+    // Two faces per buffer.
+    let paced = GpuMesh::from_mesh_paced(&device, &queue, &mesh, origin, &[], 6 * stride);
+    assert_eq!(paced.origin, whole.origin);
+    assert_eq!(paced.triangle_count, whole.triangle_count);
+    assert_eq!(paced.line_vertex_count(), whole.line_vertex_count());
+    let (vertices, buffers) = paced.surface_vertex_count();
+    assert_eq!(vertices, whole.surface_vertex_count().0);
+    assert_eq!(vertices, 3 * mesh.triangle_count());
+    assert_eq!(buffers, mesh.triangle_count().div_ceil(2));
 }

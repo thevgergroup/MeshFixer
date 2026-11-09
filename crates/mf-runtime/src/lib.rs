@@ -321,6 +321,40 @@ pub struct PoolChoice {
     pub reason: &'static str,
 }
 
+impl PoolChoice {
+    /// How many threads a pool built for `threads` gets (see
+    /// [`JobPool::new`]), without building it: for frontends that split
+    /// one thread budget over several pools.
+    pub fn for_request(threads: Option<usize>) -> PoolChoice {
+        // `available_parallelism` only errs when the OS cannot answer at
+        // all (e.g. a heavily sandboxed environment); 1 core is then the
+        // only safe assumption, not a guess hiding a real failure. Whether
+        // that happened is surfaced below in `reason` (not silently
+        // conflated with a genuine single-core machine), per MF-RT-004's
+        // "shown in diagnostics" requirement.
+        // allow-swallow: fallback surfaced in `reason`, see above.
+        let detected_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
+        let cores = detected_cores.unwrap_or(1);
+        let cores_unknown = detected_cores.is_none();
+
+        let (threads, reason): (usize, &'static str) = match (threads, cores_unknown) {
+            (None, true) => (
+                1,
+                "default: all cores but one (core count unavailable; assumed 1 core, using 1 thread)",
+            ),
+            (None, false) => (cores.saturating_sub(1).max(1), "default: all cores but one"),
+            (Some(0), _) => (1, "requested 0 threads; using 1"),
+            (Some(n), _) if n > cores => (n, "requested more threads than cores"),
+            (Some(n), _) => (n, "requested thread count honoured"),
+        };
+        PoolChoice {
+            threads,
+            cores,
+            reason,
+        }
+    }
+}
+
 /// A named `rayon` thread pool for background work.
 ///
 /// Threads are named `mf-pool-0`, `mf-pool-1`, ... so they are
@@ -350,39 +384,13 @@ impl JobPool {
     /// As [`JobPool::new`], with threads named `{name}-0`, `{name}-1`, ...
     /// (for example a separate small pool for latency-sensitive work).
     pub fn named(name: &'static str, threads: Option<usize>) -> (Self, PoolChoice) {
-        // `available_parallelism` only errs when the OS cannot answer at
-        // all (e.g. a heavily sandboxed environment); 1 core is then the
-        // only safe assumption, not a guess hiding a real failure. Whether
-        // that happened is surfaced below in `reason` (not silently
-        // conflated with a genuine single-core machine), per MF-RT-004's
-        // "shown in diagnostics" requirement.
-        // allow-swallow: fallback surfaced in `reason`, see above.
-        let detected_cores = std::thread::available_parallelism().map(|n| n.get()).ok();
-        let cores = detected_cores.unwrap_or(1);
-        let cores_unknown = detected_cores.is_none();
-
-        let (chosen, reason): (usize, &'static str) = match (threads, cores_unknown) {
-            (None, true) => (
-                1,
-                "default: all cores but one (core count unavailable; assumed 1 core, using 1 thread)",
-            ),
-            (None, false) => (cores.saturating_sub(1).max(1), "default: all cores but one"),
-            (Some(0), _) => (1, "requested 0 threads; using 1"),
-            (Some(n), _) if n > cores => (n, "requested more threads than cores"),
-            (Some(n), _) => (n, "requested thread count honoured"),
-        };
-
+        let choice = PoolChoice::for_request(threads);
+        let chosen = choice.threads;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(chosen)
             .thread_name(move |i| format!("{name}-{i}"))
             .build()
             .expect("failed to build mf-runtime job pool");
-
-        let choice = PoolChoice {
-            threads: chosen,
-            cores,
-            reason,
-        };
 
         (Self { pool }, choice)
     }

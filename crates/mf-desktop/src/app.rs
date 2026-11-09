@@ -9,8 +9,8 @@ use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, 
 use mf_geometry::{Aabb, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_metrics::FrameTimes;
-use mf_render::{MeshVertices, OrbitCamera, model_matrix, screen_position};
-use mf_runtime::{PoolChoice, RunContext};
+use mf_render::{OrbitCamera, model_matrix, screen_position};
+use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
@@ -20,7 +20,8 @@ use crate::viewport::{
     Click, NavAction, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
 };
 use crate::worker::{
-    self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, Workers,
+    self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
+    RenderMesh, Workers,
 };
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
@@ -36,8 +37,12 @@ pub const CANCELLED_EXPORT: &str = "Cancelled: nothing exported";
 /// App settings that are fixed for a run.
 #[derive(Debug, Clone, Default)]
 pub struct Settings {
-    /// Job pool threads; `None` leaves one core free (MF-RT-004).
+    /// Background threads, split between the running job and analysis
+    /// (`worker::PoolSizes`); `None` leaves one core free (MF-RT-004).
     pub threads: Option<usize>,
+    /// Replaces the analysis of each revision (`None`: the real one). For
+    /// tests, which inject failures through it.
+    pub analyze: Option<worker::AnalyzeFn>,
 }
 
 /// How the running job (the one the status bar shows) can be stopped.
@@ -98,6 +103,9 @@ pub struct MeshFixerApp {
     analyzer: LatestWorker<(Mesh, [f64; 12])>,
     /// Last revision submitted for analysis.
     requested: Option<(Mesh, [f64; 12])>,
+    /// The last revision whose analysis failed: not retried (it would fail
+    /// again), and not shown as still analysing.
+    analysis_failed: Option<(Mesh, [f64; 12])>,
     /// Vertices currently drawn for the active object, tagged with the
     /// exact mesh revision they were built for. May belong to the previous
     /// revision of the active object while the new one is analyzed (the
@@ -106,13 +114,15 @@ pub struct MeshFixerApp {
     /// showing this, or the old object's geometry would be drawn at the
     /// new object's transform in full colour, and the old object would
     /// vanish instead (MF-ISSUE-042 review I4).
-    displayed: Option<(Mesh, Arc<MeshVertices>)>,
+    /// Which object and revision they are; while the active object's new
+    /// revision is analysed, its previous revision stays on screen.
+    displayed: Option<(ObjectId, Mesh, Arc<RenderMesh>)>,
     /// Render-only vertices for every object that isn't active
     /// (MF-ISSUE-042): the viewport still draws them, dimmed, at their
     /// transform. Keyed by object id; the `Mesh` says which revision the
     /// vertices belong to, so a stale build for a since-changed object is
     /// never shown.
-    object_vertices: BTreeMap<ObjectId, (Mesh, Arc<MeshVertices>)>,
+    object_vertices: BTreeMap<ObjectId, (Mesh, Arc<RenderMesh>)>,
     /// Object ids with a build in flight, and the mesh it was requested for
     /// (so a second change before the first build returns still gets
     /// re-requested).
@@ -173,7 +183,14 @@ impl MeshFixerApp {
         theme::apply(&cc.egui_ctx);
         // Cmd/Ctrl + / − / 0 belong to the 3D view, not to scaling the UI.
         cc.egui_ctx.options_mut(|o| o.zoom_with_keyboard = false);
-        let workers = Workers::new(tx.clone(), cc.egui_ctx.clone(), settings.threads);
+        let workers = Workers::new(
+            tx.clone(),
+            cc.egui_ctx.clone(),
+            settings.threads,
+            worker::Gpu::new(render_state.device.clone(), render_state.queue.clone()),
+        );
+        let gpu = worker::Gpu::new(render_state.device.clone(), render_state.queue.clone());
+        let analyze = settings.analyze.unwrap_or(worker::analyze);
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -182,16 +199,29 @@ impl MeshFixerApp {
             analyzer: {
                 let ctx = cc.egui_ctx.clone();
                 LatestWorker::new(
-                    workers.pool(),
-                    |request, run: &RunContext| {
-                        // A panic is reported, not left to abort the app.
+                    workers.background(),
+                    move |request: (Mesh, [f64; 12]), run: &RunContext| {
+                        // A panic is reported for that revision, not left
+                        // to abort the app (or to look like work forever).
+                        let (mesh, transform) = request.clone();
                         let analysed =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                                worker::analyze(request, run)
+                                analyze(request, run, &gpu)
                             }));
                         match analysed {
                             Ok(result) => result,
-                            Err(payload) => Ok(worker::failed("analysis", false, payload)),
+                            Err(payload) => {
+                                let Message::Failed { message, .. } =
+                                    worker::failed("analysis", false, payload)
+                                else {
+                                    unreachable!("worker::failed makes a Failed message")
+                                };
+                                Ok(Message::AnalysisFailed {
+                                    mesh,
+                                    transform,
+                                    message,
+                                })
+                            }
                         }
                     },
                     move |msg| {
@@ -202,6 +232,7 @@ impl MeshFixerApp {
                 )
             },
             requested: None,
+            analysis_failed: None,
             displayed: None,
             object_vertices: BTreeMap::new(),
             requested_vertices: BTreeMap::new(),
@@ -324,8 +355,8 @@ impl MeshFixerApp {
     }
 
     /// How the job pool was sized (shown under Help).
-    pub fn pool_choice(&self) -> PoolChoice {
-        self.workers.choice
+    pub fn pool_sizes(&self) -> PoolSizes {
+        self.workers.sizes
     }
 
     /// Write the command log for the current revision path.
@@ -808,11 +839,13 @@ impl MeshFixerApp {
                 // Once the run returned Ok, cancelling no longer applies:
                 // the result is committed (one outcome; MF-CMD-006).
                 let too_late = self.finish_job();
+                let op = result.as_ref().as_ref().map_or("", |c| c.op_id);
                 let report = |r: &serde_json::Value| {
+                    let r = plain_report(op, r);
                     if too_late {
                         format!("{TOO_LATE}: {r}")
                     } else {
-                        r.to_string()
+                        r
                     }
                 };
                 match (*result).and_then(|c| self.session.commit(c)) {
@@ -886,7 +919,7 @@ impl MeshFixerApp {
             Message::ObjectVertices {
                 object,
                 mesh,
-                vertices,
+                render,
             } => {
                 if self
                     .requested_vertices
@@ -895,7 +928,27 @@ impl MeshFixerApp {
                 {
                     self.requested_vertices.remove(&object);
                 }
-                self.object_vertices.insert(object, (mesh, vertices));
+                if let Some(old) = self.object_vertices.insert(object, (mesh, render)) {
+                    self.workers.discard(old);
+                }
+            }
+            Message::AnalysisFailed {
+                mesh,
+                transform,
+                message,
+            } => {
+                if self
+                    .requested
+                    .as_ref()
+                    .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == transform)
+                {
+                    self.requested = None;
+                }
+                self.error = Some(format!(
+                    "Couldn't analyse this object, so its defects can't be shown \
+                     (internal error: {message})"
+                ));
+                self.analysis_failed = Some((mesh, transform));
             }
             Message::Analyzed { mesh, analysis } => {
                 if self
@@ -905,7 +958,9 @@ impl MeshFixerApp {
                 {
                     self.requested = None;
                 }
-                self.analyses.insert(mesh, *analysis);
+                if let Some(evicted) = self.analyses.insert(mesh, *analysis) {
+                    self.workers.discard(evicted);
+                }
             }
             Message::Replayed(result) => {
                 self.finish_job();
@@ -951,8 +1006,13 @@ impl MeshFixerApp {
             self.displayed = None;
             return;
         };
-        if let Some(a) = self.analysis_for(&mesh, &transform) {
-            self.displayed = Some((mesh.clone(), a.vertices.clone()));
+        if self.analysis_failed_for_active() {
+            // Shown as an error; retrying would only fail again.
+        } else if let Some(a) = self.analysis_for(&mesh, &transform) {
+            if !self.shows_current_revision() {
+                let object = self.active.expect("an active object has a mesh here");
+                self.displayed = Some((object, mesh.clone(), a.render.clone()));
+            }
         } else if !self
             .requested
             .as_ref()
@@ -1002,29 +1062,29 @@ impl MeshFixerApp {
     }
 
     /// Every object the viewport should draw this frame: the active one
-    /// (its vertices come from the full analysis, so they can lag one
-    /// revision behind while it's running, but never another object's)
-    /// plus every other object whose render vertices are ready
-    /// (MF-ISSUE-042).
+    /// (its render mesh comes from the full analysis, so it can lag
+    /// behind while a new revision is analysed: that object's previous
+    /// revision stays on screen, never another object's) plus every other
+    /// object whose render mesh is ready (MF-ISSUE-042).
     pub fn object_views(&self) -> Vec<ObjectView> {
         let doc = self.session.document();
         doc.objects()
             .iter()
             .filter_map(|o| {
                 let active = Some(o.id) == self.active;
-                let vertices = if active {
+                let render = if active {
                     // `displayed` may still hold a previously active
-                    // object's vertices for one frame, until its own
-                    // analysis returns (review I4): never draw those at
-                    // this object's transform.
-                    let (for_mesh, v) = self.displayed.as_ref()?;
-                    Mesh::ptr_eq(for_mesh, o.mesh()?).then(|| v.clone())?
+                    // object's render mesh until this one's analysis
+                    // returns (review I4): never draw that at this
+                    // object's transform.
+                    let (object, _, r) = self.displayed.as_ref()?;
+                    (*object == o.id).then(|| r.clone())?
                 } else {
                     self.object_vertices.get(&o.id)?.1.clone()
                 };
                 Some(ObjectView {
                     id: o.id,
-                    vertices,
+                    render,
                     transform: o.transform,
                     active,
                 })
@@ -1037,7 +1097,7 @@ impl MeshFixerApp {
     fn object_bounds(&self, o: &mf_command::Object) -> Option<Option<Aabb>> {
         let mesh = o.mesh()?;
         let vertices = if Some(o.id) == self.active {
-            &self.analysis_for(mesh, &o.transform)?.vertices
+            &self.analysis_for(mesh, &o.transform)?.render
         } else {
             let (for_mesh, v) = self.object_vertices.get(&o.id)?;
             if !Mesh::ptr_eq(for_mesh, mesh) {
@@ -1261,14 +1321,13 @@ impl MeshFixerApp {
     /// The 3D view's overlays, bottom to top (theme.rs gives each its colour).
     pub fn view_layers(&self) -> Vec<ViewLayer> {
         let mut layers = Vec::new();
-        let faces =
-            |object, faces: &Arc<Vec<mf_render::SurfaceVertex>>, color, strength| ViewLayer {
-                object,
-                geometry: ViewGeometry::Faces(faces.clone()),
-                color,
-                strength,
-            };
-        let lines = |object, lines: &Arc<Vec<mf_render::LineVertex>>, color| ViewLayer {
+        let faces = |object, faces: &Arc<mf_render::GpuFaces>, color, strength| ViewLayer {
+            object,
+            geometry: ViewGeometry::Faces(faces.clone()),
+            color,
+            strength,
+        };
+        let lines = |object, lines: &Arc<mf_render::GpuLines>, color| ViewLayer {
             object,
             geometry: ViewGeometry::Lines(lines.clone()),
             color,
@@ -1325,16 +1384,52 @@ impl MeshFixerApp {
         if let Some((object, o)) = ready(OverlayPurpose::Hover) {
             layers.push(lines(object, &o.lines, theme::HOVER));
         }
-        layers.retain(|l| match &l.geometry {
-            ViewGeometry::Lines(v) => !v.is_empty(),
-            ViewGeometry::Faces(v) => !v.is_empty(),
+        // Overlays are built for the current revision: while the active
+        // object still shows its previous one, they wouldn't line up.
+        let stale = (!self.shows_current_revision())
+            .then_some(self.active)
+            .flatten();
+        layers.retain(|l| {
+            Some(l.object) != stale
+                && match &l.geometry {
+                    ViewGeometry::Lines(v) => !v.is_empty(),
+                    ViewGeometry::Faces(v) => !v.is_empty(),
+                }
         });
         layers
     }
 
-    /// True while the active revision's analysis isn't ready.
+    /// True when the 3D view draws the active object's current revision
+    /// (not an earlier one while the current one is being prepared).
+    pub fn shows_current_revision(&self) -> bool {
+        match (&self.displayed, self.active_mesh()) {
+            (Some((object, shown, _)), Some(current)) => {
+                Some(*object) == self.active && Mesh::ptr_eq(shown, current)
+            }
+            _ => false,
+        }
+    }
+
+    /// True while the active revision's analysis isn't ready (and hasn't
+    /// failed).
     pub fn is_analyzing(&self) -> bool {
-        self.active_mesh().is_some() && self.current_analysis().is_none()
+        self.active_mesh().is_some()
+            && self.current_analysis().is_none()
+            && !self.analysis_failed_for_active()
+    }
+
+    /// True if the active revision's analysis failed.
+    pub fn analysis_failed_for_active(&self) -> bool {
+        let Some(o) = self
+            .active
+            .and_then(|id| self.session.document().object(id))
+        else {
+            return false;
+        };
+        match (&self.analysis_failed, o.mesh()) {
+            (Some((m, t)), Some(mesh)) => Mesh::ptr_eq(m, mesh) && *t == o.transform,
+            _ => false,
+        }
     }
 }
 
@@ -1343,7 +1438,10 @@ impl eframe::App for MeshFixerApp {
         let started = Instant::now();
         let frame = self.frame_times.begin(started);
         for (index, gpu) in self.viewport.collect_gpu_times() {
-            self.frame_times.set_gpu(index, gpu);
+            match gpu {
+                Some(time) => self.frame_times.set_gpu(index, time),
+                None => self.frame_times.set_gpu_unusable(index),
+            }
         }
         self.frame(ui, frame);
         let gpu = self.viewport.frame_gpu_time(frame);
@@ -1433,6 +1531,7 @@ impl MeshFixerApp {
         let objects = self.object_views();
         let placeholder = match self.active_mesh() {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
+            Some(_) if self.analysis_failed_for_active() => "Couldn't analyse this object",
             Some(_) => "Analyzing…",
             None => "Open a mesh with File > Open (STL, OBJ or 3MF)",
         };
@@ -1473,6 +1572,48 @@ impl MeshFixerApp {
             || overlays_pending
         {
             ctx.request_repaint();
+        }
+    }
+}
+
+/// An operation's report in plain words for the status line. A 5M fill's
+/// raw report lists hundreds of loops: laying that out took ~35 ms of a
+/// frame, and it isn't for people anyway.
+fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
+    let len = |key: &str| report[key].as_array().map_or(0, Vec::len);
+    // allow-swallow: the operation's own report; a count it leaves out reads as 0
+    let num = |key: &str| report[key].as_u64().unwrap_or_default();
+    let s = |n: u64| if n == 1 { "" } else { "s" };
+    match op_id {
+        "mesh.fill_holes" => {
+            let (filled, skipped) = (len("filled_loops") as u64, len("skipped_loops") as u64);
+            let faces = num("created_faces");
+            let mut text = format!(
+                "Filled {filled} hole{} with {faces} new face{}",
+                s(filled),
+                s(faces)
+            );
+            if skipped > 0 {
+                text.push_str(&format!(
+                    "; {skipped} left open (too large or can't be filled)"
+                ));
+            }
+            text
+        }
+        "mesh.remove_small_components" => {
+            let (pieces, tris) = (num("removed_components"), num("removed_triangles"));
+            format!(
+                "Removed {pieces} piece{} ({tris} triangle{})",
+                s(pieces),
+                s(tris)
+            )
+        }
+        _ => {
+            let raw = report.to_string();
+            match raw.char_indices().nth(160) {
+                Some((at, _)) => format!("{}…", &raw[..at]),
+                None => raw,
+            }
         }
     }
 }
@@ -1586,6 +1727,29 @@ fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An operation's report reaches the status line in plain words, and
+    /// anything else is kept short (a 5M fill's raw report is huge).
+    #[test]
+    fn reports_are_summarised_in_plain_words() {
+        let fill = serde_json::json!({
+            "created_faces": 10,
+            "filled_loops": [{"id": 1}, {"id": 2}],
+            "skipped_loops": [{"id": 3}],
+        });
+        assert_eq!(
+            plain_report("mesh.fill_holes", &fill),
+            "Filled 2 holes with 10 new faces; 1 left open (too large or can't be filled)"
+        );
+        let removed = serde_json::json!({"removed_components": 1, "removed_triangles": 12});
+        assert_eq!(
+            plain_report("mesh.remove_small_components", &removed),
+            "Removed 1 piece (12 triangles)"
+        );
+        let big = serde_json::json!({ "values": (0..1000).collect::<Vec<_>>() });
+        let text = plain_report("mesh.inspect", &big);
+        assert!(text.chars().count() <= 161 && text.ends_with('…'), "{text}");
+    }
 
     /// The status line explains a lost selection in words, never a debug dump.
     #[test]

@@ -68,15 +68,27 @@ fn gpu_times_arrive_later_and_skip_frames_without_a_3d_render() {
             GpuTime::NotRendered
         }
     });
-    assert!(matches!(t.gpu(), GpuSummary::NoSamples));
+    assert_eq!(
+        t.gpu(),
+        GpuSummary::Supported {
+            measured: None,
+            unusable: 0,
+            pending: 5
+        }
+    );
     // Frame indices start at 0: frames 1, 3, 5, 7, 9 had a 3D render.
     for (index, gpu_ms) in [(1, 4), (3, 2), (5, 8), (7, 6)] {
         t.set_gpu(index, ms(gpu_ms));
     }
     // A late result for a frame that rendered nothing is ignored.
     t.set_gpu(0, ms(500));
-    let GpuSummary::Measured(gpu) = t.gpu() else {
-        panic!("expected measured GPU times");
+    let GpuSummary::Supported {
+        measured: Some(gpu),
+        unusable: 0,
+        pending: 1,
+    } = t.gpu()
+    else {
+        panic!("expected 4 measured, 1 pending: {:?}", t.gpu());
     };
     assert_eq!(gpu.count(), 4);
     assert_eq!(gpu.max(), ms(8));
@@ -88,5 +100,40 @@ fn empty_history_has_no_percentiles() {
     let t = FrameTimes::new();
     assert!(t.cpu().is_none());
     assert!(t.interval().is_none());
-    assert!(matches!(t.gpu(), GpuSummary::NoSamples));
+    assert_eq!(
+        t.gpu(),
+        GpuSummary::Supported {
+            measured: None,
+            unusable: 0,
+            pending: 0
+        }
+    );
+}
+
+/// A frame whose GPU time couldn't be read (an unusable timestamp, a
+/// failed read-back) is recorded as such, so a summary says how many of
+/// the drawn frames its percentiles come from.
+#[test]
+fn unusable_gpu_samples_are_counted_not_hidden() {
+    let mut t = filled(10, |_| GpuTime::Pending);
+    for i in 0..3 {
+        t.set_gpu(i, ms(2));
+    }
+    for i in 3..8 {
+        t.set_gpu_unusable(i);
+    }
+    // A late result can't overwrite either.
+    t.set_gpu(3, ms(9));
+    t.set_gpu_unusable(0);
+    assert_eq!(t.frames().nth(3).unwrap().gpu, GpuTime::Unusable);
+    let GpuSummary::Supported {
+        measured: Some(gpu),
+        unusable,
+        pending,
+    } = t.gpu()
+    else {
+        panic!("expected measured GPU times: {:?}", t.gpu());
+    };
+    assert_eq!((gpu.count(), unusable, pending), (3, 5, 2));
+    assert_eq!(gpu.max(), ms(2));
 }

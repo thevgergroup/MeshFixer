@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use eframe::{egui, egui_wgpu};
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use mf_desktop::MeshFixerApp;
+use mf_desktop::{MeshFixerApp, Settings};
 use mf_fixtures::{DamageSpec, damaged_sphere};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
@@ -22,6 +22,8 @@ use mf_metrics::{GpuSummary, Percentiles};
 const BIG: usize = 5_000_000;
 /// MF-RT-001: no UI frame over 50 ms while fill_holes runs on 5M triangles.
 const FRAME_BUDGET: Duration = Duration::from_millis(50);
+/// MF-RT-002: cancel returns within 250 ms.
+const CANCEL_BUDGET: Duration = Duration::from_millis(250);
 
 fn heavy() -> MutexGuard<'static, ()> {
     static LOCK: Mutex<()> = Mutex::new(());
@@ -55,22 +57,36 @@ fn big_model() -> ImportedModel {
 /// The app with the 5M sphere open and analysed, on a device with GPU
 /// timestamps where the adapter has them, and the render state it runs on.
 fn opened() -> (Harness<'static, MeshFixerApp>, egui_wgpu::RenderState) {
+    opened_with(Settings::default())
+}
+
+fn opened_with(settings: Settings) -> (Harness<'static, MeshFixerApp>, egui_wgpu::RenderState) {
+    let (mut harness, render_state) = empty_app_with(settings);
+    harness.state_mut().import_model(big_model());
+    wait_until(&mut harness, "5M analysis", Duration::from_secs(600), |a| {
+        a.current_analysis().is_some() && a.viewport.frames_rendered > 0
+    });
+    (harness, render_state)
+}
+
+/// The app with nothing open (see [`opened`]).
+fn empty_app() -> (Harness<'static, MeshFixerApp>, egui_wgpu::RenderState) {
+    empty_app_with(Settings::default())
+}
+
+fn empty_app_with(settings: Settings) -> (Harness<'static, MeshFixerApp>, egui_wgpu::RenderState) {
     let mut setup = egui_kittest::wgpu::default_wgpu_setup();
     if let egui_wgpu::WgpuSetup::CreateNew(create) = &mut setup {
         create.device_descriptor = Arc::new(mf_desktop::gpu::device_descriptor);
     }
     let render_state =
         egui_kittest::wgpu::create_render_state(setup, egui_wgpu::RendererOptions::PREDICTABLE);
-    let mut harness = Harness::builder()
+    let harness = Harness::builder()
         .with_size((1440.0, 900.0))
         .renderer(egui_kittest::wgpu::WgpuTestRenderer::from_render_state(
             render_state.clone(),
         ))
-        .build_eframe(|cc| MeshFixerApp::new(cc, None).unwrap());
-    harness.state_mut().import_model(big_model());
-    wait_until(&mut harness, "5M analysis", Duration::from_secs(600), |a| {
-        a.current_analysis().is_some() && a.viewport.frames_rendered > 0
-    });
+        .build_eframe(move |cc| MeshFixerApp::with_settings(cc, None, settings).unwrap());
     (harness, render_state)
 }
 
@@ -291,6 +307,23 @@ fn summary(name: &str, p: Option<Percentiles>) -> String {
     }
 }
 
+/// The GPU column of `FrameTimes`, in words.
+fn gpu_summary(app: &MeshFixerApp) -> String {
+    match app.frame_times.gpu() {
+        GpuSummary::Unsupported => "timestamps unsupported".to_owned(),
+        GpuSummary::Supported {
+            measured,
+            unusable,
+            pending,
+        } => format!(
+            "{} of {} drawn frames measured ({unusable} unusable, {pending} pending): {}",
+            measured.as_ref().map_or(0, |p| p.count()),
+            measured.as_ref().map_or(0, |p| p.count()) + unusable + pending,
+            summary("GPU", measured)
+        ),
+    }
+}
+
 fn ms(d: Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
@@ -306,10 +339,61 @@ fn orbit_frame(harness: &mut Harness<'_, MeshFixerApp>, painter: &Painter) -> Du
     start.elapsed()
 }
 
+/// Times whole frames (see [`orbit_frame`]) until `done` holds after one,
+/// that frame included. Each frame is labelled with what the app was doing.
+fn gated_frames(
+    harness: &mut Harness<'_, MeshFixerApp>,
+    painter: &Painter,
+    mut done: impl FnMut(&MeshFixerApp) -> bool,
+) -> Vec<(Duration, String)> {
+    let mut frames = Vec::new();
+    loop {
+        let took = orbit_frame(harness, painter);
+        let app = harness.state();
+        let at = match (app.job_progress(), app.shows_current_revision()) {
+            (Some((stage, f)), _) => format!("{stage} {f:.3}"),
+            (None, false) => "job done; new revision not drawn yet".to_owned(),
+            (None, true) => "new revision drawn".to_owned(),
+        };
+        frames.push((took, at));
+        if done(app) {
+            return frames;
+        }
+        assert!(frames.len() < 100_000, "never finished");
+    }
+}
+
+/// Reports `frames` and checks the worst against the budget.
+fn judge(what: &str, frames: &[(Duration, String)], app: &MeshFixerApp) {
+    let times: Vec<Duration> = frames.iter().map(|(d, _)| *d).collect();
+    let (worst, at) = frames
+        .iter()
+        .max_by_key(|(d, _)| *d)
+        .expect("at least one frame");
+    let last = frames.last().expect("at least one frame");
+    eprintln!("{what}: {} frames", frames.len());
+    eprintln!("{}", summary("whole frame", Percentiles::of(times)));
+    eprintln!("worst frame {:.1} ms (at {at})", ms(*worst));
+    eprintln!("first frame drawing the new revision: {:.1} ms", ms(last.0));
+    let t = &app.frame_times;
+    eprintln!("{}", summary("app CPU (update + encode/submit)", t.cpu()));
+    eprintln!("{}", summary("app frame interval", t.interval()));
+    eprintln!("GPU (3D view): {}", gpu_summary(app));
+    assert!(
+        *worst <= FRAME_BUDGET,
+        "{what}: worst frame {:.1} ms at {at} (budget {} ms)",
+        ms(*worst),
+        FRAME_BUDGET.as_millis()
+    );
+}
+
 /// MF-RT-001's acceptance test. A frame here is the whole frame: the app's
 /// update (with the 3D view's encode and submit), egui's paint, and waiting
 /// for the GPU to finish it all (see [`Painter`]). The camera orbits every
-/// frame so the 5M mesh is redrawn every frame.
+/// frame so the 5M mesh is redrawn every frame. Gated from the frame that
+/// handles the Apply click through the first frame that draws the filled
+/// revision: the commit, the re-analysis and the new revision's GPU
+/// buffers all happen inside it.
 #[test]
 fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
     if !mf_render::offscreen::gpu_available() {
@@ -327,52 +411,30 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
     for _ in 0..20 {
         idle.push(orbit_frame(&mut harness, &painter));
     }
+    eprintln!(
+        "{}",
+        summary("idle whole frame (before the fill)", Percentiles::of(idle))
+    );
     let labels = harness.state().session.history_labels().len();
     let rendered = harness.state().viewport.frames_rendered;
 
     harness.get_by_label("Fill all holes").click();
     harness.run_steps(2);
-    // Every frame from the one that handles the Apply click to the one
-    // that commits the result is timed.
     harness.get_by_label("Apply").click();
-    let mut frames: Vec<Duration> = Vec::new();
-    let mut worst = (Duration::ZERO, String::new());
     let mut started = false;
-    loop {
-        let took = orbit_frame(&mut harness, &painter);
-        let app = harness.state();
-        if took > worst.0 {
-            let at = app
-                .job_progress()
-                .map_or("no job".to_owned(), |(s, f)| format!("{s} {f:.3}"));
-            worst = (took, at);
-        }
-        frames.push(took);
+    let mut committed_at = None;
+    let mut rendered_while_running = 0;
+    let mut n = 0;
+    let frames = gated_frames(&mut harness, &painter, |app| {
+        n += 1;
         started |= app.busy.is_some();
-        if started && app.busy.is_none() {
-            break;
+        assert!(started || n < 10, "the fill didn't start");
+        if started && app.busy.is_none() && committed_at.is_none() {
+            committed_at = Some(n);
+            rendered_while_running = app.viewport.frames_rendered - rendered;
         }
-        assert!(started || frames.len() < 10, "the fill didn't start");
-        assert!(frames.len() < 100_000, "the fill never finished");
-    }
-    // Not gated here: after the commit the new revision is analysed and
-    // its vertices uploaded to the GPU on the UI thread (a later task
-    // splits that upload), reported so the hitch is visible.
-    let mut after = Vec::new();
-    let settle = Instant::now();
-    while harness.state().is_analyzing() && settle.elapsed() < Duration::from_secs(120) {
-        after.push(orbit_frame(&mut harness, &painter));
-    }
-    for _ in 0..5 {
-        after.push(orbit_frame(&mut harness, &painter));
-    }
-    eprintln!(
-        "{}",
-        summary(
-            "after the fill (re-analysis, GPU upload; not gated)",
-            Percentiles::of(after)
-        )
-    );
+        started && app.busy.is_none() && app.shows_current_revision()
+    });
     let app = harness.state();
     assert!(app.error.is_none(), "{:?}", app.error);
     assert_eq!(
@@ -380,49 +442,171 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
         labels + 1,
         "the fill committed"
     );
+    let committed_at = committed_at.expect("committed");
     assert!(
-        app.viewport.frames_rendered >= rendered + frames.len() as u64 / 2,
+        rendered_while_running >= committed_at as u64 / 2,
         "the 3D view was redrawn as the camera moved"
     );
+    eprintln!("commit frame: {:.1} ms", ms(frames[committed_at - 1].0));
+    assert!(
+        committed_at >= 10,
+        "too few frames while the fill ran to judge: {committed_at}"
+    );
+    judge("fill_holes on 5M", &frames, app);
+}
 
-    let whole = Percentiles::of(frames.clone());
-    eprintln!(
-        "{}",
-        summary("idle whole frame (before the fill)", Percentiles::of(idle))
+/// MF-RT-001 for an import: gated from the frame that starts importing a
+/// 5M-triangle STL through the first frame that draws it.
+#[test]
+fn ui_frames_stay_under_50ms_while_a_5m_file_imports() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("ui_frames_stay_under_50ms_while_a_5m_file_imports");
+        return;
+    }
+    let _heavy = heavy();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("big.stl");
+    mf_io::write_path(&big_mesh(), &path, Format::StlBinary).unwrap();
+    let (mut harness, render_state) = empty_app();
+    let painter = Painter::new(render_state, [1440, 900]);
+    for _ in 0..5 {
+        orbit_frame(&mut harness, &painter);
+    }
+    harness.state_mut().open(path);
+    let mut started = false;
+    let frames = gated_frames(&mut harness, &painter, |app| {
+        started |= app.busy.is_some();
+        started && app.busy.is_none() && app.shows_current_revision()
+    });
+    let app = harness.state();
+    assert!(app.error.is_none(), "{:?}", app.error);
+    assert_eq!(app.session.document().objects().len(), 1);
+    judge("5M STL import", &frames, app);
+}
+
+/// Clicks Cancel and returns how long until the job has stopped and the
+/// app is idle (MF-RT-002: within 250 ms).
+fn cancel_latency(harness: &mut Harness<'_, MeshFixerApp>) -> Duration {
+    harness.get_by_label("Cancel").click();
+    let start = Instant::now();
+    wait_until(harness, "cancel", Duration::from_secs(60), |a| {
+        a.busy.is_none()
+    });
+    let took = start.elapsed();
+    assert_eq!(
+        harness.state().status.as_deref(),
+        Some("Cancelled: document unchanged")
     );
-    eprintln!("{} frames while fill_holes ran", frames.len());
-    eprintln!("{}", summary("whole frame", whole.clone()));
-    eprintln!("worst frame {:.1} ms (at {})", ms(worst.0), worst.1);
-    let times = &app.frame_times;
-    eprintln!(
-        "{}",
-        summary("app CPU (update + encode/submit)", times.cpu())
+    took
+}
+
+/// A fill applied right after a 5M import, while the import's analysis
+/// (and its render vertices) are still being built, still stops within
+/// 250 ms of Cancel.
+#[test]
+fn cancel_is_prompt_when_a_fill_is_applied_right_after_import() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable(
+            "cancel_is_prompt_when_a_fill_is_applied_right_after_import",
+        );
+        return;
+    }
+    let _heavy = heavy();
+    let (mut harness, _) = empty_app_with(Settings {
+        threads: Some(4),
+        ..Settings::default()
+    });
+    harness.state_mut().import_model(big_model());
+    harness.step();
+    assert!(harness.state().is_analyzing());
+    start_fill(&mut harness);
+    wait_until(
+        &mut harness,
+        "triangulating",
+        Duration::from_secs(60),
+        |a| {
+            assert!(
+                a.busy.is_some(),
+                "the fill finished before it could be cancelled"
+            );
+            a.job_progress()
+                .is_some_and(|(stage, _)| stage == "triangulating" || stage == "refining")
+        },
     );
-    eprintln!("{}", summary("app frame interval", times.interval()));
-    match times.gpu() {
-        GpuSummary::Measured(p) => eprintln!(
-            "{} ({} samples unusable)",
-            summary("GPU (3D view)", Some(p)),
-            app.viewport.gpu_samples_failed().unwrap()
-        ),
-        GpuSummary::Unsupported => eprintln!("GPU (3D view): timestamps unsupported"),
-        // Possible on Metal, whose heavy-pass timestamps come back out of
-        // order (see mf-render's timer.rs); the gate below doesn't use them.
-        GpuSummary::NoSamples => eprintln!(
-            "GPU (3D view): no usable samples ({} unusable)",
-            app.viewport.gpu_samples_failed().unwrap()
-        ),
+    let analysing = harness.state().is_analyzing();
+    let took = cancel_latency(&mut harness);
+    eprintln!(
+        "cancel after apply-right-after-import: {took:?} (analysis still running: {analysing})"
+    );
+    assert!(took <= CANCEL_BUDGET, "took {took:?}");
+}
+
+/// Switching objects during a fill, as clicks on tree rows do, queues
+/// work on the background pool: the other object's analysis, the filled
+/// object's render vertices, and (selecting the 5M object's main body) a
+/// 5M-face selection overlay each time. Cancel still stops the fill within
+/// 250 ms: none of that work may end up inside the fill (rayon lets a
+/// thread waiting in a join run any queued job of its pool). The pool is
+/// small (4 threads) so the fill's threads wait in joins often.
+#[test]
+fn cancel_is_prompt_after_switching_objects_during_a_fill() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable(
+            "cancel_is_prompt_after_switching_objects_during_a_fill",
+        );
+        return;
+    }
+    let _heavy = heavy();
+    let (mut harness, _) = opened_with(Settings {
+        threads: Some(4),
+        ..Settings::default()
+    });
+    let big = harness.state().active.unwrap();
+    // A second, small object, added without making it active.
+    let (ids, _) = harness.state_mut().session.import_model(ImportedModel {
+        objects: vec![mf_io::threemf::ModelObject {
+            name: "cube".into(),
+            mesh: mf_fixtures::cube(1.0),
+            transform: mf_io::threemf::IDENTITY,
+        }],
+        ..big_model()
+    });
+    let cube = ids[0];
+    harness.run_steps(5);
+    assert_eq!(harness.state().active, Some(big));
+    start_fill(&mut harness);
+    wait_until(
+        &mut harness,
+        "triangulating",
+        Duration::from_secs(60),
+        |a| {
+            assert!(
+                a.busy.is_some(),
+                "the fill finished before it could be cancelled"
+            );
+            a.job_progress()
+                .is_some_and(|(stage, _)| stage == "triangulating" || stage == "refining")
+        },
+    );
+    for _ in 0..4 {
+        harness.state_mut().set_active(cube);
+        harness.run_steps(2);
+        let app = harness.state_mut();
+        app.set_active(big);
+        app.selection = Some(mf_selection::Selection {
+            object: big,
+            revision: app.session.current(),
+            kind: mf_selection::SelectionKind::Component,
+            ids: vec![0],
+        });
+        harness.run_steps(2);
+        std::thread::sleep(Duration::from_millis(20));
     }
     assert!(
-        worst.0 <= FRAME_BUDGET,
-        "worst frame {:.1} ms at {} (budget {} ms)",
-        ms(worst.0),
-        worst.1,
-        FRAME_BUDGET.as_millis()
+        harness.state().busy.is_some(),
+        "the fill finished before it could be cancelled"
     );
-    assert!(
-        frames.len() >= 10,
-        "too few frames to judge: {}",
-        frames.len()
-    );
+    let took = cancel_latency(&mut harness);
+    eprintln!("cancel after switching objects during a fill: {took:?}");
+    assert!(took <= CANCEL_BUDGET, "took {took:?}");
 }

@@ -242,7 +242,7 @@ fn switching_active_object_never_shows_the_previous_objects_geometry() {
             "the active slot must belong to the newly active object"
         );
         assert_eq!(
-            active_view.vertices.triangle_count, tet_triangles,
+            active_view.render.gpu.triangle_count, tet_triangles,
             "the active slot must show the tetrahedron's own geometry, not the cube's \
              left over from before the switch"
         );

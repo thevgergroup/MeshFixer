@@ -121,11 +121,18 @@ impl<V> AnalysisCache<V> {
             .map(|(_, v)| v)
     }
 
-    pub fn insert(&mut self, mesh: Mesh, value: V) {
-        self.entries.retain(|(m, _)| !Mesh::ptr_eq(m, &mesh));
+    /// Returns what was evicted to make room (or replaced), so the caller
+    /// can free it where that's cheap.
+    pub fn insert(&mut self, mesh: Mesh, value: V) -> Option<(Mesh, V)> {
+        let replaced = self
+            .entries
+            .iter()
+            .position(|(m, _)| Mesh::ptr_eq(m, &mesh))
+            .map(|i| self.entries.remove(i));
         self.entries.push((mesh, value));
         if self.entries.len() > self.capacity {
-            self.entries.remove(0);
+            return Some(self.entries.remove(0));
         }
+        replaced
     }
 }

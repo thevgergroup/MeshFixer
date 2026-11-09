@@ -1,7 +1,17 @@
-//! Background work (MF-RT-001, MF-RT-004). Every O(n) step (import,
-//! operations, analysis, export, render vertices, overlays) runs on the
-//! app's job pool and reports back over a channel; picking and hover run on
-//! a small separate lane, so a long operation can't keep a click waiting.
+//! Background work (MF-RT-001, MF-RT-002, MF-RT-004). Every O(n) step runs
+//! off the UI thread and reports back over a channel, on one of three pools
+//! that share the thread budget:
+//!
+//! - **jobs**: the running import, operation, export or replay (one at a
+//!   time). Nothing else ever runs there: rayon lets a thread waiting in a
+//!   join run any queued job of its own pool, so a fill sharing a pool with
+//!   a 5M render-vertex build could only stop once that build finished.
+//! - **background**: analysis, render meshes and overlays.
+//! - **lane** (2 threads): picking and hover, so a click never waits.
+//!
+//! GPU buffers are created and filled here too, never on the UI thread: a
+//! 5M-triangle mesh is hundreds of megabytes (wgpu devices are
+//! `Send + Sync`).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -12,18 +22,124 @@ use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_render::{
-    LineVertex, MeshVertices, SurfaceVertex, edge_line_vertices, face_surface_vertices,
-    loop_line_vertices,
+    GpuFaces, GpuLines, GpuMesh, edge_line_vertices, face_surface_vertices, loop_line_vertices,
 };
 use mf_runtime::{CancelToken, Cancelled, JobPool, PoolChoice, RunContext};
 use mf_selection::SelectionKind;
 
 use crate::defects::{Defect, Defects};
 
+/// What the 3D view needs to draw one mesh revision, built on a worker:
+/// its GPU buffers, plus the bounds and local origin the app frames and
+/// places overlays with. No CPU copy of the vertices is kept.
+pub struct RenderMesh {
+    /// Object-space bounds; `None` for an empty mesh.
+    pub bounds: Option<Aabb>,
+    /// The local origin vertices (and overlays) are relative to.
+    pub origin: glam::DVec3,
+    pub gpu: GpuMesh,
+}
+
+/// GPU buffers are at most this big, each uploaded before the next (see
+/// [`GpuMesh::from_vertices_paced`]): a UI frame waits for at most one
+/// chunk's copy. Per-chunk buffers are also what partial re-upload builds
+/// on (MF-RENDER-003).
+pub const UPLOAD_CHUNK_BYTES: u64 = 16 << 20;
+
+/// The device and queue workers create and fill GPU buffers with.
+#[derive(Clone)]
+pub struct Gpu {
+    pub device: wgpu::Device,
+    pub queue: wgpu::Queue,
+    primer: Arc<std::sync::Mutex<Primer>>,
+}
+
+impl Gpu {
+    pub fn new(device: wgpu::Device, queue: wgpu::Queue) -> Gpu {
+        let primer = Primer {
+            renderer: mf_render::MeshRenderer::new(
+                &device,
+                mf_render::RenderTarget::format(crate::viewport::MSAA_SAMPLES),
+                crate::theme::palette(),
+            ),
+            target: mf_render::RenderTarget::new(&device, 4, 4, crate::viewport::MSAA_SAMPLES)
+                .expect("a 4×4 target fits"),
+        };
+        Gpu {
+            device,
+            queue,
+            primer: Arc::new(std::sync::Mutex::new(primer)),
+        }
+    }
+
+    /// Draws `mesh` once into a 4×4 target and waits for it. The first
+    /// draw of a freshly uploaded 5M-triangle mesh costs the GPU ~20 ms
+    /// more than later ones (measured on Metal); paid here, on a worker, it
+    /// isn't paid in the UI frame that first shows the mesh (MF-RT-001).
+    fn prime(&self, mesh: &GpuMesh, bounds: &Aabb) {
+        let mut primer = self.primer.lock().unwrap_or_else(|p| p.into_inner());
+        let Primer { renderer, target } = &mut *primer;
+        let camera = mf_render::OrbitCamera::fit(bounds);
+        let items = [mf_render::DrawItem {
+            mesh,
+            model: DMat4::IDENTITY,
+            inactive: false,
+        }];
+        target.draw(
+            &self.device,
+            &self.queue,
+            renderer,
+            Some(&camera),
+            &items,
+            true,
+            &[],
+        );
+        let submission = self.queue.submit([]);
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: Some(submission),
+                timeout: None,
+            })
+            .expect("the GPU device was lost while preparing a mesh");
+    }
+}
+
+/// A renderer and tiny target for [`Gpu::prime`].
+struct Primer {
+    renderer: mf_render::MeshRenderer,
+    target: mf_render::RenderTarget,
+}
+
+impl RenderMesh {
+    /// O(n) and a GPU upload: call it on a worker. `skip` leaves out the
+    /// boundary outlines of those loops (by ID). Generated and uploaded a
+    /// chunk at a time (see [`GpuMesh::from_mesh_paced`]).
+    pub fn build(gpu: &Gpu, mesh: &Mesh, skip: &[u32]) -> RenderMesh {
+        let bounds = mesh.bounding_box();
+        let origin = bounds.map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()));
+        let render = RenderMesh {
+            bounds,
+            origin,
+            gpu: GpuMesh::from_mesh_paced(
+                &gpu.device,
+                &gpu.queue,
+                mesh,
+                origin,
+                skip,
+                UPLOAD_CHUNK_BYTES,
+            ),
+        };
+        if let Some(bb) = &bounds {
+            gpu.prime(&render.gpu, bb);
+        }
+        render
+    }
+}
+
 /// Analysis results for one mesh revision.
 pub struct Analysis {
     pub diagnostics: Diagnostics,
-    pub vertices: Arc<MeshVertices>,
+    pub render: Arc<RenderMesh>,
     /// The object transform the measurements were made with.
     pub transform: [f64; 12],
     /// The tree's defect categories (docs/design/visual-language.md),
@@ -37,9 +153,9 @@ pub struct Analysis {
 /// tangled edges as lines, loose pieces as faces. Holes are the mesh's own
 /// boundary outlines.
 pub struct DefectLayers {
-    pub cracks: Arc<Vec<LineVertex>>,
-    pub tangled: Arc<Vec<LineVertex>>,
-    pub loose: Arc<Vec<SurfaceVertex>>,
+    pub cracks: Arc<GpuLines>,
+    pub tangled: Arc<GpuLines>,
+    pub loose: Arc<GpuFaces>,
 }
 
 /// What an overlay outlines or tints.
@@ -59,12 +175,12 @@ pub enum OverlayPurpose {
     RecentRepair,
 }
 
-/// An overlay's vertices (relative to the mesh's local origin), bounds and
-/// outward direction (object space; `None` when the faces around it face
-/// every way, like a closed piece).
+/// An overlay's GPU buffers (vertices relative to the mesh's local origin),
+/// bounds and outward direction (object space; `None` when the faces
+/// around it face every way, like a closed piece).
 pub struct Overlay {
-    pub lines: Arc<Vec<LineVertex>>,
-    pub faces: Arc<Vec<SurfaceVertex>>,
+    pub lines: Arc<GpuLines>,
+    pub faces: Arc<GpuFaces>,
     pub bounds: Option<Aabb>,
     pub normal: Option<glam::DVec3>,
 }
@@ -76,12 +192,12 @@ pub enum Message {
         mesh: Mesh,
         analysis: Box<Analysis>,
     },
-    /// Render vertices for an inactive object (MF-ISSUE-042). The active
-    /// object's vertices come from `Analyzed` instead.
+    /// The render mesh of an inactive object (MF-ISSUE-042). The active
+    /// object's comes from `Analyzed` instead.
     ObjectVertices {
         object: ObjectId,
         mesh: Mesh,
-        vertices: Arc<MeshVertices>,
+        render: Arc<RenderMesh>,
     },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
@@ -104,6 +220,12 @@ pub enum Message {
         picked: Option<(SelectionKind, u32)>,
         add: bool,
     },
+    /// The analysis of `mesh` at `transform` panicked.
+    AnalysisFailed {
+        mesh: Mesh,
+        transform: [f64; 12],
+        message: String,
+    },
     /// A worker panicked. `job` is true when it was the running job (the
     /// one the status bar shows), which is then over.
     Failed {
@@ -117,14 +239,40 @@ pub enum Message {
 /// queues behind a click's ray cast.
 const LANE_THREADS: usize = 2;
 
-/// The app's job pool and its low-latency lane (MF-RT-004).
+/// How the thread budget is split (see the module docs).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PoolSizes {
+    /// The budget: requested or default, cores, and why.
+    pub budget: PoolChoice,
+    pub jobs: usize,
+    pub background: usize,
+}
+
+impl PoolSizes {
+    /// A third of the budget (at least one thread) for background work,
+    /// the rest (at least one) for jobs. A budget of one thread still gets
+    /// one of each.
+    pub fn split(budget: PoolChoice) -> PoolSizes {
+        let background = (budget.threads / 3).max(1);
+        PoolSizes {
+            budget,
+            jobs: budget.threads.saturating_sub(background).max(1),
+            background,
+        }
+    }
+}
+
+/// The app's pools (see the module docs).
 pub struct Workers {
     tx: Sender<Message>,
     repaint: eframe::egui::Context,
-    pool: Arc<JobPool>,
+    /// For building GPU buffers on workers.
+    gpu: Gpu,
+    jobs: JobPool,
+    background: Arc<JobPool>,
     lane: JobPool,
-    /// How the pool was sized, for diagnostics.
-    pub choice: PoolChoice,
+    /// How the pools were sized, for diagnostics.
+    pub sizes: PoolSizes,
     /// The latest pick and hover build: a newer one cancels the older, so
     /// the lane only ever works on what the pointer is doing now.
     latest_pick: Option<CancelToken>,
@@ -181,44 +329,68 @@ fn supersede(latest: &mut Option<CancelToken>) -> RunContext {
 }
 
 impl Workers {
-    /// The pool has `threads` threads (`None`: all cores but one).
+    /// `threads` is the whole budget (`None`: all cores but one), split
+    /// between the jobs and background pools ([`PoolSizes::split`]).
     pub fn new(
         tx: Sender<Message>,
         repaint: eframe::egui::Context,
         threads: Option<usize>,
+        gpu: Gpu,
     ) -> Workers {
-        let (pool, choice) = JobPool::new(threads);
+        let sizes = PoolSizes::split(PoolChoice::for_request(threads));
+        let (jobs, _) = JobPool::named("mf-jobs", Some(sizes.jobs));
+        let (background, _) = JobPool::named("mf-bg", Some(sizes.background));
         let (lane, _) = JobPool::named("mf-lane", Some(LANE_THREADS));
         Workers {
             tx,
             repaint,
-            pool: Arc::new(pool),
+            gpu,
+            jobs,
+            background: Arc::new(background),
             lane,
-            choice,
+            sizes,
             latest_pick: None,
             latest_hover: None,
         }
     }
 
-    /// The job pool, shared with the analysis worker.
-    pub fn pool(&self) -> Arc<JobPool> {
-        self.pool.clone()
+    /// The background pool, shared with the analysis worker.
+    pub fn background(&self) -> Arc<JobPool> {
+        self.background.clone()
     }
 
-    fn spawn(&self, what: &'static str, job: bool, f: impl FnOnce() -> Message + Send + 'static) {
-        spawn_on(&self.pool, &self.tx, &self.repaint, what, job, move || {
+    /// The running job, on the jobs pool.
+    fn spawn_job(&self, what: &'static str, f: impl FnOnce() -> Message + Send + 'static) {
+        spawn_on(&self.jobs, &self.tx, &self.repaint, what, true, move || {
             Some(f())
         });
     }
 
+    fn spawn_background(&self, what: &'static str, f: impl FnOnce() -> Message + Send + 'static) {
+        spawn_on(
+            &self.background,
+            &self.tx,
+            &self.repaint,
+            what,
+            false,
+            move || Some(f()),
+        );
+    }
+
+    /// Drop `value` on the background pool: freeing a big revision's
+    /// vertex data and GPU buffers takes long enough to show in a frame.
+    pub fn discard<T: Send + 'static>(&self, value: T) {
+        self.background.spawn(move || drop(value));
+    }
+
     pub fn import(&self, path: PathBuf, ctx: RunContext) {
-        self.spawn("import", true, move || {
+        self.spawn_job("import", move || {
             Message::Imported(mf_io::read_model_with(&path, &ctx))
         });
     }
 
     pub fn run(&self, prepared: Prepared, ctx: RunContext) {
-        self.spawn("operation", true, move || {
+        self.spawn_job("operation", move || {
             Message::Completed(Box::new(prepared.run(&ctx)))
         });
     }
@@ -233,6 +405,7 @@ impl Workers {
         mesh: Mesh,
         target: OverlayTarget,
     ) {
+        let gpu = self.gpu.clone();
         if purpose == OverlayPurpose::Hover {
             let ctx = supersede(&mut self.latest_hover);
             spawn_on(
@@ -243,12 +416,12 @@ impl Workers {
                 false,
                 move || {
                     // allow-swallow: a superseded hover has nothing to show
-                    build_overlay(purpose, object, mesh, target, &ctx).ok()
+                    build_overlay(purpose, object, mesh, target, &ctx, &gpu).ok()
                 },
             );
         } else {
-            self.spawn("overlay", false, move || {
-                build_overlay(purpose, object, mesh, target, &RunContext::none())
+            self.spawn_background("overlay", move || {
+                build_overlay(purpose, object, mesh, target, &RunContext::none(), &gpu)
                     .expect("an uncancelled overlay build completes")
             });
         }
@@ -258,19 +431,20 @@ impl Workers {
     /// (MF-ISSUE-042): it still needs to be drawn at its transform, but not
     /// analysed.
     pub fn build_vertices(&self, object: ObjectId, mesh: Mesh) {
-        self.spawn("render vertices", false, move || {
-            let vertices = Arc::new(MeshVertices::build(&mesh));
+        let gpu = self.gpu.clone();
+        self.spawn_background("render mesh", move || {
+            let render = Arc::new(RenderMesh::build(&gpu, &mesh, &[]));
             Message::ObjectVertices {
                 object,
                 mesh,
-                vertices,
+                render,
             }
         });
     }
 
     /// Replay a command log (it re-imports source files).
     pub fn replay(&self, dir: PathBuf) {
-        self.spawn("replay", true, move || {
+        self.spawn_job("replay", move || {
             Message::Replayed(
                 mf_command::replay(&dir)
                     .map(|report| {
@@ -347,7 +521,7 @@ impl Workers {
     /// Export on the pool; cancelling leaves no file behind (see
     /// [`mf_io::write_path_with`]).
     pub fn export(&self, job: ExportJob, path: PathBuf, ctx: RunContext) {
-        self.spawn("export", true, move || {
+        self.spawn_job("export", move || {
             let result = match &job {
                 ExportJob::Mesh(mesh, format) => mf_io::write_path_with(mesh, &path, *format, &ctx),
                 ExportJob::Model(model) => mf_io::write_model_path_with(model, &path, &ctx),
@@ -371,12 +545,16 @@ fn fill_cap() -> usize {
         .expect("fill_holes declares a maximum max_loop_edges")
 }
 
+/// The analysis a [`crate::Settings`] can swap in (tests inject failures).
+pub type AnalyzeFn = fn((Mesh, [f64; 12]), &RunContext, &Gpu) -> Result<Message, Cancelled>;
+
 /// Diagnostics, defects and render vertices for one revision (O(n), so off
 /// the UI thread). Measurements are made after the object's `transform`.
 /// Cancelled when a newer revision is submitted (see analysis.rs).
 pub fn analyze(
     (mesh, transform): (Mesh, [f64; 12]),
     ctx: &RunContext,
+    gpu: &Gpu,
 ) -> Result<Message, Cancelled> {
     let diagnostics = mf_geometry::inspect_with(&mesh, ctx)?;
     ctx.checkpoint()?;
@@ -388,9 +566,9 @@ pub fn analyze(
         .collect();
     ctx.checkpoint()?;
     // Cracks get only the crack colour: no hole outline under them.
-    let vertices = Arc::new(MeshVertices::build_skipping(&mesh, &crack_ids));
+    let render = Arc::new(RenderMesh::build(gpu, &mesh, &crack_ids));
     ctx.checkpoint()?;
-    let origin = vertices.origin;
+    let origin = render.origin;
     let tangled: Vec<[u32; 2]> = defects
         .tangled
         .iter()
@@ -408,13 +586,28 @@ pub fn analyze(
         .copied()
         .collect();
     let layers = DefectLayers {
-        cracks: Arc::new(loop_line_vertices(&mesh, origin, &crack_ids)),
-        tangled: Arc::new(edge_line_vertices(&mesh, origin, &tangled)),
-        loose: Arc::new(face_surface_vertices(&mesh, origin, &loose)),
+        cracks: Arc::new(GpuLines::upload_paced(
+            &gpu.device,
+            &gpu.queue,
+            &loop_line_vertices(&mesh, origin, &crack_ids),
+            UPLOAD_CHUNK_BYTES,
+        )),
+        tangled: Arc::new(GpuLines::upload_paced(
+            &gpu.device,
+            &gpu.queue,
+            &edge_line_vertices(&mesh, origin, &tangled),
+            UPLOAD_CHUNK_BYTES,
+        )),
+        loose: Arc::new(GpuFaces::upload_paced(
+            &gpu.device,
+            &gpu.queue,
+            &face_surface_vertices(&mesh, origin, &loose),
+            UPLOAD_CHUNK_BYTES,
+        )),
     };
     let analysis = Analysis {
         diagnostics,
-        vertices,
+        render,
         transform,
         defects: Arc::new(defects),
         layers,
@@ -432,6 +625,7 @@ fn build_overlay(
     mesh: Mesh,
     target: OverlayTarget,
     ctx: &RunContext,
+    gpu: &Gpu,
 ) -> Result<Message, Cancelled> {
     {
         let origin = crate::app::mesh_origin(&mesh);
@@ -491,8 +685,18 @@ fn build_overlay(
             mesh: mesh.clone(),
             target,
             overlay: Overlay {
-                lines: Arc::new(lines),
-                faces: Arc::new(faces),
+                lines: Arc::new(GpuLines::upload_paced(
+                    &gpu.device,
+                    &gpu.queue,
+                    &lines,
+                    UPLOAD_CHUNK_BYTES,
+                )),
+                faces: Arc::new(GpuFaces::upload_paced(
+                    &gpu.device,
+                    &gpu.queue,
+                    &faces,
+                    UPLOAD_CHUNK_BYTES,
+                )),
                 bounds,
                 normal,
             },
@@ -642,11 +846,17 @@ mod tests {
     /// layer carries it.
     #[test]
     fn cracks_are_not_outlined_in_the_hole_colour() {
+        let Ok((device, queue)) = mf_render::offscreen::shared_device() else {
+            mf_fixtures::skip::gpu_unavailable("cracks_are_not_outlined_in_the_hole_colour");
+            return;
+        };
         let plate = mf_fixtures::plate_with_defects();
         let identity = mf_io::threemf::IDENTITY;
-        let Ok(Message::Analyzed { analysis, .. }) =
-            analyze((plate, identity), &RunContext::none())
-        else {
+        let Ok(Message::Analyzed { analysis, .. }) = analyze(
+            (plate, identity),
+            &RunContext::none(),
+            &Gpu::new(device, queue),
+        ) else {
             panic!("analyze answers with Analyzed");
         };
         let edges = |list: &[Defect]| -> usize {
@@ -661,14 +871,38 @@ mod tests {
         };
         assert_eq!(analysis.defects.cracks.len(), 1);
         assert_eq!(
-            analysis.vertices.lines.len(),
+            analysis.render.gpu.line_vertex_count(),
             2 * edges(&analysis.defects.holes),
             "only holes get the hole outline"
         );
         assert_eq!(
-            analysis.layers.cracks.len(),
+            analysis.layers.cracks.vertex_count(),
             2 * edges(&analysis.defects.cracks)
         );
+    }
+
+    /// The thread budget is split between the running job and background
+    /// work, never adding up to more than the budget (so the default still
+    /// leaves a core free) unless the budget is a single thread.
+    #[test]
+    fn the_thread_budget_is_split_between_jobs_and_background_work() {
+        let budget = |threads| PoolChoice {
+            threads,
+            cores: 12,
+            reason: "test",
+        };
+        let split = |t| {
+            let s = PoolSizes::split(budget(t));
+            (s.jobs, s.background)
+        };
+        assert_eq!(split(11), (8, 3));
+        assert_eq!(split(3), (2, 1));
+        assert_eq!(split(2), (1, 1));
+        assert_eq!(split(1), (1, 1));
+        for t in 2..64 {
+            let (jobs, background) = split(t);
+            assert_eq!(jobs + background, t);
+        }
     }
 
     /// A click near a loop edge that another object's solid face hides

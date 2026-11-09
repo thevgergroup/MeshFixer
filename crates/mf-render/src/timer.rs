@@ -142,9 +142,10 @@ impl GpuTimer {
         });
     }
 
-    /// GPU times read back since the last call, as (frame, duration), in
-    /// frame order. Never blocks.
-    pub fn collect(&mut self, device: &wgpu::Device) -> Vec<(u64, Duration)> {
+    /// Frames read back since the last call, in frame order, with their
+    /// GPU time, or `None` when the sample was unusable (see the module
+    /// docs; also counted in `failed`). Never blocks.
+    pub fn collect(&mut self, device: &wgpu::Device) -> Vec<(u64, Option<Duration>)> {
         // A failed poll means a lost device; its read-backs then fail and
         // are counted in `failed`, so nothing is hidden here.
         // allow-swallow: device loss is reported by the read-back callbacks (FAILED)
@@ -173,13 +174,17 @@ impl GpuTimer {
                 {
                     slot.last = [start, end];
                     let ns = (end - start) as f64 * self.period;
-                    out.push((slot.frame, Duration::from_nanos(ns.round() as u64)));
+                    out.push((slot.frame, Some(Duration::from_nanos(ns.round() as u64))));
                 }
                 Some(ticks) => {
                     slot.last = ticks;
                     self.failed += 1;
+                    out.push((slot.frame, None));
                 }
-                None => self.failed += 1,
+                None => {
+                    self.failed += 1;
+                    out.push((slot.frame, None));
+                }
             }
         }
         out.sort_unstable_by_key(|(frame, _)| *frame);
