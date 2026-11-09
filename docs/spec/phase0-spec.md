@@ -1,4 +1,6 @@
-# MeshFixer Phase 0 Engineering Spec (v0.3)
+# MeshFixer Phase 0 Engineering Spec (v0.4)
+
+v0.4 (2026-11-08, M4 Checkpoint A): fairing is required (MF-OP-002, fill styles). Many-hole handling is MF-RENDER-006. Sculpting and carving are captured as Phase 1 requirements (§11a), which Phase 0 must not block.
 
 v0.3 (2026-11-08, M3 review): MF-OP-002 corrected to Liepa's ordering (worst dihedral, then area); it now states the whole-object reporting behaviour, the 1000-edge cap and the untriangulable case.
 
@@ -187,8 +189,14 @@ Selections bound to one revision are never applied to another without translatio
 3. `mesh.fill_holes` (target: object, meaning all loops up to a size limit, or chosen boundary loops)
 4. `mesh.simplify` (stretch goal)
 
-**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing worst dihedral then area, after Liepa 2003). It never uses a chord that is already a mesh edge, or a zero-area triangle. It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. A selected loop that can't be filled (above `max_loop_edges`, default 500 and at most 1000; self-touching; or untriangulable, such as a collinear slit) fails with a structured error naming the loop. A whole-object run fills the rest and lists each such loop by ID and reason in its report. No loop is ever silently skipped or fan-filled. Fairing (smooth curvature blending) is a stretch goal.
+**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing worst dihedral then area, after Liepa 2003). It never uses a chord that is already a mesh edge, or a zero-area triangle. It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. A selected loop that can't be filled (above `max_loop_edges`, default 500 and at most 1000; self-touching; or untriangulable, such as a collinear slit) fails with a structured error naming the loop. A whole-object run fills the rest and lists each such loop by ID and reason in its report. No loop is ever silently skipped or fan-filled. **Fill styles:**
+- `flat`: triangulate and refine only.
+- `smooth`, the default: bi-Laplacian fairing (Δ²x = 0) of the patch interior, with the boundary and 1-ring fixed, so the patch meets the surface with matching slope (C1).
+- `curvature`: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
+
+Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`.
 *Accept:*
+- On a 44-edge hole in a unit-radius sphere, every patch vertex is within 2% of the radius with `smooth`, and within 1% with `curvature`.
 - On procedural holes, the patch's mean edge length is within ±25% of the boundary's mean, and no patch triangle has a minimum angle below 5°.
 - On the real scan fixture, every targeted loop closes, the result is manifold around each patch, and an offscreen render is captured for review.
 
@@ -230,6 +238,16 @@ Measured by an automated orbit benchmark on the *damaged* fixtures. Every benchm
 
 **MF-RENDER-004: Picking.** Face picking takes < 16 ms at 5M triangles. Boundary-loop picking (clicking near a highlighted boundary) resolves to a `BoundaryLoopId`.
 
+**MF-RENDER-006: Many defects.** Models with hundreds or thousands of holes stay workable:
+- holes are grouped by size, with a count and an action per group;
+- batch fill up to a size, with a preview count, as one undoable command;
+- marking intentional openings (persistent, excluded from counts and bulk fills);
+- next/previous navigation;
+- multi-select and box select in the viewport;
+- an overview that makes tiny holes visible when zoomed out.
+
+*Accept:* the GUI tests on a 300-hole fixture, and the M4 demo.
+
 **MF-RENDER-005: Diagnostic overlays.** Boundary loops, non-manifold edges and small components are highlighted, each one clickable to select it.
 
 ## 9. I/O, platform and legal
@@ -254,6 +272,29 @@ Measured by an automated orbit benchmark on the *damaged* fixtures. Every benchm
 ## 11. Non-goals for Phase 0
 
 STEP/B-rep, fillets/chamfers, remeshing, smoothing, booleans, point clouds, textures, surface text, pattern recognition, semantic tags, branch navigation UI, parameter editing UI, plugins, scripting, LLM planning, installers and signing, and visual polish. None may be blocked by Phase 0 design. Where a Phase 0 choice touches one, the relevant **Evolves:** note says how.
+
+## 11a. Phase 1 requirements captured now: sculpting and carving
+
+These requirements aren't implemented in Phase 0. They're recorded so Phase 0's design doesn't block them, and the M4 final review checks that it doesn't. A Meshmixer successor needs direct surface editing as well as repair.
+
+**MF-SCULPT-001: Brushes.**
+- **Brush set:** smooth, inflate/deflate, flatten, drag/move, pinch, crease, and carve (displace inward along the normal).
+- **Brush settings:** radius (screen or world), strength, falloff curve, symmetry (X/Y/Z, with a pivot), and pen pressure where available.
+- **Masking:** a freeze mask, plus the option to limit a brush to the current selection.
+
+**MF-SCULPT-002: Detail where it's needed.** Local, dynamic re-triangulation under the brush (split, collapse and flip within the brush footprint) keeps triangle density close to a target edge length. Nothing outside the footprint is touched (MF-OP-003 applies per stroke).
+
+**MF-SCULPT-003: Strokes are commands.**
+- A stroke (press to release) is one command. Its record holds the brush parameters and the sampled path in a remappable form (MF-HIST-002), never raw vertex positions.
+- Provenance lists the moved, created and removed elements.
+- One undo per stroke. Replay is Exact on the same build.
+
+**MF-SCULPT-004: Responsiveness.**
+- At 5M triangles, a dab affects the screen within one frame at ≥ 60 fps on the reference machine.
+- Only the GPU chunks a stroke touches are re-uploaded (MF-RENDER-003).
+- History of 1,000 strokes stays within 1.5× of one revision, plus the stroke footprints (MF-DOC-002).
+
+**MF-SCULPT-005: Carving and booleans (later).** Carving by brush is MF-SCULPT-001. Boolean subtract/union with a tool mesh is a separate later requirement, and isn't required for Phase 1's first release.
 
 ## 12. Exit criteria
 

@@ -15,7 +15,7 @@
 
 **Tech Stack:** As M3 (Rust 1.99.1, eframe/egui 0.37, wgpu 30), plus `cargo-fuzz` (nightly toolchain, fuzz job only) and `sysinfo` (MIT) for benchmark device info.
 
-**Spec:** `docs/spec/phase0-spec.md` v0.3: MF-RT-001…005, MF-CMD-006, MF-RENDER-002 (preliminary, M2 Max), MF-RENDER-003/004/005, MF-GEO-002/003, MF-DOC-002, MF-IO-002, exit criterion 9. Milestone: `docs/plan/phase0-milestones.md` § M4. Issues:
+**Spec:** `docs/spec/phase0-spec.md` v0.4: MF-RT-001…005, MF-CMD-006, MF-RENDER-002 (preliminary, M2 Max), MF-RENDER-003/004/005, MF-GEO-002/003, MF-DOC-002, MF-IO-002, exit criterion 9. Milestone: `docs/plan/phase0-milestones.md` § M4. Issues:
 - 042 (mandatory, first)
 - 019, 020, 041, 045
 - the minors 033–040 and 046
@@ -27,12 +27,17 @@ The project owner approved this plan with changes, which are folded into the tas
 - **Three UX checkpoints from the running app** (no mockups). Each is a **stop** for owner feedback before the next task starts:
   - **A:** after Task 2 (multi-object viewport plus the new layout)
   - **B:** after Task 8 (overlays, picking, hover, selection)
-  - **C:** after Task 12 (the full surgical workflow)
+  - **C:** after Task 12a (the full surgical workflow, with surface-matching fills)
 - **The viewport stays the primary workspace.** Clicking geometry selects it visibly and opens a **contextual operation panel** for that target. The defect browser complements direct manipulation; it never replaces it.
 - **Diagnostics are explained in plain language**, alongside the engineering terms, and each one has an obvious next action.
 - **Performance is measured as the user experiences it:** CPU and GPU frame time and presentation, reported as p50/p95/p99. Memory is broken down into mesh storage, topology, scratch peak, GPU allocations and process RSS. No narrow benchmark may hide a poor real-world experience.
 - **The final demo is an acceptance gate and a usability review.** It runs on a normal laptop-sized window (1440×900 points) with ordinary mouse and trackpad controls. The owner runs it themselves from a demo build, sample files and instructions. The question it answers: could someone who has used Meshmixer or Fusion inspect and repair an imported model without an engineer guiding them?
 - **A deliberate visual and interaction language** (Task 2) covers panel arrangement, hierarchy, colours for selection, defects and repairs, contextual tools, and history navigation.
+- **Checkpoint A feedback (approved 2026-11-08):**
+  - Navigation without a mouse wheel (Task 2a, done before Task 3).
+  - Handling models with many holes (added to Task 12).
+  - Fills that follow the surrounding surface: fairing, Task 12a.
+  - Sculpting and carving captured as Phase 1 requirements (spec v0.4 §11a). M4 must not block them, and the final review checks this.
 - **Two final reviews:** an independent technical review of the whole application, plus a user-facing UX assessment. Both explicitly challenge architectural shortcuts, and the UX assessment judges whether the pieces form one coherent interactive application.
 
 ## Global Constraints
@@ -373,6 +378,27 @@ The project owner approved this plan with changes, which are folded into the tas
   - Non-manifold edges.
   - Clicking a row selects the defect and frames it.
   - Each row has a one-click action where one exists: "Fill", or "Remove island".
+- **Many holes** (sculpted models often have hundreds). Everything below is computed on the analysis worker.
+  - **Size groups:** holes are grouped by edge count, each group with a count and a group action ("Fill all 312 tiny holes"):
+    - Tiny ≤ 8
+    - Small ≤ 30
+    - Medium ≤ 200
+    - Large ≤ 1000
+    - Too large for the current method > 1000 (MF-ISSUE-043)
+  - **Batch fill:** a "Fill holes up to [N] edges" slider shows a live preview count ("353 holes · 4 left open") before Apply. It runs as one `fill_holes` command with a `Loops` target, so it's one undo.
+  - **Intentional openings:**
+    - "Mark as intentional opening" is available on a hole, a group or a selection.
+    - Marked loops are stored on the object as a `BoundaryLoop` selection and translated through history like any selection. Marking is an undoable document command that changes no geometry.
+    - Marked openings are left out of defect counts, group actions, batch fill and whole-object "Fill all holes", and are listed under "Intentional openings" (unmark there).
+  - **Next / previous:** `N` and `Shift+N` (plus on-screen buttons) select and frame the next or previous hole in the current sort order.
+  - **Multi-select in the viewport:**
+    - Shift-click adds or removes.
+    - Box select (`B`, or the Select mode on the navigation bar, then drag) selects every *visible* hole whose screen-space centroid falls inside the box.
+    - Properties then shows "N holes selected" with one Fill.
+  - **"Where are they" overview** (View ▸ Show hole overview):
+    - Faces within 1 ring of any hole get a low-alpha hole tint (a `HOLE_NEIGHBOURHOOD` state bit).
+    - Holes smaller than 4 px on screen get a fixed-size screen-space marker, so tiny holes are visible when zoomed out.
+  - The tree's 200-row cap per category is replaced by virtualised scrolling, so every row is reachable.
 - **`OrbitCamera::frame(&mut self, aabb: &Aabb)`** animates over 200 ms (the animation interpolates the camera only; no geometry work).
 - **Shortcuts:** `F` frames the selection, or everything if nothing is selected. `Esc` cancels a running job, otherwise clears the selection, and only when no popup or text field consumed it (MF-ISSUE-041). `Ctrl/Cmd+Z` and `Shift+Ctrl/Cmd+Z` are undo and redo.
 - **Unit prompt (MF-ISSUE-045):**
@@ -385,13 +411,58 @@ The project owner approved this plan with changes, which are folded into the tas
   - GUI `clicking_a_hole_in_the_viewport_opens_fill_options_for_it`
   - GUI `defect_list_click_selects_and_frames_the_hole`
   - GUI `one_click_fill_from_defect_list_fills_only_that_hole`
+  - GUI `size_groups_count_and_fill_a_group_in_one_command` (300 generated holes)
+  - GUI `batch_fill_slider_previews_count_and_undoes_in_one_step`
+  - `intentional_openings_survive_edits_and_are_excluded_from_fill_all`
+  - GUI `next_hole_selects_and_frames_in_order`
+  - GUI `box_select_picks_only_visible_holes_inside_the_box`
+  - GUI `tiny_holes_get_screen_markers_when_zoomed_out`
   - GUI `esc_in_a_popup_keeps_the_selection`
   - GUI `unit_prompt_preselects_metres_for_the_archaeopteryx_scale` (a 0.5 × 0.4 m bounding box)
   - `exported_3mf_carries_the_chosen_unit`
   - `every_operation_parameter_has_a_tooltip`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(desktop): defect browser, framing, shortcuts and unit prompt [MF-RENDER-005, MF-ISSUE-041, MF-ISSUE-045]`.
-- [ ] **Step 6: Checkpoint C (stop).** Record the full workflow from the running app at 1440×900 (PNGs plus MP4): open the real scan → inspect → select a hole in the viewport → fill → undo → change refinement → fill again → export. Ship the build and the sample files (`scripts/demo.sh`). Wait for the owner's feedback, then fix or record each point before Task 13.
+
+### Task 12a: Fill styles: fairing so patches follow the surrounding surface (MF-OP-002 v0.4)
+
+**Files:**
+- `specs/operations/mesh.fill_holes.yaml` (op version 2)
+- `mf-operations/src/fill_holes/{fair.rs (new), mod.rs}`
+- `tests/geometry/fill_holes.yaml`
+- `mf-desktop` (the Fill options UI)
+
+**Interfaces:**
+- **New parameter:** `fill_style` (enum `flat | smooth | curvature`, default `smooth`, "How the patch meets the surface around the hole"). Labels in the UI: "Flat", "Smooth (matches slope)", "Curvature-matched".
+- **`flat`:** today's behaviour (triangulate plus refine).
+- **`smooth`:** after refinement, solve **Δ²x = 0** (bi-Laplacian fairing, after Liepa 2003) for the patch's *interior* vertices only.
+  - Fixed: the boundary and the existing 1-ring outside it, read-only. That gives C1 continuity.
+  - Laplacian: scale-dependent umbrella weights.
+- **`curvature`:** **Δ³x = 0** with 2 fixed rings (C2).
+- **Solver:** in-crate preconditioned conjugate gradient (Jacobi) on the sparse system per coordinate. No new dependency.
+  - Single-threaded per hole in a fixed order, so it's deterministic and bit-identical across OSes. No FMA intrinsics.
+  - It stops at a relative residual of 1e-10 or 4·n iterations. Not converging is the error `fairing_did_not_converge`, naming the loop; it never falls back to flat silently.
+- **Only patch-interior vertices move.** `untouched_outside_target` still holds, and is asserted.
+- **Versioning:** op version 2. Records with `op_version 1` replay as `fill_style: flat`, so existing logs still replay Exact. A test proves it.
+- **Desktop:** the Fill options in Properties show the style with a one-line plain explanation each. "Smooth" is preselected.
+
+- [ ] **Step 1: Tests**
+  - `smooth_fill_follows_a_sphere`: a 44-edge hole on a radius-1 UV sphere. Every patch vertex is within **2%** of the radius; flat measures much worse (recorded).
+  - `curvature_fill_follows_a_sphere_closer`: within **1%**.
+  - `fairing_moves_only_patch_interior_vertices` (untouched outside target)
+  - `fairing_is_deterministic_across_thread_counts`
+  - `v1_records_replay_as_flat_exactly`
+  - `real_scan_holes_fill_smoothly`: on the Archaeopteryx scan, the max dihedral angle between a patch face and its neighbours is no worse than `flat` for every hole.
+  - GUI `fill_style_choice_changes_the_patch`
+- [ ] **Step 2–4:** FAIL → implement → PASS.
+- [ ] **Step 5:** Commit `feat(ops): fill styles — smooth and curvature-matched fairing [MF-OP-002]`.
+- [ ] **Step 6: Checkpoint C (stop).** Record the full workflow from the running app at 1440×900 (PNGs plus MP4):
+  1. Open the real scan, and inspect it (size groups, overview).
+  2. Select a hole in the viewport and fill it with Smooth.
+  3. Undo, switch to Flat to compare, and fill again.
+  4. Batch-fill tiny holes, mark an intentional opening, and export.
+
+  Rebuild the release app so the owner can open it directly (`target/release/meshfixer-desktop`). Wait for the owner's feedback, then fix or record each point before Task 13.
 
 ### Task 13: I/O burndown (MF-ISSUE-033/034/035/039)
 
@@ -438,6 +509,8 @@ The project owner approved this plan with changes, which are folded into the tas
   - a full re-upload disguised as incremental
   - cancellation checked only between phases
   - transforms applied in rendering but not in picking
+  - fairing that moves vertices outside the patch, or falls back to flat silently
+  - anything in M4 that would block Phase 1 sculpting (spec §11a): per-stroke vertex moves must re-upload only the touched chunks, and history must share storage across many small edits
   - frame-time numbers that exclude the GPU
 - **Fix pass:** Critical and Important findings are fixed, each with a test that fails first. Minors go to `docs/issues.md`.
 - [ ] Commit `ci: M4 evidence`. Then open the PR, with CI green on 3 OSes and 0 Linux skips.
@@ -453,7 +526,7 @@ The project owner approved this plan with changes, which are folded into the tas
   - the two-object transformed 3MF
 - **Demo script (`m4-demo.md`)**, about 15 minutes. Each step lists what to look for.
   1. **Performance (spec M4 demo):** open 5M and orbit, which should stay smooth. Run `fill_holes` and keep orbiting while progress moves. Cancel: the status says the document is unchanged, and the history is unchanged. Run again to completion. Open the Metrics panel.
-  2. **Surgical repair (exit criterion 9, closing MF-ISSUE-015):**
+  2. **Surgical repair (exit criterion 9, closing MF-ISSUE-015), including Smooth vs Flat fills and many-hole handling:**
      - Open the real scan. The unit prompt preselects metres.
      - Browse defects, hover a hole to see its size, click to frame it, and fill only that hole.
      - Undo, switch refinement, and fill again. Then try a slit: it's refused, with a clear reason.
