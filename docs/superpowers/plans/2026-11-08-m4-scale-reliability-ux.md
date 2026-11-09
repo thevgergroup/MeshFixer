@@ -21,6 +21,20 @@
 - the minors 033–040 and 046
 - 032 is roadmap only; it isn't in this plan's scope
 
+## Owner amendments (2026-11-08)
+
+The project owner approved this plan with changes, which are folded into the tasks below:
+- **Three UX checkpoints from the running app** (no mockups). Each is a **stop** for owner feedback before the next task starts:
+  - **A:** after Task 2 (multi-object viewport plus the new layout)
+  - **B:** after Task 8 (overlays, picking, hover, selection)
+  - **C:** after Task 12 (the full surgical workflow)
+- **The viewport stays the primary workspace.** Clicking geometry selects it visibly and opens a **contextual operation panel** for that target. The defect browser complements direct manipulation; it never replaces it.
+- **Diagnostics are explained in plain language**, alongside the engineering terms, and each one has an obvious next action.
+- **Performance is measured as the user experiences it:** CPU and GPU frame time and presentation, reported as p50/p95/p99. Memory is broken down into mesh storage, topology, scratch peak, GPU allocations and process RSS. No narrow benchmark may hide a poor real-world experience.
+- **The final demo is an acceptance gate and a usability review.** It runs on a normal laptop-sized window (1440×900 points) with ordinary mouse and trackpad controls. The owner runs it themselves from a demo build, sample files and instructions. The question it answers: could someone who has used Meshmixer or Fusion inspect and repair an imported model without an engineer guiding them?
+- **A deliberate visual and interaction language** (Task 2) covers panel arrangement, hierarchy, colours for selection, defects and repairs, contextual tools, and history navigation.
+- **Two final reviews:** an independent technical review of the whole application, plus a user-facing UX assessment. Both explicitly challenge architectural shortcuts, and the UX assessment judges whether the pieces form one coherent interactive application.
+
 ## Global Constraints
 
 - **Unchanged from M3:**
@@ -42,11 +56,11 @@
 
 ## Review Focus
 
-1. **Cancel racing completion:** a cancel arriving just as an operation finishes must produce exactly one outcome: either the revision is committed and reported, or nothing changed and "Cancelled" is reported. Never a revision plus a "Cancelled" message. Test: `cancel_racing_completion_has_one_outcome` (Task 3).
-2. **History jumps with incremental GPU uploads:** after undo, redo, or checkout to a revision on another branch, the GPU chunks must equal a full rebuild, with no stale chunk from the previous revision. Test: `incremental_upload_matches_full_rebuild_after_checkout` (Task 5).
+1. **Cancel racing completion:** a cancel arriving just as an operation finishes must produce exactly one outcome: either the revision is committed and reported, or nothing changed and "Cancelled" is reported. Never a revision plus a "Cancelled" message. Test: `cancel_racing_completion_has_one_outcome` (Task 4).
+2. **History jumps with incremental GPU uploads:** after undo, redo, or checkout to a revision on another branch, the GPU chunks must equal a full rebuild, with no stale chunk from the previous revision. Test: `incremental_upload_matches_full_rebuild_after_checkout` (Task 6).
 3. **Mirrored transforms** (negative determinant): faces must still render front-facing and lit correctly, and picking must hit them. Test: `mirrored_object_renders_and_picks` (Task 1).
-4. **Thread budget edge cases:** on a 1- or 2-core machine, or with `--threads 0` or more threads than cores, the pool must have at least 1 thread and say what it chose. Test: `pool_size_is_clamped_and_reported` (Task 2).
-5. **Hostile archives:** a 3MF whose model part decompresses far beyond its declared or plausible size (a zip bomb), or an STL declaring 4 billion triangles, must fail fast with a structured error and bounded memory. Test: `threemf_decompression_is_bounded` (Task 10).
+4. **Thread budget edge cases:** on a 1- or 2-core machine, or with `--threads 0` or more threads than cores, the pool must have at least 1 thread and say what it chose. Test: `pool_size_is_clamped_and_reported` (Task 3).
+5. **Hostile archives:** a 3MF whose model part decompresses far beyond its declared or plausible size (a zip bomb), or an STL declaring 4 billion triangles, must fail fast with a structured error and bounded memory. Test: `threemf_decompression_is_bounded` (Task 11).
 
 ---
 
@@ -73,7 +87,55 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(render): draw and pick every object at its transform [MF-ISSUE-042]`, and close 042 in the register. Multi-object editing is then "supported", which the register states.
 
-### Task 2: `mf-runtime`: pool, cancellation, progress (MF-RT-002/003/004)
+### Task 2: Layout and visual language, then Checkpoint A
+
+**Files:** `docs/design/visual-language.md` (new), `mf-desktop/src/{theme.rs (new), panels.rs, app.rs}`
+
+**Decisions (recorded in `visual-language.md` and applied):**
+- **Layout:** the viewport is the dominant region.
+  - **Left:** "Objects & Defects", a tree of Model ▸ Holes / Narrow cracks / Loose pieces / Non-manifold edges, each with a count.
+  - **Right:** "Properties & Tools", contextual to the current target. It shows the target's description, the operations valid for its kind, their parameters, and Apply.
+  - **Bottom:** a history breadcrumb (Import → Inspect → Fill hole …; click to jump, current one highlighted) and a status line (ready, progress, or result).
+  - The operation drop-down in the left panel goes away: operations are reached from the target.
+- **Colour tokens (`theme.rs`)** each have a defined use, and the same colour never means two things:
+  - **selected:** cyan
+  - **hover:** light outline
+  - **defect:** holes orange, cracks magenta, loose pieces amber, non-manifold red
+  - **recent repair:** green tint on faces created by the last N commands, toggleable
+  - **inactive object:** desaturated
+- **Plain-language defect copy:** a table in `visual-language.md`, used by every panel and tooltip.
+
+  | Kind | Title | Detail | Next action |
+  |---|---|---|---|
+  | hole | "Hole N: small opening" (or "large opening" above 200 edges) | "42 boundary edges · 12.4 mm perimeter" | "Fill hole" |
+  | slit | "Narrow crack" | "Edges almost touch" | "Needs edge stitching (not yet available)" |
+  | island | "Loose piece" | "N triangles, not connected to the model" | "Remove piece" |
+  | non-manifold | "Tangled edge" | "More than two faces share this edge" | "Select the faces involved" |
+  | over cap | "Very large opening" | (as hole) | "Needs the large-hole method (not yet available)" |
+
+- **Camera controls** (shown in Help ▸ Controls):
+  - **Mouse:** left-drag orbits, right- or middle-drag pans, the wheel zooms to the cursor.
+  - **Trackpad:** two-finger drag orbits, Shift + two-finger drag pans, pinch zooms.
+  - **Shortcuts:** `F` frames the selection; Home resets the view.
+
+- [ ] **Step 1: Tests**
+  - GUI `layout_has_viewport_tree_properties_and_history`: the viewport takes ≥ 60% of a 1440×900 window.
+  - `clicking_a_target_shows_its_operations_in_properties`
+  - `history_breadcrumb_jumps_to_a_revision`
+  - `defect_copy_matches_the_table` (unit test of the copy function)
+  - `pinch_zooms_and_two_finger_drag_orbits`
+- [ ] **Step 2–4:** FAIL → implement → PASS.
+- [ ] **Step 5:** Commit `feat(desktop): layout, colour tokens, plain-language defects, camera controls`.
+- [ ] **Step 6: Checkpoint A (stop).** Capture the running app at 1440×900 from the GUI tests, as PNGs plus a 20–40 s MP4 assembled with ffmpeg:
+  - two transformed objects
+  - orbiting, panning and zooming
+  - active-object highlighting
+  - a selection with its contextual Properties panel
+  - the history breadcrumb
+
+  Put them in `artifacts/m4/checkpoint-a/`, along with `scripts/demo.sh` so the owner can run the same build. Then wait for the owner's feedback, and record it and any changes in the ledger before Task 3.
+
+### Task 3: `mf-runtime`: pool, cancellation, progress (MF-RT-002/003/004)
 
 **Files:** `crates/mf-runtime/{Cargo.toml, src/lib.rs}`; workspace `Cargo.toml`
 
@@ -99,7 +161,7 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(runtime): job pool, cancellation and progress [MF-RT-002, MF-RT-003, MF-RT-004]`.
 
-### Task 3: Cancellation and progress through the engine (MF-RT-001/002, MF-CMD-006)
+### Task 4: Cancellation and progress through the engine (MF-RT-001/002, MF-CMD-006)
 
 **Files:**
 - `mf-operations/src/lib.rs` and every operation
@@ -109,7 +171,7 @@
 - Test: `crates/mf-command/tests/cancel.rs`
 
 **Interfaces:**
-- **Consumes:** Task 2.
+- **Consumes:** Task 3.
 - **Produces:**
   - `Operation::execute(&self, input, target, params, ctx: &RunContext) -> Result<OpOutput, OpError>`.
   - New error variants: `OpError::Cancelled` and `CommandError::Cancelled`.
@@ -129,7 +191,7 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(engine): cooperative cancellation and progress in import, topology and operations [MF-RT-002, MF-RT-003, MF-CMD-006]`.
 
-### Task 4: Frontends: progress, cancel, thread budget (MF-RT-003/004)
+### Task 5: Frontends: progress, cancel, thread budget (MF-RT-003/004)
 
 **Files:** `mf-desktop/src/{app.rs, worker.rs, panels.rs}`, `mf-cli/src/main.rs`
 
@@ -145,13 +207,13 @@
 
 - [ ] **Step 1: Tests**
   - GUI `cancel_button_stops_fill_and_document_is_unchanged` (5M fixture)
-  - GUI `ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m`: `App::update` duration is instrumented; the maximum must be ≤ 50 ms.
+  - GUI `ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m`: the whole frame is measured, which means `App::update`, viewport encode and submit, GPU completion (timestamp queries), and presentation. The worst frame must be ≤ 50 ms, and p95/p99 are reported. `App::update` alone doesn't count.
   - CLI `progress_lines_are_monotonic_and_end_at_one`
   - CLI `threads_flag_is_reported_in_metrics`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(desktop, cli): live progress, cancel and thread budget [MF-RT-001, MF-RT-003, MF-RT-004]`.
 
-### Task 5: Chunked GPU geometry with partial re-upload (MF-RENDER-003, geometry)
+### Task 6: Chunked GPU geometry with partial re-upload (MF-RENDER-003, geometry)
 
 **Files:**
 - `mf-geometry/src/mesh.rs` (chunk-sharing queries)
@@ -175,13 +237,13 @@
 
 - [ ] **Step 1: Tests**
   - `filling_one_hole_reuploads_only_touched_chunks`: on a 1M mesh, `surface_bytes` ≤ 2 chunks plus the appended chunk.
-  - `selection_change_uploads_no_geometry` (with Task 6)
+  - `selection_change_uploads_no_geometry` (with Task 7)
   - `incremental_upload_matches_full_rebuild_after_checkout` (Review Focus 2): A → B → undo → branch C → checkout B. After each step, the GPU-side data equals `build_from(None, …)`. Compared through a CPU mirror of the uploaded chunks.
   - `moved_vertex_invalidates_every_chunk_that_references_it`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(render): per-chunk GPU geometry with partial re-upload [MF-RENDER-003]`.
 
-### Task 6: Per-face state buffer, selection tint and diagnostic overlays (MF-RENDER-003 selection, MF-RENDER-005)
+### Task 7: Per-face state buffer, selection tint and diagnostic overlays (MF-RENDER-003 selection, MF-RENDER-005)
 
 **Files:**
 - `mf-render`: `gpu_mesh.rs`, `shader.wgsl`, `renderer.rs`
@@ -190,7 +252,7 @@
 
 **Interfaces:**
 - **`FaceStates`:** per face chunk, a `Vec<u32>` packing 4 faces per word (one byte per face).
-  - Bits: `SELECTED = 1`, `SMALL_COMPONENT = 2`, `HOVER = 4`, `NON_MANIFOLD_ADJ = 8`.
+  - Bits: `SELECTED = 1`, `SMALL_COMPONENT = 2`, `HOVER = 4`, `NON_MANIFOLD_ADJ = 8`, `RECENT_REPAIR = 16` (faces created by the last N commands; colours from Task 2's tokens).
   - Built on a worker from the selection and the analysis.
 - **`GpuMesh::set_face_states(&mut self, queue, s: &FaceStates) -> UploadStats`** writes only the chunks whose words changed. The shader reads it as a storage buffer, indexed by `vertex_index / 3`.
 - **Overlays:**
@@ -209,7 +271,7 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(render, desktop): face state buffer; selection, hover and defect overlays [MF-RENDER-003, MF-RENDER-005]`.
 
-### Task 7: Accelerated picking and hover (MF-RENDER-004)
+### Task 8: Accelerated picking and hover (MF-RENDER-004)
 
 **Files:** `mf-render/src/bvh.rs` (new), `pick.rs`; `mf-desktop/src/{app.rs, worker.rs}`; `Cargo.toml` (`mf-render` at opt-level 2 in dev)
 
@@ -228,8 +290,9 @@
   - GUI `hovering_a_hole_highlights_it_and_shows_its_size`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(render): BVH picking and hover feedback [MF-RENDER-004]`.
+- [ ] **Step 6: Checkpoint B (stop).** Capture from the running app at 1440×900 (PNGs plus MP4) on the real scan and the 5M mesh: defect overlays, hover with its tooltip, clicking holes, pieces and tangled edges, the selection with its Properties panel, and recent-repair tint after a fill. Wait for the owner's feedback, and record it before Task 9.
 
-### Task 8: Memory: topology scratch, budget gate, compaction (MF-GEO-002/003, MF-ISSUE-019/020)
+### Task 9: Memory: topology scratch, budget gate, compaction (MF-GEO-002/003, MF-ISSUE-019/020)
 
 **Files:**
 - `mf-geometry/src/topology.rs`, `diagnostics.rs`
@@ -246,17 +309,19 @@
 - [ ] **Step 1: Tests**
   - `topology_build_peak_under_150mb_at_5m`
   - `working_set_under_400mb_at_5m` (the CI job)
+  - `realistic_session_rss_is_reported`: open 5M, fill holes, undo, redo, and select. Process RSS and GPU bytes are recorded in the evidence. There's no gate yet, but the number is reported next to the 400 MB storage figure, so the two can't be confused.
   - `compact_remaps_and_selections_translate`
   - `compact_is_replayable_exact`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `perf(geometry): leaner topology build; memory gate; mesh.compact [MF-GEO-002, MF-ISSUE-019, MF-ISSUE-020]`.
 
-### Task 9: Telemetry, metrics panel and orbit benchmarks (MF-RT-005, MF-RENDER-002 preliminary)
+### Task 10: Telemetry, metrics panel and orbit benchmarks (MF-RT-005, MF-RENDER-002 preliminary)
 
 **Files:** `mf-metrics` (frame-time histogram), `mf-desktop/src/panels.rs` (Metrics panel), `mf-cli` (`bench orbit`), `scripts/bench-orbit.sh`
 
 **Interfaces:**
-- **`FrameTimes`:** a ring buffer of the last 1000 frames. `p50/p95/p99() -> Duration`.
+- **`FrameTimes`:** a ring buffer of the last 1000 frames, recorded separately for **CPU** (update plus encode), **GPU** (timestamp queries; where they're unsupported, the panel says so instead of showing zero) and **frame-to-frame** (presentation interval). Each has `p50/p95/p99() -> Duration`.
+- **`MemoryBreakdown`:** mesh storage, cached topology, scratch peak of the last operation, GPU allocations (geometry, state, lines, textures) and **process RSS**, all in the panel and in `--metrics`.
 - **Metrics panel (View ▸ Metrics):**
   - frame times p50/p95/p99, and fps
   - per-operation durations
@@ -277,7 +342,7 @@
 - [ ] **Step 5:** Run `scripts/bench-orbit.sh` on the M2 Max and record the results as **preliminary** (OD-2 / MF-ISSUE-017 stay open).
 - [ ] **Step 6:** Commit `feat(metrics): frame-time telemetry, metrics panel, orbit benchmark [MF-RT-005, MF-RENDER-002]`.
 
-### Task 10: Hostile input: fuzzing and bounded readers (MF-IO-002)
+### Task 11: Hostile input: fuzzing and bounded readers (MF-IO-002)
 
 **Files:** `fuzz/{Cargo.toml, fuzz_targets/{stl.rs, obj.rs, threemf.rs}}`, `fuzz/corpus/*` (small seeds only), `mf-io` (limits), CI (`fuzz` job)
 
@@ -296,12 +361,13 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS. Then run each fuzz target locally for 10 minutes; fix and add a regression test for every crash found.
 - [ ] **Step 5:** Commit `test(io): fuzz targets per reader; bounded decompression and declared sizes [MF-IO-002]`.
 
-### Task 11: Interaction quality: defect browser, framing, units (MF-RENDER-005 UX, MF-ISSUE-041/045)
+### Task 12: Interaction quality: defect browser, framing, units (MF-RENDER-005 UX, MF-ISSUE-041/045)
 
 **Files:** `mf-desktop/src/{panels.rs, app.rs, import_dialog.rs (new)}`, `mf-render/src/camera.rs`, `mf-document`, `mf-io`, `mf-cli`
 
 **Interfaces:**
-- **Defect browser** (side panel, "Defects"):
+- **Direct manipulation first.** Clicking a hole, crack, piece or tangled edge in the viewport selects it visibly. The Properties panel (Task 2) then shows its plain-language description, its measurements, the valid operations, and their parameters with Apply. The browser below is a second route to the same targets.
+- **Defect browser** (the Objects & Defects tree, Task 2):
   - Holes, sorted by edge count, show size and perimeter in document units. Holes over 1000 edges are labelled "needs a large-hole method (not yet available)" (MF-ISSUE-043). Slits are labelled "slit: needs welding (not yet available)" (MF-ISSUE-032).
   - Islands, sorted by triangle count.
   - Non-manifold edges.
@@ -316,6 +382,7 @@
 - **Copy:** every control's tooltip comes from its spec `description`. Every error message ends with what the user can do next. Empty states explain how to start ("Open a mesh (⌘O) or drop a file here").
 
 - [ ] **Step 1: Tests**
+  - GUI `clicking_a_hole_in_the_viewport_opens_fill_options_for_it`
   - GUI `defect_list_click_selects_and_frames_the_hole`
   - GUI `one_click_fill_from_defect_list_fills_only_that_hole`
   - GUI `esc_in_a_popup_keeps_the_selection`
@@ -324,8 +391,9 @@
   - `every_operation_parameter_has_a_tooltip`
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(desktop): defect browser, framing, shortcuts and unit prompt [MF-RENDER-005, MF-ISSUE-041, MF-ISSUE-045]`.
+- [ ] **Step 6: Checkpoint C (stop).** Record the full workflow from the running app at 1440×900 (PNGs plus MP4): open the real scan → inspect → select a hole in the viewport → fill → undo → change refinement → fill again → export. Ship the build and the sample files (`scripts/demo.sh`). Wait for the owner's feedback, then fix or record each point before Task 13.
 
-### Task 12: I/O burndown (MF-ISSUE-033/034/035/039)
+### Task 13: I/O burndown (MF-ISSUE-033/034/035/039)
 
 **Files:** `mf-io/src/{lib.rs, threemf.rs}`, `mf-desktop` (export warnings)
 
@@ -341,7 +409,7 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `fix(io): export verification, empty objects, transforms/units on export, corrupt rels [MF-ISSUE-033, 034, 035, 039]`.
 
-### Task 13: Operations and replay burndown (MF-ISSUE-036/037/038/040/046)
+### Task 14: Operations and replay burndown (MF-ISSUE-036/037/038/040/046)
 
 **Files:** `mf-selection`, `mf-operations/src/fill_holes/{mod.rs, refine.rs}`, `mf-command`, CI (`replay-cross-os`)
 
@@ -356,14 +424,17 @@
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `fix(ops, replay): loop-removed vs closed, fold-safe flips, shared chords, replay Equivalent path [MF-ISSUE-036, 037, 038, 040, 046]`.
 
-### Task 14: Evidence, CI, independent review
+### Task 15: Evidence, CI, independent review
 
 - **Evidence job additions:**
   - the 1M orbit smoke JSON
   - memory gate JSON
   - cancel-timing JSON
   - GUI frames: progress bar mid-run, metrics panel, defect browser, two transformed objects
-- **Independent whole-branch review** on the most capable model. The brief gets this plan's Review Focus verbatim, plus an explicit challenge to look for shortcuts:
+- **Two final reviews**, both on the most capable model, both of the integrated application:
+  - **(a) Technical:** correctness, performance, resource use and architecture.
+  - **(b) UX assessment:** the reviewer runs the GUI tests' frame captures and the demo script, and judges whether the pieces form one coherent interactive application. Can a Meshmixer or Fusion user inspect and repair without guidance? Are the terms clear, are colours used consistently, does the contextual panel follow the target, is the viewport central?
+- The technical brief gets this plan's Review Focus verbatim, plus an explicit challenge to look for shortcuts:
   - a full re-upload disguised as incremental
   - cancellation checked only between phases
   - transforms applied in rendering but not in picking
@@ -371,12 +442,12 @@
 - **Fix pass:** Critical and Important findings are fixed, each with a test that fails first. Minors go to `docs/issues.md`.
 - [ ] Commit `ci: M4 evidence`. Then open the PR, with CI green on 3 OSes and 0 Linux skips.
 
-### Task 15: UI/UX demonstration for the project owner, and close-out
+### Task 16: UI/UX demonstration for the project owner, and close-out
 
 **Files:** `docs/milestones/m4-demo.md` (script), `artifacts/m4/demo/` (inputs), `docs/milestones/m4.md`
 
 **Deliverables:**
-- **Demo build:** `cargo build --release -p mf-desktop`. The inputs are staged in `artifacts/m4/demo/`:
+- **The owner runs it.** `scripts/demo.sh` builds the release app, stages the inputs, and opens MeshFixer at a 1440×900 window, with ordinary mouse and trackpad controls and no debug knowledge needed. The inputs are staged in `artifacts/m4/demo/`:
   - the 5M damaged sphere (generated)
   - the real Archaeopteryx scan
   - the two-object transformed 3MF
@@ -390,6 +461,7 @@
      - Export 3MF, and check its true size in Cura.
   3. **Multi-object:** open the transformed 3MF. Both objects sit where they belong; click one, select a hole on it, and fill it.
 - **Automated preview reel:** an MP4 of real GUI frames from the headless tests, assembled with ffmpeg and clearly labelled "automated preview, not the human demo". It's sent ahead, so the owner sees the flow before the live session.
+- **This is an acceptance gate, not an informational recording.** The owner tries the workflow themselves.
 - **Live session:** the owner drives with the script while it's recorded. Alternatively, Claude drives through computer use, if the owner enables it and grants access to the MeshFixer app. The recording is linked from `m4.md`, and MF-ISSUE-015 is closed with it.
 - **UX feedback:** every friction point the owner notes becomes an issue with a severity. Anything S1/S2 is fixed before M4 is marked accepted, or the owner explicitly defers it.
 - [ ] Write `docs/milestones/m4.md`: gates with evidence, benchmark tables marked preliminary, review findings, rulings, and the demo outcome. Commit `docs: M4 report and demo`.
