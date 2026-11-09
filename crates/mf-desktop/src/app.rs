@@ -5,14 +5,14 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui;
 use mf_command::{CommitOutcome, Invocation, ObjectId, Session};
-use mf_geometry::Mesh;
+use mf_geometry::{Aabb, Mesh};
 use mf_io::Format;
-use mf_render::{MeshVertices, OrbitCamera};
+use mf_render::{MeshVertices, OrbitCamera, model_matrix};
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::viewport::{Click, ViewOptions, Viewport};
-use crate::worker::{self, Analysis, Message};
+use crate::viewport::{Click, ObjectView, ViewOptions, Viewport};
+use crate::worker::{self, Analysis, Message, PickTarget};
 use mf_render::{LineVertex, loop_line_vertices, screen_position};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
@@ -26,9 +26,19 @@ pub struct MeshFixerApp {
     analyzer: LatestWorker<Mesh>,
     /// Last revision submitted for analysis.
     requested: Option<Mesh>,
-    /// Vertices currently drawn. May belong to the previous revision while
-    /// the new one is analyzed; the viewport says so.
+    /// Vertices currently drawn for the active object. May belong to the
+    /// previous revision while the new one is analyzed; the viewport says so.
     displayed: Option<Arc<MeshVertices>>,
+    /// Render-only vertices for every object that isn't active
+    /// (MF-ISSUE-042): the viewport still draws them, dimmed, at their
+    /// transform. Keyed by object id; the `Mesh` says which revision the
+    /// vertices belong to, so a stale build for a since-changed object is
+    /// never shown.
+    object_vertices: BTreeMap<ObjectId, (Mesh, Arc<MeshVertices>)>,
+    /// Object ids with a build in flight, and the mesh it was requested for
+    /// (so a second change before the first build returns still gets
+    /// re-requested).
+    requested_vertices: BTreeMap<ObjectId, Mesh>,
     /// Label of the running import/operation/export. Blocks new commands.
     pub busy: Option<String>,
     pub selected_op: String,
@@ -84,6 +94,8 @@ impl MeshFixerApp {
             },
             requested: None,
             displayed: None,
+            object_vertices: BTreeMap::new(),
+            requested_vertices: BTreeMap::new(),
             busy: None,
             selected_op,
             op_params: BTreeMap::new(),
@@ -316,20 +328,38 @@ impl MeshFixerApp {
         }
     }
 
-    /// Select what's under a click: a boundary loop within 8 px (when the
-    /// current revision's topology is ready), otherwise the clicked face's
-    /// component (ray cast on a worker). Shift adds to a same-kind selection.
+    /// Select what's under a click: a boundary loop within 8 px of any
+    /// object (when its topology is ready), otherwise the nearest clicked
+    /// face's component across every object (ray cast on a worker). A hit
+    /// makes its object active (MF-ISSUE-042); shift adds to a same-kind,
+    /// same-object selection.
     pub fn click(&mut self, ctx: &egui::Context, click: Click) {
-        let (Some(mesh), Some(cam)) = (self.active_mesh().cloned(), self.camera) else {
+        let (Some(active), Some(cam)) = (self.active, self.camera) else {
             return;
         };
-        let origin = mesh_origin(&mesh);
+        let targets: Vec<PickTarget> = self
+            .session
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| {
+                Some(PickTarget {
+                    object: o.id,
+                    mesh: o.mesh()?.clone(),
+                    model: model_matrix(&o.transform),
+                })
+            })
+            .collect();
+        if targets.is_empty() {
+            return;
+        }
         worker::pick(
             &self.tx,
             ctx,
-            mesh,
+            targets,
+            active,
             cam,
-            origin,
+            cam.target,
             click.size,
             click.px,
             click.shift,
@@ -364,21 +394,20 @@ impl MeshFixerApp {
 
     /// Where a world point appears in the window (for overlays and tests).
     pub fn screen_point(&self, world: [f64; 3]) -> Option<egui::Pos2> {
-        let (rect, cam, mesh) = (self.viewport.last_rect?, self.camera?, self.active_mesh()?);
+        let (rect, cam) = (self.viewport.last_rect?, self.camera?);
         let size = (rect.width() as f64, rect.height() as f64);
-        let (x, y) = screen_position(&cam, mesh_origin(mesh), size, world)?;
+        let (x, y) = screen_position(&cam, cam.target, size, world)?;
         Some(egui::pos2(rect.left() + x as f32, rect.top() + y as f32))
     }
 
     /// Make `id` the active object. A selection belongs to one object, so
-    /// switching to another clears it (its IDs mean nothing there).
+    /// switching to another clears it (its IDs mean nothing there). The
+    /// camera is shared by the whole document (MF-ISSUE-042) and keeps
+    /// framing every object, so activating another one doesn't move it.
     pub fn set_active(&mut self, id: ObjectId) {
-        if self.active != Some(id) {
-            self.camera = None;
-            if self.selection.as_ref().is_some_and(|s| s.object != id) {
-                self.selection = None;
-                self.status = Some("Selection cleared (another object is active)".into());
-            }
+        if self.active != Some(id) && self.selection.as_ref().is_some_and(|s| s.object != id) {
+            self.selection = None;
+            self.status = Some("Selection cleared (another object is active)".into());
         }
         self.active = Some(id);
     }
@@ -421,7 +450,6 @@ impl MeshFixerApp {
         let doc = self.session.document();
         if self.active.and_then(|id| doc.object(id)).is_none() {
             self.active = doc.objects().last().map(|o| o.id);
-            self.camera = None;
         }
     }
 
@@ -461,17 +489,45 @@ impl MeshFixerApp {
                     Err(e) => self.error = Some(e.to_string()),
                 }
             }
-            Message::Picked { mesh, picked, add } => {
+            Message::Picked {
+                object,
+                mesh,
+                picked,
+                add,
+            } => {
                 // Ignore a pick for a revision that's no longer on screen.
-                if let (Some(object), Some(current)) = (self.active, self.active_mesh())
-                    && Mesh::ptr_eq(current, &mesh)
-                {
+                let current = self
+                    .session
+                    .document()
+                    .object(object)
+                    .and_then(|o| o.mesh());
+                if current.is_some_and(|m| Mesh::ptr_eq(m, &mesh)) {
                     match picked {
-                        Some((kind, id)) => self.select(object, kind, id, add),
+                        Some((kind, id)) => {
+                            // A hit on another object makes it active
+                            // (MF-ISSUE-042); `set_active` clears a
+                            // selection that belongs to a different object.
+                            self.set_active(object);
+                            self.select(object, kind, id, add);
+                        }
                         None if !add => self.selection = None,
                         None => {}
                     }
                 }
+            }
+            Message::ObjectVertices {
+                object,
+                mesh,
+                vertices,
+            } => {
+                if self
+                    .requested_vertices
+                    .get(&object)
+                    .is_some_and(|m| Mesh::ptr_eq(m, &mesh))
+                {
+                    self.requested_vertices.remove(&object);
+                }
+                self.object_vertices.insert(object, (mesh, vertices));
             }
             Message::Analyzed { mesh, analysis } => {
                 if self
@@ -522,17 +578,86 @@ impl MeshFixerApp {
             self.analyzer.submit(mesh);
         }
         if self.camera.is_none()
-            && let Some(bb) = self.active_mesh().and_then(|m| m.bounding_box())
+            && let Some(bb) = self.document_world_bounds()
         {
             self.camera = Some(OrbitCamera::fit(&bb));
         }
     }
 
+    /// Request render vertices for every object that isn't active
+    /// (MF-ISSUE-042): the viewport draws them dimmed at their transform,
+    /// but they never need the active object's full diagnostics.
+    fn refresh_object_vertices(&mut self, ctx: &egui::Context) {
+        let stale: Vec<(ObjectId, Mesh)> = self
+            .session
+            .document()
+            .objects()
+            .iter()
+            .filter(|o| Some(o.id) != self.active)
+            .filter_map(|o| {
+                let mesh = o.mesh()?;
+                let have = self
+                    .object_vertices
+                    .get(&o.id)
+                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh));
+                let requested = self
+                    .requested_vertices
+                    .get(&o.id)
+                    .is_some_and(|m| Mesh::ptr_eq(m, mesh));
+                (!have && !requested).then(|| (o.id, mesh.clone()))
+            })
+            .collect();
+        for (id, mesh) in stale {
+            self.requested_vertices.insert(id, mesh.clone());
+            worker::build_vertices(&self.tx, ctx, id, mesh);
+        }
+        // Drop vertices and in-flight requests for objects no longer in the document.
+        let doc = self.session.document();
+        self.object_vertices
+            .retain(|id, _| doc.object(*id).is_some());
+        self.requested_vertices
+            .retain(|id, _| doc.object(*id).is_some());
+    }
+
+    /// Every object the viewport should draw this frame: the active one
+    /// (its vertices come from the full analysis, so they can lag one
+    /// revision behind while it's running) plus every other object whose
+    /// render vertices are ready (MF-ISSUE-042).
+    fn object_views(&self) -> Vec<ObjectView> {
+        let doc = self.session.document();
+        doc.objects()
+            .iter()
+            .filter_map(|o| {
+                let active = Some(o.id) == self.active;
+                let vertices = if active {
+                    self.displayed.clone()?
+                } else {
+                    self.object_vertices.get(&o.id)?.1.clone()
+                };
+                Some(ObjectView {
+                    id: o.id,
+                    vertices,
+                    transform: o.transform,
+                    active,
+                })
+            })
+            .collect()
+    }
+
+    /// Union of every object's bounding box, at its transform
+    /// (MF-ISSUE-042): what the camera fits.
+    fn document_world_bounds(&self) -> Option<Aabb> {
+        self.session
+            .document()
+            .objects()
+            .iter()
+            .filter_map(|o| Some((o.mesh()?.bounding_box()?, o.transform)))
+            .map(|(bb, t)| transformed_bounds(&bb, &model_matrix(&t)))
+            .reduce(|a, b| union_bounds(&a, &b))
+    }
+
     pub fn fit_camera(&mut self) {
-        self.camera = self
-            .active_mesh()
-            .and_then(|m| m.bounding_box())
-            .map(|bb| OrbitCamera::fit(&bb));
+        self.camera = self.document_world_bounds().map(|bb| OrbitCamera::fit(&bb));
     }
 
     /// True while the active revision's analysis isn't ready.
@@ -548,6 +673,7 @@ impl eframe::App for MeshFixerApp {
             self.handle(msg);
         }
         self.refresh_analysis();
+        self.refresh_object_vertices(&ctx);
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
         let typing = ctx.memory(|m| m.focused().is_some());
@@ -582,7 +708,7 @@ impl eframe::App for MeshFixerApp {
         crate::panels::side_panel(self, ui);
         crate::panels::replay_window(self, &ctx);
 
-        let vertices = self.displayed.clone();
+        let objects = self.object_views();
         let placeholder = match self.active_mesh() {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
             Some(_) => "Analyzing…",
@@ -596,7 +722,7 @@ impl eframe::App for MeshFixerApp {
                 self.viewport.show(
                     ui,
                     &mut self.camera,
-                    vertices.as_ref(),
+                    &objects,
                     ViewOptions {
                         show_boundaries,
                         highlight: highlight.as_ref(),
@@ -622,4 +748,44 @@ impl eframe::App for MeshFixerApp {
 fn mesh_origin(mesh: &Mesh) -> glam::DVec3 {
     mesh.bounding_box()
         .map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()))
+}
+
+/// The axis-aligned box containing every corner of `bb` after `model`
+/// (MF-ISSUE-042): a rotation or mirror can move the AABB's own min/max off
+/// the transformed shape's extremes, so every corner is transformed.
+fn transformed_bounds(bb: &Aabb, model: &glam::DMat4) -> Aabb {
+    let corners = (0u8..8).map(|i| {
+        let pick = |lo: f64, hi: f64, bit: u8| if i & bit == 0 { lo } else { hi };
+        glam::DVec3::new(
+            pick(bb.min[0], bb.max[0], 1),
+            pick(bb.min[1], bb.max[1], 2),
+            pick(bb.min[2], bb.max[2], 4),
+        )
+    });
+    let mut out: Option<Aabb> = None;
+    for c in corners {
+        let p = (*model * glam::DVec4::from((c, 1.0))).truncate().to_array();
+        out = Some(match out {
+            None => Aabb { min: p, max: p },
+            Some(mut acc) => {
+                for (k, &v) in p.iter().enumerate() {
+                    acc.min[k] = acc.min[k].min(v);
+                    acc.max[k] = acc.max[k].max(v);
+                }
+                acc
+            }
+        });
+    }
+    // `bb` is never empty for a non-empty mesh's bounding box, so there's
+    // always at least one corner.
+    out.expect("a bounding box has 8 corners")
+}
+
+fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
+    let mut out = *a;
+    for k in 0..3 {
+        out.min[k] = out.min[k].min(b.min[k]);
+        out.max[k] = out.max[k].max(b.max[k]);
+    }
+    out
 }

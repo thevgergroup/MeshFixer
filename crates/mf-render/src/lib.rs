@@ -10,6 +10,7 @@ pub mod offscreen;
 mod pick;
 mod renderer;
 mod target;
+mod transform;
 
 pub use camera::OrbitCamera;
 pub use gpu_mesh::{
@@ -17,8 +18,9 @@ pub use gpu_mesh::{
     chunk_ranges, loop_line_vertices, surface_vertices,
 };
 pub use pick::{pick_loop, ray_pick, screen_position};
-pub use renderer::{MeshRenderer, RenderTargetFormat};
+pub use renderer::{DrawItem, MeshRenderer, RenderTargetFormat};
 pub use target::RenderTarget;
+pub use transform::model_matrix;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {

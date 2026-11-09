@@ -5,7 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::Sender;
 
-use mf_command::{CommandError, Completed, Prepared};
+use glam::DMat4;
+use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Diagnostics, Mesh};
 
 /// Analysis results for one mesh revision.
@@ -24,10 +25,18 @@ pub enum Message {
         mesh: Mesh,
         analysis: Analysis,
     },
+    /// Render vertices for an inactive object (MF-ISSUE-042). The active
+    /// object's vertices come from `Analyzed` instead.
+    ObjectVertices {
+        object: ObjectId,
+        mesh: Mesh,
+        vertices: Arc<MeshVertices>,
+    },
     Exported(Result<PathBuf, IoError>),
     Replayed(Result<Vec<String>, String>),
     /// What a click picked (see [`pick`]), for the revision it was made on.
     Picked {
+        object: ObjectId,
         mesh: Mesh,
         picked: Option<(SelectionKind, u32)>,
         add: bool,
@@ -68,6 +77,24 @@ pub fn analyze(mesh: Mesh) -> Message {
     Message::Analyzed { mesh, analysis }
 }
 
+/// Render vertices only, for an object that isn't active (MF-ISSUE-042): it
+/// still needs to be drawn at its transform, but not analysed.
+pub fn build_vertices(
+    tx: &Sender<Message>,
+    ctx: &eframe::egui::Context,
+    object: ObjectId,
+    mesh: Mesh,
+) {
+    spawn(tx, ctx, move || {
+        let vertices = Arc::new(MeshVertices::build(&mesh));
+        Message::ObjectVertices {
+            object,
+            mesh,
+            vertices,
+        }
+    });
+}
+
 /// Replay a command log off the UI thread (it re-imports source files).
 pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
     spawn(tx, ctx, move || {
@@ -91,15 +118,27 @@ pub fn replay(tx: &Sender<Message>, ctx: &eframe::egui::Context, dir: PathBuf) {
     });
 }
 
-/// Ray-cast pick on a worker (O(n) over faces).
-/// What a click picked: a visible boundary loop near the cursor, else the
-/// component of the face under it. All O(n) work (topology, ray casts)
-/// happens here, never on the UI thread (MF-RT-001).
+/// One object a click can land on: its mesh and object-to-world transform
+/// (MF-ISSUE-042).
+pub struct PickTarget {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub model: DMat4,
+}
+
+/// Ray-cast pick on a worker (O(n) over faces, across every object).
+/// What a click picked: a visible boundary loop near the cursor on any
+/// object (ties go to the first target), else the nearest face in world
+/// space across every object. All O(n) work (topology, ray casts) happens
+/// here, never on the UI thread (MF-RT-001). `active` (and its mesh, which
+/// must be one of `targets`) is reported when the click hits nothing, so a
+/// miss still clears the right object's selection.
 #[allow(clippy::too_many_arguments)]
 pub fn pick(
     tx: &Sender<Message>,
     ctx: &eframe::egui::Context,
-    mesh: Mesh,
+    targets: Vec<PickTarget>,
+    active: ObjectId,
     cam: mf_render::OrbitCamera,
     origin: glam::DVec3,
     size: (f64, f64),
@@ -107,20 +146,44 @@ pub fn pick(
     add: bool,
 ) {
     spawn(tx, ctx, move || {
-        let picked = match mf_render::pick_loop(&mesh, &cam, origin, size, px, 8.0) {
-            Some(id) => Some((SelectionKind::BoundaryLoop, id)),
-            None => {
-                let (ray_origin, dir) = cam.ray(origin, size, px);
-                mf_render::ray_pick(&mesh, ray_origin, dir).and_then(|(f, _)| {
-                    mesh.topology()
+        let loop_hit = targets.iter().find_map(|t| {
+            mf_render::pick_loop(&t.mesh, &t.model, &cam, origin, size, px, 8.0)
+                .map(|id| (t, (SelectionKind::BoundaryLoop, id)))
+        });
+        let hit = loop_hit.or_else(|| {
+            let (ray_origin, dir) = cam.ray(origin, size, px);
+            targets
+                .iter()
+                .filter_map(|t| {
+                    let (f, dist) = mf_render::ray_pick(&t.mesh, &t.model, ray_origin, dir)?;
+                    let component = t
+                        .mesh
+                        .topology()
                         .components
                         .iter()
-                        .position(|c| c.contains(&f.0))
-                        .map(|c| (SelectionKind::Component, c as u32))
+                        .position(|c| c.contains(&f.0))?;
+                    Some((t, (SelectionKind::Component, component as u32), dist))
                 })
-            }
-        };
-        Message::Picked { mesh, picked, add }
+                .min_by(|(.., a), (.., b)| a.total_cmp(b))
+                .map(|(t, picked, _)| (t, picked))
+        });
+        match hit {
+            Some((target, picked)) => Message::Picked {
+                object: target.object,
+                mesh: target.mesh.clone(),
+                picked: Some(picked),
+                add,
+            },
+            None => Message::Picked {
+                object: active,
+                mesh: targets
+                    .iter()
+                    .find(|t| t.object == active)
+                    .map_or_else(Mesh::empty, |t| t.mesh.clone()),
+                picked: None,
+                add,
+            },
+        }
     });
 }
 

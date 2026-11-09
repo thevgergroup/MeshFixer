@@ -6,19 +6,34 @@ use std::sync::Arc;
 
 use eframe::egui;
 use eframe::egui_wgpu::RenderState;
+use mf_command::ObjectId;
 use mf_render::{
     GpuLines, GpuMesh, LineVertex, MeshRenderer, MeshVertices, OrbitCamera, RenderTarget,
+    model_matrix,
 };
 
 pub const MSAA_SAMPLES: u32 = 4;
+
+/// Colour multiplier for an object that isn't the active one (MF-ISSUE-042).
+const INACTIVE_TINT: f32 = 0.45;
 
 #[derive(Clone, Copy, PartialEq)]
 struct FrameKey {
     camera: OrbitCamera,
     show_boundaries: bool,
     size: (u32, u32),
+    /// Which object is active (dimming depends on this).
+    active: Option<ObjectId>,
     /// Identity of the highlight line set (0 = none).
     highlight: usize,
+}
+
+/// One object to draw this frame, at its own transform (MF-ISSUE-042).
+pub struct ObjectView {
+    pub id: ObjectId,
+    pub vertices: Arc<MeshVertices>,
+    pub transform: [f64; 12],
+    pub active: bool,
 }
 
 /// How to draw the view this frame.
@@ -45,7 +60,8 @@ pub struct Viewport {
     renderer: MeshRenderer,
     target: Option<RenderTarget>,
     texture: Option<egui::TextureId>,
-    uploaded: Option<(Arc<MeshVertices>, GpuMesh)>,
+    /// GPU meshes uploaded for the objects drawn last frame, by object id.
+    uploaded: Vec<(ObjectId, Arc<MeshVertices>, GpuMesh)>,
     highlight: Option<(Arc<Vec<LineVertex>>, GpuLines)>,
     last_frame: Option<FrameKey>,
     /// Where the 3D view was last drawn (for picking and screen projections).
@@ -62,7 +78,7 @@ impl Viewport {
             renderer,
             target: None,
             texture: None,
-            uploaded: None,
+            uploaded: Vec::new(),
             highlight: None,
             last_frame: None,
             last_rect: None,
@@ -71,11 +87,13 @@ impl Viewport {
     }
 
     /// Draw the viewport into the remaining space and handle camera input.
+    /// Every object of `objects` is drawn at its own transform
+    /// (MF-ISSUE-042): the active one full colour, the rest dimmed.
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         camera: &mut Option<OrbitCamera>,
-        vertices: Option<&Arc<MeshVertices>>,
+        objects: &[ObjectView],
         options: ViewOptions<'_>,
     ) -> Option<Click> {
         let ViewOptions {
@@ -86,10 +104,11 @@ impl Viewport {
         } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        let (Some(cam), Some(vertices)) = (camera.as_mut(), vertices) else {
-            // Nothing to draw: release GPU buffers for a vanished object
+        let (Some(cam), false) = (camera.as_mut(), objects.is_empty()) else {
+            // Nothing ready to draw yet (no camera, or no object's vertices
+            // are in hand): release GPU buffers for a vanished document
             // (MF-ISSUE-009).
-            self.uploaded = None;
+            self.uploaded.clear();
             self.highlight = None;
             self.last_frame = None;
             self.last_rect = None;
@@ -123,7 +142,7 @@ impl Viewport {
             (rect.width() * ppp).round().clamp(1.0, max) as u32,
             (rect.height() * ppp).round().clamp(1.0, max) as u32,
         );
-        let texture = self.render(*cam, vertices, show_boundaries, highlight, size);
+        let texture = self.render(*cam, objects, show_boundaries, highlight, size);
         ui.painter().image(
             texture,
             rect,
@@ -152,7 +171,7 @@ impl Viewport {
     fn render(
         &mut self,
         camera: OrbitCamera,
-        vertices: &Arc<MeshVertices>,
+        objects: &[ObjectView],
         show_boundaries: bool,
         highlight: Option<&Arc<Vec<LineVertex>>>,
         size: (u32, u32),
@@ -189,11 +208,31 @@ impl Viewport {
             dirty = true;
         }
 
-        if !matches!(&self.uploaded, Some((v, _)) if Arc::ptr_eq(v, vertices)) {
-            // Upload only. Vertex data was built on a worker thread.
-            self.uploaded = Some((vertices.clone(), GpuMesh::from_vertices(device, vertices)));
-            dirty = true;
+        // Upload only objects whose vertex set changed; drop ones no longer
+        // in the document. Vertex data was built on a worker thread.
+        let mut uploaded = Vec::with_capacity(objects.len());
+        for o in objects {
+            let existing = self
+                .uploaded
+                .iter()
+                .position(|(id, v, _)| *id == o.id && Arc::ptr_eq(v, &o.vertices));
+            let entry = match existing {
+                Some(i) => self.uploaded.swap_remove(i),
+                None => {
+                    dirty = true;
+                    (
+                        o.id,
+                        o.vertices.clone(),
+                        GpuMesh::from_vertices(device, &o.vertices),
+                    )
+                }
+            };
+            uploaded.push(entry);
         }
+        // Anything left in `self.uploaded` belonged to an object no longer
+        // drawn this frame (removed, or no longer the active/ready one).
+        dirty |= !self.uploaded.is_empty();
+        self.uploaded = uploaded;
 
         // Highlight lines upload separately from the mesh (MF-RENDER-003).
         match highlight {
@@ -208,6 +247,10 @@ impl Viewport {
             camera,
             show_boundaries,
             size,
+            // Content changes (a new vertex set, an object added or
+            // removed) already set `dirty` above; this only needs to catch
+            // a change of *which* object is active (dimming changes).
+            active: objects.iter().find(|o| o.active).map(|o| o.id),
             highlight: self
                 .highlight
                 .as_ref()
@@ -215,14 +258,34 @@ impl Viewport {
         };
         dirty |= self.last_frame != Some(key);
 
-        if dirty && let (Some(target), Some((_, gpu))) = (&self.target, &self.uploaded) {
+        if dirty && let Some(target) = &self.target {
+            let items: Vec<mf_render::DrawItem<'_>> = objects
+                .iter()
+                .zip(&self.uploaded)
+                .map(|(o, (_, _, gpu))| mf_render::DrawItem {
+                    mesh: gpu,
+                    model: model_matrix(&o.transform),
+                    tint: if o.active { 1.0 } else { INACTIVE_TINT },
+                })
+                .collect();
+            // The highlight only exists while there's a selection on the
+            // active object, so there's always one to find here.
+            let active_highlight = self.highlight.as_ref().and_then(|(_, lines)| {
+                let active = objects.iter().find(|o| o.active)?;
+                Some((
+                    lines,
+                    model_matrix(&active.transform),
+                    active.vertices.origin,
+                ))
+            });
             target.draw(
                 device,
                 &self.render_state.queue,
-                &self.renderer,
-                Some((gpu, &camera)),
+                &mut self.renderer,
+                Some(&camera),
+                &items,
                 show_boundaries,
-                self.highlight.as_ref().map(|(_, g)| g),
+                active_highlight,
             );
             self.last_frame = Some(key);
             self.frames_rendered += 1;

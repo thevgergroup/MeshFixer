@@ -2,7 +2,7 @@
 //! The ray cast is brute force over live faces; M4 adds acceleration for
 //! the < 16 ms budget at 5M triangles (MF-RENDER-004).
 
-use glam::{DVec3, DVec4};
+use glam::{DMat4, DVec3, DVec4};
 use mf_geometry::{FaceId, Mesh};
 
 use crate::OrbitCamera;
@@ -40,10 +40,13 @@ fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> (f64, 
 /// The traced boundary loop with a *visible* edge nearest to `px` on screen,
 /// if within `tolerance` pixels. Ties go to the lower loop ID. An edge is
 /// hidden when a face that doesn't touch it lies between the eye and the
-/// edge point under the cursor. Uses the mesh's topology (O(n) to compute)
+/// edge point under the cursor. `model` places the mesh (object space) in
+/// world space (MF-ISSUE-042); screen projection and the occlusion ray cast
+/// both happen in world space. Uses the mesh's topology (O(n) to compute)
 /// and a ray cast per candidate (O(faces)): call it off the UI thread.
 pub fn pick_loop(
     mesh: &Mesh,
+    model: &DMat4,
     cam: &OrbitCamera,
     origin: DVec3,
     size: (f64, f64),
@@ -51,14 +54,19 @@ pub fn pick_loop(
     tolerance: f64,
 ) -> Option<u32> {
     let topo = mesh.topology();
+    let world = |v: u32| {
+        (*model * DVec4::from((DVec3::from(mesh.corner_position(v)), 1.0)))
+            .truncate()
+            .to_array()
+    };
     // (screen distance, loop id, edge endpoints, edge parameter)
     let mut candidates: Vec<(f64, u32, [u32; 2], f64)> = Vec::new();
     for l in &topo.boundary_loops {
         let n = l.vertices.len();
         for k in 0..n {
             let (va, vb) = (l.vertices[k], l.vertices[(k + 1) % n]);
-            let a = screen_position(cam, origin, size, mesh.corner_position(va));
-            let b = screen_position(cam, origin, size, mesh.corner_position(vb));
+            let a = screen_position(cam, origin, size, world(va));
+            let b = screen_position(cam, origin, size, world(vb));
             let (Some(a), Some(b)) = (a, b) else { continue };
             let (d, t) = point_segment_distance(px, a, b);
             if d <= tolerance {
@@ -71,17 +79,14 @@ pub fn pick_loop(
     candidates
         .into_iter()
         .find(|&(_, _, [va, vb], t)| {
-            let (a, b) = (
-                DVec3::from(mesh.corner_position(va)),
-                DVec3::from(mesh.corner_position(vb)),
-            );
+            let (a, b) = (DVec3::from(world(va)), DVec3::from(world(vb)));
             let point = a + (b - a) * t;
             let to = point - eye;
             let len = to.length();
             if len == 0.0 {
                 return true;
             }
-            let hit = first_hit(mesh, eye.to_array(), (to / len).to_array(), |tri| {
+            let hit = first_hit(mesh, model, eye.to_array(), (to / len).to_array(), |tri| {
                 tri.contains(&va) || tri.contains(&vb)
             });
             hit.is_none_or(|(_, dist)| dist >= len * (1.0 - 1e-9))
@@ -90,20 +95,39 @@ pub fn pick_loop(
 }
 
 /// Nearest live face hit by the ray (Möller–Trumbore, both sides), with its
-/// distance along the ray. Ties go to the lower face ID.
-pub fn ray_pick(mesh: &Mesh, origin: [f64; 3], dir: [f64; 3]) -> Option<(FaceId, f64)> {
-    first_hit(mesh, origin, dir, |_| false)
+/// distance along the ray. `model` places the mesh in world space; `origin`
+/// and `dir` are world-space, and the reported distance is along the
+/// world-space ray (MF-ISSUE-042). Ties go to the lower face ID.
+pub fn ray_pick(
+    mesh: &Mesh,
+    model: &DMat4,
+    origin: [f64; 3],
+    dir: [f64; 3],
+) -> Option<(FaceId, f64)> {
+    first_hit(mesh, model, origin, dir, |_| false)
 }
 
-/// Nearest hit among faces for which `skip` is false.
+/// Nearest hit among faces for which `skip` is false. The ray is transformed
+/// into object space with `model`'s inverse (so the brute-force cast still
+/// walks the mesh's own triangles); the returned distance is rescaled back
+/// to the world-space ray `dir` gave.
 fn first_hit(
     mesh: &Mesh,
+    model: &DMat4,
     origin: [f64; 3],
     dir: [f64; 3],
     skip: impl Fn(&[u32; 3]) -> bool,
 ) -> Option<(FaceId, f64)> {
-    let o = DVec3::from(origin);
-    let d = DVec3::from(dir);
+    let inv = model.inverse();
+    let o = (inv * DVec4::from((DVec3::from(origin), 1.0))).truncate();
+    let d_obj = (inv * DVec4::from((DVec3::from(dir), 0.0))).truncate();
+    // World-space `dir` is a unit vector; object space may rescale it, so
+    // distances along `d_obj` are converted back by this factor.
+    let scale = d_obj.length();
+    if scale < 1e-18 {
+        return None;
+    }
+    let d = d_obj / scale;
     let mut best: Option<(FaceId, f64)> = None;
     for (id, t) in mesh.faces() {
         if skip(&t) {
@@ -116,18 +140,18 @@ fn first_hit(
         if det.abs() < 1e-18 {
             continue;
         }
-        let inv = 1.0 / det;
+        let inv_det = 1.0 / det;
         let s = o - a;
-        let u = s.dot(p) * inv;
+        let u = s.dot(p) * inv_det;
         if !(0.0..=1.0).contains(&u) {
             continue;
         }
         let q = s.cross(e1);
-        let v = d.dot(q) * inv;
+        let v = d.dot(q) * inv_det;
         if v < 0.0 || u + v > 1.0 {
             continue;
         }
-        let dist = e2.dot(q) * inv;
+        let dist = e2.dot(q) * inv_det / scale;
         if dist > 1e-12 && best.is_none_or(|(_, bt)| dist < bt) {
             best = Some((id, dist));
         }

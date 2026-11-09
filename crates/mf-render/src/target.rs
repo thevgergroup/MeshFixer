@@ -3,7 +3,9 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use crate::{GpuLines, GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+use glam::DVec3;
+
+use crate::{DrawItem, GpuLines, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
@@ -105,18 +107,23 @@ impl RenderTarget {
     }
 
     /// Render one frame and submit it. `renderer` must have been built with
-    /// [`RenderTarget::format`] for the same sample count.
+    /// [`RenderTarget::format`] for the same sample count. Every item of
+    /// `items` is drawn at its own transform (MF-ISSUE-042), shifted into
+    /// `camera.target`'s frame; `highlight` draws over the active object's
+    /// selected loops, if any.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &MeshRenderer,
-        mesh: Option<(&GpuMesh, &OrbitCamera)>,
+        renderer: &mut MeshRenderer,
+        camera: Option<&OrbitCamera>,
+        items: &[DrawItem<'_>],
         show_boundaries: bool,
-        highlight: Option<&GpuLines>,
+        highlight: Option<(&GpuLines, glam::DMat4, DVec3)>,
     ) {
-        if let Some((gpu, camera)) = mesh {
-            renderer.prepare(queue, gpu, camera, self.width as f32 / self.height as f32);
+        if let Some(camera) = camera {
+            renderer.prepare(queue, camera, self.width as f32 / self.height as f32);
         }
         let bg = BACKGROUND_RGBA.map(|c| c as f64 / 255.0);
         let (view, resolve_target) = match &self.msaa_view {
@@ -153,8 +160,16 @@ impl RenderTarget {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some((gpu, _)) = mesh {
-                renderer.paint(&mut pass, gpu, show_boundaries, highlight);
+            if let Some(camera) = camera {
+                renderer.paint(
+                    device,
+                    queue,
+                    &mut pass,
+                    camera.target,
+                    items,
+                    show_boundaries,
+                    highlight,
+                );
             }
         }
         queue.submit([encoder.finish()]);

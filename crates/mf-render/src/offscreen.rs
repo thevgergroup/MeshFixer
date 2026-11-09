@@ -3,11 +3,12 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use glam::DMat4;
 use image::RgbaImage;
 use mf_geometry::Mesh;
 
 pub use crate::target::BACKGROUND_RGBA;
-use crate::{GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTarget};
+use crate::{DrawItem, GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTarget};
 
 /// Offscreen renders use MSAA like the desktop view, so the same path is tested.
 const SAMPLES: u32 = 4;
@@ -88,15 +89,65 @@ pub fn render_image_with_chunk_limit(
 ) -> Result<RgbaImage, RenderError> {
     let (device, queue) = shared_device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES)?;
-    let renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
+    let mut renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
     let limit = max_chunk_bytes.min(device.limits().max_buffer_size);
     let gpu = GpuMesh::from_vertices_with_limit(&device, &crate::MeshVertices::build(mesh), limit);
     let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
-    let drawable = camera
-        .as_ref()
-        .filter(|_| !mesh.is_empty())
-        .map(|c| (&gpu, c));
-    target.draw(&device, &queue, &renderer, drawable, show_boundaries, None);
+    let items = [DrawItem {
+        mesh: &gpu,
+        model: DMat4::IDENTITY,
+        tint: 1.0,
+    }];
+    let items = if mesh.is_empty() { &items[..0] } else { &items };
+    target.draw(
+        &device,
+        &queue,
+        &mut renderer,
+        camera.as_ref().filter(|_| !mesh.is_empty()),
+        items,
+        show_boundaries,
+        None,
+    );
+    read_back(&device, &queue, &target)
+}
+
+/// Render several objects, each placed by its own object-to-world matrix
+/// (MF-ISSUE-042), framed by `cam` (`cam.target` is the frame every mesh's
+/// local origin and `model` are shifted into). For tests that need to
+/// render more than one transformed object without going through a full
+/// document.
+pub fn render_objects(
+    objects: &[(&Mesh, DMat4)],
+    cam: &OrbitCamera,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+) -> Result<RgbaImage, RenderError> {
+    let (device, queue) = shared_device()?;
+    let target = RenderTarget::new(&device, width, height, SAMPLES)?;
+    let mut renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES));
+    let gpus: Vec<GpuMesh> = objects
+        .iter()
+        .map(|(mesh, _)| GpuMesh::upload(&device, mesh))
+        .collect();
+    let items: Vec<DrawItem<'_>> = gpus
+        .iter()
+        .zip(objects)
+        .map(|(gpu, (_, model))| DrawItem {
+            mesh: gpu,
+            model: *model,
+            tint: 1.0,
+        })
+        .collect();
+    target.draw(
+        &device,
+        &queue,
+        &mut renderer,
+        Some(cam),
+        &items,
+        show_boundaries,
+        None,
+    );
     read_back(&device, &queue, &target)
 }
 
