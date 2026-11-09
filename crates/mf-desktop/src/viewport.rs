@@ -9,8 +9,8 @@ use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
 use mf_metrics::GpuTime;
 use mf_render::{
-    GpuFaces, GpuLines, GpuTimer, Layer, LayerGeometry, MeshRenderer, OrbitCamera, Palette,
-    RenderTarget, model_matrix,
+    GpuLines, GpuTimer, Layer, LayerGeometry, MeshRenderer, OrbitCamera, Palette, RenderTarget,
+    model_matrix,
 };
 
 use crate::theme;
@@ -25,37 +25,23 @@ struct FrameKey {
     size: (u32, u32),
     /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
-    /// Each object drawn and the identity of its render mesh.
-    objects: Vec<(ObjectId, usize)>,
+    /// Each object drawn: the identity of its render mesh, its face-state
+    /// generation (a selection change redraws) and the states shown.
+    objects: Vec<(ObjectId, usize, u64, u32)>,
     /// Identity and colour of each overlay layer, in draw order.
-    layers: Vec<(ObjectId, usize, [u8; 4], u32)>,
+    layers: Vec<(ObjectId, usize, [u8; 4])>,
 }
 
-/// One overlay to draw on an object (built by a worker; see app.rs).
+/// One line overlay to draw on an object (built by a worker; see app.rs).
+/// Face tints aren't layers: they're the render mesh's face states.
 pub struct ViewLayer {
     pub object: ObjectId,
     /// The local origin the layer's vertices are relative to (an overlay's
     /// own; it needn't be the object's render mesh's).
     pub origin: glam::DVec3,
-    pub geometry: ViewGeometry,
+    /// Built on a worker (the view never uploads).
+    pub lines: Arc<GpuLines>,
     pub color: egui::Color32,
-    /// Face layers: how much of `color` replaces the surface colour.
-    pub strength: f32,
-}
-
-/// An overlay's GPU buffers, built on a worker (the view never uploads).
-pub enum ViewGeometry {
-    Lines(Arc<GpuLines>),
-    Faces(Arc<GpuFaces>),
-}
-
-impl ViewGeometry {
-    fn identity(&self) -> usize {
-        match self {
-            ViewGeometry::Lines(v) => Arc::as_ptr(v) as usize,
-            ViewGeometry::Faces(v) => Arc::as_ptr(v) as usize,
-        }
-    }
 }
 
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
@@ -65,6 +51,8 @@ pub struct ObjectView {
     pub render: Arc<RenderMesh>,
     pub transform: [f64; 12],
     pub active: bool,
+    /// Which face-state flags tint it (`mf_render::FaceStates`).
+    pub shown_states: u32,
 }
 
 /// How to draw the view this frame.
@@ -376,18 +364,18 @@ impl Viewport {
             active: objects.iter().find(|o| o.active).map(|o| o.id),
             objects: objects
                 .iter()
-                .map(|o| (o.id, Arc::as_ptr(&o.render) as usize))
+                .map(|o| {
+                    (
+                        o.id,
+                        Arc::as_ptr(&o.render) as usize,
+                        o.render.gpu.state_generation(),
+                        o.shown_states,
+                    )
+                })
                 .collect(),
             layers: drawn
                 .iter()
-                .map(|l| {
-                    (
-                        l.object,
-                        l.geometry.identity(),
-                        l.color.to_array(),
-                        l.strength.to_bits(),
-                    )
-                })
+                .map(|l| (l.object, Arc::as_ptr(&l.lines) as usize, l.color.to_array()))
                 .collect(),
         };
         dirty |= self.last_frame.as_ref() != Some(&key);
@@ -399,6 +387,7 @@ impl Viewport {
                     mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
                     inactive: !o.active,
+                    shown_states: o.shown_states,
                 })
                 .collect();
             let gpu_layers: Vec<Layer<'_>> = drawn
@@ -406,14 +395,11 @@ impl Viewport {
                 .filter_map(|l| {
                     let o = objects.iter().find(|o| o.id == l.object)?;
                     Some(Layer {
-                        geometry: match &l.geometry {
-                            ViewGeometry::Lines(g) => LayerGeometry::Lines(g),
-                            ViewGeometry::Faces(g) => LayerGeometry::Faces(g),
-                        },
+                        geometry: LayerGeometry::Lines(&l.lines),
                         model: model_matrix(&o.transform),
                         mesh_origin: l.origin,
                         color: theme::rgba(l.color),
-                        strength: l.strength,
+                        strength: 1.0,
                     })
                 })
                 .collect();
@@ -437,6 +423,11 @@ impl Viewport {
 }
 
 impl Viewport {
+    /// The device and queue the view draws with.
+    pub fn device(&self) -> (&wgpu::Device, &wgpu::Queue) {
+        (&self.render_state.device, &self.render_state.queue)
+    }
+
     /// The render target for `size` (pixels), made or remade if needed;
     /// returns whether it was. Also made while there's nothing to draw, so
     /// the first frame that draws a model doesn't pay for it (MF-RT-001).
@@ -612,7 +603,7 @@ fn handle_input(
 }
 
 /// Draws a single triangle once, offscreen, through every pipeline the view
-/// uses (surface, outlines, line and face overlays, dimmed objects), so the
+/// uses (surface with face states, outlines, line overlays, dimmed objects), so the
 /// first frame that draws a real model doesn't also wait for the driver to
 /// get them ready: ~25 ms of GPU wait on Metal, measured (MF-RT-001). It
 /// isn't waited for here either.
@@ -625,7 +616,6 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     let vertices = mf_render::MeshVertices::build(&mesh);
     let gpu = mf_render::GpuMesh::from_vertices(device, &vertices);
     let lines = GpuLines::upload(device, &vertices.lines);
-    let faces = GpuFaces::upload(device, &vertices.surface());
     let target = RenderTarget::new(device, 8, 8, MSAA_SAMPLES).expect("an 8×8 target fits");
     let camera = OrbitCamera::fit(&mesh.bounding_box().expect("a triangle has bounds"));
     let model = glam::DMat4::IDENTITY;
@@ -633,6 +623,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         mesh: &gpu,
         model,
         inactive,
+        shown_states: u32::from(mf_render::FaceStates::ALL),
     });
     let layer = |geometry| Layer {
         geometry,
@@ -641,10 +632,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         color: [1.0; 4],
         strength: 1.0,
     };
-    let layers = [
-        layer(LayerGeometry::Lines(&lines)),
-        layer(LayerGeometry::Faces(&faces)),
-    ];
+    let layers = [layer(LayerGeometry::Lines(&lines))];
     target.draw(
         device,
         queue,

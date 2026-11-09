@@ -14,15 +14,15 @@
 //! `Send + Sync`).
 
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use glam::DMat4;
 use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_render::{
-    GpuFaces, GpuLines, GpuMesh, edge_line_vertices, face_surface_vertices, loop_line_vertices,
+    FaceStates, GpuLines, GpuMesh, UploadStats, edge_line_vertices, loop_line_vertices,
 };
 use mf_runtime::{CancelToken, Cancelled, JobPool, PoolChoice, RunContext};
 use mf_selection::SelectionKind;
@@ -41,6 +41,12 @@ pub struct RenderMesh {
     /// The local origin vertices (and defect overlays) are relative to.
     pub origin: glam::DVec3,
     pub gpu: GpuMesh,
+    /// The face states last asked for (by the UI thread), so a change is
+    /// asked for once.
+    requested_states: Mutex<Option<StateInputs>>,
+    /// The newest state request written (by workers): an older one that
+    /// finishes later is dropped.
+    written_states: Mutex<u64>,
 }
 
 /// GPU buffers are at most this big, each uploaded before the next (see
@@ -87,6 +93,7 @@ impl Gpu {
             mesh,
             model: DMat4::IDENTITY,
             inactive: false,
+            shown_states: u32::from(FaceStates::ALL),
         }];
         target.draw(
             &self.device,
@@ -143,12 +150,115 @@ impl RenderMesh {
                 skip,
                 UPLOAD_CHUNK_BYTES,
             ),
+            requested_states: Mutex::new(None),
+            written_states: Mutex::new(0),
         };
         if let Some(bb) = &bounds {
             gpu.prime(&render.gpu, bb);
         }
         render
     }
+}
+
+impl RenderMesh {
+    /// True (and remembered) if `inputs` aren't the face states last asked
+    /// for. O(selection): the UI thread asks every frame.
+    pub fn wants_states(&self, inputs: &StateInputs) -> bool {
+        let mut requested = self
+            .requested_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if requested.as_ref() == Some(inputs) {
+            return false;
+        }
+        *requested = Some(inputs.clone());
+        true
+    }
+
+    /// Forget that `inputs` were asked for (their write was superseded
+    /// before it happened), so they're asked for again if still wanted.
+    fn forget_states(&self, inputs: &StateInputs) {
+        let mut requested = self
+            .requested_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if requested.as_ref() == Some(inputs) {
+            *requested = None;
+        }
+    }
+
+    /// Write `states` (request number `seq`) unless a newer request was
+    /// written already. Only changed chunks are written; no geometry.
+    pub fn write_states(&self, gpu: &Gpu, states: &FaceStates, seq: u64) -> Option<UploadStats> {
+        let mut written = self
+            .written_states
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if seq < *written {
+            return None;
+        }
+        *written = seq;
+        Some(self.gpu.set_face_states(&gpu.queue, states))
+    }
+}
+
+/// What the face states of the active object's revision are made from
+/// (see [`face_states`]). Small to compare, so the UI thread can tell when
+/// they change; the O(n) part is done on a worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StateInputs {
+    /// The selection's faces (a loop or edge selection tints no face).
+    pub selected: Option<OverlayTarget>,
+    /// What the pointer is over (never the selection itself).
+    pub hover: Option<OverlayTarget>,
+    /// Faces made by the last few commands.
+    pub recent: Arc<[u32]>,
+    /// Faces at a non-manifold edge (from the analysis).
+    pub tangled: Arc<[u32]>,
+    /// Loose pieces with fewer triangles than this are small
+    /// (remove_small_components' `max_triangles`).
+    pub small_below: usize,
+}
+
+/// The face states of `mesh` for `inputs`: selection, hover, small loose
+/// pieces, faces at a non-manifold edge, recent repairs. O(the flagged
+/// faces and the face chunks they're in), never a pass over the whole
+/// mesh, and on a worker (MF-RT-001).
+pub fn face_states(
+    mesh: &Mesh,
+    inputs: &StateInputs,
+    ctx: &RunContext,
+) -> Result<FaceStates, Cancelled> {
+    let topo = mesh.topology_with(ctx)?;
+    let mut flagged: Vec<(u32, u8)> = Vec::new();
+    let mut set = |faces: &[u32], bit: u8| flagged.extend(faces.iter().map(|&f| (f, bit)));
+    // Components are ordered largest first: the small ones are at the end.
+    for c in topo.components.iter().skip(1).rev() {
+        if c.len() >= inputs.small_below {
+            break;
+        }
+        set(c, FaceStates::SMALL_COMPONENT);
+    }
+    set(&inputs.tangled, FaceStates::NON_MANIFOLD_ADJ);
+    set(&inputs.recent, FaceStates::RECENT_REPAIR);
+    for (target, bit) in [
+        (&inputs.selected, FaceStates::SELECTED),
+        (&inputs.hover, FaceStates::HOVER),
+    ] {
+        match target {
+            Some(OverlayTarget::Components(ids)) => {
+                for &c in ids {
+                    if let Some(faces) = topo.components.get(c as usize) {
+                        set(faces, bit);
+                    }
+                }
+            }
+            Some(OverlayTarget::Faces(ids)) => set(ids, bit),
+            Some(OverlayTarget::Loops(_) | OverlayTarget::Edges(_)) | None => {}
+        }
+    }
+    ctx.checkpoint()?;
+    Ok(FaceStates::from_flagged(mesh, &mut flagged))
 }
 
 /// Analysis results for one mesh revision.
@@ -160,17 +270,19 @@ pub struct Analysis {
     /// The tree's defect categories (docs/design/visual-language.md),
     /// shared so the panels never copy them per frame.
     pub defects: Arc<Defects>,
+    /// Every face at a non-manifold edge, sorted (tinted through the face
+    /// states).
+    pub tangled_faces: Arc<[u32]>,
     /// Defect overlays in the 3D view, relative to `vertices.origin`.
     pub layers: DefectLayers,
 }
 
-/// Vertex data for the defects the 3D view colours (theme.rs): cracks and
-/// tangled edges as lines, loose pieces as faces. Holes are the mesh's own
-/// boundary outlines.
+/// Line overlays for the defects the 3D view colours (theme.rs): cracks
+/// and tangled edges. Holes are the mesh's own boundary outlines; small
+/// loose pieces and the faces at a tangled edge are face states.
 pub struct DefectLayers {
     pub cracks: Arc<GpuLines>,
     pub tangled: Arc<GpuLines>,
-    pub loose: Arc<GpuFaces>,
 }
 
 /// What an overlay outlines or tints.
@@ -187,18 +299,17 @@ pub enum OverlayTarget {
 pub enum OverlayPurpose {
     Selection,
     Hover,
-    RecentRepair,
 }
 
-/// An overlay's GPU buffers (vertices relative to `origin`), bounds and
-/// outward direction (object space; `None` when the faces around it face
-/// every way, like a closed piece).
+/// An overlay's outline (vertices relative to `origin`; empty for faces
+/// and pieces, which are tinted through the face states instead), bounds
+/// and outward direction (object space; `None` when the faces around it
+/// face every way, like a closed piece).
 pub struct Overlay {
     /// The local origin its vertices are relative to: its own, since the
     /// render mesh it's drawn over may keep an earlier revision's origin.
     pub origin: glam::DVec3,
     pub lines: Arc<GpuLines>,
-    pub faces: Arc<GpuFaces>,
     pub bounds: Option<Aabb>,
     pub normal: Option<glam::DVec3>,
 }
@@ -235,9 +346,11 @@ pub enum Message {
     Picked {
         object: ObjectId,
         mesh: Option<Mesh>,
-        picked: Option<(SelectionKind, u32)>,
+        picked: Option<(SelectionKind, Vec<u32>)>,
         add: bool,
     },
+    /// Face states were written to a render mesh: the view redraws.
+    StatesWritten,
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -295,6 +408,7 @@ pub struct Workers {
     /// the lane only ever works on what the pointer is doing now.
     latest_pick: Option<CancelToken>,
     latest_hover: Option<CancelToken>,
+    latest_states: Option<CancelToken>,
 }
 
 /// The message for a worker that panicked with `payload`.
@@ -369,6 +483,7 @@ impl Workers {
             sizes,
             latest_pick: None,
             latest_hover: None,
+            latest_states: None,
         }
     }
 
@@ -443,6 +558,32 @@ impl Workers {
                     .expect("an uncancelled overlay build completes")
             });
         }
+    }
+
+    /// Build `render`'s face states for `inputs` (O(n)) and write the
+    /// changed chunks (request number `seq`), on the lane, superseding the
+    /// previous request: a selection or hover change uploads no geometry
+    /// (MF-RENDER-003), and the UI thread does none of it (MF-RT-001).
+    pub fn write_states(&mut self, render: Arc<RenderMesh>, inputs: StateInputs, seq: u64) {
+        let ctx = supersede(&mut self.latest_states);
+        let gpu = self.gpu.clone();
+        spawn_on(
+            &self.lane,
+            &self.tx,
+            &self.repaint,
+            "face states",
+            false,
+            move || {
+                let Ok(states) = face_states(&render.mesh, &inputs, &ctx) else {
+                    // Superseded (perhaps by a request for another object's
+                    // mesh): this one is asked for again if still wanted.
+                    render.forget_states(&inputs);
+                    return None;
+                };
+                render.write_states(&gpu, &states, seq)?;
+                Some(Message::StatesWritten)
+            },
+        );
     }
 
     /// Render vertices only, for an object that isn't active
@@ -574,6 +715,9 @@ pub struct AnalysisRequest {
     /// render mesh reuses where they're still valid (see
     /// [`RenderMesh::build`]).
     pub previous: Option<Arc<RenderMesh>>,
+    /// The face states to give the new render mesh before it's shown (and
+    /// their request number), so it never appears without its tints.
+    pub states: Option<(StateInputs, u64)>,
 }
 
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).
@@ -591,6 +735,7 @@ pub fn analyze(
         mesh,
         transform,
         previous,
+        states,
     } = request;
     let diagnostics = mf_geometry::inspect_with(&mesh, ctx)?;
     ctx.checkpoint()?;
@@ -621,14 +766,24 @@ pub fn analyze(
             _ => None,
         })
         .collect();
-    let loose: Vec<u32> = mesh
-        .topology_with(ctx)?
-        .components
+    let mut tangled_faces: Vec<u32> = defects
+        .tangled
         .iter()
-        .skip(1)
-        .flatten()
+        .flat_map(|d| match d {
+            Defect::Tangled { faces, .. } => faces.as_slice(),
+            _ => &[],
+        })
         .copied()
         .collect();
+    tangled_faces.sort_unstable();
+    tangled_faces.dedup();
+    let tangled_faces: Arc<[u32]> = tangled_faces.into();
+    if let Some((mut inputs, seq)) = states {
+        inputs.tangled = tangled_faces.clone();
+        let face_states = face_states(&mesh, &inputs, ctx)?;
+        render.wants_states(&inputs);
+        render.write_states(gpu, &face_states, seq);
+    }
     let layers = DefectLayers {
         cracks: Arc::new(GpuLines::upload_paced(
             &gpu.device,
@@ -642,18 +797,13 @@ pub fn analyze(
             &edge_line_vertices(&mesh, origin, &tangled),
             UPLOAD_CHUNK_BYTES,
         )),
-        loose: Arc::new(GpuFaces::upload_paced(
-            &gpu.device,
-            &gpu.queue,
-            &face_surface_vertices(&mesh, origin, &loose),
-            UPLOAD_CHUNK_BYTES,
-        )),
     };
     let analysis = Analysis {
         diagnostics,
         render,
         transform,
         defects: Arc::new(defects),
+        tangled_faces,
         layers,
     };
     Ok(Message::Analyzed {
@@ -674,7 +824,7 @@ fn build_overlay(
     {
         let origin = crate::app::mesh_origin(&mesh);
         let topo = mesh.topology_with(ctx)?;
-        let (mut lines, mut faces, mut points) = (Vec::new(), Vec::new(), Vec::new());
+        let (mut lines, mut points) = (Vec::new(), Vec::new());
         // The faces whose normals say which way the target faces.
         let around: Vec<u32> = match &target {
             OverlayTarget::Loops(ids) => {
@@ -694,12 +844,10 @@ fn build_overlay(
                     .flatten()
                     .copied()
                     .collect();
-                faces = face_surface_vertices(&mesh, origin, &ids);
                 points.extend(face_corners(&mesh, &ids));
                 ids
             }
             OverlayTarget::Faces(ids) => {
-                faces = face_surface_vertices(&mesh, origin, ids);
                 points.extend(face_corners(&mesh, ids));
                 ids.clone()
             }
@@ -734,12 +882,6 @@ fn build_overlay(
                     &gpu.device,
                     &gpu.queue,
                     &lines,
-                    UPLOAD_CHUNK_BYTES,
-                )),
-                faces: Arc::new(GpuFaces::upload_paced(
-                    &gpu.device,
-                    &gpu.queue,
-                    &faces,
                     UPLOAD_CHUNK_BYTES,
                 )),
                 bounds,
@@ -798,20 +940,30 @@ pub struct PickTarget {
     pub object: ObjectId,
     pub mesh: Mesh,
     pub model: DMat4,
+    /// Its non-manifold edges are drawn, so a click can land on one.
+    pub tangled: bool,
 }
 
 /// What `pick_targets` found: which target (if any) and what on it.
 struct PickHit<'a> {
     target: &'a PickTarget,
-    picked: (SelectionKind, u32),
+    picked: (SelectionKind, Vec<u32>),
+}
+
+/// An edge a click is near: a boundary loop's, or a drawn non-manifold one.
+enum EdgeHit {
+    Loop(u32),
+    Tangled([u32; 2]),
 }
 
 /// Ray-cast pick across every object (O(n) over faces, O(objects) ray casts
-/// per candidate). A boundary loop wins over a face, matching single-object
-/// picking; among loop edges within tolerance on any object, the nearest
-/// one on screen wins, and it must be visible past *every* object's faces
-/// (not just its own mesh's), so a click on a front object's face can't
-/// select a hidden loop on an object behind it (MF-ISSUE-042). Pure
+/// per candidate). An edge wins over a face: a boundary loop's edge (the
+/// loop is picked), or a drawn non-manifold edge (its incident faces are
+/// picked, as a face selection). Among edges within tolerance on any
+/// object, the nearest one on screen wins, and it must be visible past
+/// *every* object's faces (not just its own mesh's), so a click on a front
+/// object's face can't select a hidden loop on an object behind it
+/// (MF-ISSUE-042). Otherwise the clicked face's component is picked. Pure
 /// function (no I/O), so it's directly testable.
 fn pick_targets<'a>(
     targets: &'a [PickTarget],
@@ -820,26 +972,53 @@ fn pick_targets<'a>(
     size: (f64, f64),
     px: (f64, f64),
 ) -> Option<PickHit<'a>> {
+    const TOLERANCE: f64 = 8.0;
     let eye = cam.eye();
-    let mut candidates: Vec<(&PickTarget, mf_render::LoopEdgeCandidate)> = targets
-        .iter()
-        .flat_map(|t| {
-            mf_render::loop_edge_candidates(&t.mesh, &t.model, cam, origin, size, px, 8.0)
-                .into_iter()
-                .map(move |c| (t, c))
-        })
-        .collect();
-    candidates.sort_by(|(_, a), (_, b)| a.screen_distance.total_cmp(&b.screen_distance));
-    let loop_hit = candidates.into_iter().find(|(_, c)| {
+    // (target, what, screen distance, point, endpoints)
+    let mut candidates: Vec<(&PickTarget, EdgeHit, f64, glam::DVec3, [u32; 2])> = Vec::new();
+    for t in targets {
+        for c in
+            mf_render::loop_edge_candidates(&t.mesh, &t.model, cam, origin, size, px, TOLERANCE)
+        {
+            candidates.push((
+                t,
+                EdgeHit::Loop(c.loop_id),
+                c.screen_distance,
+                c.point,
+                c.endpoints,
+            ));
+        }
+        if t.tangled {
+            let edges = &t.mesh.topology().non_manifold_edges;
+            for c in mf_render::edge_candidates(
+                &t.mesh, &t.model, cam, origin, size, px, TOLERANCE, edges,
+            ) {
+                candidates.push((
+                    t,
+                    EdgeHit::Tangled(edges[c.index]),
+                    c.screen_distance,
+                    c.point,
+                    c.endpoints,
+                ));
+            }
+        }
+    }
+    candidates.sort_by(|a, b| a.2.total_cmp(&b.2));
+    let edge_hit = candidates.into_iter().find(|(_, _, _, point, endpoints)| {
         !targets.iter().any(|other| {
-            mf_render::edge_occluded(&other.mesh, &other.model, eye, c.point, c.endpoints)
+            mf_render::edge_occluded(&other.mesh, &other.model, eye, *point, *endpoints)
         })
     });
-    if let Some((target, c)) = loop_hit {
-        return Some(PickHit {
-            target,
-            picked: (SelectionKind::BoundaryLoop, c.loop_id),
-        });
+    if let Some((target, hit, ..)) = edge_hit {
+        let picked = match hit {
+            EdgeHit::Loop(id) => (SelectionKind::BoundaryLoop, vec![id]),
+            EdgeHit::Tangled([a, b]) => {
+                let mut faces = faces_on_edges(&target.mesh, vec![(a, b)]);
+                faces.sort_unstable();
+                (SelectionKind::Faces, faces)
+            }
+        };
+        return Some(PickHit { target, picked });
     }
 
     let (ray_origin, dir) = cam.ray(origin, size, px);
@@ -853,7 +1032,7 @@ fn pick_targets<'a>(
                 .components
                 .iter()
                 .position(|c| c.contains(&f.0))?;
-            Some((t, (SelectionKind::Component, component as u32), dist))
+            Some((t, (SelectionKind::Component, vec![component as u32]), dist))
         })
         .min_by(|(.., a), (.., b)| a.total_cmp(b))
         .map(|(target, picked, _)| PickHit { target, picked })
@@ -902,6 +1081,7 @@ mod tests {
                 mesh: plate,
                 transform: identity,
                 previous: None,
+                states: None,
             },
             &RunContext::none(),
             &Gpu::new(device, queue),
@@ -965,6 +1145,7 @@ mod tests {
             object: ObjectId(1),
             mesh: back.clone(),
             model: DMat4::IDENTITY,
+            tangled: false,
         };
         // Front object: a solid cube directly above, z in [2,3], same XY
         // footprint, so viewed from overhead it covers the hole below it.
@@ -973,6 +1154,7 @@ mod tests {
             object: ObjectId(2),
             mesh: front,
             model: DMat4::from_translation(DVec3::new(0.0, 0.0, 2.0)),
+            tangled: false,
         };
         let targets = vec![back_target, front_target];
 
@@ -1009,6 +1191,7 @@ mod tests {
             object: ObjectId(1),
             mesh: back.clone(),
             model: DMat4::IDENTITY,
+            tangled: false,
         }];
         let cam = overhead_camera(DVec3::new(0.5, 0.5, 1.5), 20.0);
         let origin = DVec3::ZERO;
@@ -1021,7 +1204,7 @@ mod tests {
 
         let hit = pick_targets(&targets, &cam, origin, size, mid);
         assert!(
-            matches!(hit, Some(h) if h.picked == (SelectionKind::BoundaryLoop, hole.id)),
+            matches!(hit, Some(h) if h.picked == (SelectionKind::BoundaryLoop, vec![hole.id])),
             "expected the hole's loop with nothing in front of it"
         );
     }

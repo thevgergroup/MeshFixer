@@ -27,6 +27,7 @@ Someone who has used Meshmixer or Fusion should understand the screen without an
 ```
 
 - **Left: "Objects & Defects"** (210 pt, resizable). Every object in the document. The active one is in bold and expands to: **Model**, then **Holes (n)**, **Narrow cracks (n)**, **Loose pieces (n)** and **Non-manifold edges (n)**. A category with something in it opens by default, with its header in its defect colour. An empty one is grey and stays closed. Each category lists up to 200 rows, then "…and N more". To work on another object, click its name or click it in the view.
+  - A **Legend** is pinned to the bottom of the panel: a swatch and a checkbox for each overlay in the view (Selection, Hover, Holes, Narrow cracks, Loose pieces, Non-manifold edges, Recent repairs), each with a tooltip saying what it means. Unticking one hides that overlay; View ▸ Show defects hides every defect overlay at once (their checkboxes are then disabled). Switching an overlay changes only what the view draws, never the GPU data.
 - **Right: "Properties & Tools"** (280 pt, resizable). This panel is contextual to the current target:
   - What the target is: its title and details, from the copy table below.
   - The operations valid for it. A targeted tool is already open: its parameters, then **Apply**.
@@ -72,13 +73,13 @@ They are defined once, in `theme.rs`, and used by the panels and the renderer al
 
 | Token | Colour | Means | Where |
 |---|---|---|---|
-| `SELECTED` | cyan `#28D2FF` | the current target | selected loops (outline), pieces and faces (tint), tree rows, the current history step, the targeted tool's name |
-| `HOVER` | light `#E8EEF5` | what the pointer is over | the outline of the defect under the pointer in the tree, drawn in the view; widget hover outlines |
+| `SELECTED` | cyan `#28D2FF` | the current target | selected loops and tangled edges (outline), pieces and faces (tint, which replaces any defect tint on them), tree rows, the current history step, the targeted tool's name |
+| `HOVER` | light `#E8EEF5` | what the pointer is over | the outline (loops, edges) or light tint (pieces) of the defect under the pointer in the tree, drawn in the view; widget hover outlines |
 | `HOLE` | orange `#FF8020` | an open boundary (hole) | every boundary outline in the view; the Holes header |
 | `CRACK` | magenta `#E646D2` | a narrow crack (edges almost touch) | crack outlines; the Narrow cracks header |
-| `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | loose-piece tint; the Loose pieces header |
-| `NON_MANIFOLD` | red `#EB3434` | a tangled (non-manifold) edge | tangled-edge lines; the Non-manifold edges header |
-| `RECENT_REPAIR` | green `#50CD78` | faces made by the last 3 commands on the active object | a tint, toggled by View ▸ Highlight recent repairs (on by default) |
+| `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | tint of loose pieces smaller than Remove loose pieces' size limit (`max_triangles`, as set in its tool, else its default 100); the Loose pieces header |
+| `NON_MANIFOLD` | red `#EB3434` | a tangled (non-manifold) edge | tangled-edge lines, and a light red tint (strength 0.35) on the faces that meet at them; the Non-manifold edges header |
+| `RECENT_REPAIR` | green `#50CD78` | faces made by the last 3 commands on the active object | a tint, toggled by View ▸ Highlight recent repairs or the legend (on by default) |
 | inactive object | desaturated (saturation 0, brightness 0.55) | not the active object | the whole object, outlines included |
 
 Neutral tokens carry no meaning beyond "the model" and "the room":
@@ -96,9 +97,12 @@ Line widths: defect outlines are 2 pt; overlay lines (selection, hover, cracks, 
 
 Draw order, bottom to top:
 
-1. the model surface, then hole outlines
-2. loose-piece tint, recent-repair tint, selection tint, hover tint
-3. crack lines, tangled-edge lines, selection outline, hover outline
+1. the model surface, with its face tints, then hole outlines
+2. crack lines, tangled-edge lines, selection outline, hover outline
+
+Face tints are not separate layers: they are drawn with the surface, from a per-face state buffer (one byte of flags per face, `mf_render::FaceStates`): small loose piece, next to a tangled edge, recent repair, selected, hover. Where flags overlap, they apply in that order, except that a selected or hovered face shows only the selection or hover tint (a selected loose piece is cyan, not a mix of cyan and amber). Changing the selection or hover rewrites only the changed chunks of that buffer (at most 32 KB per 32,768 faces), never the geometry; it is built on a worker.
+
+Clicking in the view picks, nearest first within 8 pt on screen and not hidden by any object: a boundary loop's edge (selects the loop) or a drawn tangled edge of the active object (selects the faces that meet at it). Otherwise the clicked face's piece is selected: clicking a tinted loose piece selects it.
 
 ## Plain-language defects
 

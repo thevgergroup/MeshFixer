@@ -97,6 +97,7 @@ pub fn render_image_with_chunk_limit(
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
+        shown_states: u32::from(crate::FaceStates::ALL),
     }];
     let items = if mesh.is_empty() { &items[..0] } else { &items };
     target.draw(
@@ -137,6 +138,7 @@ pub fn render_objects(
             mesh: gpu,
             model: *model,
             inactive: false,
+            shown_states: u32::from(crate::FaceStates::ALL),
         })
         .collect();
     target.draw(

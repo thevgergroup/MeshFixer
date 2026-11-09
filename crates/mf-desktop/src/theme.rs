@@ -30,6 +30,9 @@ pub const SELECTED_FACE_STRENGTH: f32 = 0.6;
 pub const HOVER_FACE_STRENGTH: f32 = 0.35;
 pub const LOOSE_PIECE_STRENGTH: f32 = 0.6;
 pub const RECENT_REPAIR_STRENGTH: f32 = 0.45;
+/// Faces next to a tangled edge: a light red, so the red edge line stays
+/// the strongest mark.
+pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.35;
 
 /// Outline widths in the 3D view, in points: defect outlines, and the
 /// selection / hover / crack / tangled-edge overlays drawn over them.
@@ -67,7 +70,20 @@ pub fn palette() -> mf_render::Palette {
         inactive_brightness: INACTIVE_BRIGHTNESS,
         boundary_width: BOUNDARY_WIDTH,
         overlay_width: OVERLAY_WIDTH,
+        tints: mf_render::FaceTints {
+            small_component: tint(LOOSE_PIECE, LOOSE_PIECE_STRENGTH),
+            non_manifold_adj: tint(NON_MANIFOLD, NON_MANIFOLD_FACE_STRENGTH),
+            recent_repair: tint(RECENT_REPAIR, RECENT_REPAIR_STRENGTH),
+            selected: tint(SELECTED, SELECTED_FACE_STRENGTH),
+            hover: tint(HOVER, HOVER_FACE_STRENGTH),
+        },
     }
+}
+
+/// A face tint: the token's colour, `strength` in alpha.
+fn tint(c: Color32, strength: f32) -> [f32; 4] {
+    let [r, g, b, _] = rgba(c);
+    [r, g, b, strength]
 }
 
 /// Panels use the same tokens: selection is cyan, hover a light outline.

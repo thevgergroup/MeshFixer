@@ -9,19 +9,17 @@ use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, 
 use mf_geometry::{Aabb, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_metrics::FrameTimes;
-use mf_render::{OrbitCamera, model_matrix, screen_position};
+use mf_render::{FaceStates, OrbitCamera, model_matrix, screen_position};
 use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::defects::{Defect, operation_label};
 use crate::theme;
-use crate::viewport::{
-    Click, NavAction, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
-};
+use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
 use crate::worker::{
     self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
-    RenderMesh, Workers,
+    RenderMesh, StateInputs, Workers,
 };
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
@@ -82,6 +80,34 @@ struct OverlaySlot {
     mesh: Mesh,
     target: OverlayTarget,
     ready: Option<Overlay>,
+}
+
+/// Which overlays the 3D view shows (the legend's switches; View ▸ Show
+/// defects hides every defect overlay at once).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OverlaysShown {
+    pub selection: bool,
+    pub hover: bool,
+    pub holes: bool,
+    pub cracks: bool,
+    /// Loose pieces under remove_small_components' threshold.
+    pub loose_pieces: bool,
+    pub non_manifold: bool,
+    pub recent_repairs: bool,
+}
+
+impl Default for OverlaysShown {
+    fn default() -> Self {
+        OverlaysShown {
+            selection: true,
+            hover: true,
+            holes: true,
+            cracks: true,
+            loose_pieces: true,
+            non_manifold: true,
+            recent_repairs: true,
+        }
+    }
 }
 
 /// A tangled edge being looked at (edges aren't a selection kind; its next
@@ -151,8 +177,13 @@ pub struct MeshFixerApp {
     /// What the pointer is over in the tree this frame (outlined in the view).
     pub hover: Option<(ObjectId, OverlayTarget)>,
     overlays: BTreeMap<OverlayPurpose, OverlaySlot>,
-    /// Tint faces created by the last few commands (View menu).
-    pub show_recent_repairs: bool,
+    /// Which overlays are switched on (the legend; View menu).
+    pub shown: OverlaysShown,
+    /// Faces made by the active object's last few commands, for the
+    /// revision they were found for.
+    recent: Option<(ObjectId, Mesh, Arc<[u32]>)>,
+    /// The last face-state request's number: a later one wins.
+    state_seq: u64,
     /// Help > Controls window.
     pub show_controls: bool,
     view_request: Option<ViewRequest>,
@@ -250,7 +281,9 @@ impl MeshFixerApp {
             inspected: None,
             hover: None,
             overlays: BTreeMap::new(),
-            show_recent_repairs: true,
+            shown: OverlaysShown::default(),
+            recent: None,
+            state_seq: 0,
             show_controls: false,
             view_request: None,
             viewport: Viewport::new(render_state.clone(), theme::palette()),
@@ -661,8 +694,9 @@ impl MeshFixerApp {
     }
 
     /// Select what's under a click: a boundary loop within 8 px of any
-    /// object (when its topology is ready), otherwise the nearest clicked
-    /// face's component across every object (ray cast on a worker). A hit
+    /// object (when its topology is ready), or the faces of a drawn
+    /// non-manifold edge within 8 px, otherwise the nearest clicked face's
+    /// component across every object (ray cast on a worker). A hit
     /// makes its object active (MF-ISSUE-042); shift adds to a same-kind,
     /// same-object selection.
     pub fn click(&mut self, click: Click) {
@@ -679,6 +713,9 @@ impl MeshFixerApp {
                     object: o.id,
                     mesh: o.mesh()?.clone(),
                     model: model_matrix(&o.transform),
+                    // Only the active object's tangled edges are drawn.
+                    tangled: Some(o.id) == self.active
+                        && self.defect_shown(self.shown.non_manifold),
                 })
             })
             .collect();
@@ -701,7 +738,7 @@ impl MeshFixerApp {
     pub fn select_defect(&mut self, defect: &Defect) {
         let Some(object) = self.active else { return };
         match defect.selection() {
-            Some((kind, id)) => self.select(object, kind, id, false),
+            Some((kind, id)) => self.select(object, kind, vec![id], false),
             None => {
                 let Some(mesh) = self.active_mesh().cloned() else {
                     return;
@@ -745,7 +782,7 @@ impl MeshFixerApp {
         })
     }
 
-    fn select(&mut self, object: ObjectId, kind: SelectionKind, id: u32, add: bool) {
+    fn select(&mut self, object: ObjectId, kind: SelectionKind, ids: Vec<u32>, add: bool) {
         self.inspected = None;
         // A status about an earlier target would contradict the new one.
         self.status = None;
@@ -754,17 +791,19 @@ impl MeshFixerApp {
             Some(sel)
                 if add && sel.kind == kind && sel.object == object && sel.revision == revision =>
             {
-                if !sel.ids.contains(&id) {
-                    sel.ids.push(id);
-                    sel.ids.sort_unstable();
-                }
+                sel.ids.extend(ids);
+                sel.ids.sort_unstable();
+                sel.ids.dedup();
             }
             _ => {
+                let mut ids = ids;
+                ids.sort_unstable();
+                ids.dedup();
                 self.selection = Some(Selection {
                     object,
                     revision,
                     kind,
-                    ids: vec![id],
+                    ids,
                 })
             }
         }
@@ -889,18 +928,20 @@ impl MeshFixerApp {
                 };
                 if is_current {
                     match picked {
-                        Some((kind, id)) => {
+                        Some((kind, ids)) => {
                             // A hit on another object makes it active
                             // (MF-ISSUE-042); `set_active` clears a
                             // selection that belongs to a different object.
                             self.set_active(object);
-                            self.select(object, kind, id, add);
+                            self.select(object, kind, ids, add);
                         }
                         None if !add => self.selection = None,
                         None => {}
                     }
                 }
             }
+            // The view notices the new states by their generation.
+            Message::StatesWritten => {}
             Message::Overlay {
                 purpose,
                 object,
@@ -1025,10 +1066,14 @@ impl MeshFixerApp {
                 .as_ref()
                 .filter(|(object, _, _)| Some(*object) == self.active)
                 .map(|(_, _, render)| render.clone());
+            let object = self.active.expect("an active object has a mesh here");
+            let inputs = self.state_inputs(object, &mesh);
+            self.state_seq += 1;
             self.analyzer.submit(worker::AnalysisRequest {
                 mesh,
                 transform,
                 previous,
+                states: Some((inputs, self.state_seq)),
             });
         }
         if self.camera.is_none() && self.view_request.is_none() {
@@ -1098,6 +1143,13 @@ impl MeshFixerApp {
                     render,
                     transform: o.transform,
                     active,
+                    // Only the active object's current revision has its
+                    // states: the overlays belong to it.
+                    shown_states: if active && self.shows_current_revision() {
+                        self.shown_states()
+                    } else {
+                        0
+                    },
                 })
             })
             .collect()
@@ -1270,14 +1322,113 @@ impl MeshFixerApp {
         faces
     }
 
-    /// Keep each overlay slot matching what should be shown; request a
-    /// build on a worker when it changes.
-    fn refresh_overlays(&mut self) {
+    /// Faces made by `object`'s last few commands at its revision `mesh`,
+    /// found once per revision.
+    fn recent_faces(&mut self, object: ObjectId, mesh: &Mesh) -> Arc<[u32]> {
+        if let Some((o, m, faces)) = &self.recent
+            && *o == object
+            && Mesh::ptr_eq(m, mesh)
+        {
+            return faces.clone();
+        }
+        let faces: Arc<[u32]> = self.recent_repair_faces(object).into();
+        self.recent = Some((object, mesh.clone(), faces.clone()));
+        faces
+    }
+
+    /// What the face states of `object`'s revision `mesh` (the active one)
+    /// are made from: its selection and hover, its recent repairs, and the
+    /// small-piece threshold. Small (O(selection)).
+    fn state_inputs(&mut self, object: ObjectId, mesh: &Mesh) -> StateInputs {
         let selection = self.target_overlay_request();
-        // Hovering the target itself (the pointer is still on the row just
-        // clicked) shows it as selected, not hovered.
-        let hover = self
-            .hover
+        let hover = self.hover_request(&selection);
+        let faces_of = |want: Option<(ObjectId, Mesh, OverlayTarget)>| {
+            want.filter(|(o, m, _)| *o == object && Mesh::ptr_eq(m, mesh))
+                .map(|(_, _, t)| t)
+                .filter(|t| matches!(t, OverlayTarget::Components(_) | OverlayTarget::Faces(_)))
+        };
+        StateInputs {
+            selected: faces_of(selection),
+            hover: faces_of(hover),
+            recent: self.recent_faces(object, mesh),
+            // Until its analysis is ready (the analysis fills them in).
+            tangled: self
+                .analyses
+                .get(mesh)
+                .map_or_else(|| Arc::from([]), |a| a.tangled_faces.clone()),
+            small_below: self.small_piece_threshold(),
+        }
+    }
+
+    /// remove_small_components' `max_triangles` as set in its tool (or its
+    /// default): loose pieces under it are tinted as small.
+    fn small_piece_threshold(&self) -> usize {
+        let op = "mesh.remove_small_components";
+        let set = self
+            .op_params
+            .get(op)
+            .and_then(|p| p.get("max_triangles"))
+            .and_then(|v| match v {
+                ParamValue::Int(n) => Some(*n),
+                _ => None,
+            });
+        set.unwrap_or_else(|| spec_default(op, "max_triangles"))
+            .max(0) as usize
+    }
+
+    /// True if a defect overlay switched on by `on` is drawn (View ▸ Show
+    /// defects hides them all).
+    fn defect_shown(&self, on: bool) -> bool {
+        self.show_boundaries && on
+    }
+
+    /// The face-state flags the 3D view shows (the overlays switched on).
+    pub fn shown_states(&self) -> u32 {
+        let s = &self.shown;
+        [
+            (s.selection, FaceStates::SELECTED),
+            (s.hover, FaceStates::HOVER),
+            (
+                self.defect_shown(s.loose_pieces),
+                FaceStates::SMALL_COMPONENT,
+            ),
+            (
+                self.defect_shown(s.non_manifold),
+                FaceStates::NON_MANIFOLD_ADJ,
+            ),
+            (s.recent_repairs, FaceStates::RECENT_REPAIR),
+        ]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .fold(0, |m, (_, bit)| m | u32::from(bit))
+    }
+
+    /// Keep the face states of the active object's shown revision up to
+    /// date: when what they're made from changes, a worker rebuilds them
+    /// and writes the changed chunks (no geometry is uploaded:
+    /// MF-RENDER-003). The UI thread only compares the inputs.
+    fn refresh_states(&mut self) {
+        if !self.shows_current_revision() {
+            return;
+        }
+        let Some((object, mesh, render)) = self.displayed.clone() else {
+            return;
+        };
+        let inputs = self.state_inputs(object, &mesh);
+        if render.wants_states(&inputs) {
+            self.state_seq += 1;
+            self.workers.write_states(render, inputs, self.state_seq);
+        }
+    }
+
+    /// What the pointer is over in the tree, unless it's the target itself
+    /// (the pointer is still on the row just clicked): that shows as
+    /// selected, not hovered.
+    fn hover_request(
+        &self,
+        selection: &Option<(ObjectId, Mesh, OverlayTarget)>,
+    ) -> Option<(ObjectId, Mesh, OverlayTarget)> {
+        self.hover
             .clone()
             .filter(|(object, target)| {
                 !selection
@@ -1287,24 +1438,20 @@ impl MeshFixerApp {
             .and_then(|(object, target)| {
                 let mesh = self.session.document().object(object)?.mesh()?.clone();
                 Some((object, mesh, target))
-            });
-        let recent = self.show_recent_repairs.then(|| {
-            let object = self.active?;
-            let mesh = self.active_mesh()?.clone();
-            // Reuse the slot while the revision and object are unchanged.
-            if let Some(slot) = self.overlays.get(&OverlayPurpose::RecentRepair)
-                && slot.object == object
-                && Mesh::ptr_eq(&slot.mesh, &mesh)
-            {
-                return Some((object, mesh, slot.target.clone()));
-            }
-            let faces = self.recent_repair_faces(object);
-            (!faces.is_empty()).then_some((object, mesh, OverlayTarget::Faces(faces)))
-        });
+            })
+    }
+
+    /// Keep each overlay slot matching what should be shown; request a
+    /// build on a worker when it changes. Faces and pieces are tinted by
+    /// the face states, so a hover over one needs no overlay.
+    fn refresh_overlays(&mut self) {
+        let selection = self.target_overlay_request();
+        let hover = self
+            .hover_request(&selection)
+            .filter(|(_, _, t)| matches!(t, OverlayTarget::Loops(_) | OverlayTarget::Edges(_)));
         for (purpose, want) in [
             (OverlayPurpose::Selection, selection),
             (OverlayPurpose::Hover, hover),
-            (OverlayPurpose::RecentRepair, recent.flatten()),
         ] {
             let Some((object, mesh, target)) = want else {
                 self.overlays.remove(&purpose);
@@ -1329,86 +1476,47 @@ impl MeshFixerApp {
         }
     }
 
-    /// The 3D view's overlays, bottom to top (theme.rs gives each its colour).
+    /// The 3D view's line overlays, bottom to top (theme.rs gives each its
+    /// colour). Face tints are the render mesh's face states instead.
     pub fn view_layers(&self) -> Vec<ViewLayer> {
         let mut layers = Vec::new();
-        let faces = |object, origin, faces: &Arc<mf_render::GpuFaces>, color, strength| ViewLayer {
-            object,
-            origin,
-            geometry: ViewGeometry::Faces(faces.clone()),
-            color,
-            strength,
-        };
         let lines = |object, origin, lines: &Arc<mf_render::GpuLines>, color| ViewLayer {
             object,
             origin,
-            geometry: ViewGeometry::Lines(lines.clone()),
+            lines: lines.clone(),
             color,
-            strength: 1.0,
         };
         let ready = |p| {
             self.overlays
                 .get(&p)
                 .and_then(|s| Some((s.object, s.ready.as_ref()?)))
         };
-        let defects = self
-            .show_boundaries
-            .then(|| self.active.zip(self.current_analysis()))
-            .flatten();
-        if let Some((object, a)) = defects {
-            layers.push(faces(
-                object,
-                a.render.origin,
-                &a.layers.loose,
-                theme::LOOSE_PIECE,
-                theme::LOOSE_PIECE_STRENGTH,
-            ));
+        if let Some((object, a)) = self.active.zip(self.current_analysis()) {
+            if self.defect_shown(self.shown.cracks) {
+                layers.push(lines(
+                    object,
+                    a.render.origin,
+                    &a.layers.cracks,
+                    theme::CRACK,
+                ));
+            }
+            if self.defect_shown(self.shown.non_manifold) {
+                layers.push(lines(
+                    object,
+                    a.render.origin,
+                    &a.layers.tangled,
+                    theme::NON_MANIFOLD,
+                ));
+            }
         }
-        if let Some((object, o)) = ready(OverlayPurpose::RecentRepair) {
-            layers.push(faces(
-                object,
-                o.origin,
-                &o.faces,
-                theme::RECENT_REPAIR,
-                theme::RECENT_REPAIR_STRENGTH,
-            ));
-        }
-        if let Some((object, o)) = ready(OverlayPurpose::Selection) {
-            layers.push(faces(
-                object,
-                o.origin,
-                &o.faces,
-                theme::SELECTED,
-                theme::SELECTED_FACE_STRENGTH,
-            ));
-        }
-        if let Some((object, o)) = ready(OverlayPurpose::Hover) {
-            layers.push(faces(
-                object,
-                o.origin,
-                &o.faces,
-                theme::HOVER,
-                theme::HOVER_FACE_STRENGTH,
-            ));
-        }
-        if let Some((object, a)) = defects {
-            layers.push(lines(
-                object,
-                a.render.origin,
-                &a.layers.cracks,
-                theme::CRACK,
-            ));
-            layers.push(lines(
-                object,
-                a.render.origin,
-                &a.layers.tangled,
-                theme::NON_MANIFOLD,
-            ));
-        }
-        if let Some((object, o)) = ready(OverlayPurpose::Selection) {
+        if self.shown.selection
+            && let Some((object, o)) = ready(OverlayPurpose::Selection)
+        {
             layers.push(lines(object, o.origin, &o.lines, theme::SELECTED));
         }
-        if let Some((object, o)) = ready(OverlayPurpose::Hover) {
+        if self.shown.hover
+            && let Some((object, o)) = ready(OverlayPurpose::Hover)
+        {
             layers.push(lines(object, o.origin, &o.lines, theme::HOVER));
         }
         // Overlays are built for the current revision: while the active
@@ -1416,14 +1524,26 @@ impl MeshFixerApp {
         let stale = (!self.shows_current_revision())
             .then_some(self.active)
             .flatten();
-        layers.retain(|l| {
-            Some(l.object) != stale
-                && match &l.geometry {
-                    ViewGeometry::Lines(v) => !v.is_empty(),
-                    ViewGeometry::Faces(v) => !v.is_empty(),
-                }
-        });
+        layers.retain(|l| Some(l.object) != stale && !l.lines.is_empty());
         layers
+    }
+
+    /// The face states the GPU holds for `face` of the active object's
+    /// shown revision (`None`: no such live face, or nothing shown). Reads
+    /// the GPU back and waits: for tests and diagnostics only.
+    pub fn read_face_state(&self, face: u32) -> Result<Option<u8>, mf_render::RenderError> {
+        let Some((object, mesh, render)) = &self.displayed else {
+            return Ok(None);
+        };
+        if Some(*object) != self.active {
+            return Ok(None);
+        }
+        let Some((chunk, drawn)) = FaceStates::locate(mesh, mf_geometry::FaceId(face)) else {
+            return Ok(None);
+        };
+        let (device, queue) = self.viewport.device();
+        let words = render.gpu.read_face_states(device, queue, chunk)?;
+        Ok(words.get(drawn / 4).map(|w| (w >> (8 * (drawn % 4))) as u8))
     }
 
     /// True when the 3D view draws the active object's current revision
@@ -1554,6 +1674,7 @@ impl MeshFixerApp {
         crate::panels::replay_window(self, &ctx);
         crate::panels::controls_window(self, &ctx);
         self.refresh_overlays();
+        self.refresh_states();
 
         let objects = self.object_views();
         let placeholder = match self.active_mesh() {
@@ -1562,7 +1683,7 @@ impl MeshFixerApp {
             Some(_) => "Analyzing…",
             None => "Open a mesh with File > Open (STL, OBJ or 3MF)",
         };
-        let show_boundaries = self.show_boundaries;
+        let show_boundaries = self.defect_shown(self.shown.holes);
         let updating = self.is_analyzing();
         let layers = self.view_layers();
         let out = egui::CentralPanel::no_frame()

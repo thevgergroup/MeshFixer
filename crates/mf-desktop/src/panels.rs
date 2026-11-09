@@ -87,7 +87,7 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             });
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut app.show_boundaries, "Show defects");
-                ui.checkbox(&mut app.show_recent_repairs, "Highlight recent repairs");
+                ui.checkbox(&mut app.shown.recent_repairs, "Highlight recent repairs");
                 ui.separator();
                 if ui
                     .add(egui::Button::new("Frame selection").shortcut_text("F"))
@@ -422,7 +422,8 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
 
 /// Left: "Objects & Defects". Every object; under the active one, its
 /// model and each defect category with a count. Clicking a row makes it
-/// the target; hovering outlines it in the view.
+/// the target; hovering outlines it in the view. The legend below says
+/// what each colour in the view means and switches each overlay.
 pub fn tree_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     egui::Panel::left("tree")
         .resizable(true)
@@ -431,11 +432,83 @@ pub fn tree_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.heading("Objects & Defects");
             ui.separator();
+            egui::Panel::bottom("legend")
+                .show_separator_line(true)
+                .show(ui, |ui| legend(app, ui));
             egui::ScrollArea::vertical()
                 .id_salt("tree")
                 .auto_shrink([false, false])
                 .show(ui, |ui| tree(app, ui));
         });
+}
+
+/// The view's colours, each with its switch (View > Show defects hides
+/// every defect overlay at once).
+fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    ui.add_space(4.0);
+    ui.label(RichText::new("Legend").strong());
+    let defects = app.show_boundaries;
+    let shown = &mut app.shown;
+    let rows: [(&mut bool, &str, egui::Color32, &str, bool); 7] = [
+        (
+            &mut shown.selection,
+            "Selection",
+            theme::SELECTED,
+            "The current target: outlined, or tinted",
+            true,
+        ),
+        (
+            &mut shown.hover,
+            "Hover",
+            theme::HOVER,
+            "What the pointer is over in the tree",
+            true,
+        ),
+        (
+            &mut shown.holes,
+            "Holes",
+            theme::HOLE,
+            "Open boundaries, outlined",
+            defects,
+        ),
+        (
+            &mut shown.cracks,
+            "Narrow cracks",
+            theme::CRACK,
+            "Boundaries whose edges almost touch",
+            defects,
+        ),
+        (
+            &mut shown.loose_pieces,
+            "Loose pieces",
+            theme::LOOSE_PIECE,
+            "Pieces too small to keep (under Remove loose pieces' size limit), tinted; click one to select it",
+            defects,
+        ),
+        (
+            &mut shown.non_manifold,
+            "Non-manifold edges",
+            theme::NON_MANIFOLD,
+            "Edges shared by more than two faces, and the faces at them; click one to select its faces",
+            defects,
+        ),
+        (
+            &mut shown.recent_repairs,
+            "Recent repairs",
+            theme::RECENT_REPAIR,
+            "Faces made by the last 3 commands, tinted",
+            true,
+        ),
+    ];
+    for (on, name, color, meaning, enabled) in rows {
+        ui.horizontal(|ui| {
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 2.0, color);
+            ui.add_enabled(enabled, egui::Checkbox::new(on, name))
+                .on_hover_text(meaning)
+                .on_disabled_hover_text("Hidden: View > Show defects is off");
+        });
+    }
 }
 
 fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {

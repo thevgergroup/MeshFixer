@@ -1,9 +1,10 @@
 use std::ops::Range;
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use mf_geometry::{Aabb, CHUNK, Mesh};
+use mf_geometry::{Aabb, CHUNK, FaceId, Mesh};
 use wgpu::util::DeviceExt;
 
 use crate::RenderError;
@@ -411,12 +412,164 @@ pub fn loop_line_vertices(mesh: &Mesh, origin: DVec3, loop_ids: &[u32]) -> Vec<L
     out
 }
 
+/// What the 3D view tints on each face (MF-RENDER-003, MF-RENDER-005):
+/// one byte of flags per face, four faces to a word, one word list per
+/// face chunk. A chunk's faces are in the order the GPU draws them: its
+/// live faces by ascending ID (dead ones aren't drawn, so they have no
+/// byte), which is how the shader finds a face's byte (`vertex_index / 3`).
+/// An empty word list means every face of that chunk is clear, so states
+/// with a few flagged faces are built in O(flagged faces + chunks touched)
+/// ([`FaceStates::from_flagged`]). Changing it uploads no geometry
+/// ([`GpuMesh::set_face_states`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FaceStates {
+    pub chunks: Vec<Vec<u32>>,
+}
+
+/// Four faces' flags to a word, in drawn order.
+fn pack(flags: impl Iterator<Item = u8>) -> Vec<u32> {
+    let mut words = Vec::with_capacity(CHUNK / 4);
+    let (mut word, mut k) = (0u32, 0usize);
+    for bits in flags {
+        word |= u32::from(bits) << (8 * (k % 4));
+        k += 1;
+        if k % 4 == 0 {
+            words.push(word);
+            word = 0;
+        }
+    }
+    if k % 4 != 0 {
+        words.push(word);
+    }
+    words
+}
+
+impl FaceStates {
+    /// Part of the current selection (cyan).
+    pub const SELECTED: u8 = 1;
+    /// A loose piece smaller than remove_small_components' threshold (amber).
+    pub const SMALL_COMPONENT: u8 = 2;
+    /// What the pointer is over (light).
+    pub const HOVER: u8 = 4;
+    /// Touches a non-manifold (tangled) edge (red).
+    pub const NON_MANIFOLD_ADJ: u8 = 8;
+    /// Made by one of the last few commands (green).
+    pub const RECENT_REPAIR: u8 = 16;
+    /// Every flag.
+    pub const ALL: u8 = 31;
+
+    /// No face flagged: what a freshly uploaded [`GpuMesh`] holds. O(chunks).
+    pub fn empty(mesh: &Mesh) -> FaceStates {
+        FaceStates {
+            chunks: vec![Vec::new(); mesh.face_chunk_count()],
+        }
+    }
+
+    /// The states of `mesh` from one byte per face slot (`flags[f]` for
+    /// face `f`; faces past the end of `flags` have none). Every chunk's
+    /// words are listed. O(n).
+    pub fn from_face_flags(mesh: &Mesh, flags: &[u8]) -> FaceStates {
+        let chunks = (0..mesh.face_chunk_count())
+            .map(|i| {
+                pack(mesh.faces_in_chunk(i).map(|(f, _)| {
+                    // allow-swallow: faces past the end of `flags` have none (documented)
+                    flags.get(f.0 as usize).copied().unwrap_or(0)
+                }))
+            })
+            .collect();
+        FaceStates { chunks }
+    }
+
+    /// The states of `mesh` with each `(face, flags)` of `flagged` set (a
+    /// face listed twice gets both; dead or missing faces are skipped) and
+    /// every other face clear. O(flagged + faces of the chunks they're in):
+    /// a selection or hover on a 5M-triangle mesh touches a few chunks,
+    /// not all of them.
+    pub fn from_flagged(mesh: &Mesh, flagged: &mut [(u32, u8)]) -> FaceStates {
+        let mut out = FaceStates::empty(mesh);
+        flagged.sort_unstable_by_key(|&(f, _)| f);
+        let mut local = vec![0u8; CHUNK];
+        for group in flagged.chunk_by(|a, b| a.0 as usize / CHUNK == b.0 as usize / CHUNK) {
+            let i = group[0].0 as usize / CHUNK;
+            if i >= out.chunks.len() || group.iter().all(|&(_, bits)| bits == 0) {
+                continue;
+            }
+            local.fill(0);
+            for &(f, bits) in group {
+                local[f as usize % CHUNK] |= bits;
+            }
+            out.chunks[i] = pack(
+                mesh.faces_in_chunk(i)
+                    .map(|(f, _)| local[f.0 as usize % CHUNK]),
+            );
+        }
+        out
+    }
+
+    /// The flags of the `drawn`th drawn face of face chunk `chunk`.
+    pub fn get(&self, chunk: usize, drawn: usize) -> u8 {
+        self.chunks[chunk]
+            .get(drawn / 4)
+            .map_or(0, |word| (word >> (8 * (drawn % 4))) as u8)
+    }
+
+    /// Where `face`'s flags are: its face chunk and its index among the
+    /// chunk's drawn faces. `None` for a dead or missing face. O(chunk).
+    pub fn locate(mesh: &Mesh, face: FaceId) -> Option<(usize, usize)> {
+        if !mesh.is_face_live(face) {
+            return None;
+        }
+        let chunk = face.0 as usize / CHUNK;
+        let drawn = mesh
+            .faces_in_chunk(chunk)
+            .take_while(|(f, _)| f.0 < face.0)
+            .count();
+        Some((chunk, drawn))
+    }
+}
+
+/// The bind group layout of a face chunk's states: one read-only storage
+/// buffer for the vertex shader. Made the same way here and by the
+/// renderer (wgpu deduplicates equal layouts, so they're compatible).
+pub(crate) fn face_state_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("mf face states"),
+        entries: &[wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::VERTEX,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: None,
+            },
+            count: None,
+        }],
+    })
+}
+
+/// Where one face chunk's states are in its mesh's state buffer.
+struct StateRange {
+    first_word: usize,
+    /// Words it holds (four faces each).
+    words: usize,
+}
+
+/// A mesh's face states on the GPU: one storage buffer, every chunk's
+/// words in turn, bound once per draw (binding per chunk measured ~1 ms
+/// more CPU per 5M-triangle frame). Each [`GpuMesh`] has its own, even for
+/// chunks it shares with another revision: a revision's selection isn't
+/// another's.
+struct StateBuffer {
+    buffer: wgpu::Buffer,
+    bind_group: wgpu::BindGroup,
+}
+
 /// Bytes uploaded by one update of a [`GpuMesh`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct UploadStats {
     /// Surface vertices of the face chunks that were (re)built.
     pub surface_bytes: u64,
-    /// Per-face state (selection and overlay tints); none yet.
+    /// Per-face state (selection and overlay tints: [`FaceStates`]).
     pub state_bytes: u64,
     /// Boundary outlines (always rebuilt: they're small).
     pub line_bytes: u64,
@@ -450,6 +603,17 @@ pub struct GpuMesh {
     pub origin: DVec3,
     pub triangle_count: usize,
     chunks: Vec<GpuChunk>,
+    /// Per face chunk: where its face states are in `state_buffer` (see
+    /// [`GpuMesh::set_face_states`]).
+    states: Vec<StateRange>,
+    /// Made with the chunks (every constructor makes it).
+    state_buffer: Option<StateBuffer>,
+    /// The words last written to each chunk's states (empty: all clear),
+    /// so only changed chunks are written. Locked only by writers
+    /// (workers), never to draw.
+    written: Mutex<Vec<Vec<u32>>>,
+    /// Bumped whenever the states change, so a view knows to redraw.
+    state_generation: AtomicU64,
     pub(crate) lines: Vec<(wgpu::Buffer, u32)>,
     /// Largest buffer made.
     max_bytes: u64,
@@ -466,6 +630,10 @@ impl GpuMesh {
             origin,
             triangle_count: 0,
             chunks: Vec::new(),
+            states: Vec::new(),
+            state_buffer: None,
+            written: Mutex::new(Vec::new()),
+            state_generation: AtomicU64::new(0),
             lines: Vec::new(),
             max_bytes,
             pace_bytes,
@@ -477,6 +645,106 @@ impl GpuMesh {
     /// Every surface buffer and its vertex count, in face-chunk order.
     pub(crate) fn surface_buffers(&self) -> impl Iterator<Item = &(wgpu::Buffer, u32)> {
         self.chunks.iter().flat_map(|c| c.buffers.iter())
+    }
+
+    /// What drawing the surface takes: the face states' bind group, and
+    /// every surface buffer with its vertex count and where its first
+    /// face's state is in the state buffer (a chunk is split into several
+    /// buffers only under a tiny buffer limit).
+    pub(crate) fn surface_draws(
+        &self,
+    ) -> (
+        &wgpu::BindGroup,
+        impl Iterator<Item = (&wgpu::Buffer, u32, u32)>,
+    ) {
+        let states = self
+            .state_buffer
+            .as_ref()
+            .expect("every GpuMesh constructor makes its state buffer");
+        let draws = self.chunks.iter().zip(&self.states).flat_map(|(c, s)| {
+            let mut first = 4 * s.first_word as u32;
+            c.buffers.iter().map(move |(b, n)| {
+                let at = first;
+                first += n / 3;
+                (b, *n, at)
+            })
+        });
+        (&states.bind_group, draws)
+    }
+
+    /// Changes whenever the face states do (a view redraws then).
+    pub fn state_generation(&self) -> u64 {
+        self.state_generation.load(Ordering::Acquire)
+    }
+
+    /// Make the face states on the GPU equal `s`, writing only the chunks
+    /// whose words changed: no geometry is uploaded (MF-RENDER-003). Takes
+    /// `&self` so a worker can write the states of a mesh the view is
+    /// drawing (wgpu queues are `Send + Sync`); concurrent writers are
+    /// serialised. A geometry update ([`GpuMesh::sync`]) clears them.
+    ///
+    /// Panics if `s` was built for a mesh with another chunk layout.
+    pub fn set_face_states(&self, queue: &wgpu::Queue, s: &FaceStates) -> UploadStats {
+        assert_eq!(
+            s.chunks.len(),
+            self.states.len(),
+            "face states built for another mesh"
+        );
+        let buffer = &self
+            .state_buffer
+            .as_ref()
+            .expect("every GpuMesh constructor makes its state buffer")
+            .buffer;
+        let mut written = self.written.lock().unwrap_or_else(|p| p.into_inner());
+        let mut stats = UploadStats::default();
+        for ((chunk, words), old) in self.states.iter().zip(&s.chunks).zip(written.iter_mut()) {
+            let clear = words.iter().all(|&w| w == 0);
+            if !words.is_empty() {
+                assert_eq!(
+                    words.len(),
+                    chunk.words,
+                    "face states built for another mesh"
+                );
+            }
+            if clear && old.is_empty() || !clear && words == old {
+                continue;
+            }
+            let zeros;
+            let new = if clear {
+                zeros = vec![0u32; chunk.words];
+                &zeros
+            } else {
+                words
+            };
+            if !new.is_empty() {
+                let at = 4 * chunk.first_word as u64;
+                queue.write_buffer(buffer, at, bytemuck::cast_slice(new));
+                stats.state_bytes += std::mem::size_of_val(&new[..]) as u64;
+            }
+            *old = if clear { Vec::new() } else { words.clone() };
+        }
+        if stats.state_bytes > 0 {
+            self.state_generation.fetch_add(1, Ordering::AcqRel);
+        }
+        stats
+    }
+
+    /// Read face chunk `i`'s states back from the GPU (tests and
+    /// diagnostics; waits for the GPU).
+    pub fn read_face_states(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        i: usize,
+    ) -> Result<Vec<u32>, RenderError> {
+        let (Some(chunk), Some(states)) = (self.states.get(i), &self.state_buffer) else {
+            return Err(RenderError::Readback(format!(
+                "no face chunk {i} (there are {})",
+                self.states.len()
+            )));
+        };
+        let words: Vec<u32> = read_buffer(device, queue, &states.buffer)?;
+        Ok(words[chunk.first_word..chunk.first_word + chunk.words].to_vec())
     }
 
     /// Surface vertices uploaded (three per face), and in how many buffers.
@@ -658,9 +926,49 @@ impl GpuMesh {
     /// with the next submit, which on the desktop is the worker's priming
     /// draw. (Waiting for them here measured slower first UI frames.)
     fn finish(&mut self, up: Uploader<'_>, triangle_count: usize) {
+        self.make_states(up.device);
         self.triangle_count = triangle_count;
         self.last = up.stats;
         self.total += up.stats.total();
+    }
+
+    /// Fresh (all clear) face states for every chunk: a byte per face
+    /// (wgpu zero-fills new buffers).
+    fn make_states(&mut self, device: &wgpu::Device) {
+        let mut next = 0;
+        self.states = self
+            .chunks
+            .iter()
+            .map(|c| {
+                let faces: u32 = c.buffers.iter().map(|(_, n)| n / 3).sum();
+                let range = StateRange {
+                    first_word: next,
+                    words: faces.div_ceil(4) as usize,
+                };
+                next += range.words;
+                range
+            })
+            .collect();
+        let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("mf face states"),
+            size: 4 * next.max(1) as u64,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
+            mapped_at_creation: false,
+        });
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mf face states"),
+            layout: &face_state_layout(device),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+        });
+        self.state_buffer = Some(StateBuffer { buffer, bind_group });
+        *self.written.get_mut().unwrap_or_else(|p| p.into_inner()) =
+            vec![Vec::new(); self.states.len()];
+        self.state_generation.fetch_add(1, Ordering::AcqRel);
     }
 
     /// Read face chunk `i`'s surface vertices back from the GPU: what was
@@ -679,38 +987,48 @@ impl GpuMesh {
         };
         let mut out = Vec::new();
         for (buffer, _) in chunk.buffers.iter() {
-            let readback = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("mf surface readback"),
-                size: buffer.size(),
-                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-                mapped_at_creation: false,
-            });
-            let mut encoder = device.create_command_encoder(&Default::default());
-            encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, buffer.size());
-            queue.submit([encoder.finish()]);
-            let (tx, rx) = std::sync::mpsc::channel();
-            readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                // allow-swallow: the receiver is read right after this; a send can only fail if it was dropped
-                let _ = tx.send(r);
-            });
-            device
-                .poll(wgpu::PollType::Wait {
-                    submission_index: None,
-                    timeout: None,
-                })
-                .map_err(|e| RenderError::Readback(e.to_string()))?;
-            rx.recv()
-                .map_err(|e| RenderError::Readback(e.to_string()))?
-                .map_err(|e| RenderError::Readback(e.to_string()))?;
-            let data = readback
-                .get_mapped_range(..)
-                .map_err(|e| RenderError::Readback(e.to_string()))?;
-            out.extend_from_slice(bytemuck::cast_slice::<u8, SurfaceVertex>(&data));
-            drop(data);
-            readback.unmap();
+            out.extend(read_buffer::<SurfaceVertex>(device, queue, buffer)?);
         }
         Ok(out)
     }
+}
+
+/// Copy `buffer` back from the GPU (it must allow `COPY_SRC`). Waits.
+fn read_buffer<T: Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+) -> Result<Vec<T>, RenderError> {
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("mf buffer readback"),
+        size: buffer.size(),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    encoder.copy_buffer_to_buffer(buffer, 0, &readback, 0, buffer.size());
+    queue.submit([encoder.finish()]);
+    let (tx, rx) = std::sync::mpsc::channel();
+    readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        // allow-swallow: the receiver is read right after this; a send can only fail if it was dropped
+        let _ = tx.send(r);
+    });
+    device
+        .poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        })
+        .map_err(|e| RenderError::Readback(e.to_string()))?;
+    rx.recv()
+        .map_err(|e| RenderError::Readback(e.to_string()))?
+        .map_err(|e| RenderError::Readback(e.to_string()))?;
+    let data = readback
+        .get_mapped_range(..)
+        .map_err(|e| RenderError::Readback(e.to_string()))?;
+    let out = bytemuck::cast_slice::<u8, T>(&data).to_vec();
+    drop(data);
+    readback.unmap();
+    Ok(out)
 }
 
 /// Surface buffers can be read back ([`GpuMesh::read_surface`]).

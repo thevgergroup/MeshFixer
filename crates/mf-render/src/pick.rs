@@ -105,6 +105,58 @@ pub fn loop_edge_candidates(
         .collect()
 }
 
+/// One of the given edges near a click (see [`edge_candidates`]).
+pub struct EdgeCandidate {
+    /// Its index in the edges given.
+    pub index: usize,
+    /// Screen-space distance from `px` (pixels).
+    pub screen_distance: f64,
+    /// World-space point on the edge nearest `px`.
+    pub point: DVec3,
+    pub endpoints: [u32; 2],
+}
+
+/// Every edge of `edges` (vertex pairs of `mesh`, placed by `model`) within
+/// `tolerance` screen pixels of `px`, nearest first (ties by index). For
+/// clicking on edges the view draws, such as non-manifold ones. Doesn't
+/// check occlusion (see [`edge_occluded`]). O(edges).
+#[allow(clippy::too_many_arguments)]
+pub fn edge_candidates(
+    mesh: &Mesh,
+    model: &DMat4,
+    cam: &OrbitCamera,
+    origin: DVec3,
+    size: (f64, f64),
+    px: (f64, f64),
+    tolerance: f64,
+    edges: &[[u32; 2]],
+) -> Vec<EdgeCandidate> {
+    let world =
+        |v: u32| (*model * DVec4::from((DVec3::from(mesh.corner_position(v)), 1.0))).truncate();
+    let mut out: Vec<EdgeCandidate> = edges
+        .iter()
+        .enumerate()
+        .filter_map(|(index, &[va, vb])| {
+            let (a, b) = (world(va), world(vb));
+            let sa = screen_position(cam, origin, size, a.to_array())?;
+            let sb = screen_position(cam, origin, size, b.to_array())?;
+            let (d, t) = point_segment_distance(px, sa, sb);
+            (d <= tolerance).then(|| EdgeCandidate {
+                index,
+                screen_distance: d,
+                point: a + (b - a) * t,
+                endpoints: [va, vb],
+            })
+        })
+        .collect();
+    out.sort_by(|x, y| {
+        x.screen_distance
+            .total_cmp(&y.screen_distance)
+            .then(x.index.cmp(&y.index))
+    });
+    out
+}
+
 /// True if some face of `mesh` (other than one touching `skip_vertices`)
 /// lies between `eye` and `point`, hiding it. `model` places `mesh` in
 /// world space.

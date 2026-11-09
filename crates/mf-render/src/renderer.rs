@@ -2,7 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DMat3, DMat4, DVec3, Mat4, Vec4};
 
 use crate::camera::OrbitCamera;
-use crate::gpu_mesh::{GpuFaces, GpuLines, GpuMesh, LineVertex, SurfaceVertex};
+use crate::gpu_mesh::{
+    FaceStates, GpuFaces, GpuLines, GpuMesh, LineVertex, SurfaceVertex, face_state_layout,
+};
 
 /// The colours the 3D view draws with. `mf-render` has no theme of its own
 /// in the app: the desktop passes its colour tokens in (theme.rs), so one
@@ -25,6 +27,21 @@ pub struct Palette {
     pub boundary_width: f32,
     /// Width of overlay lines (selection, cracks, tangled edges, hover), in points.
     pub overlay_width: f32,
+    /// What each face-state flag tints a face with ([`FaceStates`]).
+    pub tints: FaceTints,
+}
+
+/// The tint of each face-state flag: RGB, and in alpha how much of it
+/// replaces the surface colour (0–1). Where flags overlap, later ones in
+/// this list draw over earlier ones, and a selected or hovered face shows
+/// only the selection or hover tint.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceTints {
+    pub small_component: [f32; 4],
+    pub non_manifold_adj: [f32; 4],
+    pub recent_repair: [f32; 4],
+    pub selected: [f32; 4],
+    pub hover: [f32; 4],
 }
 
 impl Palette {
@@ -39,6 +56,13 @@ impl Palette {
         inactive_brightness: 0.55,
         boundary_width: 1.0,
         overlay_width: 1.0,
+        tints: FaceTints {
+            small_component: [1.0, 0.78, 0.16, 0.6],
+            non_manifold_adj: [0.92, 0.2, 0.2, 0.35],
+            recent_repair: [0.31, 0.8, 0.47, 0.45],
+            selected: [0.16, 0.82, 1.0, 0.6],
+            hover: [0.91, 0.93, 0.96, 0.35],
+        },
     };
 }
 
@@ -54,6 +78,8 @@ struct SceneUniforms {
     inactive: [f32; 4],
     /// Render target size in pixels (x, y), for screen-space line widths.
     viewport: [f32; 4],
+    /// [`FaceTints`], in its order.
+    tints: [[f32; 4]; 5],
 }
 
 #[repr(C)]
@@ -71,6 +97,8 @@ struct DrawUniforms {
     /// strength (how much of `color` replaces the surface colour).
     /// y: line width in pixels.
     params: [f32; 4],
+    /// x: the face-state flags shown ([`DrawItem::shown_states`]).
+    states: [u32; 4],
 }
 
 /// The render target the pipelines are built for. It must match the render
@@ -89,6 +117,9 @@ pub struct DrawItem<'a> {
     pub model: DMat4,
     /// An inactive object is drawn desaturated (see [`Palette`]).
     pub inactive: bool,
+    /// Which face-state flags ([`FaceStates`]) tint it: the overlays that
+    /// are switched on. [`FaceStates::ALL`] shows every one.
+    pub shown_states: u32,
 }
 
 /// What an overlay layer draws.
@@ -188,8 +219,16 @@ impl MeshRenderer {
             bind_group_layouts: &[Some(&scene_bgl), Some(&draw_bgl)],
             immediate_size: 0,
         });
+        // An object's own surface also reads its face states (group 2).
+        let states_bgl = face_state_layout(device);
+        let surface_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mf surface pipeline layout"),
+            bind_group_layouts: &[Some(&scene_bgl), Some(&draw_bgl), Some(&states_bgl)],
+            immediate_size: 0,
+        });
 
         let pipeline = |label: &str,
+                        layout: &wgpu::PipelineLayout,
                         vs: &str,
                         fs: &str,
                         buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
@@ -197,7 +236,7 @@ impl MeshRenderer {
                         front_face: wgpu::FrontFace| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&layout),
+                layout: Some(layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some(vs),
@@ -242,6 +281,7 @@ impl MeshRenderer {
         // correct even though the triangles are now wound the other way.
         let surface_pipeline_ccw = pipeline(
             "mf surface ccw",
+            &surface_layout,
             "vs_surface",
             "fs_surface",
             &surface_buffers,
@@ -250,6 +290,7 @@ impl MeshRenderer {
         );
         let surface_pipeline_cw = pipeline(
             "mf surface cw",
+            &surface_layout,
             "vs_surface",
             "fs_surface",
             &surface_buffers,
@@ -266,6 +307,7 @@ impl MeshRenderer {
         })];
         let line_pipeline = pipeline(
             "mf boundary lines",
+            &layout,
             "vs_line",
             "fs_line",
             &line_buffers,
@@ -274,6 +316,7 @@ impl MeshRenderer {
         );
         let overlay_line_pipeline = pipeline(
             "mf overlay lines",
+            &layout,
             "vs_line",
             "fs_overlay_line",
             &line_buffers,
@@ -282,6 +325,7 @@ impl MeshRenderer {
         );
         let overlay_face_pipeline_ccw = pipeline(
             "mf overlay faces ccw",
+            &layout,
             "vs_overlay_surface",
             "fs_overlay_surface",
             &surface_buffers,
@@ -290,6 +334,7 @@ impl MeshRenderer {
         );
         let overlay_face_pipeline_cw = pipeline(
             "mf overlay faces cw",
+            &layout,
             "vs_overlay_surface",
             "fs_overlay_surface",
             &surface_buffers,
@@ -339,6 +384,13 @@ impl MeshRenderer {
             boundary: p.boundary,
             inactive: [p.inactive_saturation, p.inactive_brightness, 0.0, 0.0],
             viewport: [size.0 as f32, size.1 as f32, 0.0, 0.0],
+            tints: [
+                p.tints.small_component,
+                p.tints.non_manifold_adj,
+                p.tints.recent_repair,
+                p.tints.selected,
+                p.tints.hover,
+            ],
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
@@ -397,6 +449,7 @@ impl MeshRenderer {
                     0.0,
                     0.0,
                 ],
+                states: [item.shown_states & u32::from(FaceStates::ALL), 0, 0, 0],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
         }
@@ -413,6 +466,7 @@ impl MeshRenderer {
                     0.0,
                     0.0,
                 ],
+                states: [0; 4],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
         }
@@ -426,9 +480,13 @@ impl MeshRenderer {
             };
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(pipeline);
-            for (buf, count) in item.mesh.surface_buffers() {
+            let (states, buffers) = item.mesh.surface_draws();
+            pass.set_bind_group(2, states, &[]);
+            for (buf, count, first_face) in buffers {
                 pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..*count, 0..1);
+                // The instance index is where the buffer's first face's
+                // state is in the mesh's state buffer.
+                pass.draw(0..count, first_face..first_face + 1);
             }
             if show_boundaries {
                 pass.set_pipeline(&self.line_pipeline);
