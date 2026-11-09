@@ -30,6 +30,28 @@ impl OrbitCamera {
         }
     }
 
+    /// Re-centre on `aabb` and fit it, keeping the current view direction
+    /// (instant; `F` frames the selection with this).
+    pub fn frame(&mut self, aabb: &Aabb) {
+        let fitted = OrbitCamera::fit(aabb);
+        self.target = fitted.target;
+        self.radius = fitted.radius;
+        self.distance = fitted.radius / (self.fov_y * 0.5).sin() * 1.1;
+    }
+
+    /// Turn to look at the target from direction `from` (target → eye),
+    /// keeping target and distance. Pitch stays short of the poles.
+    pub fn look_from(&mut self, from: DVec3) {
+        let d = from.normalize_or_zero();
+        if d == DVec3::ZERO {
+            return;
+        }
+        self.pitch = d.z.clamp(-1.0, 1.0).asin().clamp(-MAX_PITCH, MAX_PITCH);
+        if d.x != 0.0 || d.y != 0.0 {
+            self.yaw = d.y.atan2(d.x);
+        }
+    }
+
     fn forward_offset(&self) -> DVec3 {
         DVec3::new(
             self.pitch.cos() * self.yaw.cos(),
@@ -59,6 +81,23 @@ impl OrbitCamera {
 
     pub fn zoom(&mut self, factor: f64) {
         self.distance = (self.distance * factor).max(1e-9);
+    }
+
+    /// Zoom by `factor` towards the point under pixel `px` of a `size`
+    /// viewport (on the plane through the target facing the camera), so
+    /// that point stays under the cursor.
+    pub fn zoom_at(&mut self, factor: f64, size: (f64, f64), px: (f64, f64)) {
+        let (o, d) = self.ray(self.target, size, px);
+        let (o, d) = (DVec3::from(o), DVec3::from(d));
+        let normal = self.forward_offset();
+        let denom = d.dot(normal);
+        let before = self.distance;
+        self.zoom(factor);
+        if denom.abs() > 1e-12 {
+            let under = o + d * ((self.target - o).dot(normal) / denom);
+            let applied = self.distance / before;
+            self.target = under + (self.target - under) * applied;
+        }
     }
 
     pub fn view_proj(&self, aspect: f32, origin: DVec3) -> Mat4 {

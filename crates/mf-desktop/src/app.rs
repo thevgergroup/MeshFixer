@@ -4,17 +4,63 @@ use std::sync::Arc;
 use std::sync::mpsc::{Receiver, Sender, channel};
 
 use eframe::egui;
-use mf_command::{CommitOutcome, Invocation, ObjectId, Session};
+use mf_command::{CommitOutcome, Invocation, ObjectId, RevisionId, Session};
 use mf_geometry::{Aabb, Mesh};
 use mf_io::Format;
-use mf_render::{MeshVertices, OrbitCamera, model_matrix};
+use mf_render::{MeshVertices, OrbitCamera, model_matrix, screen_position};
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::viewport::{Click, ObjectView, ViewOptions, Viewport};
-use crate::worker::{self, Analysis, Message, PickTarget};
-use mf_render::{LineVertex, loop_line_vertices, screen_position};
+use crate::defects::{Defect, operation_label};
+use crate::theme;
+use crate::viewport::{Click, ObjectView, ViewGeometry, ViewLayer, ViewOptions, Viewport};
+use crate::worker::{self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
+
+/// "Recent repairs" are the faces created by this many of the active
+/// object's latest commands.
+pub const RECENT_REPAIR_COMMANDS: usize = 3;
+
+/// An operation offered in Properties for the current target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tool {
+    pub op_id: String,
+    /// Plain-language name (defects::operation_label).
+    pub label: String,
+    /// What it runs on: `None` is the whole object.
+    pub selection: Option<Selection>,
+    /// Parameters the target decides (hidden from the panel): an explicit
+    /// target already says which hole or piece, so size limits follow it.
+    pub fixed: BTreeMap<String, ParamValue>,
+}
+
+/// A camera move waiting for the bounds it needs (computed on workers).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewRequest {
+    /// Home: default orientation, everything in view.
+    Reset,
+    /// F with nothing targeted: everything in view, same orientation.
+    FrameAll,
+    /// F: the current target in view, same orientation.
+    FrameTarget,
+}
+
+/// One overlay slot: what it was requested for, and the result once built.
+struct OverlaySlot {
+    object: ObjectId,
+    mesh: Mesh,
+    target: OverlayTarget,
+    ready: Option<Overlay>,
+}
+
+/// A tangled edge being looked at (edges aren't a selection kind; its next
+/// action selects its faces).
+#[derive(Debug, Clone)]
+pub struct Inspected {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub defect: Defect,
+}
 
 pub struct MeshFixerApp {
     pub session: Session,
@@ -47,7 +93,8 @@ pub struct MeshFixerApp {
     requested_vertices: BTreeMap<ObjectId, Mesh>,
     /// Label of the running import/operation/export. Blocks new commands.
     pub busy: Option<String>,
-    pub selected_op: String,
+    /// The whole-object tool open in Properties (an operation id).
+    pub tool: Option<String>,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
     pub show_boundaries: bool,
     pub error: Option<String>,
@@ -59,8 +106,16 @@ pub struct MeshFixerApp {
     /// What the next operation targets, bound to the current revision. It is
     /// translated after every history move (MF-SEL-003).
     pub selection: Option<Selection>,
-    /// Highlight lines for the selected loops, with what they were built for.
-    highlight: Option<(Arc<Vec<LineVertex>>, Selection, Mesh)>,
+    /// A tangled edge shown in Properties (only while nothing is selected).
+    pub inspected: Option<Inspected>,
+    /// What the pointer is over in the tree this frame (outlined in the view).
+    pub hover: Option<(ObjectId, OverlayTarget)>,
+    overlays: BTreeMap<OverlayPurpose, OverlaySlot>,
+    /// Tint faces created by the last few commands (View menu).
+    pub show_recent_repairs: bool,
+    /// Help > Controls window.
+    pub show_controls: bool,
+    view_request: Option<ViewRequest>,
     pub viewport: Viewport,
     tx: Sender<Message>,
     rx: Receiver<Message>,
@@ -77,12 +132,7 @@ impl MeshFixerApp {
             .ok_or("MeshFixer needs the wgpu renderer, but it is unavailable")?;
 
         let (tx, rx) = channel::<Message>();
-        let selected_op = mf_spec::builtin::specs()
-            .iter()
-            .find(|s| !s.is_read_only())
-            .map(|s| s.id.clone())
-            // allow-swallow: no mutating operation registered means no default selection (empty id)
-            .unwrap_or_default();
+        theme::apply(&cc.egui_ctx);
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -103,7 +153,7 @@ impl MeshFixerApp {
             object_vertices: BTreeMap::new(),
             requested_vertices: BTreeMap::new(),
             busy: None,
-            selected_op,
+            tool: None,
             op_params: BTreeMap::new(),
             show_boundaries: true,
             error: None,
@@ -111,8 +161,13 @@ impl MeshFixerApp {
             warnings: Vec::new(),
             replay_report: None,
             selection: None,
-            highlight: None,
-            viewport: Viewport::new(render_state.clone()),
+            inspected: None,
+            hover: None,
+            overlays: BTreeMap::new(),
+            show_recent_repairs: true,
+            show_controls: false,
+            view_request: None,
+            viewport: Viewport::new(render_state.clone(), theme::palette()),
             tx,
             rx,
         };
@@ -168,7 +223,7 @@ impl MeshFixerApp {
     }
 
     /// Jump to any revision in the DAG, including an abandoned branch.
-    pub fn checkout(&mut self, id: mf_command::RevisionId) {
+    pub fn checkout(&mut self, id: RevisionId) {
         if self.busy.is_none() && self.session.checkout(id) {
             self.after_history_move();
         }
@@ -240,45 +295,150 @@ impl MeshFixerApp {
         })
     }
 
-    /// Validate on the UI thread, run on a worker, commit when it returns.
-    /// The selection, if the operation's spec accepts its kind; otherwise the
-    /// operation runs on the whole object (the panel says which).
-    pub fn selection_for(&self, op_id: &str) -> Option<Selection> {
-        let sel = self.selection.as_ref()?;
-        let spec = mf_spec::builtin::get(op_id)?;
-        let kind = match sel.kind {
-            SelectionKind::Faces => "face_set",
-            SelectionKind::Component => "component",
-            SelectionKind::BoundaryLoop => "boundary_loop",
-            SelectionKind::Object => return Some(sel.clone()),
-        };
-        spec.target
-            .kinds
+    /// The operations Properties offers for the current target: the ones
+    /// valid for the selected hole(s) or piece(s), or, when nothing is
+    /// targeted (or the target has none), the whole-object operations.
+    pub fn tools(&self) -> Vec<Tool> {
+        let targeted = self.targeted_tools();
+        if !targeted.is_empty() || self.target_blocks_whole_object() {
+            return targeted;
+        }
+        mf_spec::builtin::specs()
             .iter()
-            .any(|k| k == kind)
-            .then(|| sel.clone())
+            .filter(|s| !s.is_read_only() && s.target.whole_object)
+            .map(|s| Tool {
+                op_id: s.id.clone(),
+                // allow-swallow: an operation without plain words is named by its id
+                label: operation_label(&s.id, None).unwrap_or_else(|| s.id.clone()),
+                selection: None,
+                fixed: BTreeMap::new(),
+            })
+            .collect()
     }
 
-    pub fn apply(&mut self, ctx: &egui::Context, op_id: String) {
+    /// True when the target is a defect with no operation yet (a crack, a
+    /// hole over the fill limit): Properties says what it needs instead of
+    /// offering whole-object tools that wouldn't fix it.
+    fn target_blocks_whole_object(&self) -> bool {
+        let Some((sel, analysis)) = self.current_selection().zip(self.current_analysis()) else {
+            return false;
+        };
+        sel.kind == SelectionKind::BoundaryLoop
+            && sel.ids.iter().any(|&id| {
+                !matches!(
+                    analysis.defects.find(sel.kind, id),
+                    Some(Defect::Hole { .. })
+                )
+            })
+    }
+
+    /// The selection of the active object at the current revision.
+    pub fn current_selection(&self) -> Option<&Selection> {
+        self.selection
+            .as_ref()
+            .filter(|s| Some(s.object) == self.active && s.revision == self.session.current())
+    }
+
+    fn targeted_tools(&self) -> Vec<Tool> {
+        let (Some(sel), Some(analysis)) = (self.current_selection(), self.current_analysis())
+        else {
+            return Vec::new();
+        };
+        let defects: Option<Vec<&Defect>> = sel
+            .ids
+            .iter()
+            .map(|&id| analysis.defects.find(sel.kind, id))
+            .collect();
+        let Some(defects) = defects else {
+            return Vec::new();
+        };
+        let n = defects.len();
+        let tool = |op_id: &str, fixed: BTreeMap<String, ParamValue>| Tool {
+            op_id: op_id.to_owned(),
+            label: operation_label(op_id, Some((sel.kind, n)))
+                .expect("built-in operations have plain names"),
+            selection: Some(sel.clone()),
+            fixed,
+        };
+        let holes: Option<Vec<usize>> = defects
+            .iter()
+            .map(|d| match d {
+                Defect::Hole { edges, .. } => Some(*edges),
+                _ => None,
+            })
+            .collect();
+        if let Some(edges) = holes {
+            let default = spec_default("mesh.fill_holes", "max_loop_edges");
+            let largest = edges.into_iter().max().map_or(0, |e| e as i64);
+            return vec![tool(
+                "mesh.fill_holes",
+                BTreeMap::from([(
+                    "max_loop_edges".into(),
+                    ParamValue::Int(largest.max(default)),
+                )]),
+            )];
+        }
+        let pieces: Option<Vec<usize>> = defects
+            .iter()
+            .map(|d| match d {
+                Defect::LoosePiece { triangles, .. } => Some(*triangles),
+                _ => None,
+            })
+            .collect();
+        if let Some(triangles) = pieces {
+            let largest = triangles.into_iter().max().map_or(0, |t| t as i64);
+            return vec![tool(
+                "mesh.remove_small_components",
+                BTreeMap::from([
+                    ("max_triangles".into(), ParamValue::Int(largest + 1)),
+                    ("keep_largest".into(), ParamValue::Bool(true)),
+                ]),
+            )];
+        }
+        Vec::new()
+    }
+
+    /// Validate on the UI thread, run on a worker, commit when it returns.
+    pub fn apply(&mut self, ctx: &egui::Context, tool: &Tool) {
         let Some(target) = self.active else { return };
-        let selection = self.selection_for(&op_id);
-        let raw_params = self
-            .params_for(&op_id)
+        let mut params = self.params_for(&tool.op_id).clone();
+        params.extend(tool.fixed.clone());
+        let raw_params = params
             .iter()
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
         match self.session.prepare(Invocation {
-            selection,
-            op_id: op_id.clone(),
+            selection: tool.selection.clone(),
+            op_id: tool.op_id.clone(),
             target,
             raw_params,
         }) {
             Ok(prepared) => {
-                self.busy = Some(format!("Running {op_id}"));
+                self.busy = Some(format!("{}…", tool.label));
                 worker::run(&self.tx, ctx, prepared);
             }
             Err(e) => self.error = Some(e.to_string()),
         }
+    }
+
+    /// The history breadcrumb: the current path from the first import, then
+    /// the steps redo would take (greyed). Root ("New document") is left out.
+    pub fn breadcrumb(&self) -> Vec<(RevisionId, String, bool)> {
+        let current = self.session.current();
+        let mut past = true;
+        self.session
+            .linear_view()
+            .into_iter()
+            .filter_map(|id| {
+                let node = self.session.node(id)?;
+                let reached = past;
+                if id == current {
+                    past = false;
+                }
+                node.parent?;
+                Some((id, step_label(node), reached))
+            })
+            .collect()
     }
 
     pub fn undo(&mut self) {
@@ -372,7 +532,55 @@ impl MeshFixerApp {
         );
     }
 
+    /// Make `defect` (of the active object) the current target, as a tree
+    /// click does.
+    pub fn select_defect(&mut self, defect: &Defect) {
+        let Some(object) = self.active else { return };
+        match defect.selection() {
+            Some((kind, id)) => self.select(object, kind, id, false),
+            None => {
+                let Some(mesh) = self.active_mesh().cloned() else {
+                    return;
+                };
+                self.selection = None;
+                self.inspected = Some(Inspected {
+                    object,
+                    mesh,
+                    defect: defect.clone(),
+                });
+            }
+        }
+    }
+
+    /// Select the faces of an inspected tangled edge (its next action).
+    pub fn select_tangled_faces(&mut self) {
+        let Some(Inspected {
+            object,
+            defect: Defect::Tangled { faces, .. },
+            ..
+        }) = self.inspected.take()
+        else {
+            return;
+        };
+        self.selection = Some(Selection {
+            object,
+            revision: self.session.current(),
+            kind: SelectionKind::Faces,
+            ids: faces,
+        });
+    }
+
+    /// The inspected tangled edge, if it's still on the revision shown.
+    pub fn current_inspected(&self) -> Option<&Inspected> {
+        self.inspected.as_ref().filter(|i| {
+            self.selection.is_none()
+                && Some(i.object) == self.active
+                && self.active_mesh().is_some_and(|m| Mesh::ptr_eq(m, &i.mesh))
+        })
+    }
+
     fn select(&mut self, object: ObjectId, kind: SelectionKind, id: u32, add: bool) {
+        self.inspected = None;
         let revision = self.session.current();
         match self.selection.as_mut() {
             Some(sel)
@@ -396,6 +604,7 @@ impl MeshFixerApp {
 
     pub fn clear_selection(&mut self) {
         self.selection = None;
+        self.inspected = None;
     }
 
     /// Where a world point appears in the window (for overlays and tests).
@@ -415,6 +624,9 @@ impl MeshFixerApp {
             self.selection = None;
             self.status = Some("Selection cleared (another object is active)".into());
         }
+        if self.active != Some(id) {
+            self.inspected = None;
+        }
         self.active = Some(id);
     }
 
@@ -427,34 +639,6 @@ impl MeshFixerApp {
                 && s.revision == self.session.current()
         })?;
         Some(sel.ids.clone())
-    }
-
-    /// Highlight lines for the selected loops of the active mesh.
-    fn highlight_lines(&mut self) -> Option<Arc<Vec<LineVertex>>> {
-        self.highlighted_loops()?;
-        let sel = self.selection.clone()?;
-        let mesh = self.active_mesh()?.clone();
-        // Topology is only read when the worker has already computed it.
-        self.current_analysis()?;
-        if let Some((lines, for_sel, for_mesh)) = &self.highlight
-            && *for_sel == sel
-            && Mesh::ptr_eq(for_mesh, &mesh)
-        {
-            return Some(lines.clone());
-        }
-        // Use the exact origin the active mesh is actually displayed with,
-        // when `displayed` is this same mesh; otherwise a freshly-computed
-        // one for `mesh` itself, never a stale other object's or other
-        // revision's (MF-ISSUE-042 review ⚠️: the viewport's `shifted_model`
-        // shifts the highlight by this same origin, so a mismatch here
-        // would draw the highlight in the wrong place).
-        let origin = match &self.displayed {
-            Some((for_mesh, v)) if Mesh::ptr_eq(for_mesh, &mesh) => v.origin,
-            _ => mesh_origin(&mesh),
-        };
-        let lines = Arc::new(loop_line_vertices(&mesh, origin, &sel.ids));
-        self.highlight = Some((lines.clone(), sel, mesh));
-        Some(lines)
     }
 
     /// Keep `active` pointing at an object that exists in the current document.
@@ -541,6 +725,21 @@ impl MeshFixerApp {
                     }
                 }
             }
+            Message::Overlay {
+                purpose,
+                object,
+                mesh,
+                target,
+                overlay,
+            } => {
+                if let Some(slot) = self.overlays.get_mut(&purpose)
+                    && slot.object == object
+                    && Mesh::ptr_eq(&slot.mesh, &mesh)
+                    && slot.target == target
+                {
+                    slot.ready = Some(overlay);
+                }
+            }
             Message::ObjectVertices {
                 object,
                 mesh,
@@ -603,10 +802,8 @@ impl MeshFixerApp {
             self.requested = Some(mesh.clone());
             self.analyzer.submit(mesh);
         }
-        if self.camera.is_none()
-            && let Some(bb) = self.document_world_bounds()
-        {
-            self.camera = Some(OrbitCamera::fit(&bb));
+        if self.camera.is_none() && self.view_request.is_none() {
+            self.view_request = Some(ViewRequest::Reset);
         }
     }
 
@@ -676,20 +873,293 @@ impl MeshFixerApp {
             .collect()
     }
 
-    /// Union of every object's bounding box, at its transform
-    /// (MF-ISSUE-042): what the camera fits.
-    fn document_world_bounds(&self) -> Option<Aabb> {
-        self.session
-            .document()
-            .objects()
-            .iter()
-            .filter_map(|o| Some((o.mesh()?.bounding_box()?, o.transform)))
-            .map(|(bb, t)| transformed_bounds(&bb, &model_matrix(&t)))
-            .reduce(|a, b| union_bounds(&a, &b))
+    /// An object's bounds (object space), from vertices built on a worker:
+    /// `None` until they're ready, `Some(None)` for an empty mesh.
+    fn object_bounds(&self, o: &mf_command::Object) -> Option<Option<Aabb>> {
+        let mesh = o.mesh()?;
+        let vertices = if Some(o.id) == self.active {
+            &self.analyses.get(mesh)?.vertices
+        } else {
+            let (for_mesh, v) = self.object_vertices.get(&o.id)?;
+            if !Mesh::ptr_eq(for_mesh, mesh) {
+                return None;
+            }
+            v
+        };
+        Some(vertices.bounds)
     }
 
+    /// Union of every object's bounding box, at its transform
+    /// (MF-ISSUE-042): what the camera fits. `None` until every object's
+    /// bounds are known; `Some(None)` if there's nothing to frame. O(objects).
+    fn document_world_bounds(&self) -> Option<Option<Aabb>> {
+        let mut out: Option<Aabb> = None;
+        for o in self.session.document().objects() {
+            if o.mesh().is_none() {
+                continue;
+            }
+            if let Some(bb) = self.object_bounds(o)? {
+                let world = transformed_bounds(&bb, &model_matrix(&o.transform));
+                out = Some(match out {
+                    None => world,
+                    Some(acc) => union_bounds(&acc, &world),
+                });
+            }
+        }
+        Some(out)
+    }
+
+    /// Home: default view of everything (applied once every object's bounds
+    /// are known).
     pub fn fit_camera(&mut self) {
-        self.camera = self.document_world_bounds().map(|bb| OrbitCamera::fit(&bb));
+        self.view_request = Some(ViewRequest::Reset);
+    }
+
+    /// F: frame the current target, or everything, keeping the orientation.
+    pub fn frame_target(&mut self) {
+        self.view_request = Some(if self.target_overlay_request().is_some() {
+            ViewRequest::FrameTarget
+        } else {
+            ViewRequest::FrameAll
+        });
+    }
+
+    /// Apply a pending camera move once what it needs is ready.
+    fn resolve_view_request(&mut self) {
+        let Some(request) = self.view_request else {
+            return;
+        };
+        let bounds = match request {
+            ViewRequest::Reset | ViewRequest::FrameAll => match self.document_world_bounds() {
+                Some(b) => b,
+                None => return,
+            },
+            ViewRequest::FrameTarget => {
+                let Some((object, mesh, target)) = self.target_overlay_request() else {
+                    // The target went away: frame everything instead of nothing.
+                    self.view_request = Some(ViewRequest::FrameAll);
+                    return;
+                };
+                // Only an overlay built for this exact target will do.
+                let Some(slot) = self.overlays.get(&OverlayPurpose::Selection).filter(|s| {
+                    s.object == object && Mesh::ptr_eq(&s.mesh, &mesh) && s.target == target
+                }) else {
+                    return;
+                };
+                let Some(overlay) = &slot.ready else { return };
+                let Some(o) = self.session.document().object(object) else {
+                    return;
+                };
+                let model = model_matrix(&o.transform);
+                // Turn to face a target that faces away (a hole on the far
+                // side would otherwise be framed from inside the model).
+                if let (Some(n), Some(cam)) = (overlay.normal, self.camera.as_mut()) {
+                    let world = (glam::DMat3::from_mat4(model).inverse().transpose() * n)
+                        .normalize_or_zero();
+                    let eye = (cam.eye() - cam.target).normalize_or_zero();
+                    if world.dot(eye) < 0.3 {
+                        cam.look_from(world);
+                    }
+                }
+                overlay
+                    .bounds
+                    .map(|bb| inflated(&transformed_bounds(&bb, &model), FRAME_CONTEXT))
+            }
+        };
+        self.view_request = None;
+        match (bounds, request, &mut self.camera) {
+            (None, ViewRequest::Reset, cam) => *cam = None,
+            (None, ..) => {}
+            (Some(bb), ViewRequest::Reset, cam) | (Some(bb), _, cam @ None) => {
+                *cam = Some(OrbitCamera::fit(&bb))
+            }
+            (Some(bb), _, Some(cam)) => cam.frame(&bb),
+        }
+    }
+
+    /// What the selection overlay should show: the selection, or an
+    /// inspected tangled edge, on the active object at this revision.
+    fn target_overlay_request(&self) -> Option<(ObjectId, Mesh, OverlayTarget)> {
+        let mesh = self.active_mesh()?.clone();
+        if let Some(sel) = self.current_selection() {
+            let target = match sel.kind {
+                SelectionKind::BoundaryLoop => OverlayTarget::Loops(sel.ids.clone()),
+                SelectionKind::Component => OverlayTarget::Components(sel.ids.clone()),
+                SelectionKind::Faces => OverlayTarget::Faces(sel.ids.clone()),
+                SelectionKind::Object => return None,
+            };
+            return Some((sel.object, mesh, target));
+        }
+        let inspected = self.current_inspected()?;
+        match &inspected.defect {
+            Defect::Tangled { edge, .. } => {
+                Some((inspected.object, mesh, OverlayTarget::Edges(vec![*edge])))
+            }
+            _ => None,
+        }
+    }
+
+    /// Faces created by the active object's last few commands
+    /// ([`RECENT_REPAIR_COMMANDS`]), as of the current revision. O(faces
+    /// created), from the history's provenance; liveness is checked on the
+    /// worker that builds the overlay.
+    fn recent_repair_faces(&self, object: ObjectId) -> Vec<u32> {
+        let mut faces = Vec::new();
+        let mut commands = 0;
+        let mut cur = Some(self.session.current());
+        while let Some(r) = cur {
+            let Some(node) = self.session.node(r) else {
+                break;
+            };
+            if node.import.as_ref().is_some_and(|i| i.object == object) {
+                break;
+            }
+            if node.record.as_ref().is_some_and(|rec| rec.target == object) {
+                if let Some(p) = node.provenance.get(&object) {
+                    let created = p.created_faces.iter().map(|(f, _)| f.0);
+                    match &p.remap {
+                        // Older faces were renumbered: map this step's and stop.
+                        Some(remap) => {
+                            faces.extend(created.filter_map(|f| {
+                                remap.faces.get(f as usize).copied().flatten().map(|n| n.0)
+                            }));
+                            break;
+                        }
+                        None => faces.extend(created),
+                    }
+                }
+                commands += 1;
+                if commands == RECENT_REPAIR_COMMANDS {
+                    break;
+                }
+            }
+            cur = node.parent;
+        }
+        faces.sort_unstable();
+        faces.dedup();
+        faces
+    }
+
+    /// Keep each overlay slot matching what should be shown; request a
+    /// build on a worker when it changes.
+    fn refresh_overlays(&mut self, ctx: &egui::Context) {
+        let selection = self.target_overlay_request();
+        let hover = self.hover.clone().and_then(|(object, target)| {
+            let mesh = self.session.document().object(object)?.mesh()?.clone();
+            Some((object, mesh, target))
+        });
+        let recent = self.show_recent_repairs.then(|| {
+            let object = self.active?;
+            let mesh = self.active_mesh()?.clone();
+            // Reuse the slot while the revision and object are unchanged.
+            if let Some(slot) = self.overlays.get(&OverlayPurpose::RecentRepair)
+                && slot.object == object
+                && Mesh::ptr_eq(&slot.mesh, &mesh)
+            {
+                return Some((object, mesh, slot.target.clone()));
+            }
+            let faces = self.recent_repair_faces(object);
+            (!faces.is_empty()).then_some((object, mesh, OverlayTarget::Faces(faces)))
+        });
+        for (purpose, want) in [
+            (OverlayPurpose::Selection, selection),
+            (OverlayPurpose::Hover, hover),
+            (OverlayPurpose::RecentRepair, recent.flatten()),
+        ] {
+            let Some((object, mesh, target)) = want else {
+                self.overlays.remove(&purpose);
+                continue;
+            };
+            let same = self.overlays.get(&purpose).is_some_and(|s| {
+                s.object == object && Mesh::ptr_eq(&s.mesh, &mesh) && s.target == target
+            });
+            if !same {
+                worker::build_overlay(&self.tx, ctx, purpose, object, mesh.clone(), target.clone());
+                self.overlays.insert(
+                    purpose,
+                    OverlaySlot {
+                        object,
+                        mesh,
+                        target,
+                        ready: None,
+                    },
+                );
+            }
+        }
+    }
+
+    /// The 3D view's overlays, bottom to top (theme.rs gives each its colour).
+    fn view_layers(&self) -> Vec<ViewLayer> {
+        let mut layers = Vec::new();
+        let faces =
+            |object, faces: &Arc<Vec<mf_render::SurfaceVertex>>, color, strength| ViewLayer {
+                object,
+                geometry: ViewGeometry::Faces(faces.clone()),
+                color,
+                strength,
+            };
+        let lines = |object, lines: &Arc<Vec<mf_render::LineVertex>>, color| ViewLayer {
+            object,
+            geometry: ViewGeometry::Lines(lines.clone()),
+            color,
+            strength: 1.0,
+        };
+        let ready = |p| {
+            self.overlays
+                .get(&p)
+                .and_then(|s| Some((s.object, s.ready.as_ref()?)))
+        };
+        let defects = self
+            .show_boundaries
+            .then(|| self.active.zip(self.current_analysis()))
+            .flatten();
+        if let Some((object, a)) = defects {
+            layers.push(faces(
+                object,
+                &a.layers.loose,
+                theme::LOOSE_PIECE,
+                theme::LOOSE_PIECE_STRENGTH,
+            ));
+        }
+        if let Some((object, o)) = ready(OverlayPurpose::RecentRepair) {
+            layers.push(faces(
+                object,
+                &o.faces,
+                theme::RECENT_REPAIR,
+                theme::RECENT_REPAIR_STRENGTH,
+            ));
+        }
+        if let Some((object, o)) = ready(OverlayPurpose::Selection) {
+            layers.push(faces(
+                object,
+                &o.faces,
+                theme::SELECTED,
+                theme::SELECTED_FACE_STRENGTH,
+            ));
+        }
+        if let Some((object, o)) = ready(OverlayPurpose::Hover) {
+            layers.push(faces(
+                object,
+                &o.faces,
+                theme::HOVER,
+                theme::HOVER_FACE_STRENGTH,
+            ));
+        }
+        if let Some((object, a)) = defects {
+            layers.push(lines(object, &a.layers.cracks, theme::CRACK));
+            layers.push(lines(object, &a.layers.tangled, theme::NON_MANIFOLD));
+        }
+        if let Some((object, o)) = ready(OverlayPurpose::Selection) {
+            layers.push(lines(object, &o.lines, theme::SELECTED));
+        }
+        if let Some((object, o)) = ready(OverlayPurpose::Hover) {
+            layers.push(lines(object, &o.lines, theme::HOVER));
+        }
+        layers.retain(|l| match &l.geometry {
+            ViewGeometry::Lines(v) => !v.is_empty(),
+            ViewGeometry::Faces(v) => !v.is_empty(),
+        });
+        layers
     }
 
     /// True while the active revision's analysis isn't ready.
@@ -706,12 +1176,13 @@ impl eframe::App for MeshFixerApp {
         }
         self.refresh_analysis();
         self.refresh_object_vertices(&ctx);
+        self.resolve_view_request();
 
         // Shortcuts go to a focused text field first (MF-ISSUE-009).
         let typing = ctx.memory(|m| m.focused().is_some());
-        let (undo, redo, fit, escape) = ctx.input_mut(|i| {
+        let (undo, redo, frame, home, escape) = ctx.input_mut(|i| {
             if typing {
-                return (false, false, false, false);
+                return (false, false, false, false, false);
             }
             let escape = i.key_pressed(egui::Key::Escape);
             let redo = i.consume_key(
@@ -719,8 +1190,9 @@ impl eframe::App for MeshFixerApp {
                 egui::Key::Z,
             );
             let undo = i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z);
-            let fit = i.key_pressed(egui::Key::F);
-            (undo, redo, fit, escape)
+            let frame = i.key_pressed(egui::Key::F);
+            let home = i.key_pressed(egui::Key::Home);
+            (undo, redo, frame, home, escape)
         });
         if escape {
             self.clear_selection();
@@ -730,25 +1202,34 @@ impl eframe::App for MeshFixerApp {
         } else if undo {
             self.undo();
         }
-        if fit && !ctx.egui_wants_keyboard_input() {
-            self.fit_camera();
+        if !ctx.egui_wants_keyboard_input() {
+            if home {
+                self.fit_camera();
+            } else if frame {
+                self.frame_target();
+            }
         }
+        self.resolve_view_request();
 
+        self.hover = None;
         crate::panels::menu_bar(self, ui);
         crate::panels::error_banner(self, ui);
-        crate::panels::status_bar(self, ui);
-        crate::panels::side_panel(self, ui);
+        crate::panels::history_bar(self, ui);
+        crate::panels::tree_panel(self, ui);
+        crate::panels::properties_panel(self, ui);
         crate::panels::replay_window(self, &ctx);
+        crate::panels::controls_window(self, &ctx);
+        self.refresh_overlays(&ctx);
 
         let objects = self.object_views();
         let placeholder = match self.active_mesh() {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
             Some(_) => "Analyzing…",
-            None => "Open a mesh with File > Open (STL or OBJ)",
+            None => "Open a mesh with File > Open (STL, OBJ or 3MF)",
         };
         let show_boundaries = self.show_boundaries;
         let updating = self.is_analyzing();
-        let highlight = self.highlight_lines();
+        let layers = self.view_layers();
         let click = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
                 self.viewport.show(
@@ -757,7 +1238,7 @@ impl eframe::App for MeshFixerApp {
                     &objects,
                     ViewOptions {
                         show_boundaries,
-                        highlight: highlight.as_ref(),
+                        layers,
                         updating,
                         placeholder,
                     },
@@ -770,14 +1251,20 @@ impl eframe::App for MeshFixerApp {
             self.click(&ctx, c);
         }
 
-        if self.busy.is_some() || self.is_analyzing() {
+        let overlays_pending = self.overlays.values().any(|s| s.ready.is_none());
+        if self.busy.is_some()
+            || self.is_analyzing()
+            || self.view_request.is_some()
+            || overlays_pending
+        {
             ctx.request_repaint();
         }
     }
 }
 
-/// The local origin the renderer and picking use for a mesh.
-fn mesh_origin(mesh: &Mesh) -> glam::DVec3 {
+/// The local origin the renderer and picking use for a mesh. O(n): call it
+/// on a worker.
+pub(crate) fn mesh_origin(mesh: &Mesh) -> glam::DVec3 {
     mesh.bounding_box()
         .map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()))
 }
@@ -811,6 +1298,48 @@ fn transformed_bounds(bb: &Aabb, model: &glam::DMat4) -> Aabb {
     // `bb` is never empty for a non-empty mesh's bounding box, so there's
     // always at least one corner.
     out.expect("a bounding box has 8 corners")
+}
+
+/// How much bigger than the target `F` frames, so its surroundings show.
+const FRAME_CONTEXT: f64 = 2.5;
+
+/// `bb` scaled by `factor` about its centre.
+fn inflated(bb: &Aabb, factor: f64) -> Aabb {
+    let c = bb.center();
+    let half = |k: usize| (bb.max[k] - bb.min[k]) * 0.5 * factor;
+    Aabb {
+        min: [0, 1, 2].map(|k| c[k] - half(k)),
+        max: [0, 1, 2].map(|k| c[k] + half(k)),
+    }
+}
+
+/// Default value of an integer parameter of a built-in operation.
+fn spec_default(op_id: &str, param: &str) -> i64 {
+    let spec = mf_spec::builtin::get(op_id).expect("a built-in operation");
+    let p = spec
+        .parameters
+        .iter()
+        .find(|p| p.name == param)
+        .expect("the built-in operation declares this parameter");
+    match p.kind.default_value() {
+        ParamValue::Int(v) => v,
+        other => panic!("{op_id}.{param} is an integer parameter, got {other:?}"),
+    }
+}
+
+/// A history step in plain words: "Import part", "Fill hole", "Remove piece".
+fn step_label(node: &mf_command::RevisionNode) -> String {
+    if let Some(import) = &node.import {
+        return format!("Import {}", import.name);
+    }
+    node.record
+        .as_ref()
+        .and_then(|rec| {
+            let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
+            operation_label(&rec.op_id, target)
+        })
+        // allow-swallow: a step with no plain words keeps the session's own label
+        .unwrap_or_else(|| node.label.clone())
 }
 
 fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {

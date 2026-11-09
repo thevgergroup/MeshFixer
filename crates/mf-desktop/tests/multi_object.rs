@@ -64,7 +64,7 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
     let path = two_translated_cubes(dir.path());
 
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| {
@@ -95,17 +95,17 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
     let pixel_at = |p: egui::Pos2| frame.get_pixel(p.x as u32, p.y as u32).0;
     assert_ne!(
         pixel_at(pos_first),
-        mf_render::offscreen::BACKGROUND_RGBA,
+        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
         "the active (first) object must be drawn"
     );
     assert_ne!(
         pixel_at(pos_second),
-        mf_render::offscreen::BACKGROUND_RGBA,
+        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
         "the inactive (second) object must also be drawn, not skipped"
     );
     assert_eq!(
         pixel_at(pos_gap),
-        mf_render::offscreen::BACKGROUND_RGBA,
+        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
         "the gap between the cubes must stay background"
     );
 
@@ -195,7 +195,7 @@ fn switching_active_object_never_shows_the_previous_objects_geometry() {
     let path = cube_and_tetrahedron(dir.path());
 
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| {
@@ -292,7 +292,7 @@ fn importing_into_a_non_empty_document_reframes_the_camera() {
     let second = single_translated_cube(dir.path(), "second.3mf", far);
 
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(first.clone())).unwrap());
     wait_until(&mut h, "first import", |a| a.current_analysis().is_some());

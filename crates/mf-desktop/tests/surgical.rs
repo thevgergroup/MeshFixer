@@ -106,7 +106,7 @@ fn select_hole_fill_undo_refill() {
     let path = two_hole_grid(dir.path(), "two_holes.obj");
 
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| loops(a).is_some());
@@ -129,8 +129,9 @@ fn select_hole_fill_undo_refill() {
     assert_eq!(h.state().highlighted_loops(), Some(sel.ids.clone()));
     save(&mut h, "01-hole-selected");
 
-    // 2. Fill only that hole (no refinement).
-    h.state_mut().selected_op = "mesh.fill_holes".into();
+    // 2. Fill only that hole (no refinement). Properties offers the one
+    // operation valid for a hole, already open.
+    h.get_by_label("Fill hole");
     h.state_mut()
         .params_for("mesh.fill_holes")
         .insert("refine".into(), ParamValue::Bool(false));
@@ -213,7 +214,7 @@ fn selection_belongs_to_the_active_object() {
     let first = two_hole_grid(dir.path(), "first.obj");
     let second = two_hole_grid(dir.path(), "second.obj");
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(first.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| loops(a).is_some());

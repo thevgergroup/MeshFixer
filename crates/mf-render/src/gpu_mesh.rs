@@ -68,6 +68,9 @@ pub fn boundary_line_vertices(mesh: &Mesh, origin: DVec3) -> Vec<LineVertex> {
 /// (MF-RT-001).
 #[derive(Debug, Clone)]
 pub struct MeshVertices {
+    /// The mesh's bounding box (object space), so frontends can frame it
+    /// without an O(n) pass on the UI thread.
+    pub bounds: Option<mf_geometry::Aabb>,
     pub origin: DVec3,
     pub triangle_count: usize,
     pub surface: Vec<SurfaceVertex>,
@@ -76,11 +79,12 @@ pub struct MeshVertices {
 
 impl MeshVertices {
     pub fn build(mesh: &Mesh) -> MeshVertices {
-        let origin = mesh
-            .bounding_box()
+        let bounds = mesh.bounding_box();
+        let origin = bounds
             .map(|b| DVec3::from(b.center()))
             .unwrap_or(DVec3::ZERO);
         MeshVertices {
+            bounds,
             origin,
             triangle_count: mesh.triangle_count(),
             surface: surface_vertices(mesh, origin),
@@ -100,7 +104,7 @@ pub fn chunk_ranges(count: u32, stride: u64, max_bytes: u64, primitive: u32) -> 
         .collect()
 }
 
-/// A separately uploaded line set (selection highlight). Changing the
+/// A separately uploaded line set (selection highlight, overlays). Changing the
 /// selection uploads only this, never the mesh buffers (MF-RENDER-003).
 pub struct GpuLines {
     pub(crate) chunks: Vec<(wgpu::Buffer, u32)>,
@@ -122,6 +126,68 @@ impl GpuLines {
             })
             .collect();
         GpuLines { chunks }
+    }
+}
+
+/// Flat-shaded triangles for the given faces (by ID; dead IDs are skipped),
+/// relative to `origin`: a face overlay (selection, loose pieces, recent
+/// repairs). O(faces given).
+pub fn face_surface_vertices(mesh: &Mesh, origin: DVec3, faces: &[u32]) -> Vec<SurfaceVertex> {
+    let pos = |v: u32| mesh.corner_position(v);
+    let mut out = Vec::with_capacity(faces.len() * 3);
+    for &f in faces {
+        let Some(t) = mesh.face(mf_geometry::FaceId(f)) else {
+            continue;
+        };
+        let [a, b, c] = t.map(|i| DVec3::from(pos(i)));
+        let n = (b - a)
+            .cross(c - a)
+            .normalize_or_zero()
+            .as_vec3()
+            .to_array();
+        for i in t {
+            out.push(SurfaceVertex {
+                position: local(pos(i), origin),
+                normal: n,
+            });
+        }
+    }
+    out
+}
+
+/// Line-list vertices for the given edges (vertex pairs), relative to `origin`.
+pub fn edge_line_vertices(mesh: &Mesh, origin: DVec3, edges: &[[u32; 2]]) -> Vec<LineVertex> {
+    edges
+        .iter()
+        .flat_map(|e| {
+            e.map(|v| LineVertex {
+                position: local(mesh.corner_position(v), origin),
+            })
+        })
+        .collect()
+}
+
+/// A separately uploaded face overlay (see [`face_surface_vertices`]).
+pub struct GpuFaces {
+    pub(crate) chunks: Vec<(wgpu::Buffer, u32)>,
+}
+
+impl GpuFaces {
+    pub fn upload(device: &wgpu::Device, faces: &[SurfaceVertex]) -> GpuFaces {
+        let max = device.limits().max_buffer_size;
+        let stride = std::mem::size_of::<SurfaceVertex>() as u64;
+        let chunks = chunk_ranges(faces.len() as u32, stride, max, 3)
+            .into_iter()
+            .map(|r| {
+                let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("mf overlay faces"),
+                    contents: bytemuck::cast_slice(&faces[r.start as usize..r.end as usize]),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+                (buffer, r.len() as u32)
+            })
+            .collect();
+        GpuFaces { chunks }
     }
 }
 

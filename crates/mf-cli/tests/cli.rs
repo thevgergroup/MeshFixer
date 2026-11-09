@@ -145,6 +145,34 @@ fn gen_fixture_damaged() {
     assert!(d.components > 1 && !d.boundary_loops.is_empty());
 }
 
+/// The demo scene (scripts/demo.sh): two objects at their own transforms,
+/// written as one 3MF.
+#[test]
+fn gen_fixture_scene_writes_two_transformed_objects() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = dir.path().join("scene.3mf");
+    let out = meshfixer(&["gen-fixture", "scene", p.to_str().unwrap()]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let model = mf_io::read_model(&p).unwrap();
+    let names: Vec<_> = model.objects.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, ["scan", "plate"]);
+    assert!(
+        model
+            .objects
+            .iter()
+            .all(|o| o.transform != mf_io::threemf::IDENTITY)
+    );
+
+    // The scene is 3MF only: it has more than one object.
+    let stl = dir.path().join("scene.stl");
+    let out = meshfixer(&["gen-fixture", "scene", stl.to_str().unwrap()]);
+    assert!(!out.status.success());
+}
+
 #[test]
 fn metrics_json_written() {
     let dir = tempfile::tempdir().unwrap();

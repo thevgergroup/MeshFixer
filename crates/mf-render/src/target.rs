@@ -3,12 +3,11 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use glam::DVec3;
-
-use crate::{DrawItem, GpuLines, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+use crate::{DrawItem, Layer, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The headless palette's background ([`crate::Palette::HEADLESS`]).
 pub const BACKGROUND_RGBA: [u8; 4] = [38, 41, 46, 255];
 
 pub struct RenderTarget {
@@ -109,8 +108,8 @@ impl RenderTarget {
     /// Render one frame and submit it. `renderer` must have been built with
     /// [`RenderTarget::format`] for the same sample count. Every item of
     /// `items` is drawn at its own transform (MF-ISSUE-042), shifted into
-    /// `camera.target`'s frame; `highlight` draws over the active object's
-    /// selected loops, if any.
+    /// `camera.target`'s frame, then every overlay of `layers`. The clear
+    /// colour is the renderer's palette background.
     #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
@@ -120,12 +119,12 @@ impl RenderTarget {
         camera: Option<&OrbitCamera>,
         items: &[DrawItem<'_>],
         show_boundaries: bool,
-        highlight: Option<(&GpuLines, glam::DMat4, DVec3)>,
+        layers: &[Layer<'_>],
     ) {
         if let Some(camera) = camera {
-            renderer.prepare(queue, camera, self.width as f32 / self.height as f32);
+            renderer.prepare(queue, camera, (self.width, self.height));
         }
-        let bg = BACKGROUND_RGBA.map(|c| c as f64 / 255.0);
+        let bg = renderer.palette().background.map(f64::from);
         let (view, resolve_target) = match &self.msaa_view {
             Some(msaa) => (msaa, Some(&self.resolved_view)),
             None => (&self.resolved_view, None),
@@ -168,7 +167,7 @@ impl RenderTarget {
                     camera.target,
                     items,
                     show_boundaries,
-                    highlight,
+                    layers,
                 );
             }
         }

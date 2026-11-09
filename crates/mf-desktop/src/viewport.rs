@@ -8,24 +8,52 @@ use eframe::egui;
 use eframe::egui_wgpu::RenderState;
 use mf_command::ObjectId;
 use mf_render::{
-    GpuLines, GpuMesh, LineVertex, MeshRenderer, MeshVertices, OrbitCamera, RenderTarget,
-    model_matrix,
+    GpuFaces, GpuLines, GpuMesh, Layer, LayerGeometry, LineVertex, MeshRenderer, MeshVertices,
+    OrbitCamera, Palette, RenderTarget, SurfaceVertex, model_matrix,
 };
+
+use crate::theme;
 
 pub const MSAA_SAMPLES: u32 = 4;
 
-/// Colour multiplier for an object that isn't the active one (MF-ISSUE-042).
-const INACTIVE_TINT: f32 = 0.45;
-
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, PartialEq)]
 struct FrameKey {
     camera: OrbitCamera,
     show_boundaries: bool,
     size: (u32, u32),
-    /// Which object is active (dimming depends on this).
+    /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
-    /// Identity of the highlight line set (0 = none).
-    highlight: usize,
+    /// Identity and colour of each overlay layer, in draw order.
+    layers: Vec<(ObjectId, usize, [u8; 4], u32)>,
+}
+
+/// One overlay to draw on an object (built by a worker; see app.rs).
+pub struct ViewLayer {
+    pub object: ObjectId,
+    pub geometry: ViewGeometry,
+    pub color: egui::Color32,
+    /// Face layers: how much of `color` replaces the surface colour.
+    pub strength: f32,
+}
+
+pub enum ViewGeometry {
+    Lines(Arc<Vec<LineVertex>>),
+    Faces(Arc<Vec<SurfaceVertex>>),
+}
+
+impl ViewGeometry {
+    fn identity(&self) -> usize {
+        match self {
+            ViewGeometry::Lines(v) => Arc::as_ptr(v) as usize,
+            ViewGeometry::Faces(v) => Arc::as_ptr(v) as usize,
+        }
+    }
+}
+
+/// A layer's GPU buffers, kept while the same vertex set is drawn.
+enum GpuLayer {
+    Lines(GpuLines),
+    Faces(GpuFaces),
 }
 
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
@@ -39,7 +67,8 @@ pub struct ObjectView {
 /// How to draw the view this frame.
 pub struct ViewOptions<'a> {
     pub show_boundaries: bool,
-    pub highlight: Option<&'a Arc<Vec<LineVertex>>>,
+    /// Overlays, bottom to top.
+    pub layers: Vec<ViewLayer>,
     /// The geometry shown is from the previous revision while the current one is analysed.
     pub updating: bool,
     /// Text shown when there's nothing to draw.
@@ -62,7 +91,8 @@ pub struct Viewport {
     texture: Option<egui::TextureId>,
     /// GPU meshes uploaded for the objects drawn last frame, by object id.
     uploaded: Vec<(ObjectId, Arc<MeshVertices>, GpuMesh)>,
-    highlight: Option<(Arc<Vec<LineVertex>>, GpuLines)>,
+    /// Overlay buffers by vertex-set identity (the `Arc` keeps it alive).
+    layers: Vec<(usize, GpuLayer)>,
     last_frame: Option<FrameKey>,
     /// Where the 3D view was last drawn (for picking and screen projections).
     pub last_rect: Option<egui::Rect>,
@@ -71,15 +101,19 @@ pub struct Viewport {
 }
 
 impl Viewport {
-    pub fn new(render_state: RenderState) -> Viewport {
-        let renderer = MeshRenderer::new(&render_state.device, RenderTarget::format(MSAA_SAMPLES));
+    pub fn new(render_state: RenderState, palette: Palette) -> Viewport {
+        let renderer = MeshRenderer::new(
+            &render_state.device,
+            RenderTarget::format(MSAA_SAMPLES),
+            palette,
+        );
         Viewport {
             render_state,
             renderer,
             target: None,
             texture: None,
             uploaded: Vec::new(),
-            highlight: None,
+            layers: Vec::new(),
             last_frame: None,
             last_rect: None,
             frames_rendered: 0,
@@ -98,7 +132,7 @@ impl Viewport {
     ) -> Option<Click> {
         let ViewOptions {
             show_boundaries,
-            highlight,
+            layers,
             updating,
             placeholder,
         } = options;
@@ -109,17 +143,17 @@ impl Viewport {
             // are in hand): release GPU buffers for a vanished document
             // (MF-ISSUE-009).
             self.uploaded.clear();
-            self.highlight = None;
+            self.layers.clear();
             self.last_frame = None;
             self.last_rect = None;
             ui.painter()
-                .rect_filled(rect, 0.0, egui::Color32::from_rgb(38, 41, 46));
+                .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
             ui.painter().text(
                 rect.center(),
                 egui::Align2::CENTER_CENTER,
                 placeholder,
                 egui::FontId::proportional(16.0),
-                egui::Color32::GRAY,
+                theme::TEXT_MUTED,
             );
             return None;
         };
@@ -137,12 +171,13 @@ impl Viewport {
 
         // Clamp to the device limit; egui scales the image up if needed.
         let ppp = ui.ctx().pixels_per_point();
+        self.renderer.set_pixels_per_point(ppp);
         let max = RenderTarget::max_dimension(&self.render_state.device) as f32;
         let size = (
             (rect.width() * ppp).round().clamp(1.0, max) as u32,
             (rect.height() * ppp).round().clamp(1.0, max) as u32,
         );
-        let texture = self.render(*cam, objects, show_boundaries, highlight, size);
+        let texture = self.render(*cam, objects, show_boundaries, &layers, size);
         ui.painter().image(
             texture,
             rect,
@@ -155,16 +190,23 @@ impl Viewport {
                 egui::Align2::LEFT_TOP,
                 "Updating view…",
                 egui::FontId::proportional(14.0),
-                egui::Color32::from_rgb(255, 200, 80),
+                theme::TEXT_MUTED,
             );
         }
-        ui.painter().text(
-            rect.left_bottom() + egui::vec2(8.0, -8.0),
-            egui::Align2::LEFT_BOTTOM,
-            "drag: orbit · shift/right-drag: pan · scroll: zoom · F: fit",
+        // The controls hint, on a backdrop so it reads over the model.
+        let hint = ui.painter().layout_no_wrap(
+            "Drag: orbit · right-drag: pan · wheel: zoom · F: frame · Home: reset · Help > Controls"
+                .to_owned(),
             egui::FontId::proportional(12.0),
-            egui::Color32::from_gray(140),
+            theme::TEXT_MUTED,
         );
+        let at = rect.left_bottom() + egui::vec2(8.0, -8.0 - hint.size().y);
+        ui.painter().rect_filled(
+            egui::Rect::from_min_size(at, hint.size()).expand(4.0),
+            4.0,
+            theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85),
+        );
+        ui.painter().galley(at, hint, theme::TEXT_MUTED);
         click
     }
 
@@ -173,7 +215,7 @@ impl Viewport {
         camera: OrbitCamera,
         objects: &[ObjectView],
         show_boundaries: bool,
-        highlight: Option<&Arc<Vec<LineVertex>>>,
+        layers: &[ViewLayer],
         size: (u32, u32),
     ) -> egui::TextureId {
         let device = &self.render_state.device;
@@ -234,15 +276,29 @@ impl Viewport {
         dirty |= !self.uploaded.is_empty();
         self.uploaded = uploaded;
 
-        // Highlight lines upload separately from the mesh (MF-RENDER-003).
-        match highlight {
-            None => self.highlight = None,
-            Some(lines) => {
-                if !matches!(&self.highlight, Some((h, _)) if Arc::ptr_eq(h, lines)) {
-                    self.highlight = Some((lines.clone(), GpuLines::upload(device, lines)));
-                }
-            }
+        // Overlays upload separately from the meshes (MF-RENDER-003), and
+        // only when their vertex set changes. Layers on an object that isn't
+        // drawn this frame are skipped.
+        let drawn: Vec<&ViewLayer> = layers
+            .iter()
+            .filter(|l| objects.iter().any(|o| o.id == l.object))
+            .collect();
+        let mut kept = Vec::with_capacity(drawn.len());
+        for l in &drawn {
+            let id = l.geometry.identity();
+            let entry = match self.layers.iter().position(|(i, _)| *i == id) {
+                Some(i) => self.layers.swap_remove(i),
+                None => (
+                    id,
+                    match &l.geometry {
+                        ViewGeometry::Lines(v) => GpuLayer::Lines(GpuLines::upload(device, v)),
+                        ViewGeometry::Faces(v) => GpuLayer::Faces(GpuFaces::upload(device, v)),
+                    },
+                ),
+            };
+            kept.push(entry);
         }
+        self.layers = kept;
         let key = FrameKey {
             camera,
             show_boundaries,
@@ -251,12 +307,19 @@ impl Viewport {
             // removed) already set `dirty` above; this only needs to catch
             // a change of *which* object is active (dimming changes).
             active: objects.iter().find(|o| o.active).map(|o| o.id),
-            highlight: self
-                .highlight
-                .as_ref()
-                .map_or(0, |(h, _)| Arc::as_ptr(h) as usize),
+            layers: drawn
+                .iter()
+                .map(|l| {
+                    (
+                        l.object,
+                        l.geometry.identity(),
+                        l.color.to_array(),
+                        l.strength.to_bits(),
+                    )
+                })
+                .collect(),
         };
-        dirty |= self.last_frame != Some(key);
+        dirty |= self.last_frame.as_ref() != Some(&key);
 
         if dirty && let Some(target) = &self.target {
             let items: Vec<mf_render::DrawItem<'_>> = objects
@@ -265,19 +328,26 @@ impl Viewport {
                 .map(|(o, (_, _, gpu))| mf_render::DrawItem {
                     mesh: gpu,
                     model: model_matrix(&o.transform),
-                    tint: if o.active { 1.0 } else { INACTIVE_TINT },
+                    inactive: !o.active,
                 })
                 .collect();
-            // The highlight only exists while there's a selection on the
-            // active object, so there's always one to find here.
-            let active_highlight = self.highlight.as_ref().and_then(|(_, lines)| {
-                let active = objects.iter().find(|o| o.active)?;
-                Some((
-                    lines,
-                    model_matrix(&active.transform),
-                    active.vertices.origin,
-                ))
-            });
+            let gpu_layers: Vec<Layer<'_>> = drawn
+                .iter()
+                .zip(&self.layers)
+                .filter_map(|(l, (_, gpu))| {
+                    let o = objects.iter().find(|o| o.id == l.object)?;
+                    Some(Layer {
+                        geometry: match gpu {
+                            GpuLayer::Lines(g) => LayerGeometry::Lines(g),
+                            GpuLayer::Faces(g) => LayerGeometry::Faces(g),
+                        },
+                        model: model_matrix(&o.transform),
+                        mesh_origin: o.vertices.origin,
+                        color: theme::rgba(l.color),
+                        strength: l.strength,
+                    })
+                })
+                .collect();
             target.draw(
                 device,
                 &self.render_state.queue,
@@ -285,7 +355,7 @@ impl Viewport {
                 Some(&camera),
                 &items,
                 show_boundaries,
-                active_highlight,
+                &gpu_layers,
             );
             self.last_frame = Some(key);
             self.frames_rendered += 1;
@@ -295,21 +365,71 @@ impl Viewport {
     }
 }
 
+/// Mouse: left-drag orbits, right- or middle-drag pans, the wheel zooms
+/// to the cursor. Trackpad: two-finger drag orbits, Shift + two-finger drag
+/// pans, pinch zooms (to the cursor). egui reports both wheels and
+/// two-finger drags as scroll events; the unit tells them apart (points:
+/// trackpad, lines or pages: wheel). Momentum after the fingers lift is
+/// ignored so the view stops when you stop.
 fn handle_input(ui: &egui::Ui, response: &egui::Response, rect: egui::Rect, cam: &mut OrbitCamera) {
+    let h = rect.height().max(1.0) as f64;
+    let size = (rect.width() as f64, rect.height() as f64);
     let delta = response.drag_delta();
     let pan = response.dragged_by(egui::PointerButton::Secondary)
         || response.dragged_by(egui::PointerButton::Middle)
         || (response.dragged_by(egui::PointerButton::Primary) && ui.input(|i| i.modifiers.shift));
     if pan {
-        let h = rect.height().max(1.0) as f64;
         cam.pan(delta.x as f64 / h, delta.y as f64 / h);
     } else if response.dragged_by(egui::PointerButton::Primary) {
         cam.orbit(delta.x as f64 * 0.01, delta.y as f64 * 0.01);
     }
-    if response.hovered() {
-        let scroll = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll != 0.0 {
-            cam.zoom((-scroll as f64 * 0.002).exp());
+    if !response.hovered() {
+        return;
+    }
+    let (events, zoom, pointer) = ui.input(|i| {
+        let wheels: Vec<_> = i
+            .events
+            .iter()
+            .filter_map(|e| match e {
+                egui::Event::MouseWheel {
+                    unit,
+                    delta,
+                    source,
+                    modifiers,
+                    ..
+                } => Some((*unit, *delta, *source, *modifiers)),
+                _ => None,
+            })
+            .collect();
+        (wheels, i.zoom_delta(), i.pointer.hover_pos())
+    });
+    let cursor = pointer.map_or((size.0 * 0.5, size.1 * 0.5), |p| {
+        ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64)
+    });
+    // Pinch (and Ctrl/Cmd + wheel, which egui turns into zoom).
+    if zoom != 1.0 {
+        cam.zoom_at(1.0 / zoom as f64, size, cursor);
+    }
+    for (unit, delta, source, modifiers) in events {
+        if modifiers.ctrl || modifiers.command || source == egui::MouseWheelSource::Momentum {
+            continue;
+        }
+        match unit {
+            egui::MouseWheelUnit::Point if modifiers.shift => {
+                // Fingers move the model like a drag does.
+                cam.pan(delta.x as f64 / h, delta.y as f64 / h);
+            }
+            egui::MouseWheelUnit::Point => {
+                cam.orbit(delta.x as f64 * 0.01, delta.y as f64 * 0.01);
+            }
+            egui::MouseWheelUnit::Line | egui::MouseWheelUnit::Page => {
+                let lines = if unit == egui::MouseWheelUnit::Page {
+                    delta.y as f64 * 10.0
+                } else {
+                    delta.y as f64
+                };
+                cam.zoom_at((-lines * 0.1).exp(), size, cursor);
+            }
         }
     }
 }

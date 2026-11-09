@@ -682,7 +682,7 @@ impl Session {
     }
 
     /// Root → current path, then the redo chain (most recent children).
-    fn linear_view(&self) -> Vec<RevisionId> {
+    pub fn linear_view(&self) -> Vec<RevisionId> {
         let mut path = Vec::new();
         let mut cur = Some(self.cursor);
         while let Some(r) = cur {

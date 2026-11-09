@@ -1,7 +1,22 @@
-use eframe::egui;
+//! The layout (docs/design/visual-language.md): menu bar on top, "Objects &
+//! Defects" on the left, "Properties & Tools" on the right, the history
+//! breadcrumb and status line at the bottom; the 3D view takes the rest.
+
+use eframe::egui::{self, RichText};
+use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
 
-use crate::app::MeshFixerApp;
+use crate::app::{MeshFixerApp, Tool};
+use crate::defects::{Defect, count, defect_copy, measure, unit_symbol};
+use crate::theme;
+use crate::worker::OverlayTarget;
+
+/// Panel widths (points). With the bottom bar, they leave the 3D view at
+/// least 60% of a 1440×900 window.
+const TREE_WIDTH: f32 = 210.0;
+const PROPERTIES_WIDTH: f32 = 280.0;
+/// Rows listed per defect category before "…and N more".
+const MAX_ROWS: usize = 200;
 
 pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let ctx = ui.ctx().clone();
@@ -59,11 +74,40 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     app.redo();
                     ui.close();
                 }
+                ui.separator();
+                if ui
+                    .add_enabled(
+                        app.selection.is_some() || app.inspected.is_some(),
+                        egui::Button::new("Clear selection").shortcut_text("Esc"),
+                    )
+                    .clicked()
+                {
+                    app.clear_selection();
+                    ui.close();
+                }
             });
             ui.menu_button("View", |ui| {
-                ui.checkbox(&mut app.show_boundaries, "Show boundary loops");
-                if ui.button("Fit to view (F)").clicked() {
+                ui.checkbox(&mut app.show_boundaries, "Show defects");
+                ui.checkbox(&mut app.show_recent_repairs, "Highlight recent repairs");
+                ui.separator();
+                if ui
+                    .add(egui::Button::new("Frame selection").shortcut_text("F"))
+                    .clicked()
+                {
+                    app.frame_target();
+                    ui.close();
+                }
+                if ui
+                    .add(egui::Button::new("Reset view").shortcut_text("Home"))
+                    .clicked()
+                {
                     app.fit_camera();
+                    ui.close();
+                }
+            });
+            ui.menu_button("Help", |ui| {
+                if ui.button("Controls…").clicked() {
+                    app.show_controls = true;
                     ui.close();
                 }
             });
@@ -76,11 +120,7 @@ pub fn error_banner(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         return;
     };
     egui::Panel::top("error")
-        .frame(
-            egui::Frame::new()
-                .fill(egui::Color32::from_rgb(120, 30, 30))
-                .inner_margin(6.0),
-        )
+        .frame(egui::Frame::new().fill(theme::ERROR_FILL).inner_margin(6.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.colored_label(egui::Color32::WHITE, format!("Error: {message}"));
@@ -93,26 +133,143 @@ pub fn error_banner(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         });
 }
 
-pub fn status_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    egui::Panel::bottom("status").show(ui, |ui| {
+/// Width kept for the status line at the right of the bottom bar.
+const STATUS_WIDTH: f32 = 360.0;
+
+/// Bottom bar: Undo/Redo, the history breadcrumb (click a step to jump to
+/// it; the current one is highlighted, steps redo would take are greyed),
+/// any other branches, and the status line.
+pub fn history_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    egui::Panel::bottom("history").show(ui, |ui| {
         ui.horizontal(|ui| {
-            if let Some(busy) = &app.busy {
-                ui.spinner();
-                ui.label(busy);
-            } else if app.is_analyzing() {
-                ui.spinner();
-                ui.label("Analyzing…");
-            } else if let Some(status) = &app.status {
-                ui.label(status);
+            let idle = app.busy.is_none();
+            if ui
+                .add_enabled(idle && app.session.can_undo(), egui::Button::new("Undo"))
+                .on_hover_text("Cmd+Z")
+                .clicked()
+            {
+                app.undo();
+            }
+            if ui
+                .add_enabled(idle && app.session.can_redo(), egui::Button::new("Redo"))
+                .on_hover_text("Shift+Cmd+Z")
+                .clicked()
+            {
+                app.redo();
+            }
+            ui.separator();
+            let crumbs_width = (ui.available_width() - STATUS_WIDTH).max(120.0);
+            let mut clicked = None;
+            ui.allocate_ui(egui::vec2(crumbs_width, ui.available_height()), |ui| {
+                egui::ScrollArea::horizontal()
+                    .id_salt("breadcrumb")
+                    .stick_to_right(true)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let current = app.session.current();
+                            let crumbs = app.breadcrumb();
+                            if crumbs.is_empty() {
+                                ui.weak("No history yet");
+                            }
+                            for (i, (id, label, reached)) in crumbs.into_iter().enumerate() {
+                                if i > 0 {
+                                    ui.weak("›");
+                                }
+                                let text = if reached {
+                                    RichText::new(&label)
+                                } else {
+                                    RichText::new(&label).color(theme::TEXT_MUTED).italics()
+                                };
+                                if ui
+                                    .add_enabled(
+                                        idle,
+                                        egui::Button::selectable(id == current, text),
+                                    )
+                                    .on_hover_text("Jump to this step")
+                                    .clicked()
+                                {
+                                    clicked = Some(id);
+                                }
+                            }
+                            if has_branches(app) {
+                                ui.menu_button("Branches…", |ui| {
+                                    if let Some(id) = history_tree(app, ui) {
+                                        clicked = Some(id);
+                                        ui.close();
+                                    }
+                                });
+                            }
+                        });
+                    });
+            });
+            if let Some(id) = clicked {
+                app.checkout(id);
             }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(format!(
-                    "view frames rendered: {}",
-                    app.viewport.frames_rendered
-                ));
+                status(app, ui);
             });
         });
     });
+}
+
+/// The status line: what's running, or the last result, or "Ready".
+fn status(app: &MeshFixerApp, ui: &mut egui::Ui) {
+    let (text, spinning) = if let Some(busy) = &app.busy {
+        (busy.clone(), true)
+    } else if app.is_analyzing() {
+        ("Analyzing…".to_owned(), true)
+    } else if let Some(status) = &app.status {
+        (status.clone(), false)
+    } else {
+        ("Ready".to_owned(), false)
+    };
+    ui.add(egui::Label::new(RichText::new(&text).color(theme::TEXT_MUTED)).truncate())
+        .on_hover_text(&text);
+    if spinning {
+        ui.spinner();
+    }
+}
+
+fn has_branches(app: &MeshFixerApp) -> bool {
+    app.session.revisions().iter().any(|n| n.children.len() > 1)
+}
+
+/// The full revision DAG (MF-HIST-001): every branch, the current path in
+/// normal text, abandoned branches greyed. Returns a clicked revision.
+fn history_tree(app: &MeshFixerApp, ui: &mut egui::Ui) -> Option<mf_command::RevisionId> {
+    let current = app.session.current();
+    let mut on_path = std::collections::BTreeSet::new();
+    let mut cur = Some(current);
+    while let Some(r) = cur {
+        on_path.insert(r);
+        cur = app.session.node(r).and_then(|n| n.parent);
+    }
+    let mut clicked = None;
+    let mut stack = vec![(mf_command::RevisionId(0), 0usize)];
+    while let Some((id, depth)) = stack.pop() {
+        let Some(node) = app.session.node(id) else {
+            continue;
+        };
+        let mut text = RichText::new(format!("{} · {}", id.0, node.label));
+        if !on_path.contains(&id) {
+            text = text.color(theme::TEXT_MUTED).italics();
+        }
+        ui.horizontal(|ui| {
+            ui.add_space(depth as f32 * 12.0);
+            if ui.selectable_label(id == current, text).clicked() {
+                clicked = Some(id);
+            }
+        });
+        for &c in node.children.iter().rev() {
+            let child_depth = if node.children.len() > 1 {
+                depth + 1
+            } else {
+                depth
+            };
+            stack.push((c, child_depth));
+        }
+    }
+    clicked
 }
 
 /// The last replay's per-command verdicts.
@@ -133,27 +290,77 @@ pub fn replay_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     }
 }
 
-pub fn side_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let ctx = ui.ctx().clone();
-    egui::Panel::right("side")
-        .default_size(340.0)
+/// Help > Controls.
+pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    let mut open = app.show_controls;
+    egui::Window::new("Controls")
+        .open(&mut open)
+        .resizable(false)
+        .collapsible(false)
+        .show(ctx, |ui| {
+            let group = |ui: &mut egui::Ui, title: &str, rows: &[(&str, &str)]| {
+                ui.strong(title);
+                egui::Grid::new(title).num_columns(2).show(ui, |ui| {
+                    for (k, v) in rows {
+                        ui.label(*k);
+                        ui.label(RichText::new(*v).color(theme::TEXT_MUTED));
+                        ui.end_row();
+                    }
+                });
+                ui.add_space(6.0);
+            };
+            group(
+                ui,
+                "Mouse",
+                &[
+                    ("Left-drag", "Orbit"),
+                    ("Right- or middle-drag", "Pan"),
+                    ("Wheel", "Zoom to the cursor"),
+                    ("Click", "Select a hole or piece (Shift adds)"),
+                ],
+            );
+            group(
+                ui,
+                "Trackpad",
+                &[
+                    ("Two-finger drag", "Orbit"),
+                    ("Shift + two-finger drag", "Pan"),
+                    ("Pinch", "Zoom"),
+                ],
+            );
+            group(
+                ui,
+                "Shortcuts",
+                &[
+                    ("F", "Frame the selection (or everything)"),
+                    ("Home", "Reset the view"),
+                    ("Esc", "Clear the selection"),
+                    ("Cmd+Z / Shift+Cmd+Z", "Undo / Redo"),
+                ],
+            );
+        });
+    app.show_controls = open;
+}
+
+/// Left: "Objects & Defects". Every object; under the active one, its
+/// model and each defect category with a count. Clicking a row makes it
+/// the target; hovering outlines it in the view.
+pub fn tree_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    egui::Panel::left("tree")
+        .resizable(true)
+        .default_size(TREE_WIDTH)
+        .min_size(170.0)
         .show(ui, |ui| {
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                objects(app, ui);
-                ui.separator();
-                diagnostics(app, ui);
-                ui.separator();
-                selection(app, ui);
-                ui.separator();
-                operations(app, ui, &ctx);
-                ui.separator();
-                history(app, ui);
-            });
+            ui.heading("Objects & Defects");
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("tree")
+                .auto_shrink([false, false])
+                .show(ui, |ui| tree(app, ui));
         });
 }
 
-fn objects(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    ui.heading("Objects");
+fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let objects: Vec<_> = app
         .session
         .document()
@@ -168,276 +375,447 @@ fn objects(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .collect();
     if objects.is_empty() {
-        ui.weak("No objects");
+        ui.weak("Open a mesh with File > Open");
     }
     for (id, name, tris) in objects {
-        if ui
-            .selectable_label(
-                app.active == Some(id),
-                format!("{name}  ({tris} triangles)"),
-            )
-            .clicked()
-        {
+        let active = app.active == Some(id);
+        let text = if active {
+            RichText::new(&name).strong()
+        } else {
+            RichText::new(&name).color(theme::TEXT_MUTED)
+        };
+        let row = ui.selectable_label(false, text).on_hover_text(format!(
+            "{}{}",
+            count(tris, "triangle"),
+            if active {
+                ""
+            } else {
+                " · click to work on it"
+            }
+        ));
+        if row.clicked() {
             app.set_active(id);
         }
+        if active {
+            ui.indent(("defects", id.0), |ui| defects_tree(app, ui));
+        }
     }
 }
 
-fn diagnostics(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    ui.heading("Diagnostics");
-    // Only ever show diagnostics for the exact revision on screen.
+fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(object) = app.active else { return };
     let Some(analysis) = app.current_analysis() else {
-        ui.weak(if app.is_analyzing() {
-            "Analyzing…"
-        } else {
-            "—"
+        ui.horizontal(|ui| {
+            ui.spinner();
+            ui.weak("Analyzing…");
         });
         return;
     };
-    let d = &analysis.diagnostics;
-    let flag = |ok: bool| if ok { "yes" } else { "no" };
-    egui::Grid::new("diag")
-        .num_columns(2)
-        .striped(true)
-        .show(ui, |ui| {
-            let mut row = |k: &str, v: String| {
-                ui.label(k);
-                ui.label(v);
-                ui.end_row();
-            };
-            row("Triangles", d.triangle_count.to_string());
-            row("Vertices", d.vertex_count.to_string());
-            row("Components", d.components.to_string());
-            row("Closed", flag(d.is_closed).into());
-            row("Manifold", flag(d.is_manifold).into());
-            row("Boundary loops", d.boundary_loops.len().to_string());
-            row("Boundary edges", d.boundary_edges.to_string());
-            row(
-                "Untraced boundary edges",
-                d.untraced_boundary_edges.to_string(),
-            );
-            row("Non-manifold edges", d.non_manifold_edges.to_string());
-            row("Non-manifold vertices", d.non_manifold_vertices.to_string());
-            row("Degenerate triangles", d.degenerate_triangles.to_string());
-            row("Duplicate vertices", d.duplicate_vertices_exact.to_string());
-            row(
-                "Inconsistent edges",
-                d.inconsistent_orientation_edges.to_string(),
-            );
-            row(
-                "Surface area",
-                d.surface_area
-                    .map_or("overflow (coordinates too large)".into(), |a| {
-                        format!("{a:.4}")
-                    }),
-            );
-            row(
-                "Near-duplicate vertices",
-                d.duplicate_vertices_tolerance.to_string(),
-            );
-            row("Duplicate faces", d.duplicate_faces.to_string());
-            row(
-                "Volume",
-                d.signed_volume
-                    .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
-            );
-            if let Some(bb) = d.bounding_box {
-                row(
-                    "Size",
-                    format!(
-                        "{:.3} × {:.3} × {:.3}",
-                        bb.max[0] - bb.min[0],
-                        bb.max[1] - bb.min[1],
-                        bb.max[2] - bb.min[2]
-                    ),
-                );
-            }
-        });
-    if !d.boundary_loops.is_empty() {
-        ui.collapsing(
-            format!("Boundary loops ({})", d.boundary_loops.len()),
-            |ui| {
-                for l in d.boundary_loops.iter().take(200) {
-                    ui.label(format!(
-                        "#{}: {} edges, perimeter {}",
-                        l.id,
-                        l.edge_count,
-                        l.perimeter.map_or("overflow".into(), |p| format!("{p:.3}"))
-                    ));
-                }
-                if d.boundary_loops.len() > 200 {
-                    ui.weak(format!("…and {} more", d.boundary_loops.len() - 200));
-                }
-            },
-        );
+    let defects = analysis.defects.clone();
+    let units = app.session.document().units();
+    let nothing_targeted = app.selection.is_none() && app.current_inspected().is_none();
+    if ui
+        .selectable_label(nothing_targeted, "Model")
+        .on_hover_text("The whole object: its operations are in Properties")
+        .clicked()
+    {
+        app.clear_selection();
     }
-}
-
-/// Operation panel generated entirely from the operation spec (MF-SPEC-003).
-fn describe(sel: &mf_selection::Selection) -> String {
-    let ids: Vec<String> = sel.ids.iter().map(|i| format!("#{i}")).collect();
-    let what = match sel.kind {
-        mf_selection::SelectionKind::BoundaryLoop => "hole",
-        mf_selection::SelectionKind::Component => "component",
-        mf_selection::SelectionKind::Faces => "face",
-        mf_selection::SelectionKind::Object => return "whole object".into(),
-    };
-    let plural = if sel.ids.len() == 1 { "" } else { "s" };
-    format!("{what}{plural} {}", ids.join(", "))
-}
-
-fn selection(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    ui.heading("Selection");
-    match app.selection.as_ref().map(describe) {
-        Some(text) => {
-            ui.horizontal(|ui| {
-                ui.label(format!("Selected: {text}"));
-                if ui.button("Clear").clicked() {
-                    app.clear_selection();
+    let categories = [
+        ("Holes", &defects.holes, theme::HOLE),
+        ("Narrow cracks", &defects.cracks, theme::CRACK),
+        ("Loose pieces", &defects.loose, theme::LOOSE_PIECE),
+        ("Non-manifold edges", &defects.tangled, theme::NON_MANIFOLD),
+    ];
+    for (name, list, color) in categories {
+        let label = format!("{name} ({})", list.len());
+        let text = if list.is_empty() {
+            RichText::new(label).color(theme::TEXT_MUTED)
+        } else {
+            RichText::new(label).color(color)
+        };
+        egui::CollapsingHeader::new(text)
+            .id_salt((object.0, name))
+            .default_open(!list.is_empty())
+            .show(ui, |ui| {
+                for d in list.iter().take(MAX_ROWS) {
+                    defect_row(app, ui, object, d, units);
+                }
+                if list.len() > MAX_ROWS {
+                    ui.weak(format!("…and {} more", list.len() - MAX_ROWS));
                 }
             });
+    }
+}
+
+fn defect_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    object: mf_command::ObjectId,
+    d: &Defect,
+    units: mf_io::threemf::Unit,
+) {
+    let copy = defect_copy(d, units);
+    let selected = match (d.selection(), app.current_selection()) {
+        (Some((kind, id)), Some(sel)) => sel.kind == kind && sel.ids.contains(&id),
+        (None, _) => app.current_inspected().is_some_and(|i| i.defect == *d),
+        _ => false,
+    };
+    let row = ui
+        .selectable_label(selected, &copy.title)
+        .on_hover_ui(|ui| {
+            ui.strong(&copy.title);
+            ui.label(&copy.detail);
+            ui.label(RichText::new(format!("Next: {}", copy.next_action)).color(theme::TEXT_MUTED));
+        });
+    if row.hovered() {
+        app.hover = Some((object, overlay_target(d)));
+    }
+    if row.clicked() {
+        app.select_defect(d);
+    }
+}
+
+fn overlay_target(d: &Defect) -> OverlayTarget {
+    match d {
+        Defect::Hole { loop_id, .. }
+        | Defect::OverCap { loop_id, .. }
+        | Defect::Crack { loop_id, .. } => OverlayTarget::Loops(vec![*loop_id]),
+        Defect::LoosePiece { component, .. } => OverlayTarget::Components(vec![*component]),
+        Defect::Tangled { edge, .. } => OverlayTarget::Edges(vec![*edge]),
+    }
+}
+
+/// Right: "Properties & Tools", contextual to the current target: what it
+/// is, the operations valid for it, their parameters, and Apply.
+pub fn properties_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let ctx = ui.ctx().clone();
+    egui::Panel::right("properties")
+        .resizable(true)
+        .default_size(PROPERTIES_WIDTH)
+        .min_size(220.0)
+        .show(ui, |ui| {
+            ui.heading("Properties & Tools");
+            ui.separator();
+            egui::ScrollArea::vertical()
+                .id_salt("properties")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if app.active_mesh().is_none() {
+                        ui.weak("Nothing open yet.");
+                        return;
+                    }
+                    target_section(app, ui);
+                    ui.add_space(8.0);
+                    tools_section(app, ui, &ctx);
+                    ui.add_space(8.0);
+                    details_section(app, ui);
+                });
+        });
+}
+
+/// What the target is, in plain language.
+fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let units = app.session.document().units();
+    let analysis = app.current_analysis();
+    if let Some(inspected) = app.current_inspected() {
+        let copy = defect_copy(&inspected.defect, units);
+        ui.label(RichText::new(&copy.title).strong().size(16.0));
+        ui.label(&copy.detail);
+        if ui.button(&copy.next_action).clicked() {
+            app.select_tangled_faces();
         }
-        None => {
-            ui.weak("Click a hole's orange outline, or a part. Shift-click adds; Esc clears.");
+        return;
+    }
+    if let Some(sel) = app.current_selection().cloned() {
+        let found: Option<Vec<Defect>> = analysis.and_then(|a| {
+            sel.ids
+                .iter()
+                .map(|&id| a.defects.find(sel.kind, id).cloned())
+                .collect()
+        });
+        match (&found, sel.ids.len()) {
+            (Some(defects), 1) => {
+                let copy = defect_copy(&defects[0], units);
+                ui.label(RichText::new(&copy.title).strong().size(16.0));
+                ui.label(&copy.detail);
+                if app.tools().is_empty() {
+                    ui.label(RichText::new(&copy.next_action).color(theme::TEXT_MUTED));
+                }
+            }
+            (Some(defects), n) => {
+                ui.label(RichText::new(selection_title(&sel, n)).strong().size(16.0));
+                let blocked: Vec<_> = defects
+                    .iter()
+                    .filter(|d| !matches!(d, Defect::Hole { .. } | Defect::LoosePiece { .. }))
+                    .collect();
+                if let Some(d) = blocked.first() {
+                    let copy = defect_copy(d, units);
+                    ui.label(
+                        RichText::new(format!(
+                            "Includes a {}: {}",
+                            copy.title.to_lowercase(),
+                            copy.next_action
+                        ))
+                        .color(theme::TEXT_MUTED),
+                    );
+                }
+            }
+            (None, n) => {
+                let main_body = sel.kind == SelectionKind::Component && sel.ids == [0];
+                if main_body {
+                    ui.label(RichText::new("Main body").strong().size(16.0));
+                    if let Some(a) = analysis {
+                        let tris = a.diagnostics.triangle_count
+                            - a.defects
+                                .loose
+                                .iter()
+                                .map(|d| match d {
+                                    Defect::LoosePiece { triangles, .. } => *triangles,
+                                    _ => 0,
+                                })
+                                .sum::<usize>();
+                        ui.label(count(tris, "triangle"));
+                    }
+                } else {
+                    ui.label(RichText::new(selection_title(&sel, n)).strong().size(16.0));
+                }
+                ui.label(
+                    RichText::new(
+                        "No operation works on this selection yet; these act on the whole object.",
+                    )
+                    .color(theme::TEXT_MUTED),
+                );
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Clear selection").on_hover_text("Esc").clicked() {
+                app.clear_selection();
+            }
+            ui.weak("Shift-click adds");
+        });
+        return;
+    }
+    // Nothing targeted: the whole object.
+    let Some(id) = app.active else { return };
+    let Some(object) = app.session.document().object(id) else {
+        return;
+    };
+    ui.label(RichText::new(&object.name).strong().size(16.0));
+    let Some(a) = analysis else {
+        ui.weak("Analyzing…");
+        return;
+    };
+    let d = &a.diagnostics;
+    ui.label(count(d.triangle_count, "triangle"));
+    if let Some(bb) = d.bounding_box {
+        let u = unit_symbol(units);
+        ui.label(format!(
+            "{} × {} × {} {u}",
+            measure(bb.max[0] - bb.min[0]),
+            measure(bb.max[1] - bb.min[1]),
+            measure(bb.max[2] - bb.min[2])
+        ));
+    }
+    let problems = a.defects.holes.len()
+        + a.defects.cracks.len()
+        + a.defects.loose.len()
+        + a.defects.tangled.len();
+    ui.label(if problems == 0 {
+        RichText::new("No defects found").color(theme::TEXT_MUTED)
+    } else {
+        RichText::new(format!(
+            "{} to look at (see the tree)",
+            count(problems, "defect")
+        ))
+        .color(theme::TEXT_MUTED)
+    });
+}
+
+fn selection_title(sel: &Selection, n: usize) -> String {
+    match sel.kind {
+        SelectionKind::BoundaryLoop => format!("{} selected", count(n, "opening")),
+        SelectionKind::Component => format!("{} selected", count(n, "piece")),
+        SelectionKind::Faces => format!("{} selected", count(n, "face")),
+        SelectionKind::Object => "Whole object".to_owned(),
+    }
+}
+
+/// The operations valid for the target. Targeted tools are open at once;
+/// whole-object tools open when chosen.
+fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context) {
+    let tools = app.tools();
+    if tools.is_empty() {
+        return;
+    }
+    let targeted = tools.iter().any(|t| t.selection.is_some());
+    ui.label(
+        RichText::new(if targeted {
+            "Tool"
+        } else {
+            "Tools for the whole object"
+        })
+        .strong(),
+    );
+    for tool in &tools {
+        let open = targeted || app.tool.as_deref() == Some(&tool.op_id);
+        if targeted {
+            ui.label(RichText::new(&tool.label).size(15.0).color(theme::SELECTED));
+        } else if ui
+            .add(
+                egui::Button::new(&tool.label)
+                    .selected(open)
+                    .min_size(egui::vec2(ui.available_width(), 24.0)),
+            )
+            .on_hover_text(if open { "Close" } else { "Open this tool" })
+            .clicked()
+        {
+            app.tool = if open { None } else { Some(tool.op_id.clone()) };
+        }
+        if open {
+            ui.indent(("tool", &tool.op_id), |ui| tool_body(app, ui, ctx, tool));
         }
     }
 }
 
-fn operations(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context) {
-    ui.heading("Operations");
-    let specs: Vec<_> = mf_spec::builtin::specs()
-        .iter()
-        .filter(|s| !s.is_read_only())
-        .collect();
-    egui::ComboBox::from_label("Operation")
-        .selected_text(app.selected_op.clone())
-        .show_ui(ui, |ui| {
-            for s in &specs {
-                ui.selectable_value(&mut app.selected_op, s.id.clone(), &s.id);
-            }
-        });
-    let Some(spec) = mf_spec::builtin::get(&app.selected_op) else {
+fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, ctx: &egui::Context, tool: &Tool) {
+    let Some(spec) = mf_spec::builtin::get(&tool.op_id) else {
+        ui.label(format!("Unknown operation {}", tool.op_id));
         return;
     };
-    ui.label(&spec.summary);
-    // Say exactly what Apply will act on.
-    let target = match app.selection_for(&spec.id) {
-        Some(sel) => format!("Target: {}", describe(&sel)),
-        None if app.selection.is_some() => {
-            "Target: whole object (this operation can't use the current selection)".to_owned()
-        }
-        None => "Target: whole object".to_owned(),
-    };
-    ui.label(egui::RichText::new(target).strong());
-    let op_id = spec.id.clone();
-    let values = app.params_for(&op_id);
-    egui::Grid::new("params").num_columns(2).show(ui, |ui| {
-        for p in &spec.parameters {
-            ui.label(&p.name).on_hover_text(&p.description);
-            let Some(value) = values.get_mut(&p.name) else {
-                continue;
-            };
-            match (&p.kind, value) {
-                (ParamKind::Integer { min, max, .. }, ParamValue::Int(v)) => {
-                    let range = min.unwrap_or(i64::MIN)..=max.unwrap_or(i64::MAX);
-                    ui.add(egui::DragValue::new(v).range(range))
+    ui.label(RichText::new(&spec.summary).color(theme::TEXT_MUTED));
+    let values = app.params_for(&tool.op_id);
+    egui::Grid::new(("params", &tool.op_id))
+        .num_columns(2)
+        .show(ui, |ui| {
+            for p in spec
+                .parameters
+                .iter()
+                .filter(|p| !tool.fixed.contains_key(&p.name))
+            {
+                let Some(value) = values.get_mut(&p.name) else {
+                    continue;
+                };
+                let name = plain_name(&p.name);
+                match (&p.kind, value) {
+                    (ParamKind::Integer { min, max, .. }, ParamValue::Int(v)) => {
+                        ui.label(&name).on_hover_text(&p.description);
+                        let range = min.unwrap_or(i64::MIN)..=max.unwrap_or(i64::MAX);
+                        ui.add(egui::DragValue::new(v).range(range))
+                            .on_hover_text(&p.description);
+                    }
+                    (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
+                        ui.label(&name).on_hover_text(&p.description);
+                        let range = min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX);
+                        let suffix = p
+                            .unit
+                            .as_deref()
+                            .map(|u| format!(" {u}"))
+                            // allow-swallow: no unit means no suffix
+                            .unwrap_or_default();
+                        ui.add(
+                            egui::DragValue::new(v)
+                                .range(range)
+                                .speed(0.01)
+                                .suffix(suffix),
+                        )
                         .on_hover_text(&p.description);
+                    }
+                    (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
+                        ui.label("");
+                        ui.checkbox(v, &name).on_hover_text(&p.description);
+                    }
+                    _ => {
+                        ui.label(&name);
+                        ui.label("type mismatch");
+                    }
                 }
-                (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
-                    let range = min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX);
-                    let suffix = p
-                        .unit
-                        .as_deref()
-                        .map(|u| format!(" {u}"))
-                        // allow-swallow: no unit means no suffix
-                        .unwrap_or_default();
-                    ui.add(
-                        egui::DragValue::new(v)
-                            .range(range)
-                            .speed(0.01)
-                            .suffix(suffix),
-                    )
-                    .on_hover_text(&p.description);
-                }
-                (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
-                    ui.checkbox(v, "").on_hover_text(&p.description);
-                }
-                _ => {
-                    ui.label("type mismatch");
-                }
+                ui.end_row();
             }
-            ui.end_row();
-        }
-    });
+        });
     ui.horizontal(|ui| {
         let can_apply = app.busy.is_none() && app.active.is_some();
         if ui
             .add_enabled(can_apply, egui::Button::new("Apply"))
             .clicked()
         {
-            app.apply(ctx, op_id.clone());
+            app.apply(ctx, tool);
         }
-        if ui.button("Defaults").clicked() {
-            app.op_params.remove(&op_id);
+        let editable = spec
+            .parameters
+            .iter()
+            .any(|p| !tool.fixed.contains_key(&p.name));
+        if editable && ui.button("Defaults").clicked() {
+            app.op_params.remove(&tool.op_id);
         }
     });
 }
 
-fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    ui.heading("History");
-    ui.horizontal(|ui| {
-        let idle = app.busy.is_none();
-        if ui
-            .add_enabled(idle && app.session.can_undo(), egui::Button::new("Undo"))
-            .clicked()
-        {
-            app.undo();
-        }
-        if ui
-            .add_enabled(idle && app.session.can_redo(), egui::Button::new("Redo"))
-            .clicked()
-        {
-            app.redo();
-        }
-    });
-    // The full revision DAG (MF-HIST-001). Revisions on the current path are
-    // normal, abandoned branches and redo targets are greyed. Click to jump.
-    let current = app.session.current();
-    let mut on_path = std::collections::BTreeSet::new();
-    let mut cur = Some(current);
-    while let Some(r) = cur {
-        on_path.insert(r);
-        cur = app.session.node(r).and_then(|n| n.parent);
+/// "max_loop_edges" → "Max loop edges".
+fn plain_name(id: &str) -> String {
+    let spaced = id.replace('_', " ");
+    let mut chars = spaced.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().chain(chars).collect(),
+        None => spaced,
     }
-    let mut clicked = None;
-    let mut stack = vec![(mf_command::RevisionId(0), 0usize)];
-    while let Some((id, depth)) = stack.pop() {
-        let Some(node) = app.session.node(id) else {
-            continue;
-        };
-        let mut text = egui::RichText::new(&node.label);
-        if id == current {
-            text = text.strong();
-        } else if !on_path.contains(&id) {
-            text = text.weak().italics();
-        }
-        ui.horizontal(|ui| {
-            ui.add_space(depth as f32 * 12.0);
-            if ui.selectable_label(id == current, text).clicked() {
-                clicked = Some(id);
-            }
+}
+
+/// Every number `inspect` reports, folded away under "Details".
+fn details_section(app: &MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(analysis) = app.current_analysis() else {
+        return;
+    };
+    let d = &analysis.diagnostics;
+    let flag = |ok: bool| if ok { "yes" } else { "no" };
+    egui::CollapsingHeader::new("Details")
+        .id_salt("details")
+        .show(ui, |ui| {
+            egui::Grid::new("diag")
+                .num_columns(2)
+                .striped(true)
+                .show(ui, |ui| {
+                    let mut row = |k: &str, v: String| {
+                        ui.label(k);
+                        ui.label(v);
+                        ui.end_row();
+                    };
+                    row("Triangles", d.triangle_count.to_string());
+                    row("Vertices", d.vertex_count.to_string());
+                    row("Components", d.components.to_string());
+                    row("Closed", flag(d.is_closed).into());
+                    row("Manifold", flag(d.is_manifold).into());
+                    row("Boundary loops", d.boundary_loops.len().to_string());
+                    row("Boundary edges", d.boundary_edges.to_string());
+                    row(
+                        "Untraced boundary edges",
+                        d.untraced_boundary_edges.to_string(),
+                    );
+                    row("Non-manifold edges", d.non_manifold_edges.to_string());
+                    row("Non-manifold vertices", d.non_manifold_vertices.to_string());
+                    row("Degenerate triangles", d.degenerate_triangles.to_string());
+                    row("Duplicate vertices", d.duplicate_vertices_exact.to_string());
+                    row(
+                        "Inconsistent edges",
+                        d.inconsistent_orientation_edges.to_string(),
+                    );
+                    row(
+                        "Surface area",
+                        d.surface_area
+                            .map_or("overflow (coordinates too large)".into(), |a| {
+                                format!("{a:.4}")
+                            }),
+                    );
+                    row(
+                        "Near-duplicate vertices",
+                        d.duplicate_vertices_tolerance.to_string(),
+                    );
+                    row("Duplicate faces", d.duplicate_faces.to_string());
+                    row(
+                        "Volume",
+                        d.signed_volume
+                            .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
+                    );
+                });
         });
-        // Children pushed in reverse so the oldest branch is drawn first.
-        for &c in node.children.iter().rev() {
-            let child_depth = if node.children.len() > 1 {
-                depth + 1
-            } else {
-                depth
-            };
-            stack.push((c, child_depth));
-        }
-    }
-    if let Some(id) = clicked {
-        app.checkout(id);
-    }
 }

@@ -2,13 +2,58 @@ use bytemuck::{Pod, Zeroable};
 use glam::{DMat3, DMat4, DVec3, Mat4, Vec4};
 
 use crate::camera::OrbitCamera;
-use crate::gpu_mesh::{GpuLines, GpuMesh, LineVertex, SurfaceVertex};
+use crate::gpu_mesh::{GpuFaces, GpuLines, GpuMesh, LineVertex, SurfaceVertex};
+
+/// The colours the 3D view draws with. `mf-render` has no theme of its own
+/// in the app: the desktop passes its colour tokens in (theme.rs), so one
+/// colour means one thing everywhere. Components are linear 0–1 RGBA as
+/// written to the (non-sRGB) render target.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Palette {
+    pub background: [f32; 4],
+    /// Front faces of the model.
+    pub surface: [f32; 4],
+    /// Back faces (seen through holes, or flipped).
+    pub back_face: [f32; 4],
+    /// Every traced boundary loop's outline (holes).
+    pub boundary: [f32; 4],
+    /// Saturation kept by an inactive object (0 = grey, 1 = unchanged).
+    pub inactive_saturation: f32,
+    /// Brightness multiplier of an inactive object.
+    pub inactive_brightness: f32,
+    /// Width of boundary outlines, in points.
+    pub boundary_width: f32,
+    /// Width of overlay lines (selection, cracks, tangled edges, hover), in points.
+    pub overlay_width: f32,
+}
+
+impl Palette {
+    /// Headless renders (the CLI's `render`, offscreen tests) have no app
+    /// theme; these are the renderer's own neutral colours for them.
+    pub const HEADLESS: Palette = Palette {
+        background: [38.0 / 255.0, 41.0 / 255.0, 46.0 / 255.0, 1.0],
+        surface: [0.70, 0.72, 0.76, 1.0],
+        back_face: [0.62, 0.30, 0.30, 1.0],
+        boundary: [1.0, 0.55, 0.05, 1.0],
+        inactive_saturation: 0.0,
+        inactive_brightness: 0.55,
+        boundary_width: 1.0,
+        overlay_width: 1.0,
+    };
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct SceneUniforms {
     view_proj: [[f32; 4]; 4],
     eye_dir: [f32; 4],
+    surface: [f32; 4],
+    back_face: [f32; 4],
+    boundary: [f32; 4],
+    /// x: inactive saturation, y: inactive brightness.
+    inactive: [f32; 4],
+    /// Render target size in pixels (x, y), for screen-space line widths.
+    viewport: [f32; 4],
 }
 
 #[repr(C)]
@@ -20,9 +65,12 @@ struct DrawUniforms {
     /// uniform scale, not a non-uniform scale or shear (both legal in a
     /// 3MF transform). The translation column is unused padding.
     normal_matrix: [[f32; 4]; 4],
-    /// Colour multiplier (RGB) applied in the fragment shader; inactive
-    /// objects are dimmed. Alpha is unused.
-    tint: [f32; 4],
+    /// A layer's colour (unused for an object's own surface and outlines).
+    color: [f32; 4],
+    /// x: 1 for an inactive object (desaturated), or a face layer's
+    /// strength (how much of `color` replaces the surface colour).
+    /// y: line width in pixels.
+    params: [f32; 4],
 }
 
 /// The render target the pipelines are built for. It must match the render
@@ -39,9 +87,30 @@ pub struct RenderTargetFormat {
 pub struct DrawItem<'a> {
     pub mesh: &'a GpuMesh,
     pub model: DMat4,
-    /// Colour multiplier for the whole object: 1.0 is full colour (the
-    /// active object), lower values dim inactive ones.
-    pub tint: f32,
+    /// An inactive object is drawn desaturated (see [`Palette`]).
+    pub inactive: bool,
+}
+
+/// What an overlay layer draws.
+pub enum LayerGeometry<'a> {
+    /// Lines over the surface (selected loops, cracks, tangled edges, hover).
+    Lines(&'a GpuLines),
+    /// Faces re-shaded with a colour (selected or loose pieces, recent repairs).
+    Faces(&'a GpuFaces),
+}
+
+/// One overlay on an object, drawn after every object's own surface:
+/// face layers first, then line layers, each in the order given (a later
+/// layer draws over an earlier one).
+pub struct Layer<'a> {
+    pub geometry: LayerGeometry<'a>,
+    /// The object's object-to-world transform.
+    pub model: DMat4,
+    /// The local origin the layer's vertices are relative to.
+    pub mesh_origin: DVec3,
+    pub color: [f32; 4],
+    /// Face layers: how much of `color` replaces the surface colour (0–1).
+    pub strength: f32,
 }
 
 /// A per-draw uniform buffer and its bind group, reused across frames.
@@ -54,7 +123,12 @@ pub struct MeshRenderer {
     surface_pipeline_ccw: wgpu::RenderPipeline,
     surface_pipeline_cw: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
-    highlight_pipeline: wgpu::RenderPipeline,
+    overlay_line_pipeline: wgpu::RenderPipeline,
+    overlay_face_pipeline_ccw: wgpu::RenderPipeline,
+    overlay_face_pipeline_cw: wgpu::RenderPipeline,
+    palette: Palette,
+    /// Physical pixels per point (line widths are in points).
+    pixels_per_point: f32,
     draw_bgl: wgpu::BindGroupLayout,
     scene_uniforms: wgpu::Buffer,
     scene_bind_group: wgpu::BindGroup,
@@ -63,7 +137,11 @@ pub struct MeshRenderer {
 }
 
 impl MeshRenderer {
-    pub fn new(device: &wgpu::Device, target: RenderTargetFormat) -> MeshRenderer {
+    pub fn new(
+        device: &wgpu::Device,
+        target: RenderTargetFormat,
+        palette: Palette,
+    ) -> MeshRenderer {
         let shader = device.create_shader_module(wgpu::include_wgsl!("shader.wgsl"));
         let scene_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("mf scene uniforms"),
@@ -178,32 +256,55 @@ impl MeshRenderer {
             wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Cw,
         );
+        // Lines are drawn as screen-space quads so they can be wider than a
+        // pixel: each segment (a pair of consecutive line-list vertices) is
+        // one instance of six vertices.
         let line_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+            array_stride: 2 * std::mem::size_of::<LineVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3],
         })];
         let line_pipeline = pipeline(
             "mf boundary lines",
             "vs_line",
             "fs_line",
             &line_buffers,
-            wgpu::PrimitiveTopology::LineList,
+            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
         );
-        let highlight_pipeline = pipeline(
-            "mf highlight lines",
+        let overlay_line_pipeline = pipeline(
+            "mf overlay lines",
             "vs_line",
-            "fs_highlight",
+            "fs_overlay_line",
             &line_buffers,
-            wgpu::PrimitiveTopology::LineList,
+            wgpu::PrimitiveTopology::TriangleList,
             wgpu::FrontFace::Ccw,
+        );
+        let overlay_face_pipeline_ccw = pipeline(
+            "mf overlay faces ccw",
+            "vs_overlay_surface",
+            "fs_overlay_surface",
+            &surface_buffers,
+            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::FrontFace::Ccw,
+        );
+        let overlay_face_pipeline_cw = pipeline(
+            "mf overlay faces cw",
+            "vs_overlay_surface",
+            "fs_overlay_surface",
+            &surface_buffers,
+            wgpu::PrimitiveTopology::TriangleList,
+            wgpu::FrontFace::Cw,
         );
         MeshRenderer {
             surface_pipeline_ccw,
             surface_pipeline_cw,
             line_pipeline,
-            highlight_pipeline,
+            overlay_line_pipeline,
+            overlay_face_pipeline_ccw,
+            overlay_face_pipeline_cw,
+            palette,
+            pixels_per_point: 1.0,
             draw_bgl,
             scene_uniforms,
             scene_bind_group,
@@ -211,16 +312,33 @@ impl MeshRenderer {
         }
     }
 
+    pub fn palette(&self) -> &Palette {
+        &self.palette
+    }
+
+    /// Physical pixels per point of the target, so line widths (in points)
+    /// look the same on every display.
+    pub fn set_pixels_per_point(&mut self, ppp: f32) {
+        self.pixels_per_point = ppp.max(0.1);
+    }
+
     /// Write the scene (view-projection, eye direction) uniforms. Call once
     /// per frame before the render pass begins. `world_origin` is the
     /// shared reference point every mesh's local origin is shifted from
     /// (the camera target's frame), kept close to the drawn geometry so the
     /// `f32` GPU matrix holds enough precision (MF-GEO-001).
-    pub fn prepare(&self, queue: &wgpu::Queue, camera: &OrbitCamera, aspect: f32) {
+    pub fn prepare(&self, queue: &wgpu::Queue, camera: &OrbitCamera, size: (u32, u32)) {
+        let aspect = size.0 as f32 / size.1.max(1) as f32;
         let eye_dir = (camera.eye() - camera.target).normalize_or_zero().as_vec3();
+        let p = &self.palette;
         let u = SceneUniforms {
             view_proj: camera.view_proj(aspect, camera.target).to_cols_array_2d(),
             eye_dir: Vec4::from((eye_dir, 0.0)).to_array(),
+            surface: p.surface,
+            back_face: p.back_face,
+            boundary: p.boundary,
+            inactive: [p.inactive_saturation, p.inactive_brightness, 0.0, 0.0],
+            viewport: [size.0 as f32, size.1 as f32, 0.0, 0.0],
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
@@ -248,8 +366,8 @@ impl MeshRenderer {
 
     /// Draw every item of `items` at its transform (MF-ISSUE-042), each
     /// shifted into the frame [`Self::prepare`] was called with
-    /// (`camera.target`), then the active object's boundary lines and
-    /// highlight, if any.
+    /// (`camera.target`), with its boundary outlines if `show_boundaries`,
+    /// then every overlay of `layers` (see [`Layer`]).
     ///
     /// Call after [`Self::prepare`] and before the render pass ends. Must
     /// be called on the same device the renderer and `items` were built
@@ -263,16 +381,38 @@ impl MeshRenderer {
         world_origin: DVec3,
         items: &[DrawItem<'_>],
         show_boundaries: bool,
-        highlight: Option<(&GpuLines, DMat4, DVec3)>,
+        layers: &[Layer<'_>],
     ) {
-        self.ensure_slots(device, items.len() + highlight.is_some() as usize);
+        self.ensure_slots(device, items.len() + layers.len());
 
         for (slot, item) in self.draw_slots.iter().zip(items) {
             let model = shifted_model(item.model, item.mesh.origin, world_origin);
             let u = DrawUniforms {
                 model: model.to_cols_array_2d(),
                 normal_matrix: normal_matrix(item.model).to_cols_array_2d(),
-                tint: [item.tint, item.tint, item.tint, 1.0],
+                color: [0.0; 4],
+                params: [
+                    f32::from(u8::from(item.inactive)),
+                    self.palette.boundary_width * self.pixels_per_point,
+                    0.0,
+                    0.0,
+                ],
+            };
+            queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
+        }
+        let layer_slots = &self.draw_slots[items.len()..];
+        for (slot, layer) in layer_slots.iter().zip(layers) {
+            let shifted = shifted_model(layer.model, layer.mesh_origin, world_origin);
+            let u = DrawUniforms {
+                model: shifted.to_cols_array_2d(),
+                normal_matrix: normal_matrix(layer.model).to_cols_array_2d(),
+                color: layer.color,
+                params: [
+                    layer.strength,
+                    self.palette.overlay_width * self.pixels_per_point,
+                    0.0,
+                    0.0,
+                ],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
         }
@@ -294,25 +434,35 @@ impl MeshRenderer {
                 pass.set_pipeline(&self.line_pipeline);
                 for (buf, count) in &item.mesh.lines {
                     pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..6, 0..*count / 2);
+                }
+            }
+        }
+        // Face layers, then line layers, so outlines stay visible over tints.
+        let layered: Vec<_> = layer_slots.iter().zip(layers).collect();
+        for (slot, layer) in &layered {
+            if let LayerGeometry::Faces(faces) = layer.geometry {
+                let pipeline = if layer.model.determinant() < 0.0 {
+                    &self.overlay_face_pipeline_cw
+                } else {
+                    &self.overlay_face_pipeline_ccw
+                };
+                pass.set_bind_group(1, &slot.bind_group, &[]);
+                pass.set_pipeline(pipeline);
+                for (buf, count) in &faces.chunks {
+                    pass.set_vertex_buffer(0, buf.slice(..));
                     pass.draw(0..*count, 0..1);
                 }
             }
         }
-        if let Some((lines, model, mesh_origin)) = highlight {
-            let slot = &self.draw_slots[items.len()];
-            let shifted = shifted_model(model, mesh_origin, world_origin);
-            let u = DrawUniforms {
-                model: shifted.to_cols_array_2d(),
-                // Highlight lines don't shade by normal.
-                normal_matrix: Mat4::IDENTITY.to_cols_array_2d(),
-                tint: [1.0, 1.0, 1.0, 1.0],
-            };
-            queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
-            pass.set_bind_group(1, &slot.bind_group, &[]);
-            pass.set_pipeline(&self.highlight_pipeline);
-            for (buf, count) in &lines.chunks {
-                pass.set_vertex_buffer(0, buf.slice(..));
-                pass.draw(0..*count, 0..1);
+        for (slot, layer) in &layered {
+            if let LayerGeometry::Lines(lines) = layer.geometry {
+                pass.set_bind_group(1, &slot.bind_group, &[]);
+                pass.set_pipeline(&self.overlay_line_pipeline);
+                for (buf, count) in &lines.chunks {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..6, 0..*count / 2);
+                }
             }
         }
     }

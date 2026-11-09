@@ -156,8 +156,12 @@ fn cli() -> Command {
             .arg(
                 Arg::new("kind")
                     .required(true)
-                    .value_parser(["damaged"])
-                    .help("damaged: UV sphere with holes, islands and unwelded corners"),
+                    .value_parser(["damaged", "scene"])
+                    .help(
+                        "damaged: UV sphere with holes, islands and unwelded corners; \
+                         scene: the two-object demo (a damaged scan and a plate with a \
+                         hole, a crack and a tangled edge, each at its own transform), 3MF only",
+                    ),
             )
             .arg(output_positional())
             .arg(
@@ -364,6 +368,31 @@ fn gen_fixture(m: &ArgMatches) -> Result<(), Failure> {
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
+    if m.get_one::<String>("kind").map(String::as_str) == Some("scene") {
+        if format != Format::ThreeMf {
+            return Err(Failure::Usage(
+                "the scene has several objects: write it as .3mf".into(),
+            ));
+        }
+        let model = mf_io::threemf::Model {
+            unit: mf_io::threemf::Unit::Millimeter,
+            objects: mf_fixtures::demo_scene()
+                .into_iter()
+                .map(|(name, mesh, transform)| mf_io::threemf::ModelObject {
+                    name,
+                    mesh,
+                    transform,
+                })
+                .collect(),
+        };
+        mf_io::write_model_path(&model, output)?;
+        eprintln!(
+            "wrote {} objects to {}",
+            model.objects.len(),
+            output.display()
+        );
+        return Ok(());
+    }
     let triangles = *m.get_one::<u64>("triangles").unwrap_or(&1_000_000) as usize;
     let seed = *m.get_one::<u64>("seed").unwrap_or(&1);
     let mesh =
