@@ -17,5 +17,6 @@ pollster.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+mf-metrics.workspace = true
 mf-fixtures.workspace = true
 mf-runtime.workspace = true

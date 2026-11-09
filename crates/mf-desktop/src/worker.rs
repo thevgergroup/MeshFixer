@@ -560,13 +560,18 @@ impl Workers {
 
     /// Build an overlay: O(target) to O(n) (a large component, or finding a
     /// loop's vertices), so never on the UI thread (MF-RT-001). Hover
-    /// overlays go to the lane, superseding the previous hover.
+    /// overlays go to the lane, superseding the previous hover. `origin`
+    /// is the local origin of the render mesh the overlay is drawn over:
+    /// its lines must be relative to the very same point as the mesh's own
+    /// outlines, or their `f32` positions round differently and the lines
+    /// z-fight (fix round 1, I1).
     pub fn build_overlay(
         &mut self,
         purpose: OverlayPurpose,
         object: ObjectId,
         mesh: Mesh,
         target: OverlayTarget,
+        origin: glam::DVec3,
     ) {
         let gpu = self.gpu.clone();
         if purpose == OverlayPurpose::Hover {
@@ -575,17 +580,25 @@ impl Workers {
                 &self.lane,
                 &self.tx,
                 &self.repaint,
-                "hover",
+                "hover outline",
                 false,
                 move || {
                     // allow-swallow: a superseded hover has nothing to show
-                    build_overlay(purpose, object, mesh, target, &ctx, &gpu).ok()
+                    build_overlay(purpose, object, mesh, target, origin, &ctx, &gpu).ok()
                 },
             );
         } else {
             self.spawn_background("overlay", move || {
-                build_overlay(purpose, object, mesh, target, &RunContext::none(), &gpu)
-                    .expect("an uncancelled overlay build completes")
+                build_overlay(
+                    purpose,
+                    object,
+                    mesh,
+                    target,
+                    origin,
+                    &RunContext::none(),
+                    &gpu,
+                )
+                .expect("an uncancelled overlay build completes")
             });
         }
     }
@@ -688,7 +701,9 @@ impl Workers {
                     // allow-swallow: a superseded click has nothing to report
                     t.mesh.topology_with(&ctx).ok()?;
                 }
-                Some(match pick_targets(&targets, &cam, origin, size, px) {
+                // allow-swallow: a superseded click has nothing to report
+                let picked = pick_targets(&targets, &cam, origin, size, px, &ctx).ok()?;
+                Some(match picked {
                     Some(hit) => Message::Picked {
                         object: hit.target.object,
                         mesh: Some(hit.target.mesh.clone()),
@@ -714,7 +729,9 @@ impl Workers {
     /// it lands on one of the active object's defects (a hole, a loose
     /// piece, a drawn tangled edge), as `None` otherwise. The app keeps at
     /// most one in flight and drops a result a newer pointer position has
-    /// made stale. Every target must have its BVH (the app only asks then).
+    /// made stale. The app only asks once every target has its BVH and
+    /// topology; one without topology here (released since) makes this a
+    /// miss, rather than an O(n) topology build on the lane.
     #[allow(clippy::too_many_arguments)]
     pub fn hover(
         &self,
@@ -732,7 +749,14 @@ impl Workers {
             "hover",
             false,
             move || {
-                let hover = pick_targets(&targets, &cam, origin, size, px).and_then(|hit| {
+                if targets.iter().any(|t| !t.mesh.has_cached_topology()) {
+                    return Some(Message::Hovered { seq, hover: None });
+                }
+                // Nothing supersedes a hover pick (one is in flight at a
+                // time), and with every BVH built it does no O(n) work.
+                let picked = pick_targets(&targets, &cam, origin, size, px, &RunContext::none())
+                    .expect("a context that is never cancelled can't be cancelled");
+                let hover = picked.and_then(|hit| {
                     let defect = hit.defect()?;
                     Some(ViewHover {
                         object: hit.target.object,
@@ -886,6 +910,7 @@ fn build_overlay(
     object: ObjectId,
     mesh: Mesh,
     target: OverlayTarget,
+    origin: glam::DVec3,
     ctx: &RunContext,
     gpu: &Gpu,
 ) -> Result<Message, Cancelled> {
@@ -917,12 +942,6 @@ fn build_overlay(
                 (edges.iter().flatten().copied().collect(), edges.clone())
             }
         };
-        // Lines are relative to a point of the target itself: O(1), and as
-        // precise as it gets (a whole-mesh bounding box is O(n), too slow
-        // for a hover over a 5M-triangle mesh).
-        let origin = points.first().map_or(glam::DVec3::ZERO, |&v| {
-            glam::DVec3::from(mesh.corner_position(v))
-        });
         let lines = match &target {
             OverlayTarget::Loops(ids) => loop_line_vertices(&mesh, origin, ids),
             OverlayTarget::Edges(edges) => edge_line_vertices(&mesh, origin, edges),
@@ -1042,11 +1061,17 @@ pub struct PickTarget {
 
 impl PickTarget {
     /// Nearest face hit by a world-space ray, through the BVH when there
-    /// is one, else by brute force (see [`PickTarget::bvh`]).
-    fn ray_pick(&self, origin: [f64; 3], dir: [f64; 3]) -> Option<(mf_geometry::FaceId, f64)> {
+    /// is one, else by brute force (see [`PickTarget::bvh`]; ~50 ms at 5M,
+    /// cancellable through `ctx`).
+    fn ray_pick(
+        &self,
+        origin: [f64; 3],
+        dir: [f64; 3],
+        ctx: &RunContext,
+    ) -> Result<Option<(mf_geometry::FaceId, f64)>, Cancelled> {
         match &self.bvh {
-            Some(bvh) => bvh.ray_pick(&self.mesh, origin, dir, &self.model),
-            None => mf_render::ray_pick(&self.mesh, &self.model, origin, dir),
+            Some(bvh) => Ok(bvh.ray_pick(&self.mesh, origin, dir, &self.model)),
+            None => mf_render::ray_pick_with(&self.mesh, &self.model, origin, dir, ctx),
         }
     }
 
@@ -1143,14 +1168,17 @@ pub struct ViewHover {
 /// object's face can't select a hidden loop on an object behind it
 /// (MF-ISSUE-042). Otherwise the clicked face's component is picked. Pure
 /// function (no I/O), so it's directly testable. Every target's topology
-/// must be computed (it's cached on the mesh).
+/// must be computed (it's cached on the mesh). Cancelled through `ctx`
+/// (only the brute-force casts of a target without its BVH check it: the
+/// rest is microseconds).
 fn pick_targets<'a>(
     targets: &'a [PickTarget],
     cam: &mf_render::OrbitCamera,
     origin: glam::DVec3,
     size: (f64, f64),
     px: (f64, f64),
-) -> Option<PickHit<'a>> {
+    ctx: &RunContext,
+) -> Result<Option<PickHit<'a>>, Cancelled> {
     const TOLERANCE: f64 = 8.0;
     let eye = cam.eye();
     // (target, what, screen distance, point, endpoints)
@@ -1185,38 +1213,48 @@ fn pick_targets<'a>(
         }
     }
     candidates.sort_by(|a, b| a.2.total_cmp(&b.2));
-    let edge_hit = candidates.into_iter().find(|(_, _, _, point, endpoints)| {
-        !targets.iter().any(|other| {
-            mf_render::edge_occluded(
+    for (target, hit, _, point, endpoints) in candidates {
+        let mut hidden = false;
+        for other in targets {
+            if mf_render::edge_occluded_with(
                 &other.mesh,
                 other.bvh.as_deref(),
                 &other.model,
                 eye,
-                *point,
-                *endpoints,
-            )
-        })
-    });
-    if let Some((target, hit, ..)) = edge_hit {
-        return Some(PickHit { target, hit });
+                point,
+                endpoints,
+                ctx,
+            )? {
+                hidden = true;
+                break;
+            }
+        }
+        if !hidden {
+            return Ok(Some(PickHit { target, hit }));
+        }
     }
 
     let (ray_origin, dir) = cam.ray(origin, size, px);
-    targets
-        .iter()
-        .filter_map(|t| {
-            let (f, dist) = t.ray_pick(ray_origin, dir)?;
-            // Components list their faces sorted: O(components · log n).
-            let component = t
-                .mesh
-                .topology()
-                .components
-                .iter()
-                .position(|c| c.binary_search(&f.0).is_ok())?;
-            Some((t, Hit::Component(component as u32), dist))
-        })
-        .min_by(|(.., a), (.., b)| a.total_cmp(b))
-        .map(|(target, hit, _)| PickHit { target, hit })
+    let mut best: Option<(&PickTarget, Hit<'a>, f64)> = None;
+    for t in targets {
+        let Some((f, dist)) = t.ray_pick(ray_origin, dir, ctx)? else {
+            continue;
+        };
+        // Components list their faces sorted: O(components · log n).
+        let Some(component) = t
+            .mesh
+            .topology()
+            .components
+            .iter()
+            .position(|c| c.binary_search(&f.0).is_ok())
+        else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(.., b)| dist < *b) {
+            best = Some((t, Hit::Component(component as u32), dist));
+        }
+    }
+    Ok(best.map(|(target, hit, _)| PickHit { target, hit }))
 }
 
 /// What to export: one mesh, or a whole 3MF model.
@@ -1354,7 +1392,7 @@ mod tests {
         let mid = screen_position(&cam, origin, size, ((a + b) * 0.5).to_array())
             .expect("the hole's edge projects on screen");
 
-        let hit = pick_targets(&targets, &cam, origin, size, mid);
+        let hit = pick_targets(&targets, &cam, origin, size, mid, &RunContext::none()).unwrap();
         match hit {
             Some(h) if h.selection().0 == SelectionKind::BoundaryLoop => {
                 panic!(
@@ -1390,7 +1428,7 @@ mod tests {
         let b = DVec3::from(back.corner_position(hole.vertices[1]));
         let mid = screen_position(&cam, origin, size, ((a + b) * 0.5).to_array()).unwrap();
 
-        let hit = pick_targets(&targets, &cam, origin, size, mid);
+        let hit = pick_targets(&targets, &cam, origin, size, mid, &RunContext::none()).unwrap();
         assert!(
             matches!(hit, Some(h) if h.selection() == (SelectionKind::BoundaryLoop, vec![hole.id])),
             "expected the hole's loop with nothing in front of it"

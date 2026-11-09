@@ -9,7 +9,9 @@ use std::time::{Duration, Instant};
 use glam::{DMat4, DQuat, DVec3, DVec4};
 use mf_fixtures::{DamageSpec, damaged_sphere};
 use mf_geometry::{FaceId, Mesh};
-use mf_render::{Bvh, OrbitCamera, edge_occluded, pick_loop, ray_pick};
+use mf_render::{
+    Bvh, OrbitCamera, edge_occluded, edge_occluded_with, pick_loop, ray_pick, ray_pick_with,
+};
 use mf_runtime::RunContext;
 
 /// MF-RENDER-004: a face pick at 5M triangles.
@@ -250,4 +252,40 @@ fn bvh_build_is_cancellable() {
     });
     assert!(result, "a cancelled build reports Cancelled");
     assert!(stopped < CANCEL_BUDGET, "stopped {stopped:?} after cancel");
+}
+
+/// The brute-force cast a click falls back on while a new revision's BVH
+/// is being built is cancellable (a newer click supersedes it), checking
+/// at least every 100 ms, and its cost at 5M is on record.
+#[test]
+fn brute_force_pick_is_cancellable() {
+    let mesh = damaged_sphere(&DamageSpec::for_triangles(5_000_000, 11));
+    mesh.topology();
+    let model = DMat4::IDENTITY;
+    let bb = mesh.bounding_box().unwrap();
+    let cam = OrbitCamera::fit(&bb);
+    let origin = DVec3::from(bb.center());
+    let size = (1440.0, 900.0);
+    let (o, d) = cam.ray(origin, size, (720.0, 450.0));
+
+    let cancelled = RunContext::none();
+    cancelled.cancel.cancel();
+    assert!(ray_pick_with(&mesh, &model, o, d, &cancelled).is_err());
+    let eye = cam.eye();
+    assert!(edge_occluded_with(&mesh, None, &model, eye, origin, [0, 0], &cancelled).is_err());
+
+    let (ctx, probe) = RunContext::instrumented();
+    let start = Instant::now();
+    let hit = ray_pick_with(&mesh, &model, o, d, &ctx).unwrap();
+    let ray = start.elapsed();
+    assert!(hit.is_some());
+    let start = Instant::now();
+    edge_occluded_with(&mesh, None, &model, eye, origin, [0, 0], &ctx).unwrap();
+    let occlusion = start.elapsed();
+    println!(
+        "5M brute force (no BVH yet): ray cast {ray:?}, one occlusion test {occlusion:?}; \
+         longest gap between checkpoints {:?}",
+        probe.max_gap()
+    );
+    assert!(probe.max_gap() <= Duration::from_millis(100));
 }

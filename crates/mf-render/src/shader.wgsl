@@ -29,6 +29,8 @@ struct Draw {
     color: vec4<f32>,
     // x: 1 for an inactive object.
     // y: line width in pixels.
+    // z: how much further than a mesh's own outlines a layer's lines are
+    // pulled towards the camera (0 for the outlines themselves).
     params: vec4<f32>,
     // x: the face-state flags shown (the overlays switched on).
     states: vec4<u32>,
@@ -109,9 +111,18 @@ fn vs_surface(
     return out;
 }
 
+// A hovered face (unless selected) glows: strongly tinted and barely
+// shaded, so it reads as near-white against the shaded model at any angle.
+fn glow(rgb: vec3<f32>, n_in: vec3<f32>) -> vec3<f32> {
+    let light = abs(dot(normalize(n_in), normalize(scene.eye_dir.xyz)));
+    return rgb * (0.85 + 0.15 * light);
+}
+
 @fragment
 fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
-    let rgb = lit(base_color(front, in.state), in.normal);
+    let base = base_color(front, in.state);
+    let glowing = (in.state & HOVER) != 0u && (in.state & SELECTED) == 0u;
+    let rgb = select(lit(base, in.normal), glow(base, in.normal), glowing);
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
 }
 
@@ -152,8 +163,10 @@ fn vs_line(
     // NDC spans 2 units per viewport, so half the width in pixels is
     // width / viewport in NDC.
     clip = vec4<f32>(clip.xy + normal * side[corner] * draw.params.y / px * clip.w, clip.zw);
-    // Pull lines slightly towards the camera so they draw over their own faces.
-    clip.z = clip.z - 0.0005 * clip.w;
+    // Pull lines slightly towards the camera so they draw over their own
+    // faces; overlay layers a little further, so they win over the
+    // (narrower, so differently sloped) outlines they're drawn on.
+    clip.z = clip.z - (0.0005 + draw.params.z) * clip.w;
     return clip;
 }
 

@@ -333,3 +333,30 @@ fn importing_into_a_non_empty_document_reframes_the_camera() {
         "the newly imported object must be framed on screen: {pos:?} not in {rect:?}"
     );
 }
+
+/// Fix round 1, P2: picking is ready only once every object's topology is
+/// built too (on the background pool), so a hover never builds one on the
+/// picking lane.
+#[test]
+fn picking_ready_includes_every_objects_topology() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("picking_ready_includes_every_objects_topology");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_translated_cubes(dir.path());
+    let mut h = Harness::builder()
+        .with_size((1440.0, 900.0))
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
+    wait_until(&mut h, "picking ready", |a| {
+        a.session.document().objects().len() == 2 && a.picking_ready()
+    });
+    for o in h.state().session.document().objects() {
+        assert!(
+            o.mesh().unwrap().has_cached_topology(),
+            "{}'s topology is built",
+            o.name
+        );
+    }
+}

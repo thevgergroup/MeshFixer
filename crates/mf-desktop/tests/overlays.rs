@@ -406,3 +406,166 @@ fn hovering_a_loose_piece_tints_it_and_shows_its_triangle_count() {
     });
     assert!(h.query_by_label(&copy.detail).is_none());
 }
+
+/// How many of `n` points along the edge `a`–`b` (between 20% and 80% of
+/// the way) show a colour `want` accepts within a pixel of the line, in
+/// the frame rendered now (with the pointer wherever it is).
+fn along_edge(
+    h: &mut Harness<'_, MeshFixerApp>,
+    a: [f64; 3],
+    b: [f64; 3],
+    n: usize,
+    want: impl Fn([i32; 3]) -> bool,
+) -> usize {
+    let image = h.render().unwrap();
+    (0..n)
+        .filter(|&i| {
+            let t = 0.2 + 0.6 * i as f64 / (n - 1) as f64;
+            let p = [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) * t);
+            let s = h.state().screen_point(p).unwrap();
+            (-1..=1).any(|dx| {
+                (-1..=1).any(|dy| {
+                    let px = image
+                        .get_pixel((s.x as i32 + dx) as u32, (s.y as i32 + dy) as u32)
+                        .0;
+                    want([0, 1, 2].map(|k| i32::from(px[k])))
+                })
+            })
+        })
+        .count()
+}
+
+/// The hover colour (a light, slightly blue white), not the hole's orange
+/// or the tangled edge's red.
+fn hover_white(p: [i32; 3]) -> bool {
+    p.iter().all(|&c| c >= 190) && p[2] >= p[0]
+}
+
+/// Fix round 1, I1: a selected hole's outline is drawn in the selection
+/// colour over the hole's own outline, and a hovered tangled edge in the
+/// hover colour over the tangled-edge line, along their whole length (no
+/// z-fighting with the defect lines underneath).
+#[test]
+fn selection_and_hover_outlines_show_their_colours() {
+    require_gpu!("selection_and_hover_outlines_show_their_colours");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(write(
+        dir.path(),
+        "plate.obj",
+        &mf_fixtures::plate_with_defects(),
+    ));
+    wait_until(&mut h, "picking ready", MeshFixerApp::picking_ready);
+    let mesh = h.state().active_mesh().unwrap().clone();
+    let defects = h.state().current_analysis().unwrap().defects.clone();
+    let Defect::Hole { loop_id, .. } = defects.holes[0] else {
+        panic!("a hole: {:?}", defects.holes);
+    };
+    let topo = mesh.topology();
+    let l = topo
+        .boundary_loops
+        .iter()
+        .find(|l| l.id == loop_id)
+        .unwrap();
+    let (a, b) = (
+        mesh.corner_position(l.vertices[0]),
+        mesh.corner_position(l.vertices[1]),
+    );
+
+    // Select the hole by clicking its edge.
+    let at = [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) / 3.0);
+    let pos = h.state().screen_point(at).unwrap();
+    click_at(&mut h, pos);
+    h.event(egui::Event::PointerGone);
+    wait_until(&mut h, "selection outline", |a| {
+        a.selection.is_some()
+            && a.view_layers()
+                .iter()
+                .any(|l| l.color == mf_desktop::theme::SELECTED)
+    });
+    let selected = along_edge(&mut h, a, b, 10, cyan);
+    assert!(selected >= 9, "{selected} of 10 points cyan");
+
+    // Hover the tangled edge.
+    let Defect::Tangled { edge, .. } = &defects.tangled[0] else {
+        panic!("a tangled edge");
+    };
+    let (a, b) = (mesh.corner_position(edge[0]), mesh.corner_position(edge[1]));
+    let at = [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) / 3.0);
+    let pos = h.state().screen_point(at).unwrap();
+    point_at(&mut h, pos);
+    wait_until(&mut h, "hover outline", |a| {
+        a.view_layers()
+            .iter()
+            .any(|l| l.color == mf_desktop::theme::HOVER)
+    });
+    let hovered = along_edge(&mut h, a, b, 10, hover_white);
+    assert!(hovered >= 9, "{hovered} of 10 points in the hover colour");
+}
+
+/// Fix round 1, P3: moving off a hovered hole and back to the very same
+/// spot hovers it again.
+#[test]
+fn hover_returns_when_the_pointer_comes_back() {
+    require_gpu!("hover_returns_when_the_pointer_comes_back");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(write(
+        dir.path(),
+        "open_box.obj",
+        &mf_fixtures::scaled(&mf_fixtures::cube_with_missing_face(), 10.0),
+    ));
+    wait_until(&mut h, "picking ready", MeshFixerApp::picking_ready);
+    let mesh = h.state().active_mesh().unwrap().clone();
+    let l = mesh.topology().boundary_loops[0].clone();
+    let (a, b) = (
+        mesh.corner_position(l.vertices[0]),
+        mesh.corner_position(l.vertices[1]),
+    );
+    let at = [0, 1, 2].map(|k| a[k] + (b[k] - a[k]) / 3.0);
+    let pos = h.state().screen_point(at).unwrap();
+    let hovered = |a: &MeshFixerApp| a.view_hover().is_some();
+    point_at(&mut h, pos);
+    wait_until(&mut h, "hover", hovered);
+    // Off the view entirely, then back.
+    h.event(egui::Event::PointerGone);
+    wait_until(&mut h, "hover cleared", |a| !hovered(a));
+    point_at(&mut h, pos);
+    wait_until(&mut h, "hover again", hovered);
+}
+
+/// Fix round 1, P5: a hovered loose piece stands out: it glows near-white,
+/// clearly brighter than its amber at rest.
+#[test]
+fn hovered_loose_piece_stands_out() {
+    require_gpu!("hovered_loose_piece_stands_out");
+    let dir = tempfile::tempdir().unwrap();
+    let cube = mf_fixtures::translated(&mf_fixtures::cube(4.0), [14.0, 3.0, 0.0]);
+    let mut h = open(write(
+        dir.path(),
+        "plate_and_cube.obj",
+        &mf_fixtures::merge(&[mf_fixtures::grid(10), cube]),
+    ));
+    wait_until(&mut h, "picking ready", MeshFixerApp::picking_ready);
+    let piece = h.state().active_mesh().unwrap().topology().components[1].clone();
+    // A side face of the cube, lit at an angle (so shading would dim it).
+    let side = h.state().screen_point([18.0, 4.0, 2.0]).unwrap();
+    let rest = pixel(&mut h, side);
+    assert!(amber(rest), "{rest:?}");
+    point_at(&mut h, side);
+    wait_until(&mut h, "hover tint", |a| {
+        a.view_hover().is_some() && piece.iter().all(|&f| state(a, f) & FaceStates::HOVER != 0)
+    });
+    h.run_steps(2);
+    // Just above and left of the pointer (the harness draws the cursor
+    // down and right of its tip).
+    let p = h
+        .render()
+        .unwrap()
+        .get_pixel(side.x as u32 - 4, side.y as u32 - 4)
+        .0;
+    let p = [0, 1, 2].map(|k| i32::from(p[k]));
+    let sum = |p: [i32; 3]| p.iter().sum::<i32>();
+    assert!(
+        hover_white(p) && sum(p) >= sum(rest) + 120,
+        "hovered {p:?} vs at rest {rest:?}"
+    );
+}

@@ -27,7 +27,7 @@ pub const INACTIVE_BRIGHTNESS: f32 = 0.55;
 
 /// How strongly a face layer replaces the surface colour (0–1).
 pub const SELECTED_FACE_STRENGTH: f32 = 0.6;
-pub const HOVER_FACE_STRENGTH: f32 = 0.35;
+pub const HOVER_FACE_STRENGTH: f32 = 0.85;
 pub const LOOSE_PIECE_STRENGTH: f32 = 0.6;
 pub const RECENT_REPAIR_STRENGTH: f32 = 0.45;
 /// Faces next to a tangled edge: a light red, so the red edge line stays

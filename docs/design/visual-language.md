@@ -74,7 +74,7 @@ They are defined once, in `theme.rs`, and used by the panels and the renderer al
 | Token | Colour | Means | Where |
 |---|---|---|---|
 | `SELECTED` | cyan `#28D2FF` | the current target | selected loops and tangled edges (outline), pieces and faces (tint, which replaces any defect tint on them), tree rows, the current history step, the targeted tool's name |
-| `HOVER` | light `#E8EEF5` | what the pointer is over | the outline (loops, edges) or light tint (pieces) of the defect under the pointer in the tree, drawn in the view; widget hover outlines |
+| `HOVER` | light `#E8EEF5` | what the pointer is over | the outline (loops, edges) or glow (pieces: strength 0.85 and barely shaded, so it reads near-white at any angle) of the defect under the pointer, in the tree or in the 3D view (where a tooltip gives its size); widget hover outlines |
 | `HOLE` | orange `#FF8020` | an open boundary (hole) | every boundary outline in the view; the Holes header |
 | `CRACK` | magenta `#E646D2` | a narrow crack (edges almost touch) | crack outlines; the Narrow cracks header |
 | `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | tint of every loose piece (every piece but the main body: the same set the tree lists, whatever its size); the Loose pieces header |
@@ -100,7 +100,7 @@ Draw order, bottom to top:
 1. the model surface, with its face tints, then hole outlines
 2. crack lines, tangled-edge lines, selection outline, hover outline
 
-Face tints are not separate layers: they are drawn with the surface, from a per-face state buffer (one byte of flags per face, `mf_render::FaceStates`): loose piece, next to a tangled edge, recent repair, selected, hover. One colour, one meaning: a selected face shows only the selection tint, even when it is hovered too or is a loose piece (so it is cyan, never a blend); a hovered face shows only the hover tint (the hover outline lines still draw over a selection); otherwise the defect and repair tints apply in that order. Changing the selection or hover rewrites only the changed chunks of that buffer (at most 32 KB per 32,768 faces), never the geometry; it is built on a worker.
+Face tints are not separate layers: they are drawn with the surface, from a per-face state buffer (one byte of flags per face, `mf_render::FaceStates`): loose piece, next to a tangled edge, recent repair, selected, hover. One colour, one meaning: a selected face shows only the selection tint, even when it is hovered too or is a loose piece (so it is cyan, never a blend); a hovered face shows only the hover glow (the hover tint, with little shading; the hover outline lines still draw over a selection); otherwise the defect and repair tints apply in that order. Changing the selection or hover rewrites only the changed chunks of that buffer (at most 32 KB per 32,768 faces), never the geometry; it is built on a worker.
 
 Clicking in the view picks, nearest first within 8 pt on screen and not hidden by any object: a boundary loop's edge (selects the loop) or a drawn tangled edge of the active object (selects the faces that meet at it). Otherwise the clicked face's piece is selected: clicking a tinted loose piece selects it.
 

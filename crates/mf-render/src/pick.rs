@@ -8,6 +8,8 @@
 use glam::{DMat4, DVec3, DVec4};
 use mf_geometry::{FaceId, Mesh};
 
+use mf_runtime::{Cancelled, RunContext};
+
 use crate::{Bvh, OrbitCamera};
 
 /// Hits nearer than this (along the ray) don't count: the ray's own start.
@@ -226,18 +228,49 @@ pub fn edge_occluded(
     point: DVec3,
     skip_vertices: [u32; 2],
 ) -> bool {
+    edge_occluded_with(
+        mesh,
+        bvh,
+        model,
+        eye,
+        point,
+        skip_vertices,
+        &RunContext::none(),
+    )
+    .expect("a context that is never cancelled can't be cancelled")
+}
+
+/// [`edge_occluded`], cancellable: without a BVH it walks every face
+/// (O(n), ~10 ms at 5M), checking `ctx` every [`mf_runtime::TICK_INTERVAL`]
+/// faces, so a newer click can supersede it.
+pub fn edge_occluded_with(
+    mesh: &Mesh,
+    bvh: Option<&Bvh>,
+    model: &DMat4,
+    eye: DVec3,
+    point: DVec3,
+    skip_vertices: [u32; 2],
+    ctx: &RunContext,
+) -> Result<bool, Cancelled> {
+    ctx.checkpoint()?;
     let inv = model.inverse();
     let from = (inv * DVec4::from((eye, 1.0))).truncate();
     let to = (inv * DVec4::from((point, 1.0))).truncate();
     let skip = |tri: &[u32; 3]| tri.contains(&skip_vertices[0]) || tri.contains(&skip_vertices[1]);
     match bvh {
-        Some(bvh) => bvh.occluded(mesh, from, to, skip),
+        Some(bvh) => Ok(bvh.occluded(mesh, from, to, skip)),
         None => {
             let Some((d, len)) = segment(from, to) else {
-                return false;
+                return Ok(false);
             };
-            mesh.faces()
-                .any(|(_, t)| blocks(mesh, &t, from, d, len, &skip))
+            let mut ticker = ctx.ticker();
+            for (_, t) in mesh.faces() {
+                ticker.tick()?;
+                if blocks(mesh, &t, from, d, len, &skip) {
+                    return Ok(true);
+                }
+            }
+            Ok(false)
         }
     }
 }
@@ -283,6 +316,21 @@ pub fn ray_pick(
     origin: [f64; 3],
     dir: [f64; 3],
 ) -> Option<(FaceId, f64)> {
+    ray_pick_with(mesh, model, origin, dir, &RunContext::none())
+        .expect("a context that is never cancelled can't be cancelled")
+}
+
+/// [`ray_pick`], cancellable: it checks `ctx` every
+/// [`mf_runtime::TICK_INTERVAL`] faces, so a newer click can supersede a
+/// brute-force cast over a big mesh.
+pub fn ray_pick_with(
+    mesh: &Mesh,
+    model: &DMat4,
+    origin: [f64; 3],
+    dir: [f64; 3],
+    ctx: &RunContext,
+) -> Result<Option<(FaceId, f64)>, Cancelled> {
+    ctx.checkpoint()?;
     // The ray is cast in object space (so it walks the mesh's own
     // triangles); world-space `dir` is a unit vector, and object space may
     // rescale it, so distances are converted back by `scale`.
@@ -291,11 +339,13 @@ pub fn ray_pick(
     let d_obj = (inv * DVec4::from((DVec3::from(dir), 0.0))).truncate();
     let scale = d_obj.length();
     if scale < 1e-18 {
-        return None;
+        return Ok(None);
     }
     let d = d_obj / scale;
     let mut best: Option<(FaceId, f64)> = None;
+    let mut ticker = ctx.ticker();
     for (id, t) in mesh.faces() {
+        ticker.tick()?;
         let [a, b, c] = t.map(|v| DVec3::from(mesh.corner_position(v)));
         let Some(raw) = intersect(o, d, a, b, c) else {
             continue;
@@ -305,5 +355,5 @@ pub fn ray_pick(
             best = Some((id, dist));
         }
     }
-    best
+    Ok(best)
 }

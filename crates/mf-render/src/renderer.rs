@@ -61,10 +61,14 @@ impl Palette {
             non_manifold_adj: [0.92, 0.2, 0.2, 0.35],
             recent_repair: [0.31, 0.8, 0.47, 0.45],
             selected: [0.16, 0.82, 1.0, 0.6],
-            hover: [0.91, 0.93, 0.96, 0.35],
+            hover: [0.91, 0.93, 0.96, 0.85],
         },
     };
 }
+
+/// How much further overlay lines are pulled towards the camera than a
+/// mesh's own outlines (clip-space depth, times w).
+const OVERLAY_PULL: f32 = 0.0002;
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -430,7 +434,11 @@ impl MeshRenderer {
                 params: [
                     0.0,
                     self.palette.overlay_width * self.pixels_per_point,
-                    0.0,
+                    // Over the mesh's own outlines: a selected or hovered
+                    // hole draws its colour, not the hole's (fix round 1,
+                    // I1). Layers among themselves tie (same width, same
+                    // origin) and the later one wins.
+                    OVERLAY_PULL,
                     0.0,
                 ],
                 states: [0; 4],

@@ -79,6 +79,9 @@ struct OverlaySlot {
     object: ObjectId,
     mesh: Mesh,
     target: OverlayTarget,
+    /// The local origin of the render mesh it's drawn over (see
+    /// `Workers::build_overlay`).
+    origin: glam::DVec3,
     ready: Option<Overlay>,
 }
 
@@ -269,6 +272,10 @@ impl MeshFixerApp {
                     // request keeps the ones it finished.
                     for (object, mesh) in revisions {
                         let bvh = Arc::new(Bvh::build(&mesh, run)?);
+                        // Picking needs the topology too (hole edges,
+                        // pieces): built here, so a hover never builds it
+                        // on the picking lane.
+                        mesh.topology_with(run)?;
                         // allow-swallow: the receiver only disappears while the app is closing
                         let _ = tx.send(Message::BvhBuilt { object, mesh, bvh });
                         ctx.request_repaint();
@@ -809,14 +816,16 @@ impl MeshFixerApp {
             .collect()
     }
 
-    /// True once every object's current revision has its picking BVH:
-    /// hover picks wait for it (MF-RENDER-004).
+    /// True once every object's current revision has its picking BVH and
+    /// topology: hover picks wait for them (MF-RENDER-004).
     pub fn picking_ready(&self) -> bool {
         self.session.document().objects().iter().all(|o| {
             o.mesh().is_none_or(|mesh| {
-                self.bvhs
-                    .get(&o.id)
-                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
+                mesh.has_cached_topology()
+                    && self
+                        .bvhs
+                        .get(&o.id)
+                        .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
             })
         })
     }
@@ -854,9 +863,16 @@ impl MeshFixerApp {
                 .iter()
                 .any(|(r, rm)| r == id && Mesh::ptr_eq(rm, m))
         });
+        // What was asked for holds revisions alive: let go of them once
+        // they're built or replaced, on the pool (the last handle on a big
+        // revision frees it).
         if new {
-            self.bvh_requested = missing.clone();
+            let old = std::mem::replace(&mut self.bvh_requested, missing.clone());
+            self.workers.discard(old);
             self.bvh_builder.submit(missing);
+        } else if missing.is_empty() && !self.bvh_requested.is_empty() {
+            self.workers
+                .discard(std::mem::take(&mut self.bvh_requested));
         }
     }
 
@@ -876,10 +892,12 @@ impl MeshFixerApp {
             }),
             _ => None,
         };
+        let picks = &mut self.hover_picks;
         if want.is_none() {
             self.view_hover = None;
+            // Coming back to the same spot asks again (fix round 1, P3).
+            picks.sent = None;
         }
-        let picks = &mut self.hover_picks;
         picks.want = want;
         let Some(query) = want else { return };
         if picks.in_flight
@@ -1126,8 +1144,10 @@ impl MeshFixerApp {
                     self.finish_job();
                 }
                 if what == "hover" {
-                    // Its answer will never come: let the next one go.
+                    // Its answer will never come: let the next one go, and
+                    // ask again for the same spot.
                     self.hover_picks.in_flight = false;
+                    self.hover_picks.sent = None;
                 }
                 self.error = Some(format!("Internal error in {what}: {message}"));
             }
@@ -1176,6 +1196,7 @@ impl MeshFixerApp {
                     && slot.object == object
                     && Mesh::ptr_eq(&slot.mesh, &mesh)
                     && slot.target == target
+                    && slot.origin == overlay.origin
                 {
                     slot.ready = Some(overlay);
                 }
@@ -1661,22 +1682,35 @@ impl MeshFixerApp {
             (OverlayPurpose::Selection, selection),
             (OverlayPurpose::Hover, hover),
         ] {
-            let Some((object, mesh, target)) = want else {
+            // Its lines share the shown render mesh's origin, so they draw
+            // exactly over its own outlines (fix round 1, I1); until that
+            // object is shown there's nothing to draw it over.
+            let origin = want.as_ref().and_then(|(object, ..)| {
+                self.displayed
+                    .as_ref()
+                    .filter(|(o, ..)| o == object)
+                    .map(|(.., render)| render.origin)
+            });
+            let (Some((object, mesh, target)), Some(origin)) = (want, origin) else {
                 self.overlays.remove(&purpose);
                 continue;
             };
             let same = self.overlays.get(&purpose).is_some_and(|s| {
-                s.object == object && Mesh::ptr_eq(&s.mesh, &mesh) && s.target == target
+                s.object == object
+                    && Mesh::ptr_eq(&s.mesh, &mesh)
+                    && s.target == target
+                    && s.origin == origin
             });
             if !same {
                 self.workers
-                    .build_overlay(purpose, object, mesh.clone(), target.clone());
+                    .build_overlay(purpose, object, mesh.clone(), target.clone(), origin);
                 self.overlays.insert(
                     purpose,
                     OverlaySlot {
                         object,
                         mesh,
                         target,
+                        origin,
                         ready: None,
                     },
                 );

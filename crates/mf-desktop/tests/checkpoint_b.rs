@@ -309,11 +309,28 @@ fn hover_and_click(
     h.event(egui::Event::PointerMoved(
         view.right_top() + egui::vec2(-6.0, 6.0),
     ));
+    // A hole shows the selection outline; a piece or a tangled edge's
+    // faces the selection tint.
+    let selected_faces: Vec<u32> = match &expected {
+        (SelectionKind::Component, c) => {
+            h.state().active_mesh().unwrap().topology().components[c[0] as usize].clone()
+        }
+        (SelectionKind::Faces, faces) => faces.clone(),
+        _ => Vec::new(),
+    };
     wait_until(h, "selection drawn", SHORT, |a| {
+        let layers = a.view_layers();
         a.view_hover().is_none()
-            && a.view_layers()
-                .iter()
-                .all(|l| l.color != mf_desktop::theme::HOVER)
+            && layers.iter().all(|l| l.color != mf_desktop::theme::HOVER)
+            && (if selected_faces.is_empty() {
+                layers
+                    .iter()
+                    .any(|l| l.color == mf_desktop::theme::SELECTED)
+            } else {
+                selected_faces
+                    .iter()
+                    .all(|&f| a.read_face_state(f).unwrap().unwrap() & FaceStates::SELECTED != 0)
+            })
     });
     h.run_steps(4);
     rec.still(h, &format!("clicked-{name}"));
@@ -340,12 +357,22 @@ fn walkthrough(
     );
     rec.still(&mut h, "01-defect-overlays");
 
+    // The biggest fillable hole, so it shows at the size it's framed at
+    // (a scan's first hole can be a three-edge pinhole).
+    let size = |d: &Defect| match d {
+        Defect::Hole {
+            edges, perimeter, ..
+        } => (perimeter.unwrap_or(0.0), *edges),
+        _ => (-1.0, 0),
+    };
     let hole = defects
         .holes
         .iter()
-        .find(|d| matches!(d, Defect::Hole { .. }))
+        .filter(|d| matches!(d, Defect::Hole { .. }))
+        .max_by(|a, b| size(a).partial_cmp(&size(b)).expect("finite perimeters"))
         .expect("a fillable hole")
         .clone();
+    println!("{}: hole {:?}", rec.prefix, size(&hole));
     let hole_row = defect_copy(&hole, h.state().session.document().units()).title;
     hover_and_click(&mut h, rec, &hole, &hole_row, "02-hole");
     h.get_by_label("Fill hole");

@@ -22,8 +22,8 @@ pub use gpu_mesh::{
     chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
 };
 pub use pick::{
-    EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, loop_edge_candidates,
-    pick_loop, ray_pick, screen_position,
+    EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,
+    loop_edge_candidates, pick_loop, ray_pick, ray_pick_with, screen_position,
 };
 pub use renderer::{DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat};
 pub use target::RenderTarget;

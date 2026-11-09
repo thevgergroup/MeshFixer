@@ -311,7 +311,9 @@ fn build_subtree(
     ctx: &RunContext,
 ) -> Result<Vec<Node>, Cancelled> {
     if items.len() <= PARALLEL_MIN {
-        let mut nodes = Vec::with_capacity(items.len());
+        // About 0.44 nodes per face are made (leaves average ~4.5 faces):
+        // half a node per face rarely needs to grow.
+        let mut nodes = Vec::with_capacity(items.len() / 2 + 1);
         let mut work = Work { ctx, done: 0 };
         build_into(items, first, depth, &mut nodes, &mut work)?;
         ctx.checkpoint()?;
@@ -329,25 +331,36 @@ fn build_subtree(
         || build_subtree(left_items, first, depth + 1, ctx),
         || build_subtree(right_items, first + mid as u32, depth + 1, ctx),
     );
-    let (left, right) = (left?, right?);
-    let mut nodes = Vec::with_capacity(1 + left.len() + right.len());
-    nodes.push(Node {
-        min: e.min,
-        max: e.max,
-        first_or_right: 1 + left.len() as u32,
-        count: 0,
-    });
-    for (sub, offset) in [(&left, 1u32), (&right, 1 + left.len() as u32)] {
-        nodes.extend(sub.iter().map(|n| Node {
-            first_or_right: if n.count == 0 {
-                n.first_or_right + offset
-            } else {
-                n.first_or_right
-            },
-            ..*n
-        }));
-        ctx.checkpoint()?;
+    let (mut nodes, right) = (left?, right?);
+    // Merged into the left subtree's buffer (no third copy): its interior
+    // nodes move down one for the root, the right subtree follows.
+    for n in &mut nodes {
+        if n.count == 0 {
+            n.first_or_right += 1;
+        }
     }
+    let right_at = 1 + nodes.len() as u32;
+    nodes.reserve_exact(1 + right.len());
+    nodes.insert(
+        0,
+        Node {
+            min: e.min,
+            max: e.max,
+            first_or_right: right_at,
+            count: 0,
+        },
+    );
+    ctx.checkpoint()?;
+    nodes.extend(right.iter().map(|n| Node {
+        first_or_right: if n.count == 0 {
+            n.first_or_right + right_at
+        } else {
+            n.first_or_right
+        },
+        ..*n
+    }));
+    drop(right);
+    ctx.checkpoint()?;
     Ok(nodes)
 }
 
