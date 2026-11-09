@@ -109,10 +109,59 @@ pub fn defect_view(
     out
 }
 
-/// The camera that shows all of `bounds` (an object, world space) from
-/// the current direction.
+/// Within this angle of edge-on (degrees) to a flat object, its row's
+/// framing turns to show its broad side.
+pub const EDGE_ON_DEGREES: f64 = 25.0;
+/// …turning until the view is this many degrees off the object's plane.
+pub const BROAD_SIDE_DEGREES: f64 = 60.0;
+/// An object is flat when its thinnest extent is at most this fraction
+/// of its next thinnest (a cube is never seen edge-on).
+pub const FLAT_RATIO: f64 = 0.5;
+
+/// The camera that shows all of `bounds` (an object, world space). It
+/// keeps the current direction, unless the object is flat (a slab, a
+/// scan of a tablet) and the view is within [`EDGE_ON_DEGREES`] of
+/// edge-on to it: then it turns towards the object's thinnest axis, to
+/// [`BROAD_SIDE_DEGREES`] off its plane, keeping the direction's heading
+/// within the plane and which side it looks from ("up" stays up: the
+/// orbit camera is Z-up).
 pub fn object_view(cam: &OrbitCamera, bounds: &Aabb, scene: &Aabb) -> OrbitCamera {
-    cam.framing(bounds, cam.view_dir(), OBJECT_FILL, scene)
+    cam.framing(
+        bounds,
+        broad_side(cam.view_dir(), bounds),
+        OBJECT_FILL,
+        scene,
+    )
+}
+
+/// `dir` (target → eye), turned to show a flat `bounds`' broad side if it
+/// is nearly edge-on to it (see [`object_view`]).
+fn broad_side(dir: DVec3, bounds: &Aabb) -> DVec3 {
+    let extent = [0, 1, 2].map(|k| bounds.max[k] - bounds.min[k]);
+    let mut axes = [0, 1, 2];
+    axes.sort_by(|a, b| extent[*a].total_cmp(&extent[*b]));
+    let (thin, next) = (axes[0], axes[1]);
+    let flat = extent[thin] <= FLAT_RATIO * extent[next];
+    if !flat {
+        return dir;
+    }
+    let mut n = DVec3::ZERO;
+    n[thin] = 1.0;
+    let across = dir.dot(n);
+    if across.abs() >= EDGE_ON_DEGREES.to_radians().sin() {
+        return dir;
+    }
+    // Which side to look from: the side it's on, else from above (+z) or
+    // the positive side.
+    let side = if across < 0.0 { -1.0 } else { 1.0 };
+    let along = dir - n * across;
+    let along = if along.length() > 1e-9 {
+        along.normalize()
+    } else {
+        return n * side;
+    };
+    let tilt = BROAD_SIDE_DEGREES.to_radians();
+    (along * tilt.cos() + n * side * tilt.sin()).normalize()
 }
 
 /// The six axes and the eight diagonals, unit length.
@@ -230,6 +279,31 @@ mod tests {
                 .is_none_or(|t| t > eye.length()),
             "a clear line of sight from {eye}"
         );
+    }
+
+    #[test]
+    fn a_flat_object_seen_edge_on_is_turned_to_its_broad_side() {
+        let slab = Aabb {
+            min: [0.0, 0.0, 0.0],
+            max: [100.0, 100.0, 2.0],
+        };
+        // Level with it: turned to look down on it, same heading.
+        let edge_on = DVec3::new(0.6, -0.8, 0.05).normalize();
+        let d = broad_side(edge_on, &slab);
+        assert!((d.z - 60f64.to_radians().sin()).abs() < 1e-9, "{d}");
+        assert!((d.x / d.y - 0.6 / -0.8).abs() < 1e-9, "same heading: {d}");
+        // From below, it stays below.
+        let d = broad_side(DVec3::new(0.6, -0.8, -0.05).normalize(), &slab);
+        assert!(d.z < -0.8);
+        // Not edge-on (30° above its plane): unchanged.
+        let above = DVec3::new(0.0, -30f64.to_radians().cos(), 30f64.to_radians().sin());
+        assert_eq!(broad_side(above, &slab), above);
+        // A cube is never turned.
+        let cube = Aabb {
+            min: [0.0; 3],
+            max: [1.0; 3],
+        };
+        assert_eq!(broad_side(edge_on, &cube), edge_on);
     }
 
     #[test]

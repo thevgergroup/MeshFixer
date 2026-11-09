@@ -780,3 +780,176 @@ fn a_double_click_across_two_rows_frames_nothing() {
     );
     assert_eq!(h.state().camera.unwrap(), before, "and frames nothing");
 }
+
+/// Fix round 1, I1: switching to another object while the first one is
+/// still being analysed (its analysis cancelled mid-topology) must not
+/// leave picking waiting forever, with an object's BVH built but its
+/// topology never cached: a defect row of the new object still frames
+/// when double-clicked.
+#[test]
+fn switching_objects_mid_analysis_still_lets_a_row_be_framed() {
+    require_gpu!("switching_objects_mid_analysis_still_lets_a_row_be_framed");
+    // "big": 2M triangles, so its analysis is still running when its
+    // picking BVH is built; "box": an open box beside it.
+    let open_box = mf_fixtures::scaled(&mf_fixtures::cube_with_missing_face(), 10.0);
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, None).unwrap());
+    h.state_mut().import_model(model(vec![
+        ("big", mf_fixtures::grid(1000), IDENTITY),
+        (
+            "box",
+            open_box,
+            mf_fixtures::rotation_translation(2, 0.0, [1100.0, 0.0, 0.0]),
+        ),
+    ]));
+    let (big, open) = {
+        let doc = h.state().session.document();
+        (doc.objects()[0].id, doc.objects()[1].id)
+    };
+    wait_until(&mut h, "the big object's BVH", |a| a.has_picking_bvh(big));
+    // Switch while (most likely) its analysis is still computing.
+    let busy = h.state().is_analyzing();
+    h.state_mut().set_active(open);
+    wait_until(&mut h, "the box analysed and drawn", |a| {
+        a.current_analysis().is_some() && a.shows_current_revision() && a.camera.is_some()
+    });
+    h.run_steps(30);
+    println!("big object still analysing at the switch: {busy}");
+    // Whether or not that switch caught the analysis mid-topology, make
+    // sure of the state it can leave: the big object's BVH is built, but
+    // its topology isn't cached and nothing is computing it.
+    h.state()
+        .session
+        .document()
+        .object(big)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .release_topology();
+    assert!(!h.state().picking_ready());
+    let hole = h.state().current_analysis().unwrap().defects.holes[0].clone();
+    let label = row_of(h.state(), &hole);
+    double_click_row(&mut h, &label);
+    finish_move(&mut h);
+    let (off_centre, size) = on_screen(h.state(), &defect_points(h.state(), &hole));
+    assert!(
+        off_centre < 0.05 && size >= 0.25,
+        "framed: {off_centre} {size}"
+    );
+}
+
+/// The area of the convex hull of `points` (screen space).
+fn hull_area(points: &[egui::Pos2]) -> f32 {
+    let mut p: Vec<egui::Pos2> = points.to_vec();
+    p.sort_by(|a, b| a.x.total_cmp(&b.x).then(a.y.total_cmp(&b.y)));
+    let cross = |o: egui::Pos2, a: egui::Pos2, b: egui::Pos2| {
+        (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x)
+    };
+    let mut hull: Vec<egui::Pos2> = Vec::new();
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &egui::Pos2>> = if pass == 0 {
+            Box::new(p.iter())
+        } else {
+            Box::new(p.iter().rev())
+        };
+        for &q in iter {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0
+            {
+                hull.pop();
+            }
+            hull.push(q);
+        }
+        hull.pop();
+    }
+    let n = hull.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (hull[i], hull[(i + 1) % n]);
+            a.x * b.y - b.x * a.y
+        })
+        .sum::<f32>()
+        .abs()
+        * 0.5
+}
+
+/// Where the corners of `points`' bounding box land for camera `cam` in a
+/// view of `rect`.
+fn corners_for(cam: &OrbitCamera, rect: egui::Rect, points: &[DVec3]) -> Vec<egui::Pos2> {
+    let lo = points.iter().fold(DVec3::splat(f64::MAX), |a, p| a.min(*p));
+    let hi = points.iter().fold(DVec3::splat(f64::MIN), |a, p| a.max(*p));
+    let size = (rect.width() as f64, rect.height() as f64);
+    (0..8)
+        .map(|i| {
+            let pick = |k: usize| if i & (1 << k) == 0 { lo[k] } else { hi[k] };
+            let (x, y) =
+                mf_render::screen_position(cam, cam.target, size, [pick(0), pick(1), pick(2)])
+                    .unwrap();
+            egui::pos2(x as f32, y as f32)
+        })
+        .collect()
+}
+
+/// Fix round 1, I2: an object row double-clicked while the view is edge-on
+/// to a flat object turns to show its broad side (its projected area is
+/// at least 40% of a face-on view's), keeping "up".
+#[test]
+fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
+    require_gpu!("double_click_on_an_object_row_shows_a_flat_object_face_on");
+    // A 100 × 100 × 2 mm slab.
+    let slab = [
+        100.0, 0.0, 0.0, 0.0, 100.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0,
+    ];
+    let mut h = opened(model(vec![("slab", mf_fixtures::cube(1.0), slab)]));
+    // Look at it edge-on.
+    h.state_mut().camera.as_mut().unwrap().pitch = 0.0;
+    h.run_steps(3);
+    let id = h.state().session.document().objects()[0].id;
+    let points = object_points(h.state(), id);
+    double_click_row(&mut h, "slab");
+    finish_move(&mut h);
+    let cam = h.state().camera.unwrap();
+    let rect = h.state().viewport.last_rect.unwrap();
+    let mut face_on = cam;
+    face_on.look_from(DVec3::Z);
+    let shown = hull_area(&corners_for(&cam, rect, &points));
+    let best = hull_area(&corners_for(&face_on, rect, &points));
+    assert!(
+        shown >= 0.4 * best,
+        "the broad side shows: {shown} of a face-on {best} (view {})",
+        cam.view_dir()
+    );
+    assert!(cam.view_dir().z > 0.0, "from above: up stays up");
+    let (off_centre, _) = on_screen(h.state(), &points);
+    assert!(off_centre < 0.05, "{off_centre}");
+}
+
+/// Fix round 1, P2: double-clicking an object's row frames the object and
+/// doesn't pulse whatever was selected on it.
+#[test]
+fn double_click_on_an_object_row_does_not_pulse_the_selection() {
+    require_gpu!("double_click_on_an_object_row_does_not_pulse_the_selection");
+    let mut h = opened(model(vec![(
+        "plate",
+        mf_fixtures::plate_with_defects(),
+        IDENTITY,
+    )]));
+    let hole = h.state().current_analysis().unwrap().defects.holes[0].clone();
+    let pos = row_pos(&h, &row_of(h.state(), &hole));
+    click_at(&mut h, pos);
+    assert!(h.state().selection.is_some());
+    // Somewhere else first, so framing the object moves the camera.
+    h.state_mut().camera.as_mut().unwrap().zoom(0.2);
+    h.step();
+    // Right after the click on the hole's row: egui counts the next two
+    // clicks as a triple-click.
+    double_click_row(&mut h, "plate");
+    let (cameras, pulse) = finish_move(&mut h);
+    assert!(cameras.windows(2).any(|w| w[0] != w[1]), "framed");
+    assert!(h.state().selection.is_some(), "the selection stays");
+    assert_eq!(pulse, 0.0, "no pulse for an object row");
+}

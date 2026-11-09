@@ -312,19 +312,20 @@ fn cancelled_topology_is_not_cached() {
     assert_eq!(*topo, mf_geometry::Topology::compute(&mesh));
 }
 
-/// A cancellable caller waiting for the topology another thread is
-/// computing (it holds the mesh's topology lock all the while) stops when
-/// cancelled, rather than waiting the computation out (MF-RT-002). The
+/// A caller asking for the topology while another thread computes it
+/// never blocks on that computation (M4 Task 8a fix round 1: blocking
+/// could deadlock a thread pool). It computes its own, and stops promptly
+/// when cancelled (MF-RT-002); the first caller's result is kept. The
 /// desktop's Cancel and its picking lane rely on this.
 #[test]
-fn waiting_for_another_threads_topology_is_cancellable() {
+fn a_second_topology_caller_never_blocks_and_is_cancellable() {
     let _guard = heavy();
     let mesh = big_mesh();
     mesh.release_topology();
     let computing = RunContext::none();
     let m = mesh.clone();
     let first = spawn(&computing, move |ctx| m.topology_with(ctx).map(|_| ()));
-    // The first caller is computing, so it holds the lock.
+    // The first caller is computing.
     while !matches!(computing.progress.snapshot(), ("topology", f) if f > 0.05) {
         std::thread::sleep(Duration::from_micros(200));
     }

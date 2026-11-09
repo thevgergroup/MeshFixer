@@ -637,9 +637,11 @@ fn tree_row(
     // Enter (or Space) on a focused row is a click too: Enter also frames.
     let enter = response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     // egui's double-click is the pointer's: it only counts here if the
-    // first click was on this row too.
+    // first click was on this row too. A click on another row just before
+    // makes egui count the second click on this one as a triple-click:
+    // that's this row's double-click too.
     let last_click = egui::Id::unique("tree row last clicked");
-    let twice = response.double_clicked()
+    let twice = (response.double_clicked() || response.triple_clicked())
         && ui.data(|d| d.get_temp::<egui::Id>(last_click)) == Some(response.id);
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(last_click, response.id));

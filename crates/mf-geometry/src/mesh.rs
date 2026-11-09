@@ -61,35 +61,6 @@ pub struct Mesh {
     inner: Arc<Inner>,
 }
 
-thread_local! {
-    /// The meshes (by identity) whose topology this thread is computing,
-    /// holding their topology lock (see [`Mesh::topology_with`]).
-    static COMPUTING_TOPOLOGY: std::cell::RefCell<Vec<usize>> =
-        const { std::cell::RefCell::new(Vec::new()) };
-}
-
-/// Marks a mesh's topology as being computed on this thread, until dropped
-/// (also when the computation panics or is cancelled).
-struct ComputingTopology(usize);
-
-impl ComputingTopology {
-    fn enter(key: usize) -> ComputingTopology {
-        COMPUTING_TOPOLOGY.with(|c| c.borrow_mut().push(key));
-        ComputingTopology(key)
-    }
-}
-
-impl Drop for ComputingTopology {
-    fn drop(&mut self) {
-        COMPUTING_TOPOLOGY.with(|c| {
-            let mut c = c.borrow_mut();
-            if let Some(i) = c.iter().rposition(|k| *k == self.0) {
-                c.remove(i);
-            }
-        });
-    }
-}
-
 pub(crate) struct Inner {
     pub(crate) positions: Chunked<[f64; 3]>,
     pub(crate) faces: Chunked<[u32; 3]>,
@@ -389,81 +360,31 @@ impl Mesh {
     /// As [`Mesh::topology`], cancellable, reporting progress as stage
     /// `"topology"`. A cancelled computation caches nothing.
     ///
-    /// Re-entered on a thread that is already computing this mesh's
-    /// topology (a rayon worker waiting in a join inside that computation
-    /// can pick up another job that asks for it), it computes its own copy
-    /// rather than wait for the lock its own thread holds: that wait would
-    /// never end.
+    /// Compute, then publish: the cache is only ever locked briefly (to
+    /// read it, or to store a finished result), never while computing. A
+    /// caller never waits for another caller's computation: inside a
+    /// thread pool the computing caller may itself be waiting, in a rayon
+    /// join, for the very worker that would be waiting for it, and the
+    /// pool would deadlock (M4 Task 8a, fix round 1). So callers that
+    /// arrive while one computes compute too, and the first result stored
+    /// is kept (the others are dropped; the topology is deterministic, so
+    /// they're equal). The cost: occasional duplicate work, and while it
+    /// lasts the transient memory of each computation (about the
+    /// topology's own size, per caller).
     pub fn topology_with(&self, ctx: &RunContext) -> Result<Arc<Topology>, Cancelled> {
-        let key = Arc::as_ptr(&self.inner) as usize;
-        if COMPUTING_TOPOLOGY.with(|c| c.borrow().contains(&key)) {
-            return Ok(Arc::new(Topology::compute_with(self, ctx)?));
-        }
-        let mut cached = self.lock_topology_with(ctx)?;
-        if let Some(topo) = cached.as_ref() {
+        if let Some(topo) = self.lock_topology().clone() {
             ctx.progress.report("topology", 1.0);
-            return Ok(topo.clone());
+            return Ok(topo);
         }
-        let topo = {
-            let _computing = ComputingTopology::enter(key);
-            Arc::new(Topology::compute_with(self, ctx)?)
-        };
-        *cached = Some(topo.clone());
-        Ok(topo)
+        let topo = Arc::new(Topology::compute_with(self, ctx)?);
+        Ok(self.lock_topology().get_or_insert(topo).clone())
     }
 
-    /// As [`Mesh::topology_with`], unless another computation of it is
-    /// under way: then `None` at once (that one caches it). For background
-    /// jobs that only warm the cache: waiting could deadlock a thread pool
-    /// whose worker, inside that computation's parallel work, picked this
-    /// job up (M4 Task 8a).
-    pub fn topology_unless_busy(
-        &self,
-        ctx: &RunContext,
-    ) -> Result<Option<Arc<Topology>>, Cancelled> {
-        let key = Arc::as_ptr(&self.inner) as usize;
-        if COMPUTING_TOPOLOGY.with(|c| c.borrow().contains(&key)) {
-            return Ok(None);
-        }
-        let mut cached = match self.inner.topology.try_lock() {
-            Ok(guard) => guard,
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner(),
-            Err(std::sync::TryLockError::WouldBlock) => return Ok(None),
-        };
-        if let Some(topo) = cached.as_ref() {
-            return Ok(Some(topo.clone()));
-        }
-        let topo = {
-            let _computing = ComputingTopology::enter(key);
-            Arc::new(Topology::compute_with(self, ctx)?)
-        };
-        *cached = Some(topo.clone());
-        Ok(Some(topo))
-    }
-
-    /// The topology lock, waited for cancellably: another thread may hold
-    /// it for as long as computing the topology takes, and a cancelled
-    /// caller must not wait that out (MF-RT-002).
-    fn lock_topology_with(
-        &self,
-        ctx: &RunContext,
-    ) -> Result<std::sync::MutexGuard<'_, Option<Arc<Topology>>>, Cancelled> {
-        loop {
-            match self.inner.topology.try_lock() {
-                Ok(guard) => return Ok(guard),
-                // See `lock_topology`: a poisoned lock is safe to use.
-                Err(std::sync::TryLockError::Poisoned(p)) => return Ok(p.into_inner()),
-                Err(std::sync::TryLockError::WouldBlock) => {
-                    ctx.checkpoint()?;
-                    std::thread::sleep(std::time::Duration::from_millis(1));
-                }
-            }
-        }
-    }
-
+    /// The cached topology's slot. Only ever held briefly (see
+    /// [`Mesh::topology_with`]).
     fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {
-        // A panic while computing topology leaves nothing half-written (the
-        // value is only stored on success), so a poisoned lock is safe to use.
+        // Nothing is half-written under this lock (a finished result is
+        // stored whole), so a poisoned lock is safe to use.
         self.inner
             .topology
             .lock()
@@ -477,16 +398,10 @@ impl Mesh {
     }
 
     /// True if this revision's topology has been computed and is cached.
-    /// Never waits: while another thread holds the topology lock (for as
-    /// long as computing the topology takes) it answers false, so a UI
-    /// thread can ask every frame (MF-RT-001).
+    /// Never waits on a computation (the cache's lock is only held for a
+    /// moment), so a UI thread can ask every frame (MF-RT-001).
     pub fn has_cached_topology(&self) -> bool {
-        match self.inner.topology.try_lock() {
-            Ok(guard) => guard.is_some(),
-            // See `lock_topology`: a poisoned lock is safe to use.
-            Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().is_some(),
-            Err(std::sync::TryLockError::WouldBlock) => false,
-        }
+        self.lock_topology().is_some()
     }
 
     /// Heap bytes owned by this mesh's storage (excludes cached topology).
@@ -581,59 +496,5 @@ impl Mesh {
     /// True if both handles point at the same revision.
     pub fn ptr_eq(a: &Mesh, b: &Mesh) -> bool {
         Arc::ptr_eq(&a.inner, &b.inner)
-    }
-}
-
-#[cfg(test)]
-#[allow(clippy::unwrap_used)] // tests may panic on failure
-mod tests {
-    use super::*;
-
-    /// A rayon worker waiting in a join inside a topology computation can
-    /// pick up another job asking for the same mesh's topology. It must
-    /// not wait for the lock its own thread holds (that hung the desktop's
-    /// analysis against its picking-BVH builder, M4 Task 8a): it computes
-    /// its own copy.
-    #[test]
-    fn topology_asked_for_again_while_computing_it_on_this_thread_does_not_hang() {
-        let mesh = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            vec![[0, 1, 2]],
-        )
-        .unwrap();
-        // As topology_with does while it computes: the lock held, the mesh
-        // marked as being computed on this thread.
-        let held = mesh.lock_topology();
-        let key = Arc::as_ptr(&mesh.inner) as usize;
-        let computing = ComputingTopology::enter(key);
-        let topo = mesh.topology();
-        assert_eq!(topo.components.len(), 1);
-        assert!(held.is_none(), "the copy isn't cached under the held lock");
-        drop((computing, held));
-        // Afterwards it's computed and cached as usual.
-        let cached = mesh.topology();
-        assert!(Arc::ptr_eq(&cached, &mesh.topology()));
-    }
-
-    /// A job that only warms the cache doesn't wait for a computation
-    /// under way (it could be holding up that very computation).
-    #[test]
-    fn topology_unless_busy_does_not_wait() {
-        let mesh = Mesh::new(
-            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
-            vec![[0, 1, 2]],
-        )
-        .unwrap();
-        let ctx = RunContext::none();
-        let held = mesh.lock_topology();
-        let other = mesh.clone();
-        let busy = std::thread::spawn(move || other.topology_unless_busy(&ctx).unwrap().is_none());
-        assert!(busy.join().unwrap(), "busy: no answer, no wait");
-        drop(held);
-        let topo = mesh
-            .topology_unless_busy(&RunContext::none())
-            .unwrap()
-            .unwrap();
-        assert!(Arc::ptr_eq(&topo, &mesh.topology()), "computed and cached");
     }
 }

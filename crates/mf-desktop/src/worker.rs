@@ -400,6 +400,8 @@ pub enum Message {
     },
     /// Face states were written to a render mesh: the view redraws.
     StatesWritten,
+    /// A mesh's topology was computed and cached ([`Workers::warm_topology`]).
+    TopologyCached,
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -646,6 +648,15 @@ impl Workers {
                 Some(Message::StatesWritten)
             },
         );
+    }
+
+    /// Compute and cache `mesh`'s topology on the background pool (picking
+    /// needs it; see the app's `refresh_bvhs`). Never cancelled.
+    pub fn warm_topology(&self, mesh: Mesh) {
+        self.spawn_background("topology", move || {
+            mesh.topology();
+            Message::TopologyCached
+        });
     }
 
     /// Like [`Workers::write_states`], for an object that isn't active

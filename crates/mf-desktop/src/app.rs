@@ -87,6 +87,10 @@ const PULSES: f64 = 2.0;
 /// listed for this long (seconds; egui's double-click window is 0.3 s), so
 /// the rows don't move under a double-click's second click.
 pub const TREE_HOLD_SECONDS: f64 = 0.35;
+/// A framing from the tree that is still waiting for what it needs (the
+/// item's bounds, the picking BVHs) after this long gives up, saying so,
+/// rather than wait (and redraw) forever.
+pub const FIND_GIVE_UP_SECONDS: f64 = 10.0;
 
 /// What a row of the tree ("Objects & Defects") stands for. Every row
 /// behaves the same way (M4 Task 8a): click selects it, double-click or
@@ -107,6 +111,9 @@ pub enum TreeItem {
 #[derive(Debug, Clone)]
 struct Find {
     item: TreeItem,
+    /// When it was asked for (input time): it gives up after
+    /// [`FIND_GIVE_UP_SECONDS`].
+    since: f64,
     /// The revision a defect belongs to (a later one may not have it).
     mesh: Option<Mesh>,
 }
@@ -260,6 +267,10 @@ pub struct MeshFixerApp {
     bvh_builder: LatestWorker<Vec<(ObjectId, Mesh)>>,
     /// The revisions last asked for.
     bvh_requested: Vec<(ObjectId, Mesh)>,
+    /// Revisions whose topology was asked for on its own: they have their
+    /// BVH, but their topology isn't cached (whoever was computing it was
+    /// cancelled, or it was released). Picking waits for it.
+    topology_requested: Vec<Mesh>,
     overlays: BTreeMap<OverlayPurpose, OverlaySlot>,
     /// Which overlays are switched on (the legend; View menu).
     pub shown: OverlaysShown,
@@ -334,12 +345,10 @@ impl MeshFixerApp {
                         let bvh = Arc::new(Bvh::build(&mesh, run)?);
                         // Picking needs the topology too (hole edges,
                         // pieces): built here, so a hover never builds it
-                        // on the picking lane, unless it's being built
-                        // already (the analysis): then that caches it.
-                        // Waiting for it here could deadlock this pool,
-                        // whose worker may have picked this job up inside
-                        // that very computation (M4 Task 8a).
-                        mesh.topology_unless_busy(run)?;
+                        // on the picking lane. If the analysis is computing
+                        // it too, the first to finish publishes it (no
+                        // waiting: see `Mesh::topology_with`).
+                        mesh.topology_with(run)?;
                         // allow-swallow: the receiver only disappears while the app is closing
                         let _ = tx.send(Message::BvhBuilt { object, mesh, bvh });
                         ctx.request_repaint();
@@ -412,6 +421,7 @@ impl MeshFixerApp {
             bvhs: BTreeMap::new(),
             bvh_builder,
             bvh_requested: Vec::new(),
+            topology_requested: Vec::new(),
             overlays: BTreeMap::new(),
             shown: OverlaysShown::default(),
             recent: None,
@@ -902,6 +912,17 @@ impl MeshFixerApp {
         })
     }
 
+    /// True once object `id`'s current revision has its picking BVH (tests
+    /// and diagnostics).
+    pub fn has_picking_bvh(&self, id: ObjectId) -> bool {
+        let Some(mesh) = self.session.document().object(id).and_then(|o| o.mesh()) else {
+            return false;
+        };
+        self.bvhs
+            .get(&id)
+            .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
+    }
+
     /// Ask for the BVH of every object revision that lacks one (the active
     /// object first), and let go of those for revisions no longer current.
     /// O(objects) on the UI thread; the builds run on the background pool.
@@ -945,6 +966,44 @@ impl MeshFixerApp {
         } else if missing.is_empty() && !self.bvh_requested.is_empty() {
             self.workers
                 .discard(std::mem::take(&mut self.bvh_requested));
+        }
+        self.refresh_topologies();
+    }
+
+    /// Picking needs every object's topology as well as its BVH. The BVH
+    /// builder computes it, but it can still be missing with the BVH built
+    /// (whoever was computing it was cancelled, or it was released): then
+    /// it's computed on its own, once per revision. O(objects).
+    fn refresh_topologies(&mut self) {
+        let doc = self.session.document();
+        let (done, keep): (Vec<Mesh>, Vec<Mesh>) = std::mem::take(&mut self.topology_requested)
+            .into_iter()
+            .partition(|m| {
+                m.has_cached_topology()
+                    || !doc
+                        .objects()
+                        .iter()
+                        .any(|o| o.mesh().is_some_and(|c| Mesh::ptr_eq(c, m)))
+            });
+        self.topology_requested = keep;
+        if !done.is_empty() {
+            self.workers.discard(done);
+        }
+        let missing: Vec<Mesh> = self
+            .bvhs
+            .iter()
+            .filter(|(id, (m, _))| {
+                doc.object(**id)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|c| Mesh::ptr_eq(c, m))
+                    && !m.has_cached_topology()
+                    && !self.topology_requested.iter().any(|r| Mesh::ptr_eq(r, m))
+            })
+            .map(|(_, (m, _))| m.clone())
+            .collect();
+        for mesh in missing {
+            self.workers.warm_topology(mesh.clone());
+            self.topology_requested.push(mesh);
         }
     }
 
@@ -1265,7 +1324,7 @@ impl MeshFixerApp {
                 }
             }
             // The view notices the new states by their generation.
-            Message::StatesWritten => {}
+            Message::StatesWritten | Message::TopologyCached => {}
             Message::Overlay {
                 purpose,
                 object,
@@ -1646,6 +1705,7 @@ impl MeshFixerApp {
         self.pulse = None;
         self.find = Some(Find {
             item: item.clone(),
+            since: self.now,
             mesh,
         });
     }
@@ -1712,6 +1772,14 @@ impl MeshFixerApp {
         let Some(find) = self.find.clone() else {
             return;
         };
+        if self.now - find.since > FIND_GIVE_UP_SECONDS {
+            self.find = None;
+            self.status = Some(
+                "Couldn't frame it: the view is still being prepared. Try again in a moment."
+                    .into(),
+            );
+            return;
+        }
         let Some(cam) = self.camera else { return };
         let scene = match self.document_world_bounds() {
             None => return,
@@ -1772,9 +1840,14 @@ impl MeshFixerApp {
                 duration: FRAME_MOVE_SECONDS,
             },
             last: cam,
-            pulse: self
-                .target_overlay_request()
-                .map(|(object, _, target)| (object, target)),
+            // An object's row frames the object: what's selected on it
+            // isn't what was asked for, so it doesn't pulse.
+            pulse: match find.item {
+                TreeItem::Object(_) => None,
+                _ => self
+                    .target_overlay_request()
+                    .map(|(object, _, target)| (object, target)),
+            },
         });
     }
 

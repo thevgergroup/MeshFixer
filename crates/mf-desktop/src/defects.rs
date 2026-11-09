@@ -526,7 +526,7 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             "Narrow crack".into(),
             "Narrow crack".into(),
             count(*edges, "edge"),
-            "Edges almost touch".into(),
+            format!("Edges almost touch · {}", count(*edges, "edge")),
             "Needs edge stitching (not yet available)",
         ),
         Defect::LoosePiece {
@@ -561,7 +561,10 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             "Tangled edge".into(),
             "Tangled edge".into(),
             count(faces.len(), "face"),
-            "More than two faces share this edge".into(),
+            format!(
+                "More than two faces share this edge · {}",
+                count(faces.len(), "face")
+            ),
             "Select the faces involved",
         ),
     }
@@ -864,7 +867,7 @@ mod tests {
             }),
             s(
                 "Narrow crack",
-                "Edges almost touch",
+                "Edges almost touch · 8 edges",
                 "Needs edge stitching (not yet available)"
             )
         );
@@ -887,7 +890,7 @@ mod tests {
             }),
             s(
                 "Tangled edge",
-                "More than two faces share this edge",
+                "More than two faces share this edge · 3 faces",
                 "Select the faces involved"
             )
         );
