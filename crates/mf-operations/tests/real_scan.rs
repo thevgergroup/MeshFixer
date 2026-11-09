@@ -4,8 +4,11 @@
 //! the Smithsonian Archaeopteryx scan in `fixtures/SOURCES.md`, fetched by
 //! `scripts/fetch-fixtures.sh`. Skips (per policy) when not fetched.
 
-use std::collections::{BTreeMap, HashMap};
+mod common;
 
+use std::collections::BTreeMap;
+
+use common::{edge_faces, untouched_outside, vector_area};
 use mf_geometry::{Mesh, inspect};
 use mf_operations::{Target, find};
 use mf_spec::{Params, builtin};
@@ -22,32 +25,6 @@ fn params() -> Params {
         .unwrap()
         .validate(&BTreeMap::new())
         .unwrap()
-}
-
-/// Faces on each undirected edge.
-fn edge_faces(m: &Mesh) -> HashMap<(u32, u32), u32> {
-    let mut count = HashMap::new();
-    for (_, t) in m.faces() {
-        for k in 0..3 {
-            let (a, b) = (t[k], t[(k + 1) % 3]);
-            *count.entry((a.min(b), a.max(b))).or_insert(0) += 1;
-        }
-    }
-    count
-}
-
-/// Magnitude of a loop's vector area: ~0 for a slit (collinear vertices),
-/// which can't be closed without zero-area triangles.
-fn vector_area(m: &Mesh, vertices: &[u32]) -> f64 {
-    let p: Vec<[f64; 3]> = vertices.iter().map(|&v| m.corner_position(v)).collect();
-    let mut s = [0.0; 3];
-    for k in 0..p.len() {
-        let (a, b) = (p[k], p[(k + 1) % p.len()]);
-        s[0] += a[1] * b[2] - a[2] * b[1];
-        s[1] += a[2] * b[0] - a[0] * b[2];
-        s[2] += a[0] * b[1] - a[1] * b[0];
-    }
-    0.5 * (s[0] * s[0] + s[1] * s[1] + s[2] * s[2]).sqrt()
 }
 
 /// Slit threshold: a millionth of the smallest real hole's area here
@@ -113,29 +90,10 @@ fn fill_each_small_hole_of_real_scan_untouched_outside() {
         };
         let (after, prov) = out.change.unwrap();
         // Untouched outside the target: every input face keeps its ID and
-        // indices, every input vertex its exact position, nothing removed.
-        assert!(prov.removed_faces.is_empty() && prov.removed_vertices.is_empty());
-        assert!(prov.modified_faces.is_empty() && prov.moved_vertices.is_empty());
-        for (f, t) in m.faces() {
-            assert_eq!(after.face(f), Some(t), "loop {id}: face {f:?} changed");
-        }
-        for (v, p) in m.vertices() {
-            let q = after.position(v).unwrap();
-            assert_eq!(p.map(f64::to_bits), q.map(f64::to_bits), "loop {id}: {v:?}");
-        }
-        // The loop closes and the patch is manifold where it meets the scan:
-        // no edge of a new face has more than two faces.
-        let mut added: HashMap<(u32, u32), u32> = HashMap::new();
-        for (f, _) in &prov.created_faces {
-            let t = after.face(*f).unwrap();
-            for k in 0..3 {
-                let (a, b) = (t[k], t[(k + 1) % 3]);
-                *added.entry((a.min(b), a.max(b))).or_insert(0) += 1;
-            }
-        }
-        for (e, n) in &added {
-            let total = n + before_edges.get(e).copied().unwrap_or(0);
-            assert_eq!(total, 2, "loop {id}: edge {e:?} has {total} faces");
+        // indices, every input vertex its exact position, nothing removed;
+        // the loop closes and the patch is manifold where it meets the scan.
+        if let Err(e) = untouched_outside(&m, &before_edges, &after, &prov) {
+            panic!("loop {id}: {e}");
         }
         // No new face is degenerate (by inspect's threshold).
         for (f, _) in &prov.created_faces {

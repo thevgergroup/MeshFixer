@@ -30,6 +30,9 @@ timing=(
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"
   "mf-cli bench_memory working_set_under_400mb_at_5m"
   "mf-desktop memory realistic_session_rss_is_reported"
+  # The messy-model collection (15 real files, one of 5.7M triangles):
+  # alone, so its recorded times and peak heap are its own.
+  "mf-operations messy_corpus every_messy_model_imports_and_analyses every_messy_model_fills_or_refuses_by_name targeted_fill_on_messy_models_is_untouched_outside messy_results_are_recorded"
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,
   # so its frames don't compete with other GPU tests.
   "mf-cli bench_orbit bench_orbit_json_has_device_info_and_percentiles"

@@ -7,6 +7,7 @@ toolchain="$HOME/.rustup/toolchains/$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-t
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 scripts/test-check-swallowed.sh > /dev/null
+scripts/test-fetch-fixtures.sh > /dev/null
 scripts/check-swallowed-defaults.sh
 cargo deny check licenses 2>/dev/null
 # Timing tests run on their own after the rest (scripts/run-tests.sh).
