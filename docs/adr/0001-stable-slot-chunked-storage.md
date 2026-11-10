@@ -87,3 +87,19 @@ The remaining large transient is topology construction (468 MB), tracked as MF-I
 
 Half-edges are no longer sorted as 16-byte records: a counting sort buckets their 4-byte IDs by low vertex, each bucket is sorted by (high vertex, half-edge) reading the vertices back from the mesh, and whether a vertex has one corner fan is checked by walking the fan of one of its corners across two-face edges (in parallel over vertices) instead of collecting fans in a corner union-find plus a sorted fan array. The result is identical, and faster. `meshfixer bench memory` reports these figures and CI's `memory-gate` job fails the working set above 400 MB.
 
+
+## Amendment (Phase 1 Task 16b, 2026-11-11): storage chunks and groups
+
+**Context.** The M4 technical review (I1, I2) found that one 32,768-element copy-on-write chunk served three purposes: copy-on-write, hash caching, and the GPU face chunk. Sculpting needs these at different sizes. One moved vertex copied 786 KB, which pushed a 1,000-stroke history 20–80× past MF-SCULPT-004's budget. GPU reuse was decided per vertex chunk, so one dab on the 1M scan re-uploaded 14–29 of its 31 face chunks.
+
+**Decision.**
+- `Chunked<T>` is now two-level. A **group** of `CHUNK` = 32,768 elements holds `STORAGE_CHUNK` = 1,024-element storage chunks, each behind its own `Arc`.
+  - **Copy-on-write happens per storage chunk.** A write copies one storage chunk (24 KB of positions) plus the group's index of 32 `Arc`s.
+  - **The group stays the hash unit.** Its cached digest is BLAKE3 over the same element bytes as before, so content hashes, logs and goldens are unchanged. It also stays the GPU face chunk, so buffer and draw-call counts don't multiply.
+- GPU reuse is now decided per face. `Mesh::moved_vertices(prev)` compares only the storage chunks that aren't shared. A face chunk is rebuilt only if its faces changed or one of its faces uses a moved vertex. `ChunkVertices.storage_chunks` gives a quick pre-filter before the per-face scan.
+
+**Measured.**
+- On the Archaeopteryx scan, a 1%-of-diagonal dab now re-uploads 1–4 of 31 face chunks, which are exactly the chunks its faces lie in.
+- 1,000 small strokes on a 1M sphere take 185 MB of history: one revision is 23 MB, and the footprints (the storage chunks copied) are 161 MB. With the old chunks the footprints alone would be 889 MB.
+
+**Rejected:** storing strokes as deltas materialised on checkout. That would put a slow path into every revision read. It remains the next step if per-storage-chunk footprints prove too large on real sculpting sessions.

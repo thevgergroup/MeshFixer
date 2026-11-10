@@ -2895,6 +2895,7 @@ dependencies = [
  "image",
  "mf-fixtures",
  "mf-geometry",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "pollster 0.4.0",

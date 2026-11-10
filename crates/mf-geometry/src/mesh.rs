@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, OnceLock};
 use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
-use crate::chunked::{Bits, CHUNK, Chunked};
+use crate::chunked::{Bits, CHUNK, Chunked, STORAGE_CHUNK};
 use crate::edit::MeshEdit;
 use crate::hash::ContentHash;
 use crate::ids::{FaceId, SlotRemap, VertexId};
@@ -526,13 +526,37 @@ impl Mesh {
         if self.vertex_chunk_shared(prev, j) {
             return true;
         }
-        let (now, then) = (self.inner.positions.chunk(j), prev.inner.positions.chunk(j));
-        now.len() >= then.len()
-            && !then.is_empty()
+        let (now, then) = (&self.inner.positions, &prev.inner.positions);
+        now.chunk_len(j) >= then.chunk_len(j)
+            && then.chunk_len(j) > 0
             && now
-                .iter()
-                .zip(then)
+                .chunk_iter(j)
+                .zip(then.chunk_iter(j))
                 .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits))
+    }
+
+    /// The vertex slots `prev` has whose position differs here (bitwise),
+    /// ascending. Vertices appended since `prev` aren't "moved". Only
+    /// storage chunks not shared with `prev` are compared, so after a
+    /// local edit this is O(chunks + the copied chunks' vertices)
+    /// (Phase 1 Task 16b: what a dab invalidates on the GPU).
+    pub fn moved_vertices(&self, prev: &Mesh) -> Vec<u32> {
+        let (now, then) = (&self.inner.positions, &prev.inner.positions);
+        let mut out = Vec::new();
+        for k in 0..then.storage_chunk_count() {
+            if now.shares_storage_chunk(then, k) {
+                continue;
+            }
+            let (a, b) = (now.storage_chunk(k), then.storage_chunk(k));
+            for (i, q) in b.iter().enumerate() {
+                if a.get(i)
+                    .is_none_or(|p| p.map(f64::to_bits) != q.map(f64::to_bits))
+                {
+                    out.push((k * STORAGE_CHUNK + i) as u32);
+                }
+            }
+        }
+        out
     }
 
     /// Live faces in face chunk `i`, in ascending ID order.
@@ -541,8 +565,7 @@ impl Mesh {
         let base = i * CHUNK;
         self.inner
             .faces
-            .chunk(i)
-            .iter()
+            .chunk_iter(i)
             .enumerate()
             .map(move |(k, t)| (base + k, *t))
             .filter(move |(f, _)| live.get(*f))
