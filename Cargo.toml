@@ -56,6 +56,13 @@ unsafe_code = "forbid"
 [workspace.lints.clippy]
 unwrap_used = "warn"
 
+# Line tables only: backtraces and panics keep file and line numbers, but the
+# full variable debug info (most of target/'s size and link time) is dropped.
+# The test profile inherits this. To step through locals in a debugger, set
+# CARGO_PROFILE_DEV_DEBUG=true for that build.
+[profile.dev]
+debug = "line-tables-only"
+
 # The geometry hot paths are optimised even in test builds so tests on real
 # scans (1M triangles) run in seconds, not minutes. Debug assertions and
 # overflow checks stay on.
