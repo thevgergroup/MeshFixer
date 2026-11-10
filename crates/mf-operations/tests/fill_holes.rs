@@ -777,14 +777,20 @@ mod fairing {
 /// cheapest to close across the short chord x–y, so without coordination
 /// both would use it and x–y would get four faces.
 fn holes_sharing_a_chord() -> Mesh {
+    holes_sharing_a_chord_with([0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
+}
+
+/// As [`holes_sharing_a_chord`], with the second piece's vertices c and d
+/// placed at `c_at` and `d_at`.
+fn holes_sharing_a_chord_with(c_at: [f64; 3], d_at: [f64; 3]) -> Mesh {
     let h = 0.2;
     let positions = vec![
         [0.0, h, 0.0],    // 0 x
         [0.0, -h, 0.0],   // 1 y
         [1.0, 0.0, 0.0],  // 2 a
         [0.0, 0.0, -1.0], // 3 b
-        [0.0, 0.0, 1.0],  // 4 c
-        [-1.0, 0.0, 0.0], // 5 d
+        c_at,             // 4 c
+        d_at,             // 5 d
     ];
     let (x, y, a, b, c, d) = (0, 1, 2, 3, 4, 5);
     let triangles = vec![
@@ -828,5 +834,42 @@ fn a_chord_used_by_an_earlier_loop_is_excluded_for_later_loops() {
             .count();
         assert!(on_chord <= 2, "x–y has {on_chord} faces: {report}");
         assert!(d.is_closed && d.is_manifold, "{d:?} {report}");
+    }
+}
+
+/// MF-ISSUE-038 fix round 1: a hole whose only way across is a chord an
+/// earlier hole's fill already took is reported with its own reason and
+/// plain words naming both holes and the edge, not as a slit.
+#[test]
+fn a_hole_whose_only_chord_was_taken_says_so() {
+    // The second piece on top of the first (c at a, d at b): each hole's
+    // other diagonal (a–c, d–b) has zero length, so x–y is the only way
+    // across either. The first hole takes it.
+    let m = holes_sharing_a_chord_with([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]);
+    let ids: Vec<u32> = m.topology().boundary_loops.iter().map(|l| l.id).collect();
+    let (first, second) = (ids[0], ids[1]);
+    // Whole object: the first hole fills, the second is skipped by name.
+    let (_, _, report) = fill(&m, Target::WholeObject, NO_REFINE).unwrap();
+    let skipped = report["skipped_loops"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{report}");
+    let s = &skipped[0];
+    assert_eq!(s["id"], second, "{report}");
+    assert_eq!(s["reason"], "chord_used_by_another_hole", "{report}");
+    assert_eq!(s["by"], first, "{report}");
+    assert_eq!(s["edge"], serde_json::json!([0, 1]), "{report}");
+    let expected = format!(
+        "Hole {second} can't be closed: the only way across it uses the edge between \
+         vertices 0 and 1, which hole {first}'s fill already uses. Fill hole {second} \
+         first, on its own, or leave it open."
+    );
+    assert_eq!(s["message"], expected.as_str(), "{report}");
+    // Both selected: an error with the same words, never the slit message.
+    match fill(&m, Target::Loops(vec![first, second]), NO_REFINE) {
+        Err(OpError::Failed { code, message }) => {
+            assert_eq!(code, "loop_chord_used_by_another_hole");
+            assert_eq!(message, expected);
+            assert!(!message.contains("flat"), "{message}");
+        }
+        other => panic!("{:?}", other.map(|r| r.2)),
     }
 }

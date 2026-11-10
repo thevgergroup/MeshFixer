@@ -1194,6 +1194,21 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             Failure::Usage(format!("unsupported output format: {}", out.display()))
         })?;
         let doc = report.session.document();
+        // STL and OBJ hold one mesh: refuse rather than write the first
+        // object and silently drop the rest.
+        if format != Format::ThreeMf && doc.objects().len() > 1 {
+            let names: Vec<String> = doc
+                .objects()
+                .iter()
+                .map(|o| format!("'{}'", o.name))
+                .collect();
+            return Err(Failure::Usage(format!(
+                "the log has {} objects ({}), but {} holds one mesh; write a .3mf to keep them all",
+                names.len(),
+                names.join(", "),
+                out.display()
+            )));
+        }
         let object = doc
             .objects()
             .first()

@@ -890,6 +890,8 @@ fn every_messy_model_fills_or_refuses_by_name() {
                         "self_touching",
                         "untriangulable",
                         "fairing_did_not_converge",
+                        // MF-ISSUE-038: a neighbour's fill took the only chord.
+                        "chord_used_by_another_hole",
                     ]
                     .contains(&reason.as_str()),
                     "{} ({}): unnamed skip reason {reason}",

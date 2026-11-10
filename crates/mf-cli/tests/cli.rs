@@ -598,6 +598,65 @@ fn replay_writes_a_threemf_that_keeps_the_transform_once() {
     );
 }
 
+/// `replay -o out.stl` of a log with several objects refuses by name
+/// (STL/OBJ hold one mesh) and suggests .3mf, instead of writing the first
+/// object and dropping the rest; nothing is written.
+#[test]
+fn replay_refuses_to_write_several_objects_to_one_stl() {
+    use mf_io::threemf::{Model, ModelObject, Unit};
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("pair.3mf");
+    let at = |x: f64| [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, 0.0, 0.0];
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                name: "left".into(),
+                mesh: cube(1.0),
+                transform: at(0.0),
+            },
+            ModelObject {
+                name: "right".into(),
+                mesh: cube(1.0),
+                transform: at(10.0),
+            },
+        ],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let log = dir.path().join("pair.mfx.log");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.compact",
+        "--save-log",
+        log.to_str().unwrap(),
+        "-o",
+        dir.path().join("run.3mf").to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+
+    let out = dir.path().join("out.stl");
+    let r = meshfixer(&["replay", log.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert!(
+        !r.status.success(),
+        "{}",
+        String::from_utf8_lossy(&r.stdout)
+    );
+    let err = String::from_utf8_lossy(&r.stderr);
+    assert!(
+        err.contains("'left'") && err.contains("'right'") && err.contains(".3mf"),
+        "{err}"
+    );
+    assert!(!out.exists(), "nothing is written");
+
+    // The same log to .3mf keeps both.
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&["replay", log.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert_eq!(mf_io::read_model(&out).unwrap().objects.len(), 2);
+}
+
 /// Triangular holes (3-edge loops) as (id, centroid), by id.
 fn holes(path: &str) -> Vec<(u64, Vec<f64>)> {
     let out = meshfixer(&["inspect", path, "--json"]);

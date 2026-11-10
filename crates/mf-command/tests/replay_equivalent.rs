@@ -92,6 +92,50 @@ fn the_same_log_with_one_changed_index_is_a_mismatch() {
     assert!(!report.all_verified());
 }
 
+/// Replay the fixture after `change` edits the first command's recorded
+/// output summary (structure untouched); the first verdict.
+fn first_verdict_after(change: impl Fn(&mut serde_json::Value)) -> Verdict {
+    let dir = copy_fixture();
+    let commands = dir.path().join(LOG).join("commands.jsonl");
+    let text = std::fs::read_to_string(&commands).unwrap();
+    let mut lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    let first = lines.iter_mut().find(|e| e["kind"] == "command").unwrap();
+    change(&mut first["output_summary"]);
+    let changed: Vec<String> = lines.iter().map(|e| e.to_string()).collect();
+    std::fs::write(&commands, changed.join("\n") + "\n").unwrap();
+    let report = replay(&dir.path().join(LOG)).unwrap();
+    report.results.first().unwrap().1.clone()
+}
+
+/// The Equivalent tolerance stays tight (1e-9): a recorded surface area
+/// off by a relative 1e-6, with the structure unchanged, is a Mismatch.
+#[test]
+fn an_area_off_by_a_millionth_is_a_mismatch() {
+    match first_verdict_after(|summary| {
+        let area = summary["surface_area"].as_f64().unwrap();
+        summary["surface_area"] = (area * (1.0 + 1e-6)).into();
+    }) {
+        Verdict::Mismatch { .. } => {}
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
+/// Likewise a recorded bounding box off by 1e-6 × its diagonal.
+#[test]
+fn a_bounding_box_off_by_a_millionth_of_its_diagonal_is_a_mismatch() {
+    match first_verdict_after(|summary| {
+        let x = summary["bbox"][1][0].as_f64().unwrap();
+        // The sphere's diagonal is 2√3.
+        summary["bbox"][1][0] = (x + 1e-6 * 2.0 * 3f64.sqrt()).into();
+    }) {
+        Verdict::Mismatch { .. } => {}
+        other => panic!("expected Mismatch, got {other:?}"),
+    }
+}
+
 /// Writes `tests/data/equivalent-replay/`: a sphere with two holes, each
 /// filled (refined, so new vertices are computed) by its own command.
 #[cfg(feature = "test-position-jitter")]

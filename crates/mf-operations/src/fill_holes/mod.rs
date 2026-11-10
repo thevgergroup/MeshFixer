@@ -473,15 +473,24 @@ impl Operation for FillHoles {
         // again with those chords excluded, exactly as an existing mesh
         // edge is. Rare, so this runs one loop at a time; the result still
         // depends only on loop order.
-        let mut used_chords: BTreeSet<(u32, u32)> = BTreeSet::new();
+        // Mesh edge → the loop whose patch used it.
+        let mut used_chords: BTreeMap<(u32, u32), u32> = BTreeMap::new();
         let mut edit = input.edit();
         let mut filled = Vec::new();
         for (li, ((l, mut patch), mut faired)) in fill.iter().zip(patches).zip(fairing).enumerate()
         {
+            // The first chord an earlier patch took from this loop, and
+            // that patch's loop: named if the rebuilt loop can't close.
+            let mut taken_by: Option<((u32, u32), u32)> = None;
             if let Some(p) = &patch {
                 let taken: BTreeSet<(usize, usize)> = rim_edges(p)
-                    .filter(|&(i, j)| used_chords.contains(&mesh_edge(l, i, j)))
+                    .filter(|&(i, j)| used_chords.contains_key(&mesh_edge(l, i, j)))
                     .collect();
+                taken_by = taken
+                    .iter()
+                    .map(|&(i, j)| mesh_edge(l, i, j))
+                    .min()
+                    .map(|e| (e, used_chords[&e]));
                 if !taken.is_empty() {
                     let mut excluded = existing[li].clone();
                     excluded.extend(taken);
@@ -547,6 +556,26 @@ impl Operation for FillHoles {
                 other => other,
             };
             let Some(patch) = patch else {
+                // MF-ISSUE-038: not a slit; a neighbouring hole's fill took
+                // the only way across.
+                if let Some(((a, b), by)) = taken_by {
+                    let message = format!(
+                        "Hole {id} can't be closed: the only way across it uses the edge between vertices {a} and {b}, which hole {by}'s fill already uses. Fill hole {id} first, on its own, or leave it open.",
+                        id = l.id
+                    );
+                    if matches!(target, Target::Loops(_)) {
+                        return Err(failed("loop_chord_used_by_another_hole", message));
+                    }
+                    skipped.push(json!({
+                        "id": l.id,
+                        "edges": l.edge_count,
+                        "reason": "chord_used_by_another_hole",
+                        "by": by,
+                        "edge": [a, b],
+                        "message": message,
+                    }));
+                    continue;
+                }
                 if matches!(target, Target::Loops(_)) {
                     return Err(failed(
                         "loop_untriangulable",
@@ -575,7 +604,9 @@ impl Operation for FillHoles {
                 )
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;
             }
-            used_chords.extend(rim_edges(&patch).map(|(i, j)| mesh_edge(l, i, j)));
+            for (i, j) in rim_edges(&patch) {
+                used_chords.entry(mesh_edge(l, i, j)).or_insert(l.id);
+            }
             let mut entry = json!({"id": l.id, "edges": l.edge_count, "faces": patch.tris.len()});
             if let Some(Ok(f)) = faired {
                 entry["faired_vertices"] = json!(f.vertices);
