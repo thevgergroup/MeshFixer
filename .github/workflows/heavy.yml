@@ -221,7 +221,7 @@ jobs:
     # C++ Manifold through the `manifold-cpp` feature, which builds C++
     # Manifold v3.5.3 and oneTBB from source with CMake) through the
     # qualification gates, on the real models. On demand only.
-    if: github.event.label.name == 'run-qualify' || (github.event_name == 'workflow_dispatch' && inputs.qualify)
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify
     runs-on: macos-latest
     env:
       MF_REQUIRE_FIXTURES: "1"
