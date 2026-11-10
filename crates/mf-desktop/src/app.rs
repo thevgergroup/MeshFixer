@@ -242,7 +242,12 @@ pub struct MeshFixerApp {
     requested: Option<(Mesh, [f64; 12])>,
     /// The last revision whose analysis failed: not retried (it would fail
     /// again), and not shown as still analysing.
-    analysis_failed: Option<(Mesh, [f64; 12])>,
+    analysis_failed: Option<Mesh>,
+    /// Measures an analysed revision again after a transform-only change
+    /// (a move, a turn, an undo of one): see `worker::remeasure`.
+    remeasurer: LatestWorker<worker::RemeasureRequest>,
+    /// The (revision, transform) last sent to it.
+    remeasure_asked: Option<(Mesh, [f64; 12])>,
     /// Vertices currently drawn for the active object, tagged with the
     /// exact mesh revision they were built for. May belong to the previous
     /// revision of the active object while the new one is analyzed (the
@@ -477,6 +482,14 @@ impl MeshFixerApp {
                 },
             )
         };
+        let remeasurer = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            LatestWorker::new(workers.background(), worker::remeasure, move |msg| {
+                // allow-swallow: the receiver only disappears while the app is closing
+                let _ = tx.send(msg);
+                ctx.request_repaint();
+            })
+        };
         let lowest_worker = {
             let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
             LatestWorker::new(
@@ -543,6 +556,8 @@ impl MeshFixerApp {
             },
             requested: None,
             analysis_failed: None,
+            remeasurer,
+            remeasure_asked: None,
             displayed: None,
             object_vertices: BTreeMap::new(),
             requested_vertices: BTreeMap::new(),
@@ -1160,14 +1175,22 @@ impl MeshFixerApp {
             .collect()
     }
 
+    /// Undo (mid-drag, it cancels the drag instead, as Esc does).
     pub fn undo(&mut self) {
+        if self.cancel_tool_drag() {
+            return;
+        }
         if self.busy.is_none() {
             self.session.undo();
             self.after_history_move();
         }
     }
 
+    /// Redo (mid-drag, it cancels the drag instead).
     pub fn redo(&mut self) {
+        if self.cancel_tool_drag() {
+            return;
+        }
         if self.busy.is_none() {
             self.session.redo();
             self.after_history_move();
@@ -1414,6 +1437,8 @@ impl MeshFixerApp {
     /// object has its BVH and the active one its analysis; until then the
     /// hover just doesn't update.
     fn update_hover(&mut self, pointer: Option<((f64, f64), (f64, f64))>) {
+        // A tool that hides the defects hides what hovering would find.
+        let pointer = pointer.filter(|_| !self.tool_hides_defects());
         let want = match (pointer, self.camera, self.active) {
             (Some((px, size)), Some(camera), Some(_)) => Some(HoverQuery {
                 px,
@@ -1584,8 +1609,10 @@ impl MeshFixerApp {
     /// was open closes.
     pub fn open_tool(&mut self, id: &str) {
         self.leave_interactive();
-        self.tool = Some(id.to_owned());
         self.interactive = crate::tools::Interactive::open(self, id);
+        let interactive = crate::tools::entry(id).is_some_and(|e| e.kind == ToolKind::Interactive);
+        // An interactive tool that can't open here (no object) stays shut.
+        self.tool = (!interactive || self.interactive.is_some()).then(|| id.to_owned());
     }
 
     /// Close the whole-object tool open in Properties.
@@ -1919,15 +1946,11 @@ impl MeshFixerApp {
                     self.workers.discard(old);
                 }
             }
-            Message::AnalysisFailed {
-                mesh,
-                transform,
-                message,
-            } => {
+            Message::AnalysisFailed { mesh, message, .. } => {
                 if self
                     .requested
                     .as_ref()
-                    .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == transform)
+                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, &mesh))
                 {
                     self.requested = None;
                 }
@@ -1935,7 +1958,7 @@ impl MeshFixerApp {
                     "Couldn't analyse this object, so its defects can't be shown \
                      (internal error: {message}). Undo the last step, or open the file again."
                 ));
-                self.analysis_failed = Some((mesh, transform));
+                self.analysis_failed = Some(mesh);
             }
             Message::HoleView { defects, view } => {
                 if let Some(old) = self.hole_list.replace((defects, view)) {
@@ -1964,6 +1987,27 @@ impl MeshFixerApp {
                         self.select(object, SelectionKind::BoundaryLoop, ids, add);
                     }
                 }
+            }
+            Message::Remeasured {
+                mesh,
+                transform,
+                defects,
+                hole_view,
+            } => {
+                // Only for the placement the object has now (a later move
+                // asks again).
+                let current = self.session.document().objects().iter().any(|o| {
+                    o.transform == transform && o.mesh().is_some_and(|m| Mesh::ptr_eq(m, &mesh))
+                });
+                if current && let Some(a) = self.analyses.get_mut(&mesh) {
+                    a.transform = transform;
+                    let old = (
+                        std::mem::replace(&mut a.defects, defects),
+                        std::mem::replace(&mut a.hole_view, hole_view),
+                    );
+                    self.workers.discard(old);
+                }
+                self.workers.discard(mesh);
             }
             Message::LowestPoint {
                 object,
@@ -2002,7 +2046,7 @@ impl MeshFixerApp {
                 if self
                     .requested
                     .as_ref()
-                    .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == analysis.transform)
+                    .is_some_and(|(m, _)| Mesh::ptr_eq(m, &mesh))
                 {
                     self.requested = None;
                 }
@@ -2068,14 +2112,31 @@ impl MeshFixerApp {
     /// Analysis for exactly the active revision, if it's ready.
     pub fn current_analysis(&self) -> Option<&Analysis> {
         let object = self.session.document().object(self.active?)?;
-        self.analysis_for(object.mesh()?, &object.transform)
+        self.analysis_for(object.mesh()?)
     }
 
-    /// The analysis of `mesh` measured at `transform`, if it's ready.
-    fn analysis_for(&self, mesh: &Mesh, transform: &[f64; 12]) -> Option<&Analysis> {
-        self.analyses
-            .get(mesh)
-            .filter(|a| a.transform == *transform)
+    /// The analysis of `mesh`, if it's ready. Its topology, render mesh
+    /// and overlays belong to the mesh alone; its measurements (perimeters,
+    /// sizes, where each defect is) were made at `Analysis::transform`,
+    /// which lags the object's for a moment after a move or turn while
+    /// they're made again ([`Self::refresh_analysis`]): the previous values
+    /// show meanwhile, and nothing goes blank.
+    fn analysis_for(&self, mesh: &Mesh) -> Option<&Analysis> {
+        self.analyses.get(mesh)
+    }
+
+    /// True while the active object's measurements are being made again
+    /// after a transform-only change.
+    pub fn is_remeasuring(&self) -> bool {
+        let Some(o) = self
+            .active
+            .and_then(|id| self.session.document().object(id))
+        else {
+            return false;
+        };
+        o.mesh()
+            .and_then(|m| self.analysis_for(m))
+            .is_some_and(|a| a.transform != o.transform)
     }
 
     /// Request analysis when the active revision changes.
@@ -2092,10 +2153,13 @@ impl MeshFixerApp {
         };
         if self.analysis_failed_for_active() {
             // Shown as an error; retrying would only fail again.
-        } else if let Some(render) = self
-            .analysis_for(&mesh, &transform)
-            .map(|a| a.render.clone())
+        } else if let Some((render, measured)) = self
+            .analysis_for(&mesh)
+            .map(|a| (a.render.clone(), a.transform))
         {
+            if measured != transform {
+                self.remeasure(&mesh, transform);
+            }
             if !self.shows_current_revision() {
                 let object = self.active.expect("an active object has a mesh here");
                 self.analyses.touch(&mesh);
@@ -2109,7 +2173,7 @@ impl MeshFixerApp {
         } else if !self
             .requested
             .as_ref()
-            .is_some_and(|(m, t)| Mesh::ptr_eq(m, &mesh) && *t == transform)
+            .is_some_and(|(m, _)| Mesh::ptr_eq(m, &mesh))
         {
             self.requested = Some((mesh.clone(), transform));
             // The new render mesh shares this object's chunks on screen.
@@ -2136,6 +2200,36 @@ impl MeshFixerApp {
         if self.camera.is_none() && self.view_request.is_none() {
             self.view_request = Some(ViewRequest::Reset);
         }
+    }
+
+    /// Measure the active revision `mesh` again at `transform` (on a
+    /// worker), once per (revision, transform).
+    fn remeasure(&mut self, mesh: &Mesh, transform: [f64; 12]) {
+        if self
+            .remeasure_asked
+            .as_ref()
+            .is_some_and(|(m, t)| Mesh::ptr_eq(m, mesh) && *t == transform)
+        {
+            return;
+        }
+        let Some((a, object)) = self.analyses.get(mesh).zip(self.active) else {
+            return;
+        };
+        // allow-swallow: an object with no numbering yet numbers its holes from 1
+        let numbers = self.hole_numbers.get(&object).cloned().unwrap_or_default();
+        let request = worker::RemeasureRequest {
+            mesh: mesh.clone(),
+            diagnostics: a.diagnostics.clone(),
+            previous: a.defects.clone(),
+            from: a.transform,
+            to: transform,
+            numbers,
+            openings: self.active_openings(),
+        };
+        if let Some(old) = self.remeasure_asked.replace((mesh.clone(), transform)) {
+            self.workers.discard(old);
+        }
+        self.remeasurer.submit(request);
     }
 
     /// Request render vertices for every object that isn't active
@@ -2422,7 +2516,7 @@ impl MeshFixerApp {
     /// it's ready (the active object's is [`Self::current_analysis`]).
     pub fn analysis_of(&self, id: ObjectId) -> Option<&Analysis> {
         let object = self.session.document().object(id)?;
-        self.analysis_for(object.mesh()?, &object.transform)
+        self.analysis_for(object.mesh()?)
     }
 
     /// True if a row's item is the current target (the row shows selected).
@@ -2784,7 +2878,9 @@ impl MeshFixerApp {
     /// True while an open tool hides the defect and recent-repair
     /// overlays (Transform: D8, so the axis colours mean one thing).
     pub fn tool_hides_defects(&self) -> bool {
-        matches!(self.interactive, Some(Interactive::Transform(_)))
+        self.interactive
+            .as_ref()
+            .is_some_and(Interactive::hides_defects)
     }
 
     /// True if the view outlines the holes this frame.
@@ -2877,6 +2973,8 @@ impl MeshFixerApp {
         self.hover
             .clone()
             .or_else(|| self.view_hover().map(|h| (h.object, h.target.clone())))
+            // A tool that hides the defects hides their hover outline too.
+            .filter(|(_, t)| !self.tool_hides_defects() || *t == OverlayTarget::Object)
             .filter(|(object, target)| {
                 !selection
                     .as_ref()
@@ -3149,7 +3247,7 @@ impl MeshFixerApp {
             return false;
         };
         match (&self.analysis_failed, o.mesh()) {
-            (Some((m, t)), Some(mesh)) => Mesh::ptr_eq(m, mesh) && *t == o.transform,
+            (Some(m), Some(mesh)) => Mesh::ptr_eq(m, mesh),
             _ => false,
         }
     }
@@ -3503,28 +3601,31 @@ impl MeshFixerApp {
         }
     }
 
-    /// T opens Transform; while it's open, W, E and R pick Move, Rotate
-    /// and Scale (Meshmixer's keys). Its keys come before the app's.
-    fn transform_keys(&mut self, ctx: &egui::Context) {
-        let (t, w, e, r) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::NONE, egui::Key::T),
-                i.consume_key(egui::Modifiers::NONE, egui::Key::W),
-                i.consume_key(egui::Modifiers::NONE, egui::Key::E),
-                i.consume_key(egui::Modifiers::NONE, egui::Key::R),
-            )
-        });
-        if t {
-            self.open_transform();
+    /// The tools' keys, before the app's (I8): each catalogue tool's
+    /// shortcut opens it (T: Transform), and the open interactive tool
+    /// gets its own keys (Transform: W, E and R pick Move, Rotate and
+    /// Scale, as in Meshmixer). A key no open tool uses is left for the
+    /// rest of the app.
+    fn tool_keys(&mut self, ctx: &egui::Context) {
+        for e in crate::tools::CATALOGUE {
+            let Some(key) = e.shortcut else { continue };
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                if e.id == transform_tool::ID {
+                    self.open_transform();
+                } else {
+                    self.open_tool(e.id);
+                }
+            }
         }
-        let mode = match (w, e, r) {
-            (true, ..) => Some(GizmoMode::Move),
-            (_, true, _) => Some(GizmoMode::Rotate),
-            (.., true) => Some(GizmoMode::Scale),
-            _ => None,
-        };
-        if let Some(mode) = mode {
-            self.set_transform_mode(mode);
+        let keys = crate::tools::tool_keys(self.interactive.as_ref());
+        let pressed = ctx.input_mut(|i| {
+            keys.iter()
+                .find(|(k, _)| i.consume_key(egui::Modifiers::NONE, *k))
+                .map(|(_, what)| *what)
+        });
+        match pressed {
+            Some(crate::tools::ToolKey::Mode(mode)) => self.set_transform_mode(mode),
+            None => {}
         }
     }
 
@@ -3741,6 +3842,9 @@ impl MeshFixerApp {
                 }
             }
             Some(ToolPointer::Move(px)) => self.drag_to(px, invert),
+            // A click on a handle is the tool's, not a pick; Transform has
+            // nothing to do with it.
+            Some(ToolPointer::Click(_)) => {}
             Some(ToolPointer::End(px)) => {
                 self.drag_to(px, invert);
                 let Some(d) = self.transform_tool_mut().and_then(|t| t.dragging.take()) else {
@@ -4059,7 +4163,7 @@ impl MeshFixerApp {
             self.delete_active_object();
         }
         if !typing && !ctx.egui_wants_keyboard_input() {
-            self.transform_keys(&ctx);
+            self.tool_keys(&ctx);
         }
         self.keep_transform_target();
         if !ctx.egui_wants_keyboard_input() {
@@ -4185,13 +4289,14 @@ impl MeshFixerApp {
             self.box_select(b);
         }
         self.update_hover(out.pointer);
-        if self.hover.is_none() {
+        if self.hover.is_none() && !self.tool_hides_defects() {
             crate::panels::view_hover_tooltip(self, &ctx);
         }
 
         let overlays_pending = self.overlays.values().any(|s| s.ready.is_none());
         if self.busy.is_some()
             || self.is_analyzing()
+            || self.is_remeasuring()
             || self.view_request.is_some()
             || self.camera_animating()
             || self.pulse.is_some()

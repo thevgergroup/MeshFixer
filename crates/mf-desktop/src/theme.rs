@@ -32,6 +32,9 @@ pub const AXIS_X: Color32 = Color32::from_rgb(229, 72, 77);
 pub const AXIS_Y: Color32 = Color32::from_rgb(70, 167, 88);
 /// The gizmo's Z handle only (D8).
 pub const AXIS_Z: Color32 = Color32::from_rgb(62, 139, 240);
+/// The gizmo's handles with no single axis (the centre, the view ring,
+/// uniform scale) only (D9): a light neutral grey, distinct from `HOVER`.
+pub const GIZMO_FREE: Color32 = Color32::from_gray(180);
 /// The build-plate grid: a neutral, so it never competes with a defect or
 /// selection colour.
 pub const PLATE: Color32 = Color32::from_gray(70);
@@ -68,6 +71,9 @@ pub const SURFACE: Color32 = Color32::from_rgb(200, 194, 184);
 /// Back faces, seen through holes or flipped (a dark slate, not a defect colour).
 pub const BACK_FACE: Color32 = Color32::from_rgb(78, 84, 100);
 pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(38, 41, 46);
+/// Primary text drawn over the 3D view (the open tool's line): a neutral,
+/// never a geometry colour.
+pub const TEXT: Color32 = Color32::from_gray(225);
 /// Secondary text: details, hints, steps you can redo.
 pub const TEXT_MUTED: Color32 = Color32::from_gray(150);
 /// The running job's progress bar (a neutral: progress is not a defect,
@@ -120,7 +126,7 @@ pub fn gizmo_palette() -> mf_render::GizmoPalette {
         axis_x: rgba(AXIS_X),
         axis_y: rgba(AXIS_Y),
         axis_z: rgba(AXIS_Z),
-        neutral: rgba(Color32::WHITE),
+        neutral: rgba(GIZMO_FREE),
     }
 }
 

@@ -2108,12 +2108,16 @@ fn transform_field(
         tool.editing = None;
     }
     if entered {
+        let shown = value.map(crate::transform_tool::field_text);
         match text
             .trim()
             .trim_end_matches(['%', '°'])
             .trim()
             .parse::<f64>()
         {
+            // Enter on the value as shown changes nothing (the field shows
+            // 4 decimals: compare what it shows, not the bits behind it).
+            Ok(v) if shown.as_deref() == Some(crate::transform_tool::field_text(v).as_str()) => {}
             Ok(v) if v.is_finite() => app.set_transform_field(field, v),
             _ => {
                 app.status = Some(format!(

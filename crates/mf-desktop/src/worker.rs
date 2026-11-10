@@ -468,6 +468,14 @@ pub enum Message {
         ids: Vec<u32>,
         add: bool,
     },
+    /// `mesh`'s defects measured again at `transform` (its topology,
+    /// render mesh and overlays are kept: see [`remeasure`]).
+    Remeasured {
+        mesh: Mesh,
+        transform: [f64; 12],
+        defects: Arc<Defects>,
+        hole_view: Arc<HoleView>,
+    },
     /// The lowest world z of `object`'s revision `mesh` at `transform`
     /// (the Transform tool's plate snap; `None`: no vertices).
     LowestPoint {
@@ -1025,6 +1033,43 @@ pub struct AnalysisRequest {
     pub numbers: Arc<HoleNumbers>,
     /// The object's intentional openings at this revision.
     pub openings: Vec<u32>,
+}
+
+/// One analysed revision to measure again at a new transform.
+pub struct RemeasureRequest {
+    pub mesh: Mesh,
+    pub diagnostics: mf_geometry::Diagnostics,
+    /// Its defects, and the transform they were measured at.
+    pub previous: Arc<Defects>,
+    pub from: [f64; 12],
+    pub to: [f64; 12],
+    pub numbers: Arc<HoleNumbers>,
+    pub openings: Vec<u32>,
+}
+
+/// A transform-only change (a move, a turn, an undo of one): the mesh's
+/// topology, render mesh, face states and overlay lines all stay; only the
+/// measurements are made again ([`crate::defects::remeasured`]: O(defects)
+/// for a move). On a worker, like the analysis.
+pub fn remeasure(request: RemeasureRequest, ctx: &RunContext) -> Result<Message, Cancelled> {
+    ctx.checkpoint()?;
+    let defects = crate::defects::remeasured(
+        &request.previous,
+        &request.mesh,
+        &request.diagnostics,
+        &request.from,
+        &request.to,
+        fill_cap(),
+        &request.numbers,
+    );
+    ctx.checkpoint()?;
+    let hole_view = Arc::new(crate::defects::hole_view(&defects, &request.openings));
+    Ok(Message::Remeasured {
+        mesh: request.mesh,
+        transform: request.to,
+        defects: Arc::new(defects),
+        hole_view,
+    })
 }
 
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).

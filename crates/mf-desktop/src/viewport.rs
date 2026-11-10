@@ -115,6 +115,9 @@ pub enum ToolPointer {
     Move((f64, f64)),
     /// The tool's drag ended (the button was released).
     End((f64, f64)),
+    /// A plain click (no drag) where the tool claims the press: the
+    /// tool's, not a pick (a sculpt dab, a handle clicked).
+    Click((f64, f64)),
 }
 
 /// A box dragged in Select mode (or after B): `rect` in points from the
@@ -301,17 +304,21 @@ impl Viewport {
             })
             .map(local);
         let claimed = |p: egui::Pos2| tool_grabs.is_some_and(|grabs| grabs(local(p)));
-        let click = response
+        let clicked = response
             .clicked()
             .then(|| response.interact_pointer_pos())
-            .flatten()
-            // A click on the tool's handle isn't a pick.
-            .filter(|p| !claimed(*p))
-            .map(|p| Click {
-                px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
-                size: (rect.width() as f64, rect.height() as f64),
-                shift: ui.input(|i| i.modifiers.shift),
-            });
+            .flatten();
+        // A click the tool claims is the tool's, not a pick.
+        if let Some(p) = clicked.filter(|p| claimed(*p))
+            && tool.is_none()
+        {
+            tool = Some(ToolPointer::Click(local(p)));
+        }
+        let click = clicked.filter(|p| !claimed(*p)).map(|p| Click {
+            px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
+            size: (rect.width() as f64, rect.height() as f64),
+            shift: ui.input(|i| i.modifiers.shift),
+        });
         let pointer = response
             .hover_pos()
             .filter(|_| !ui.input(|i| i.pointer.any_down()))
@@ -352,8 +359,13 @@ impl Viewport {
                 );
             }
         }
-        let owned = self.tool_drag || tool.is_some();
-        handle_input(ui, &response, rect, cam, self.nav_mode, selecting || owned);
+        // While the tool drags, the camera holds still: no orbit, pan,
+        // wheel or pinch (the drag maps the pointer through this camera).
+        let owned =
+            self.tool_drag || matches!(tool, Some(ToolPointer::Start { .. } | ToolPointer::End(_)));
+        if !owned {
+            handle_input(ui, &response, rect, cam, self.nav_mode, selecting);
+        }
         ViewInput {
             rect,
             drawn: true,
@@ -463,12 +475,12 @@ impl Viewport {
             let text = ui.painter().layout_no_wrap(
                 hint.to_owned(),
                 egui::FontId::proportional(13.0),
-                theme::HOVER,
+                theme::TEXT,
             );
             let area = egui::Rect::from_min_size(top, text.size()).expand(4.0);
             ui.painter()
                 .rect_filled(area, 4.0, theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85));
-            ui.painter().galley(top, text, theme::HOVER);
+            ui.painter().galley(top, text, theme::TEXT);
         }
         // The controls hint, on a backdrop so it reads over the model. Kept
         // short so it clears the navigation bar at the bottom-right; Help >
@@ -845,7 +857,7 @@ fn handle_input(
     rect: egui::Rect,
     cam: &mut OrbitCamera,
     mode: NavMode,
-    // A box selection or an interactive tool owns the primary drag.
+    // A box selection owns the primary drag.
     selecting: bool,
 ) {
     let h = rect.height().max(1.0) as f64;

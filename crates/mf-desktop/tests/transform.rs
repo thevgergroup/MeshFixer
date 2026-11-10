@@ -175,6 +175,17 @@ fn release(h: &mut Harness<'_, MeshFixerApp>, pos: egui::Pos2) {
     h.step();
 }
 
+/// A 30 x 10 x 5 mm box, so a turn is plain to see.
+fn slab_file(dir: &std::path::Path) -> std::path::PathBuf {
+    let (positions, triangles) = mf_fixtures::cube(10.0).to_arrays();
+    let stretched = positions
+        .iter()
+        .map(|p| [p[0] * 3.0, p[1], p[2] * 0.5])
+        .collect();
+    let mesh = mf_geometry::Mesh::new(stretched, triangles).unwrap();
+    model_file(dir, "slab", mesh, IDENTITY)
+}
+
 fn cube_file(dir: &std::path::Path) -> std::path::PathBuf {
     model_file(dir, "cube", mf_fixtures::cube(10.0), IDENTITY)
 }
@@ -293,7 +304,8 @@ fn type_into(h: &mut Harness<'_, MeshFixerApp>, label: &str, text: &str) {
 fn numeric_rotation_commits_one_command() {
     require_gpu!("numeric_rotation_commits_one_command");
     let dir = tempfile::tempdir().unwrap();
-    let mut h = open(cube_file(dir.path()));
+    // A 30 x 10 x 5 slab: a quarter turn shows.
+    let mut h = open(slab_file(dir.path()));
     open_transform(&mut h);
     h.key_press(egui::Key::E);
     h.run_steps(3);
@@ -319,7 +331,7 @@ fn numeric_rotation_commits_one_command() {
     );
     assert_eq!(
         h.state().status.as_deref(),
-        Some("Rotated cube 90° about Z")
+        Some("Rotated slab 90° about Z")
     );
     h.run_steps(3);
     save(&mut h, "transform-numeric.png");
@@ -472,6 +484,265 @@ fn transform_tool_fits_a_laptop_window() {
         assert!(window.contains_rect(r), "{label} at {r:?} is on screen");
     }
     save(&mut h, "transform-laptop-1280x720.png");
+}
+
+/// The midpoint of the first boundary edge of the active object's hole,
+/// in window points.
+fn hole_edge_point(h: &Harness<'_, MeshFixerApp>) -> egui::Pos2 {
+    let app = h.state();
+    let mesh = app.active_mesh().unwrap();
+    let topo = mesh.topology();
+    let l = &topo.boundary_loops[0];
+    let t = transform(h);
+    let p = |v: u32| {
+        let c = mesh.corner_position(v);
+        mf_desktop::transform_tool::world_point(&t, glam::DVec3::from(c))
+    };
+    let mid = (p(l.vertices[0]) + p(l.vertices[1])) * 0.5;
+    app.screen_point(mid.to_array()).unwrap()
+}
+
+/// Rests the pointer at `pos` until the hover pick answers.
+fn hover(h: &mut Harness<'_, MeshFixerApp>, pos: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(pos + egui::vec2(30.0, 30.0)));
+    h.step();
+    h.event(egui::Event::PointerMoved(pos));
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(2) {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn tooltip_shown(h: &Harness<'_, MeshFixerApp>) -> bool {
+    h.query_all_by(|n| {
+        n.label()
+            .or(n.value())
+            .is_some_and(|l| l.contains("Click to select"))
+    })
+    .next()
+    .is_some()
+}
+
+/// Review C1: a move keeps the analysis. The panels, the tree's counts and
+/// hovering never go blank while the object's measurements are made again
+/// (topology, render mesh and overlays belong to the mesh, not to where
+/// it is).
+#[test]
+fn a_move_keeps_the_analysis_and_hover_working() {
+    require_gpu!("a_move_keeps_the_analysis_and_hover_working");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(defective_file(dir.path()));
+    h.run_steps(3);
+    let holes = |h: &Harness<'_, MeshFixerApp>| h.query_by_label_contains("Holes (").is_some();
+    assert!(holes(&h));
+    open_transform(&mut h);
+    // A small object: off the 1 mm grid, so any drag moves it.
+    h.state_mut().transform_tool_mut().unwrap().snap = false;
+    h.run_steps(3);
+    let history = steps(&h);
+    let (at, dir_x) = x_arrow(&h);
+    press(&mut h, at);
+    move_to(&mut h, at, at + dir_x * 80.0);
+    release(&mut h, at + dir_x * 80.0);
+    let start = Instant::now();
+    loop {
+        let app = h.state();
+        assert!(app.current_analysis().is_some(), "the analysis never goes");
+        assert!(!app.is_analyzing(), "no \"Analysing…\" after a move");
+        assert!(holes(&h), "the tree keeps its counts");
+        if app.busy.is_none() && steps(&h) == history + 1 && !app.is_remeasuring() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "the move never settled: busy {:?}, steps {} of {}, remeasuring {}, analysis at {:?}, object at {:?}",
+            app.busy,
+            steps(&h),
+            history + 1,
+            app.is_remeasuring(),
+            app.current_analysis().map(|a| a.transform),
+            transform(&h)
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let status = h.state().status.clone().unwrap();
+    assert!(status.starts_with("Moved scan by "), "{status}");
+    let a = h.state().current_analysis().unwrap();
+    assert_eq!(a.transform, transform(&h), "measured at the new place");
+    // Hover still works (with the tool closed: it hides defect hover).
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    let pos = hole_edge_point(&h);
+    hover(&mut h, pos);
+    assert!(
+        h.state().view_hover().is_some(),
+        "hovering the moved hole finds it"
+    );
+}
+
+/// Review I2: with Transform open, hovering a defect neither outlines it
+/// nor offers "Click to select" (a click there targets the object).
+#[test]
+fn transform_tool_hides_defect_hover() {
+    require_gpu!("transform_tool_hides_defect_hover");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(defective_file(dir.path()));
+    h.run_steps(3);
+    let pos = hole_edge_point(&h);
+    hover(&mut h, pos);
+    assert!(
+        h.state().view_hover().is_some(),
+        "the hole is under the pointer"
+    );
+    assert!(tooltip_shown(&h));
+    open_transform(&mut h);
+    hover(&mut h, pos);
+    assert!(h.state().view_hover().is_none(), "no defect hover");
+    assert!(!tooltip_shown(&h), "no \"Click to select\" tooltip");
+}
+
+/// Review I3: the tools' keys go to the open tool only (W, E and R are
+/// Transform's while it's open, and nobody's otherwise: see
+/// `tools::Interactive::keys`); typed into one of its fields, they're text.
+#[test]
+fn tool_keys_go_to_the_open_tool_only() {
+    require_gpu!("tool_keys_go_to_the_open_tool_only");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(cube_file(dir.path()));
+    // Shut, its keys do nothing (and aren't taken: `tools` unit tests).
+    h.key_press(egui::Key::E);
+    h.run_steps(2);
+    assert!(h.state().transform_tool().is_none());
+    open_transform(&mut h);
+    assert_eq!(h.state().transform_tool().unwrap().mode, GizmoMode::Move);
+    h.key_press(egui::Key::E);
+    h.run_steps(2);
+    assert_eq!(h.state().transform_tool().unwrap().mode, GizmoMode::Rotate);
+    h.key_press(egui::Key::W);
+    h.run_steps(2);
+    // Typing in a field: the key is text, not a mode switch.
+    h.get_by_label("Rotation Z").focus();
+    h.run_steps(2);
+    h.key_press(egui::Key::E);
+    h.run_steps(2);
+    assert_eq!(h.state().transform_tool().unwrap().mode, GizmoMode::Move);
+}
+
+/// Review minors 2 and 4: mid-drag, the wheel doesn't move the camera
+/// and Cmd/Ctrl+Z cancels the drag (undoing nothing).
+#[test]
+fn mid_drag_the_camera_and_history_hold_still() {
+    require_gpu!("mid_drag_the_camera_and_history_hold_still");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(cube_file(dir.path()));
+    open_transform(&mut h);
+    h.run_steps(3);
+    let (camera, revision, before) = (h.state().camera, h.state().session.current(), transform(&h));
+    let (at, dir_x) = x_arrow(&h);
+    let to = at + dir_x * 60.0;
+    press(&mut h, at);
+    move_to(&mut h, at, to);
+    h.event(egui::Event::MouseWheel {
+        unit: egui::MouseWheelUnit::Line,
+        delta: egui::vec2(0.0, 3.0),
+        modifiers: egui::Modifiers::NONE,
+        phase: egui::TouchPhase::Move,
+        source: egui::MouseWheelSource::Wheel,
+    });
+    h.step();
+    assert_eq!(h.state().camera, camera, "the wheel waits for the drag");
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.step();
+    assert_eq!(
+        h.state().shown_transform(h.state().active.unwrap()),
+        None,
+        "drag cancelled"
+    );
+    assert_eq!(h.state().session.current(), revision, "nothing undone");
+    release(&mut h, to);
+    h.run_steps(3);
+    assert_eq!(transform(&h), before);
+    assert_eq!(h.state().session.current(), revision, "nothing committed");
+}
+
+/// Drags the X arrow `px` points with `modifiers` held throughout, and
+/// returns the committed X translation.
+fn drag_x(h: &mut Harness<'_, MeshFixerApp>, px: f32, modifiers: egui::Modifiers) -> f64 {
+    let history = steps(h);
+    let (at, dir_x) = x_arrow(h);
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    press(h, at);
+    move_to(h, at, at + dir_x * px);
+    release(h, at + dir_x * px);
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    wait_until(h, "the move commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() == history + 1
+    });
+    transform(h)[9]
+}
+
+/// Snapping is on by default (a 1 mm grid); Cmd/Ctrl while dragging
+/// turns it off for that drag.
+#[test]
+fn moves_snap_to_the_grid_unless_cmd_is_held() {
+    require_gpu!("moves_snap_to_the_grid_unless_cmd_is_held");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(cube_file(dir.path()));
+    open_transform(&mut h);
+    h.run_steps(3);
+    let snapped = drag_x(&mut h, 73.0, egui::Modifiers::NONE);
+    assert!(
+        snapped > 0.5 && snapped.fract() == 0.0,
+        "on the 1 mm grid: {snapped}"
+    );
+    let free = drag_x(&mut h, 41.0, egui::Modifiers::COMMAND);
+    assert!(
+        free > snapped && free.fract() != 0.0,
+        "off the grid with Cmd: {free}"
+    );
+}
+
+/// Review minor 3: Enter on a field showing its value unchanged commits
+/// nothing; a real change commits once.
+#[test]
+fn enter_on_an_unchanged_field_commits_nothing() {
+    require_gpu!("enter_on_an_unchanged_field_commits_nothing");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(cube_file(dir.path()));
+    open_transform(&mut h);
+    h.run_steps(3);
+    let history = steps(&h);
+    type_into(&mut h, "Position X", "5");
+    h.run_steps(5);
+    assert_eq!(steps(&h), history, "5 is what it shows");
+    type_into(&mut h, "Scale Y", "100");
+    h.run_steps(5);
+    assert_eq!(steps(&h), history, "100% is what it shows");
+    type_into(&mut h, "Position X", "6");
+    wait_until(&mut h, "the move commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() == history + 1
+    });
+}
+
+/// A plain click on a handle is the tool's: it picks nothing.
+#[test]
+fn clicking_a_handle_is_not_a_pick() {
+    require_gpu!("clicking_a_handle_is_not_a_pick");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(defective_file(dir.path()));
+    open_transform(&mut h);
+    h.run_steps(3);
+    let (status, revision) = (h.state().status.clone(), h.state().session.current());
+    let (at, _) = x_arrow(&h);
+    press(&mut h, at);
+    release(&mut h, at);
+    h.run_steps(5);
+    assert!(h.state().selection.is_none());
+    assert_eq!(h.state().status, status);
+    assert_eq!(h.state().session.current(), revision);
+    assert!(h.state().transform_tool().is_some());
 }
 
 // --- Timing (heavy list, on demand: scripts/run-tests.sh) ---
@@ -686,4 +957,31 @@ fn ui_frames_stay_under_50ms_while_dropping_30m_to_plate() {
         frames.len()
     );
     assert!(*worst < FRAME_BUDGET, "a frame took {worst:?}");
+}
+
+/// Review C1 at scale: after a move of a 30M object commits, the analysis
+/// stays (no "Analysing…", no blank panels) while it is measured again.
+#[test]
+fn analysis_stays_available_after_moving_a_30m_object() {
+    require_gpu!("analysis_stays_available_after_moving_a_30m_object");
+    let (mut h, _rs) = opened_big(IDENTITY);
+    open_transform(&mut h);
+    let history = steps(&h);
+    let (at, dir_x) = x_arrow(&h);
+    press(&mut h, at);
+    move_to(&mut h, at, at + dir_x * 60.0);
+    release(&mut h, at + dir_x * 60.0);
+    let start = Instant::now();
+    loop {
+        let app = h.state();
+        assert!(app.current_analysis().is_some(), "the analysis never goes");
+        assert!(!app.is_analyzing());
+        if app.busy.is_none() && steps(&h) == history + 1 && !app.is_remeasuring() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(120), "never settled");
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    eprintln!("move to measured: {:.2} s", start.elapsed().as_secs_f64());
 }

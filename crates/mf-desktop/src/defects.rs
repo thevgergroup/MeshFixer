@@ -382,6 +382,43 @@ pub fn classify_numbered(
     out
 }
 
+/// `previous` (this mesh's defects measured at transform `from`), measured
+/// again at `to`: which holes, cracks, pieces and tangled edges there are
+/// depends only on the mesh, so only the measurements change (perimeters,
+/// sizes, where each defect is). A pure move shifts every place and keeps
+/// every size: O(defects). Any other change (rotate, scale) measures again
+/// with [`classify_numbered`] (no inspection, topology or GPU work).
+pub fn remeasured(
+    previous: &Defects,
+    mesh: &Mesh,
+    diagnostics: &Diagnostics,
+    from: &[f64; 12],
+    to: &[f64; 12],
+    fill_cap: usize,
+    numbers: &HoleNumbers,
+) -> Defects {
+    if from[..9] != to[..9] {
+        return classify_numbered(mesh, diagnostics, to, fill_cap, numbers);
+    }
+    let d = [to[9] - from[9], to[10] - from[10], to[11] - from[11]];
+    let mut out = previous.clone();
+    let places = &mut out.places;
+    for p in places
+        .holes
+        .iter_mut()
+        .chain(places.cracks.iter_mut())
+        .chain(places.loose.iter_mut())
+        .chain(places.tangled.iter_mut())
+        .flatten()
+    {
+        for (k, dk) in d.iter().enumerate() {
+            p.bounds.min[k] += dk;
+            p.bounds.max[k] += dk;
+        }
+    }
+    out
+}
+
 /// What identifies a hole across revisions: its lexicographically smallest
 /// corner (exact bits) and edge count. Kept elements keep their positions
 /// (ADR-0001), compaction included, so a hole another command didn't
@@ -1148,6 +1185,35 @@ mod tests {
         let mut e = mf_fixtures::grid(n).edit();
         e.remove_face(mf_geometry::FaceId(2 * (n + 1))).unwrap();
         e.finish().unwrap().0
+    }
+
+    /// A move only shifts where each defect is; a rotation measures again.
+    /// Either way the result is what a fresh analysis at the new
+    /// transform finds.
+    #[test]
+    fn remeasuring_after_a_move_or_turn_matches_a_fresh_analysis() {
+        let mesh = holed_grid();
+        let diagnostics = mf_geometry::inspect(&mesh);
+        let numbers = HoleNumbers::default();
+        let before = classify_numbered(&mesh, &diagnostics, &IDENTITY, 1000, &numbers);
+        let mut moved = IDENTITY;
+        moved[9] = 4.0;
+        moved[11] = -2.5;
+        let mut turned = moved;
+        (turned[0], turned[1], turned[3], turned[4]) = (0.0, 1.0, -1.0, 0.0);
+        for to in [moved, turned] {
+            let again = remeasured(&before, &mesh, &diagnostics, &IDENTITY, &to, 1000, &numbers);
+            let fresh = classify_numbered(&mesh, &diagnostics, &to, 1000, &numbers);
+            assert_eq!(again.holes, fresh.holes);
+            assert_eq!(again.world_size, fresh.world_size);
+            for (a, b) in again.places.holes.iter().zip(&fresh.places.holes) {
+                let (a, b) = (a.unwrap(), b.unwrap());
+                for k in 0..3 {
+                    assert!((a.bounds.min[k] - b.bounds.min[k]).abs() < 1e-12);
+                    assert!((a.bounds.max[k] - b.bounds.max[k]).abs() < 1e-12);
+                }
+            }
+        }
     }
 
     fn hole_perimeter(d: &Defects, edges: usize) -> f64 {

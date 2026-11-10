@@ -143,6 +143,13 @@ impl<V: GpuHeld> AnalysisCache<V> {
             .map(|(_, v)| v)
     }
 
+    pub fn get_mut(&mut self, mesh: &Mesh) -> Option<&mut V> {
+        self.entries
+            .iter_mut()
+            .find(|(m, _)| Mesh::ptr_eq(m, mesh))
+            .map(|(_, v)| v)
+    }
+
     /// Revisions cached.
     pub fn len(&self) -> usize {
         self.entries.len()
