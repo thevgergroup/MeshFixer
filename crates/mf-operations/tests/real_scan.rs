@@ -286,6 +286,42 @@ fn real_scan_holes_fill_smoothly() {
     assert!(smooth_rim < flat_rim, "{smooth_rim} vs {flat_rim}");
 }
 
+/// MF-ISSUE-040: filling every hole of the real scan in one whole-object
+/// run keeps the scan consistently oriented: no edge is walked the same
+/// way by two faces, before or after (every patch is wound to match the
+/// faces it meets).
+#[test]
+fn real_scan_fill_keeps_orientation_consistent() {
+    let Some(m) = scan("real_scan_fill_keeps_orientation_consistent") else {
+        return;
+    };
+    let before = inspect(&m);
+    assert_eq!(before.inconsistent_orientation_edges, 0, "{before:?}");
+    let out = find("mesh.fill_holes")
+        .unwrap()
+        .execute(
+            &m,
+            &Target::WholeObject,
+            &params(),
+            &mf_operations::RunContext::none(),
+        )
+        .unwrap();
+    assert!(
+        !out.report["filled_loops"].as_array().unwrap().is_empty(),
+        "{}",
+        out.report
+    );
+    let (after, _) = out.change.unwrap();
+    let d = inspect(&after);
+    assert_eq!(d.inconsistent_orientation_edges, 0, "{d:?}");
+    assert_eq!(d.non_manifold_edges, 0);
+    assert_ne!(
+        d.volume_status,
+        mf_geometry::VolumeStatus::InconsistentOrientation,
+        "{d:?}"
+    );
+}
+
 #[test]
 fn real_scan_render_before_after() {
     let test = "real_scan_render_before_after";

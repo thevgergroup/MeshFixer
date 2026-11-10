@@ -770,3 +770,63 @@ mod fairing {
         assert!(failures.is_empty(), "{failures:#?}");
     }
 }
+
+/// Two 4-edge holes that share two non-adjacent vertices (x, y): an oblate
+/// "octahedron" (poles x and y close together, equator a, c, d, b) made of
+/// two 2-triangle pieces that touch only at the poles. Each hole is
+/// cheapest to close across the short chord x–y, so without coordination
+/// both would use it and x–y would get four faces.
+fn holes_sharing_a_chord() -> Mesh {
+    let h = 0.2;
+    let positions = vec![
+        [0.0, h, 0.0],    // 0 x
+        [0.0, -h, 0.0],   // 1 y
+        [1.0, 0.0, 0.0],  // 2 a
+        [0.0, 0.0, -1.0], // 3 b
+        [0.0, 0.0, 1.0],  // 4 c
+        [-1.0, 0.0, 0.0], // 5 d
+    ];
+    let (x, y, a, b, c, d) = (0, 1, 2, 3, 4, 5);
+    let triangles = vec![
+        // Piece 1, on (x, a, y, b), joined across a–b.
+        [x, a, b],
+        [y, b, a],
+        // Piece 2, on (x, d, y, c), joined across c–d.
+        [y, c, d],
+        [x, d, c],
+    ];
+    Mesh::new(positions, triangles).unwrap()
+}
+
+/// MF-ISSUE-038: in one whole-object run, a chord an earlier loop's patch
+/// used is excluded for later loops, so no edge gets more than two faces.
+#[test]
+fn a_chord_used_by_an_earlier_loop_is_excluded_for_later_loops() {
+    let m = holes_sharing_a_chord();
+    let loops = &m.topology().boundary_loops;
+    assert_eq!(loops.len(), 2, "{loops:?}");
+    for l in loops {
+        assert_eq!(l.edge_count, 4, "{l:?}");
+        assert!(l.vertices.contains(&0) && l.vertices.contains(&1), "{l:?}");
+    }
+    // Each hole alone closes across x–y.
+    for l in loops {
+        let (one, _, _) = fill(&m, Target::Loops(vec![l.id]), NO_REFINE).unwrap();
+        let uses_chord = one
+            .faces()
+            .filter(|(_, t)| t.contains(&0) && t.contains(&1))
+            .count();
+        assert_eq!(uses_chord, 2, "loop {} alone", l.id);
+    }
+    for style in [NO_REFINE, &[][..]] {
+        let (after, _, report) = fill(&m, Target::WholeObject, style).unwrap();
+        let d = inspect(&after);
+        assert_eq!(d.non_manifold_edges, 0, "{report}");
+        let on_chord = after
+            .faces()
+            .filter(|(_, t)| t.contains(&0) && t.contains(&1))
+            .count();
+        assert!(on_chord <= 2, "x–y has {on_chord} faces: {report}");
+        assert!(d.is_closed && d.is_manifold, "{d:?} {report}");
+    }
+}

@@ -1093,14 +1093,7 @@ impl MeshFixerApp {
                 self.status = Some(format!("Selection partly lost ({} element(s))", lost.len()));
                 self.selection = Some(mapped);
             }
-            Translation::Failed(TranslateError::LoopClosed { faces }) => {
-                let plural = if faces.len() == 1 { "" } else { "s" };
-                self.status = Some(format!(
-                    "Hole filled ({} face{plural}); selection cleared",
-                    faces.len()
-                ));
-            }
-            Translation::Failed(e) => self.status = Some(selection_lost(&e)),
+            Translation::Failed(e) => self.status = Some(selection_cleared(&e)),
             Translation::Ambiguous { candidates } => {
                 self.status = Some(format!(
                     "Selection cleared: it could now be any of {} parts",
@@ -3455,6 +3448,22 @@ pub fn defect_target(d: &Defect) -> OverlayTarget {
     }
 }
 
+/// The status line when a history move clears the selection: a filled
+/// hole says so with its face count; anything else says why
+/// (MF-ISSUE-036: a hole removed with its surroundings is not "filled").
+fn selection_cleared(e: &TranslateError) -> String {
+    match e {
+        TranslateError::LoopClosed { faces } => {
+            let plural = if faces.len() == 1 { "" } else { "s" };
+            format!(
+                "Hole filled ({} face{plural}); selection cleared",
+                faces.len()
+            )
+        }
+        other => selection_lost(other),
+    }
+}
+
 /// Why a selection couldn't follow a history move, in plain words.
 fn selection_lost(e: &TranslateError) -> String {
     let why = match e {
@@ -3462,6 +3471,7 @@ fn selection_lost(e: &TranslateError) -> String {
         TranslateError::ObjectMissing => "its object doesn't exist at this step",
         TranslateError::AllLost { .. } => "what was selected doesn't exist at this step",
         TranslateError::LoopClosed { .. } => "the hole is closed at this step",
+        TranslateError::LoopRemoved => "the hole was removed along with the faces around it",
         TranslateError::KindNotTranslatable => "this kind of selection can't follow history",
         TranslateError::NotInSource { .. } => "it named elements that don't exist",
     };
@@ -3567,6 +3577,22 @@ mod tests {
         assert!(import_failed(&other).ends_with("from the program that made it."));
     }
 
+    /// MF-ISSUE-036: a hole that was filled and a hole whose surroundings
+    /// were removed clear the selection with different messages.
+    #[test]
+    fn a_filled_hole_and_a_removed_hole_say_which() {
+        let closed = selection_cleared(&TranslateError::LoopClosed {
+            faces: vec![mf_geometry::FaceId(1), mf_geometry::FaceId(2)],
+        });
+        assert_eq!(closed, "Hole filled (2 faces); selection cleared");
+        let removed = selection_cleared(&TranslateError::LoopRemoved);
+        assert_eq!(
+            removed,
+            "Selection cleared: the hole was removed along with the faces around it"
+        );
+        assert!(!removed.contains("filled"), "{removed}");
+    }
+
     /// The status line explains a lost selection in words, never a debug dump.
     #[test]
     fn lost_selection_is_explained_in_plain_words() {
@@ -3575,6 +3601,7 @@ mod tests {
             TranslateError::ObjectMissing,
             TranslateError::AllLost { lost: vec![1] },
             TranslateError::LoopClosed { faces: vec![] },
+            TranslateError::LoopRemoved,
             TranslateError::KindNotTranslatable,
             TranslateError::NotInSource { ids: vec![2] },
         ] {

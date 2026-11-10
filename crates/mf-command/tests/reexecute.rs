@@ -143,3 +143,75 @@ fn reexecute_fails_by_name_when_target_gone() {
         "a failed re-execution doesn't move the cursor"
     );
 }
+
+/// A recorded fill on the imported mesh, and a second revision to stand on.
+fn recorded_fill() -> (Session, ObjectId, RevisionId, mf_command::CommandRecord) {
+    let mut s = Session::new();
+    let id = s.add_geometry(Geometry::Mesh(damaged()), "scan".into(), None);
+    let import = s.current();
+    let sel = hole(&s, id);
+    s.execute(invocation("mesh.fill_holes", id, Some(sel), &[]))
+        .unwrap();
+    let record = s.records_to_current().last().unwrap().clone();
+    (s, id, import, record)
+}
+
+fn revision_count(s: &Session) -> usize {
+    (0..)
+        .take_while(|&r| s.node(RevisionId(r)).is_some())
+        .count()
+}
+
+/// MF-ISSUE-040: when re-execution fails after moving to `onto` (here the
+/// operation itself fails), the cursor goes back to where it was, not to
+/// `onto`.
+#[test]
+fn reexecute_restores_the_cursor_when_the_command_fails() {
+    let (mut s, id, import, mut record) = recorded_fill();
+    let elsewhere = upstream(&mut s, id, import, "5");
+    assert_ne!(elsewhere, import);
+    record.params.0.insert(
+        "fill_style".into(),
+        mf_spec::ParamValue::Text("not-a-style".into()),
+    );
+    let revisions = revision_count(&s);
+    let err = s.reexecute(&record, import).unwrap_err();
+    assert!(matches!(err, CommandError::Operation(_)), "{err:?}");
+    assert_eq!(s.current(), elsewhere, "the cursor went back");
+    assert_eq!(revision_count(&s), revisions, "no revision was added");
+}
+
+/// MF-ISSUE-040: a record from a newer operation version is refused by
+/// name, without moving the cursor.
+#[test]
+fn reexecute_refuses_an_operation_version_it_cannot_upgrade() {
+    let (mut s, _, import, mut record) = recorded_fill();
+    let here = s.current();
+    record.op_version = 99;
+    match s.reexecute(&record, import).unwrap_err() {
+        CommandError::OperationVersion {
+            op,
+            recorded,
+            current,
+        } => {
+            assert_eq!(op, "mesh.fill_holes");
+            assert_eq!(recorded, 99);
+            assert_eq!(current, mf_operations::find(&op).unwrap().version());
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.current(), here);
+}
+
+/// MF-ISSUE-040: re-executing onto a revision that doesn't exist names it.
+#[test]
+fn reexecute_onto_an_unknown_revision_names_it() {
+    let (mut s, _, _, record) = recorded_fill();
+    let here = s.current();
+    let missing = RevisionId(9_999);
+    match s.reexecute(&record, missing).unwrap_err() {
+        CommandError::UnknownRevision(r) => assert_eq!(r, missing),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.current(), here);
+}

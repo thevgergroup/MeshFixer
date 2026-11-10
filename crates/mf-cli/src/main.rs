@@ -504,30 +504,8 @@ fn export(
         .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
     metrics.structures(mesh);
     if format == Format::ThreeMf {
-        let objects = doc
-            .objects()
-            .iter()
-            .map(|o| {
-                let mesh = o.mesh().ok_or_else(|| {
-                    Failure::Runtime(format!("object '{}' is not a mesh", o.name))
-                })?;
-                Ok(mf_io::threemf::ModelObject {
-                    name: o.name.clone(),
-                    mesh: mesh.clone(),
-                    transform: o.transform,
-                })
-            })
-            .collect::<Result<Vec<_>, Failure>>()?;
-        let model = mf_io::threemf::Model {
-            unit: doc.units(),
-            objects,
-        };
-        let warnings = metrics.record("export", || {
-            mf_io::write_model_path_with(&model, output, ctx)
-        })?;
-        for w in &warnings {
-            eprintln!("warning: {w}");
-        }
+        let model = threemf_model(doc)?;
+        metrics.record("export", || write_threemf(&model, output, ctx))?;
     } else {
         // MF-ISSUE-035: STL/OBJ write a single mesh with no transform of
         // its own, so apply the object's here (mirrors
@@ -541,6 +519,42 @@ fn export(
             "exported with the object's position applied: {}",
             output.display()
         );
+    }
+    Ok(())
+}
+
+/// Every object of `doc` as a 3MF model: object-space geometry, each with
+/// its own transform, in the document's unit.
+fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Failure> {
+    let objects = doc
+        .objects()
+        .iter()
+        .map(|o| {
+            let mesh = o
+                .mesh()
+                .ok_or_else(|| Failure::Runtime(format!("object '{}' is not a mesh", o.name)))?;
+            Ok(mf_io::threemf::ModelObject {
+                name: o.name.clone(),
+                mesh: mesh.clone(),
+                transform: o.transform,
+            })
+        })
+        .collect::<Result<Vec<_>, Failure>>()?;
+    Ok(mf_io::threemf::Model {
+        unit: doc.units(),
+        objects,
+    })
+}
+
+/// Write (and verify) a 3MF model, printing its warnings.
+fn write_threemf(
+    model: &mf_io::threemf::Model,
+    output: &Path,
+    ctx: &RunContext,
+) -> Result<(), Failure> {
+    let warnings = mf_io::write_model_path_with(model, output, ctx)?;
+    for w in &warnings {
+        eprintln!("warning: {w}");
     }
     Ok(())
 }
@@ -1165,6 +1179,16 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     for (id, verdict) in &report.results {
         println!("command {}: {verdict:?}", id.0);
     }
+    // MF-ISSUE-046: byte-identical and within-tolerance results are counted
+    // apart, so a cross-platform run shows which it got.
+    let count =
+        |f: fn(&mf_command::Verdict) -> bool| report.results.iter().filter(|(_, v)| f(v)).count();
+    println!(
+        "verdicts: {} exact, {} equivalent, {} not verified",
+        count(|v| matches!(v, mf_command::Verdict::Exact)),
+        count(|v| matches!(v, mf_command::Verdict::Equivalent { .. })),
+        count(|v| !v.is_verified()),
+    );
     if let Some(out) = m.get_one::<PathBuf>("output") {
         let format = Format::from_path(out).ok_or_else(|| {
             Failure::Usage(format!("unsupported output format: {}", out.display()))
@@ -1178,10 +1202,11 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             .mesh()
             .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
         // MF-ISSUE-035: apply the object's transform before an STL/OBJ
-        // write, as `export` does (3MF carries its own transform per
-        // object, so only the single-mesh STL/OBJ formats need this).
+        // write, as `export` does. A 3MF goes through `export`'s path too:
+        // object-space geometry with each object's own transform, so the
+        // transform is kept and applied once (by whatever reads it).
         if format == Format::ThreeMf {
-            mf_io::write_path_with(mesh, out, format, doc.units(), ctx)?;
+            write_threemf(&threemf_model(doc)?, out, ctx)?;
         } else {
             let transformed = mf_io::transform_mesh(mesh, &object.transform);
             mf_io::write_path_with(&transformed, out, format, doc.units(), ctx)?;

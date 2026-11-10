@@ -1,0 +1,11 @@
+{
+  "format": "mfx-log/1",
+  "engine_version": "0.0.1",
+  "sources": [
+    {
+      "object": 1,
+      "path": "../two-holes.stl",
+      "content_hash": "f6596d69bf535fd331de05ed7ac1764a67780931f31fd27389d4c9c3485a5a07"
+    }
+  ]
+}

@@ -245,6 +245,10 @@ fn run_saves_log_and_replay_verifies_it() {
     );
     let text = String::from_utf8_lossy(&replayed.stdout);
     assert!(text.contains("Exact"), "{text}");
+    assert!(
+        text.contains("verdicts: 1 exact, 0 equivalent, 0 not verified"),
+        "{text}"
+    );
 
     // Tampering makes replay fail with exit code 1.
     let commands = log.join("commands.jsonl");
@@ -260,6 +264,23 @@ fn run_saves_log_and_replay_verifies_it() {
         Some(1),
         "{}",
         String::from_utf8_lossy(&tampered.stdout)
+    );
+}
+
+/// MF-ISSUE-046: replay counts Exact and Equivalent verdicts separately
+/// (the cross-OS CI job prints this line per OS). The fixture's log was
+/// recorded with jittered positions, so every command is Equivalent.
+#[test]
+fn replay_counts_exact_and_equivalent_separately() {
+    let log = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../mf-command/tests/data/equivalent-replay/session.mfx.log");
+    let r = meshfixer(&["replay", log.to_str().unwrap()]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let text = String::from_utf8_lossy(&r.stdout);
+    assert!(text.contains("command 1: Equivalent"), "{text}");
+    assert!(
+        text.contains("verdicts: 0 exact, 2 equivalent, 0 not verified"),
+        "{text}"
     );
 }
 
@@ -498,6 +519,82 @@ fn run_applies_a_mirrored_transform_and_keeps_normals_outward() {
     assert!(
         volume > 0.0,
         "mirrored object's winding wasn't flipped on export: signed volume {volume}"
+    );
+}
+
+/// A one-object 3MF (a unit cube translated by +100 in x), run through
+/// `mesh.compact` with a saved log: the log replays an object that has a
+/// transform.
+fn translated_cube_log(dir: &Path) -> std::path::PathBuf {
+    use mf_io::threemf::{Model, ModelObject, Unit};
+    let input = dir.join("moved.3mf");
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![ModelObject {
+            name: "box".into(),
+            mesh: cube(1.0),
+            transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0],
+        }],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let log = dir.join("moved.mfx.log");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.compact",
+        "--save-log",
+        log.to_str().unwrap(),
+        "-o",
+        dir.join("run.3mf").to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    log
+}
+
+/// `replay -o out.stl` writes the object where its transform puts it.
+#[test]
+fn replay_writes_an_stl_with_the_objects_transform_applied() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = translated_cube_log(dir.path());
+    let out = dir.path().join("out.stl");
+    let r = meshfixer(&["replay", log.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("position applied"),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    let bbox = mf_io::read_path(&out).unwrap().mesh.bounding_box().unwrap();
+    assert!(
+        bbox.min[0] > 99.0 && bbox.max[0] < 102.0,
+        "the transform wasn't applied: {bbox:?}"
+    );
+}
+
+/// `replay -o out.3mf` keeps the object's transform as the object's
+/// transform, with its geometry in object space: the transform is
+/// neither dropped nor applied twice.
+#[test]
+fn replay_writes_a_threemf_that_keeps_the_transform_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let log = translated_cube_log(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&["replay", log.to_str().unwrap(), "-o", out.to_str().unwrap()]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let model = mf_io::read_model(&out).unwrap();
+    assert_eq!(model.objects.len(), 1);
+    let object = &model.objects[0];
+    assert_eq!(
+        object.transform[9..],
+        [100.0, 0.0, 0.0],
+        "{:?}",
+        object.transform
+    );
+    let bbox = object.mesh.bounding_box().unwrap();
+    assert!(
+        bbox.min[0] > -0.5 && bbox.max[0] < 1.5,
+        "object-space geometry was moved (transform applied twice): {bbox:?}"
     );
 }
 

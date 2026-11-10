@@ -211,6 +211,23 @@ fn ring_faces(
         .collect())
 }
 
+/// Edges of `patch` between two of its loop's vertices (local indices,
+/// `i < j`): the loop's own edges and the chords across it.
+fn rim_edges(patch: &refine::Patch) -> impl Iterator<Item = (usize, usize)> + '_ {
+    patch.tris.iter().flat_map(move |t| {
+        (0..3).filter_map(move |k| {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            (a < patch.n_boundary && b < patch.n_boundary).then_some((a.min(b), a.max(b)))
+        })
+    })
+}
+
+/// Local edge (i, j) of loop `l` as a mesh edge (low vertex first).
+fn mesh_edge(l: &BoundaryLoop, i: usize, j: usize) -> (u32, u32) {
+    let (a, b) = (l.vertices[i], l.vertices[j]);
+    (a.min(b), a.max(b))
+}
+
 impl Operation for FillHoles {
     fn id(&self) -> &'static str {
         "mesh.fill_holes"
@@ -449,9 +466,62 @@ impl Operation for FillHoles {
             ctx.checkpoint()?;
         }
 
+        // MF-ISSUE-038: loops were patched independently, so two loops that
+        // share two non-adjacent vertices could both have used the chord
+        // between them (giving that edge four faces). Going in loop order,
+        // a patch that uses a chord an earlier patch already used is built
+        // again with those chords excluded, exactly as an existing mesh
+        // edge is. Rare, so this runs one loop at a time; the result still
+        // depends only on loop order.
+        let mut used_chords: BTreeSet<(u32, u32)> = BTreeSet::new();
         let mut edit = input.edit();
         let mut filled = Vec::new();
-        for ((l, patch), faired) in fill.iter().zip(patches).zip(fairing) {
+        for (li, ((l, mut patch), mut faired)) in fill.iter().zip(patches).zip(fairing).enumerate()
+        {
+            if let Some(p) = &patch {
+                let taken: BTreeSet<(usize, usize)> = rim_edges(p)
+                    .filter(|&(i, j)| used_chords.contains(&mesh_edge(l, i, j)))
+                    .collect();
+                if !taken.is_empty() {
+                    let mut excluded = existing[li].clone();
+                    excluded.extend(taken);
+                    let positions: Vec<[f64; 3]> = l
+                        .vertices
+                        .iter()
+                        .map(|&v| input.corner_position(v))
+                        .collect();
+                    patch = triangulate::triangulate(
+                        &positions,
+                        &normals[li],
+                        &excluded,
+                        min_area,
+                        ctx,
+                    )?
+                    .map(|tris| refine::Patch {
+                        n_boundary: positions.len(),
+                        sigma: Vec::new(),
+                        tris,
+                        positions,
+                    });
+                    faired = None;
+                    if let Some(p) = &mut patch {
+                        if refine {
+                            p.sigma = sigma[li].clone();
+                            p.refine(&excluded, ctx)?;
+                        }
+                        if fair {
+                            faired = Some(fairing::fair(
+                                p,
+                                &l.vertices,
+                                &rings[li],
+                                input,
+                                style,
+                                ctx,
+                            )?);
+                        }
+                    }
+                }
+            }
             // A patch whose fairing didn't converge is never kept flat: an
             // error when selected, skipped and reported in a whole-object
             // run.
@@ -505,6 +575,7 @@ impl Operation for FillHoles {
                 )
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;
             }
+            used_chords.extend(rim_edges(&patch).map(|(i, j)| mesh_edge(l, i, j)));
             let mut entry = json!({"id": l.id, "edges": l.edge_count, "faces": patch.tris.len()});
             if let Some(Ok(f)) = faired {
                 entry["faired_vertices"] = json!(f.vertices);

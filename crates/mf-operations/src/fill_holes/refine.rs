@@ -107,16 +107,45 @@ impl Patch {
         any
     }
 
+    /// Area vector (twice the area, along the normal) of triangle `t`.
+    fn area_vector(&self, t: [usize; 3]) -> [f64; 3] {
+        let [a, b, c] = t.map(|v| self.positions[v]);
+        cross(sub(b, a), sub(c, a))
+    }
+
+    /// Whether flipping (u, v, c) + (v, u, d) to (c, u, d) + (c, d, v)
+    /// keeps the patch from folding (MF-ISSUE-037). On a non-planar patch
+    /// (a saddle, say) the circumsphere test can ask for a flip across a
+    /// quad that isn't convex seen from the patch, which turns a triangle
+    /// upside down. Rejected when either new triangle faces against the
+    /// two it replaces (their summed area vector), or when more of the new
+    /// pair than of the old pair face against the patch normal `patch`.
+    fn flip_keeps_orientation(&self, [u, v, c, d]: [usize; 4], patch: [f64; 3]) -> bool {
+        let old = [self.area_vector([u, v, c]), self.area_vector([v, u, d])];
+        let new = [self.area_vector([c, u, d]), self.area_vector([c, d, v])];
+        let quad = [0, 1, 2].map(|k| old[0][k] + old[1][k]);
+        let against = |pair: &[[f64; 3]; 2]| pair.iter().filter(|&&n| dot(n, patch) <= 0.0).count();
+        new.iter().all(|&n| dot(n, quad) > 0.0) && against(&new) <= against(&old)
+    }
+
     /// Relax pass: flip interior edges whose opposite vertex lies inside the
     /// circumsphere of the neighbouring triangle. Never creates an edge that
-    /// already exists (in the patch or in `existing`). Bounded by
-    /// `max_flips`, a termination guard for non-planar patches.
+    /// already exists (in the patch or in `existing`), nor a fold
+    /// ([`Self::flip_keeps_orientation`]). Bounded by `max_flips`, a
+    /// termination guard for non-planar patches.
     fn relax(
         &mut self,
         existing: &BTreeSet<(usize, usize)>,
         ctx: &RunContext,
     ) -> Result<(), Cancelled> {
         let max_flips = 100 * self.tris.len().max(1);
+        // The patch normal: the sum of its triangles' area vectors, which
+        // is the rim's vector area, so no flip or split changes it.
+        let patch = self
+            .tris
+            .iter()
+            .map(|&t| self.area_vector(t))
+            .fold([0.0; 3], |s, n| [s[0] + n[0], s[1] + n[1], s[2] + n[2]]);
         let mut flips = 0;
         loop {
             // One pass is a sort and a sweep over the patch's edges.
@@ -156,7 +185,9 @@ impl Patch {
                 else {
                     continue;
                 };
-                if dist(centre, self.positions[d]) < r * (1.0 - 1e-12) {
+                if dist(centre, self.positions[d]) < r * (1.0 - 1e-12)
+                    && self.flip_keeps_orientation([u, v, c, d], patch)
+                {
                     // Triangles (u, v, c) and (v, u, d) become (c, u, d) and
                     // (c, d, v), keeping the patch's orientation.
                     self.tris[t1] = [c, u, d];
@@ -189,5 +220,68 @@ impl Patch {
             }
             self.relax(existing, ctx)?;
         }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may panic on failure
+mod tests {
+    use super::*;
+
+    fn normal(p: &Patch, t: [usize; 3]) -> [f64; 3] {
+        let [a, b, c] = t.map(|v| p.positions[v]);
+        cross(sub(b, a), sub(c, a))
+    }
+
+    /// MF-ISSUE-037: a saddle-shaped hole (five rim points on the unit
+    /// circle, lifted onto z = 3 (x² − y²)). Starting from a fan whose
+    /// triangles all face along the patch normal, refinement's Delaunay
+    /// flips used to fold one triangle upside down; every triangle must
+    /// still face along the patch normal afterwards.
+    #[test]
+    fn refining_a_saddle_hole_never_reverses_a_triangle() {
+        let n = 5;
+        let positions: Vec<[f64; 3]> = (0..n)
+            .map(|i| {
+                let a = 2.0 * std::f64::consts::PI * i as f64 / n as f64;
+                let (x, y) = (a.cos(), a.sin());
+                [x, y, 3.0 * (x * x - y * y)]
+            })
+            .collect();
+        // A fan in the winding `triangulate` emits ([m, i, j]).
+        let tris: Vec<[usize; 3]> = (1..n - 1).map(|j| [0, j + 1, j]).collect();
+        let mut p = Patch {
+            sigma: vec![0.3; n],
+            positions,
+            tris,
+            n_boundary: n,
+        };
+        // Splits and flips both keep the sum of the triangles' area vectors
+        // (it is the rim's vector area), so this is the patch normal before
+        // and after.
+        let patch = |p: &Patch| {
+            p.tris
+                .iter()
+                .map(|&t| normal(p, t))
+                .fold([0.0; 3], |s, v| [s[0] + v[0], s[1] + v[1], s[2] + v[2]])
+        };
+        let before = patch(&p);
+        assert!(p.tris.iter().all(|&t| dot(normal(&p, t), before) > 0.0));
+
+        p.refine(&BTreeSet::new(), &RunContext::none()).unwrap();
+        assert!(p.tris.len() > 3, "refinement added vertices");
+        let after = patch(&p);
+        let reversed: Vec<[usize; 3]> = p
+            .tris
+            .iter()
+            .copied()
+            .filter(|&t| dot(normal(&p, t), after) <= 0.0)
+            .collect();
+        assert!(
+            reversed.is_empty(),
+            "{} of {} triangles face against the patch: {reversed:?}",
+            reversed.len(),
+            p.tris.len()
+        );
     }
 }

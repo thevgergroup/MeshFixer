@@ -126,6 +126,9 @@ fn untranslatable_reason(t: &Translation) -> String {
             TranslateError::LoopClosed { faces } => {
                 format!("the boundary loop was closed (by {} faces)", faces.len())
             }
+            TranslateError::LoopRemoved => {
+                "the boundary loop was removed along with the faces around it".into()
+            }
             TranslateError::KindNotTranslatable => "its kind can't be translated".into(),
             TranslateError::NotInSource { ids } => {
                 format!("{ids:?} aren't elements of the selection's own revision")
@@ -165,6 +168,8 @@ impl Prepared {
         let output = self
             .op
             .execute(&self.input, &self.target_spec, &self.params, ctx)?;
+        #[cfg(feature = "test-position-jitter")]
+        let output = crate::jitter::perturb(output);
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6). Still
         // cancellable: the first hash of a freshly imported mesh is O(n).

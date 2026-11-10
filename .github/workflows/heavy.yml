@@ -183,4 +183,8 @@ jobs:
         run: |
           set -o pipefail
           target/release/meshfixer replay xos/session.mfx.log | tee replay.txt
-          { echo "### Cross-OS replay on ${RUNNER_OS}"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          # MF-ISSUE-046: Exact (byte-identical) and Equivalent (within
+          # tolerance) counted apart, per OS.
+          counts=$(grep '^verdicts: ' replay.txt)
+          echo "${RUNNER_OS}: ${counts}"
+          { echo "### Cross-OS replay on ${RUNNER_OS}"; echo "**${counts}**"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
