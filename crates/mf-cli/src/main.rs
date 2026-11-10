@@ -496,9 +496,11 @@ fn export(
     ctx: &RunContext,
 ) -> Result<(), Failure> {
     let doc = session.document();
-    let mesh = doc
+    let object = doc
         .object(id)
-        .and_then(|o| o.mesh())
+        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+    let mesh = object
+        .mesh()
         .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
     metrics.structures(mesh);
     if format == Format::ThreeMf {
@@ -527,9 +529,18 @@ fn export(
             eprintln!("warning: {w}");
         }
     } else {
+        // MF-ISSUE-035: STL/OBJ write a single mesh with no transform of
+        // its own, so apply the object's here (mirrors
+        // mf-desktop's App::export_to) and say so, like the desktop's
+        // status note.
+        let transformed = mf_io::transform_mesh(mesh, &object.transform);
         metrics.record("export", || {
-            mf_io::write_path_with(mesh, output, format, doc.units(), ctx)
+            mf_io::write_path_with(&transformed, output, format, doc.units(), ctx)
         })?;
+        eprintln!(
+            "exported with the object's position applied: {}",
+            output.display()
+        );
     }
     Ok(())
 }
@@ -620,7 +631,10 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
                 })
                 .collect(),
         };
-        mf_io::write_model_path_with(&model, output, ctx)?;
+        let warnings = mf_io::write_model_path_with(&model, output, ctx)?;
+        for w in &warnings {
+            eprintln!("warning: {w}");
+        }
         eprintln!(
             "wrote {} objects to {}",
             model.objects.len(),
@@ -1156,12 +1170,26 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             Failure::Usage(format!("unsupported output format: {}", out.display()))
         })?;
         let doc = report.session.document();
-        let mesh = doc
+        let object = doc
             .objects()
             .first()
-            .and_then(|o| o.mesh())
             .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
-        mf_io::write_path_with(mesh, out, format, doc.units(), ctx)?;
+        let mesh = object
+            .mesh()
+            .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
+        // MF-ISSUE-035: apply the object's transform before an STL/OBJ
+        // write, as `export` does (3MF carries its own transform per
+        // object, so only the single-mesh STL/OBJ formats need this).
+        if format == Format::ThreeMf {
+            mf_io::write_path_with(mesh, out, format, doc.units(), ctx)?;
+        } else {
+            let transformed = mf_io::transform_mesh(mesh, &object.transform);
+            mf_io::write_path_with(&transformed, out, format, doc.units(), ctx)?;
+            eprintln!(
+                "exported with the object's position applied: {}",
+                out.display()
+            );
+        }
     }
     if report.all_verified() {
         println!("all {} command(s) verified", report.results.len());

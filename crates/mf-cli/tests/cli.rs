@@ -407,6 +407,100 @@ fn run_on_3mf_keeps_every_object() {
     );
 }
 
+/// MF-ISSUE-035 (fix round 1): `run`'s STL/OBJ export applies the exported
+/// object's transform, not just the desktop's. The demo scene's "scan"
+/// object is centred at the origin before its transform moves it to
+/// [-32, 0, 20] (`mf_fixtures::demo_scene`); exporting it to STL after an
+/// operation must write it at that position, not back at the origin, and
+/// must say so on stderr.
+#[test]
+fn run_applies_the_objects_transform_to_an_stl_export() {
+    let dir = tempfile::tempdir().unwrap();
+    let scene = dir.path().join("scene.3mf");
+    let created = meshfixer(&["gen-fixture", "scene", scene.to_str().unwrap()]);
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let out = dir.path().join("out.stl");
+    let r = meshfixer(&[
+        "run",
+        scene.to_str().unwrap(),
+        "--op",
+        "mesh.compact",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    assert!(
+        String::from_utf8_lossy(&r.stderr).contains("position applied"),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+
+    let exported = mf_io::read_path(&out).unwrap().mesh;
+    let bbox = exported.bounding_box().unwrap();
+    let center = bbox.center();
+    // The "scan" object's own geometry is centred near the origin; its
+    // transform moves it to translation [-32, 0, 20] (demo_scene). A
+    // bounding-box centre still near the origin would mean the transform
+    // was never applied.
+    assert!(
+        (center[0] - (-32.0)).abs() < 5.0 && (center[2] - 20.0).abs() < 5.0,
+        "exported bbox centre {center:?} doesn't reflect the object's transform"
+    );
+}
+
+/// As above, but with a mirrored transform (negative determinant): winding
+/// must flip so the exported mesh's normals stay outward.
+#[test]
+fn run_applies_a_mirrored_transform_and_keeps_normals_outward() {
+    use mf_io::threemf::{Model, ModelObject, Unit};
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("mirrored.3mf");
+    // Mirror in x, plus a translation: a position check (not just winding)
+    // fails if the transform was never applied at all.
+    let mirror: [f64; 12] = [
+        -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0,
+    ];
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![ModelObject {
+            name: "box".into(),
+            mesh: cube(1.0),
+            transform: mirror,
+        }],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+
+    let out = dir.path().join("out.stl");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.compact",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+
+    let exported = mf_io::read_path(&out).unwrap().mesh;
+    // Untransformed cube(1.0) spans x in [0, 1]; mirrored then translated
+    // by 100, it spans x in [99, 100] — nowhere near [0, 1].
+    let bbox = exported.bounding_box().unwrap();
+    assert!(
+        bbox.min[0] > 90.0 && bbox.max[0] < 110.0,
+        "the mirrored transform's translation wasn't applied: bbox {bbox:?}"
+    );
+    let volume = mf_geometry::inspect(&exported).signed_volume.unwrap();
+    assert!(
+        volume > 0.0,
+        "mirrored object's winding wasn't flipped on export: signed volume {volume}"
+    );
+}
+
 /// Triangular holes (3-edge loops) as (id, centroid), by id.
 fn holes(path: &str) -> Vec<(u64, Vec<f64>)> {
     let out = meshfixer(&["inspect", path, "--json"]);
