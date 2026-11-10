@@ -174,112 +174,279 @@ fn split_cuts_a_closed_object_in_two_and_refuses_an_open_one() {
     assert_eq!(h.state().active_tool, "repair");
 }
 
-#[test]
-fn combine_subtracts_the_tool_and_shows_where_they_overlap() {
-    require_gpu!("combine_subtracts_the_tool_and_shows_where_they_overlap");
-    let mut h = opened(
-        WINDOW,
-        vec![
-            ("block", mf_fixtures::cube(20.0), at([0.0; 3])),
-            ("peg", ball(), at([20.0, 10.0, 20.0])),
-        ],
-    );
-    h.get_by_label("Combine").click();
-    settle(&mut h);
-    assert_eq!(h.state().active_tool, "combine");
-    wait_until(&mut h, "the overlap", |a| a.combine.tool.is_some());
-    // The overlap is found on a background thread.
-    let start = Instant::now();
-    while h.query_by_label_contains("overlap region").is_none() {
-        assert!(
-            start.elapsed() < Duration::from_secs(60),
-            "no overlap shown"
-        );
-        h.step();
-        std::thread::sleep(Duration::from_millis(5));
-    }
-    settle(&mut h);
-    h.get_by_label("Subtract").click();
-    settle(&mut h);
-    still(&mut h, "combine-preview");
-    let history = h.state().session.history_labels().len();
-    h.get_by_label("Combine objects").click();
-    wait_until(&mut h, "the boolean", |a| {
-        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
-    });
-    settle(&mut h);
-    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
-    assert_eq!(objects(&h), ["block"], "the tool is used up");
-    still(&mut h, "combine-after");
+/// The Browser row of `name` (an object row is a button).
+fn row<'a>(h: &'a Harness<'_, MeshFixerApp>, name: &'a str) -> egui_kittest::Node<'a> {
+    h.get_by_role_and_label(egui::accesskit::Role::Button, name)
 }
 
-/// Owner report: the tool stays even with "Keep tool" unchecked. Checked,
-/// the tool must survive the union (as the checkbox promises); unchecked
-/// again right after, on the next combine, it must actually be removed --
-/// not stuck `true` from the previous run, and not merely reported
-/// removed while the object lingers in the document.
+/// The widest node labelled `label`: the panel's own button where the
+/// rail has an icon of the same name ("Combine").
+fn panel_button<'a>(h: &'a Harness<'_, MeshFixerApp>, label: &'a str) -> egui_kittest::Node<'a> {
+    h.query_all_by_label(label)
+        .max_by(|a, b| a.rect().width().total_cmp(&b.rect().width()))
+        .unwrap_or_else(|| panic!("no {label:?}"))
+}
+
+/// Click `names`' Browser rows: the first plainly, the rest with Shift
+/// (selected together).
+fn select_together(h: &mut Harness<'_, MeshFixerApp>, names: &[&str]) {
+    for (k, name) in names.iter().enumerate() {
+        if k == 0 {
+            row(h, name).click();
+        } else {
+            row(h, name).click_modifiers(egui::Modifiers::SHIFT);
+        }
+        settle(h);
+    }
+}
+
+fn id_of(h: &Harness<'_, MeshFixerApp>, name: &str) -> mf_command::ObjectId {
+    h.state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == name)
+        .unwrap_or_else(|| panic!("no object {name:?}"))
+        .id
+}
+
+fn is_hole(h: &Harness<'_, MeshFixerApp>, name: &str) -> bool {
+    h.state().is_hole(id_of(h, name))
+}
+
+/// A block, a post on it and a peg through its side.
+fn block_post_peg() -> Vec<(&'static str, Mesh, [f64; 12])> {
+    vec![
+        ("block", mf_fixtures::cube(20.0), at([0.0; 3])),
+        ("post", mf_fixtures::cube(8.0), at([6.0, 6.0, 16.0])),
+        ("peg", ball(), at([20.0, 10.0, 10.0])),
+    ]
+}
+
+/// H toggles the role (one undoable step); the Browser row gets the hole
+/// icon and says "(hole)"; the view draws it hatched; and the role is
+/// saved in the 3MF as object metadata.
 #[test]
-fn unchecking_keep_tool_after_checking_it_removes_the_tool_object() {
-    require_gpu!("unchecking_keep_tool_after_checking_it_removes_the_tool_object");
-    // "block" and "peg" overlap (as in the test above); combine them
-    // twice in a row, same pair both times.
-    let mut h = opened(
-        WINDOW,
-        vec![
-            ("block", mf_fixtures::cube(20.0), at([0.0; 3])),
-            ("peg", ball(), at([20.0, 10.0, 20.0])),
-        ],
+fn h_toggles_a_hole_which_draws_hatched_and_is_saved() {
+    require_gpu!("h_toggles_a_hole_which_draws_hatched_and_is_saved");
+    let mut h = opened(WINDOW, block_post_peg());
+    row(&h, "peg").click();
+    settle(&mut h);
+    let centre = h.state().screen_point([20.0, 10.0, 10.0]).unwrap();
+    let before = h.render().unwrap();
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    assert!(is_hole(&h, "peg"));
+    // The row says so (its accessible label, with the hole icon).
+    row(&h, "peg (hole)");
+    still(&mut h, "role-hole");
+    let after = h.render().unwrap();
+    // The peg's pixels: plain before, a hatch after (brightness crosses
+    // its mean many times across 40 points of the ball).
+    let ppp = h.ctx.pixels_per_point();
+    let y = (centre.y * ppp) as usize;
+    let x0 = ((centre.x - 20.0) * ppp) as usize;
+    let n = (40.0 * ppp) as usize;
+    let crossings = |raw: &[u8], width: usize| {
+        let values: Vec<f64> = (x0..x0 + n)
+            .map(|x| {
+                let p = &raw[(y * width + x) * 4..][..3];
+                0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64
+            })
+            .collect();
+        let mean = values.iter().sum::<f64>() / values.len() as f64;
+        values
+            .windows(2)
+            .filter(|w| (w[0] - mean).signum() != (w[1] - mean).signum())
+            .count()
+    };
+    let (plain, hatched) = (
+        crossings(before.as_raw(), before.width() as usize),
+        crossings(after.as_raw(), after.width() as usize),
     );
+    assert!(
+        hatched >= 6 && hatched > 2 * plain,
+        "hatch: {plain} crossings before, {hatched} after"
+    );
+    // One undo step back to a solid; H again makes it a hole.
+    h.get_by_label("Undo").click();
+    settle(&mut h);
+    assert!(!is_hole(&h, "peg"));
+    row(&h, "peg").click();
+    settle(&mut h);
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    assert!(is_hole(&h, "peg"));
+    let model = h.state().document_model().unwrap();
+    let peg = model.objects.iter().find(|o| o.name == "peg").unwrap();
+    assert_eq!(
+        peg.metadata.get("meshfixer:role").map(String::as_str),
+        Some("hole")
+    );
+    let block = model.objects.iter().find(|o| o.name == "block").unwrap();
+    assert!(block.metadata.is_empty());
+}
+
+/// The Browser row's right-click menu switches the role too, and with
+/// several objects selected together H switches them all in one step.
+#[test]
+fn the_browser_menu_and_h_switch_roles_of_the_selected_objects() {
+    require_gpu!("the_browser_menu_and_h_switch_roles_of_the_selected_objects");
+    let mut h = opened(WINDOW, block_post_peg());
+    row(&h, "peg").click_secondary();
+    settle(&mut h);
+    h.get_by_label("Make it a hole").click();
+    settle(&mut h);
+    assert!(is_hole(&h, "peg"));
+    select_together(&mut h, &["block", "post"]);
+    assert_eq!(
+        h.state().selected_objects(),
+        [id_of(&h, "block"), id_of(&h, "post")]
+    );
+    let steps = h.state().session.history_labels().len();
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    assert!(is_hole(&h, "block") && is_hole(&h, "post"));
+    assert_eq!(h.state().session.history_labels().len(), steps + 1);
+    // Shift-click again takes one out of the selection.
+    row(&h, "post (hole)").click_modifiers(egui::Modifiers::SHIFT);
+    settle(&mut h);
+    assert_eq!(h.state().selected_objects(), [id_of(&h, "block")]);
+}
+
+/// Click `world` in the view, with `modifiers`.
+fn click_view(h: &mut Harness<'_, MeshFixerApp>, world: [f64; 3], modifiers: egui::Modifiers) {
+    let at = h.state().screen_point(world).unwrap();
+    h.event(egui::Event::ModifiersChanged(modifiers));
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers,
+        });
+        h.step();
+    }
+    h.event(egui::Event::ModifiersChanged(egui::Modifiers::NONE));
+    settle(h);
+}
+
+/// Shift-click in the view selects objects together too (and a plain
+/// click selects just one again).
+#[test]
+fn shift_click_in_the_view_selects_objects_together() {
+    require_gpu!("shift_click_in_the_view_selects_objects_together");
+    let mut h = opened(WINDOW, block_post_peg());
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    click_view(&mut h, [10.0, 2.0, 10.0], egui::Modifiers::NONE);
+    wait_until(&mut h, "the block", |a| {
+        a.active == Some(id_of_app(a, "block"))
+    });
+    click_view(&mut h, [10.0, 10.0, 24.0], egui::Modifiers::SHIFT);
+    wait_until(&mut h, "block and post", |a| {
+        a.selected_objects().len() == 2
+    });
+    assert_eq!(
+        h.state().selected_objects(),
+        [id_of(&h, "block"), id_of(&h, "post")]
+    );
+    h.get_by_label("Joins 2 solids and cuts 0 holes");
+    still(&mut h, "combine-view-picked");
+    click_view(&mut h, [10.0, 10.0, 24.0], egui::Modifiers::NONE);
+    wait_until(&mut h, "just the post", |a| a.selected_objects().len() == 1);
+    assert_eq!(h.state().selected_objects(), [id_of(&h, "post")]);
+}
+
+fn id_of_app(a: &MeshFixerApp, name: &str) -> mf_command::ObjectId {
+    a.session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == name)
+        .unwrap()
+        .id
+}
+
+/// Combine on the objects selected together: the panel says what it will
+/// do and lists each object with its role; one Combine joins the solids
+/// and cuts the hole, as one command (one undo restores all three).
+#[test]
+fn combine_joins_the_solids_and_cuts_the_holes_selected() {
+    require_gpu!("combine_joins_the_solids_and_cuts_the_holes_selected");
+    let mut h = opened(WINDOW, block_post_peg());
+    row(&h, "peg").click();
+    settle(&mut h);
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    select_together(&mut h, &["block", "post", "peg (hole)"]);
     h.get_by_label("Combine").click();
     settle(&mut h);
     assert_eq!(h.state().active_tool, "combine");
-    wait_until(&mut h, "the overlap", |a| a.combine.tool.is_some());
-    settle(&mut h);
-    // Check "Keep the tool object" and union: the tool must survive.
-    h.get_by_label("Keep the tool object").click();
-    settle(&mut h);
-    assert!(h.state().combine.keep_tool, "the checkbox is now checked");
+    h.get_by_label("Joins 2 solids and cuts 1 hole");
+    h.get_by_label("block · Solid");
+    h.get_by_label("post · Solid");
+    h.get_by_label("peg · Hole");
+    // No target/tool picker any more; Intersect sits under More.
+    assert!(h.query_by_label("Tool").is_none());
+    assert!(h.query_by_label("Intersect").is_none());
+    still(&mut h, "combine-preview");
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Combine objects").click();
-    wait_until(&mut h, "the first combine", |a| {
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
-    assert_eq!(
-        objects(&h),
-        ["block", "peg"],
-        "kept: the tool is still in the document"
-    );
+    assert_eq!(objects(&h), ["block"], "post joined, peg cut and used up");
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    still(&mut h, "combine-after");
+    h.get_by_label("Undo").click();
+    settle(&mut h);
+    assert_eq!(objects(&h), ["block", "post", "peg"]);
+    assert!(is_hole(&h, "peg"), "undo restores the hole with its role");
+}
 
-    // Open Combine again on the same pair and uncheck "Keep the tool
-    // object" before applying.
+/// More ▸ Keep the hole objects keeps the holes; More ▸ Intersect works
+/// on exactly two selected objects.
+#[test]
+fn more_keeps_holes_and_intersects_two() {
+    require_gpu!("more_keeps_holes_and_intersects_two");
+    let mut h = opened(WINDOW, block_post_peg());
+    row(&h, "peg").click();
+    settle(&mut h);
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    select_together(&mut h, &["block", "peg (hole)"]);
     h.get_by_label("Combine").click();
     settle(&mut h);
-    wait_until(&mut h, "the overlap", |a| a.combine.tool.is_some());
+    h.get_by_label("More").click();
     settle(&mut h);
-    assert!(
-        h.state().combine.keep_tool,
-        "keep_tool carries over from the last time Combine was open"
-    );
-    h.get_by_label("Keep the tool object").click();
+    h.get_by_label("Keep the hole objects").click();
     settle(&mut h);
-    assert!(
-        !h.state().combine.keep_tool,
-        "the checkbox is now unchecked"
-    );
+    assert!(h.state().combine.keep_holes);
+    still(&mut h, "combine-more");
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Combine objects").click();
-    wait_until(&mut h, "the second combine", |a| {
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
-    assert_eq!(
-        objects(&h),
-        ["block"],
-        "unchecked: the consumed tool object is actually removed"
-    );
+    assert_eq!(objects(&h), ["block", "post", "peg"], "the hole is kept");
+    // Intersect the block and the post.
+    select_together(&mut h, &["block", "post"]);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Intersect").click();
+    wait_until(&mut h, "the intersect", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(objects(&h), ["block", "peg"]);
 }
 
 #[test]
@@ -297,19 +464,22 @@ fn a_self_overlapping_target_is_refused_with_make_solid_as_the_way_on() {
             ("cutter", ball(), at([15.0, 10.0, 12.0])),
         ],
     );
+    row(&h, "cutter").click();
+    settle(&mut h);
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    select_together(&mut h, &["tangle", "cutter (hole)"]);
     h.get_by_label("Combine").click();
     settle(&mut h);
-    h.get_by_label("Subtract").click();
-    settle(&mut h);
-    h.get_by_label("Combine objects").click();
+    panel_button(&h, "Combine").click();
     wait_until(&mut h, "the refusal", |a| {
         a.busy.is_none() && a.refusal.is_some()
     });
     settle(&mut h);
-    let code = h.state().refusal.clone().unwrap().code;
-    eprintln!("refused: {code}");
+    let refusal = h.state().refusal.clone().unwrap();
     still(&mut h, "combine-refusal");
-    assert_eq!(code, "operand_overlaps_itself");
+    assert_eq!(refusal.code, "operand_overlaps_itself");
+    assert!(refusal.message.contains("'tangle'"), "{}", refusal.message);
     // The refusal's next action opens Make solid on the target.
     h.get_by_label("Run Make solid first").click();
     settle(&mut h);
@@ -327,6 +497,45 @@ fn a_self_overlapping_target_is_refused_with_make_solid_as_the_way_on() {
         "the result is one closed solid"
     );
     still(&mut h, "solid-after");
+}
+
+/// Split acts on every selected object, as one command.
+#[test]
+fn split_cuts_every_selected_object() {
+    require_gpu!("split_cuts_every_selected_object");
+    let mut h = opened(
+        WINDOW,
+        vec![
+            ("left", ball(), at([0.0, 0.0, 10.0])),
+            ("right", ball(), at([40.0, 0.0, 10.0])),
+        ],
+    );
+    select_together(&mut h, &["left", "right"]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.get_by_label("Cuts 2 selected objects");
+    h.state_mut().split.plane[11] = 11.3;
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut in two").click();
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let mut names = objects(&h);
+    names.sort();
+    assert_eq!(
+        names,
+        [
+            "left (bottom)",
+            "left (top)",
+            "right (bottom)",
+            "right (top)"
+        ]
+    );
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    still(&mut h, "split-many");
 }
 
 /// Owner report: after a split, picking one part (in the Browser or the

@@ -132,6 +132,7 @@ fn gizmo_draws_over_geometry() {
     let cam = OrbitCamera::fit(&bb);
     let gpu = GpuMesh::upload(&device, &mesh);
     let items = [DrawItem {
+        hole: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
@@ -193,6 +194,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
     let mesh = cube(10.0);
     let gpu = GpuMesh::upload(&device, &mesh);
     let items = [DrawItem {
+        hole: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,

@@ -261,6 +261,28 @@ fn fs_glass_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @loca
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
 }
 
+// A Hole (its role in a combine): lit like a solid but about 35% opaque,
+// with grey diagonal stripes in screen space (a pattern, not a colour:
+// ~8 pt apart, `draw.params.w` pixels per point), so it reads as "cut
+// away" in any palette.
+@fragment
+fn fs_hole_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base = base_color(front, in.state);
+    var rgb = lit(base, in.normal);
+    let selected = (in.state & SELECTED) != 0u;
+    if (selected) {
+        rgb = rim(rgb, in.normal, scene.tint_selected.rgb, 0.9);
+    }
+    let period = 8.0 * max(draw.params.w, 0.1);
+    let d = (in.clip.x + in.clip.y) / period;
+    let f = abs(fract(d) - 0.5) * 2.0;
+    let aa = fwidth(d) * 2.0;
+    let stripe = 1.0 - smoothstep(0.35 - aa, 0.35 + aa, f);
+    rgb = mix(rgb, vec3<f32>(0.5), 0.75 * stripe);
+    let a = mix(0.35, 0.6, stripe);
+    return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
+}
+
 // --- The stage's background: a soft vertical gradient (UI plan §4). ---
 struct BackgroundOut {
     @builtin(position) clip: vec4<f32>,

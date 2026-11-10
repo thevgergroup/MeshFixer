@@ -136,6 +136,7 @@ fn draw(
     let target = RenderTarget::new(device, 400, 400, 4).unwrap();
     let mut renderer = MeshRenderer::new(device, RenderTarget::format(4), Palette::HEADLESS);
     let items = [DrawItem {
+        hole: false,
         mesh: gpu,
         model: DMat4::IDENTITY,
         inactive: false,
@@ -370,6 +371,7 @@ fn a_selected_surface_keeps_its_own_shading() {
         let target = RenderTarget::new(&device, 400, 400, 4).unwrap();
         let mut renderer = MeshRenderer::new(&device, RenderTarget::format(4), palette);
         let items = [DrawItem {
+            hole: false,
             mesh: &gpu,
             model: DMat4::IDENTITY,
             inactive: false,

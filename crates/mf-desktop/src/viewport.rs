@@ -28,7 +28,7 @@ struct FrameKey {
     /// Each object drawn: the identity of its render mesh, its face-state
     /// generation (a selection change redraws), the states shown and
     /// whether it's dimmed.
-    objects: Vec<(ObjectId, usize, u64, u32, bool)>,
+    objects: Vec<(ObjectId, usize, u64, u32, bool, bool)>,
     /// Identity, colour, x-ray and emphasis (bits) of each overlay layer,
     /// in draw order.
     layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
@@ -69,6 +69,11 @@ pub struct ObjectView {
     pub hovered: bool,
     /// Which face-state flags tint it (`mf_render::FaceStates`).
     pub shown_states: u32,
+    /// One of several objects selected together (Shift-click): drawn
+    /// undimmed like the active one.
+    pub picked: bool,
+    /// Its role is Hole: drawn translucent with a grey hatch.
+    pub hole: bool,
 }
 
 /// How to draw the view this frame.
@@ -741,7 +746,8 @@ impl Viewport {
                         Arc::as_ptr(&o.render) as usize,
                         o.render.gpu.state_generation(),
                         o.shown_states,
-                        !(o.active || o.hovered),
+                        !(o.active || o.hovered || o.picked),
+                        o.hole,
                     )
                 })
                 .collect(),
@@ -771,9 +777,10 @@ impl Viewport {
             let items: Vec<mf_render::DrawItem<'_>> = objects
                 .iter()
                 .map(|o| mf_render::DrawItem {
+                    hole: o.hole,
                     mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
-                    inactive: !(o.active || o.hovered),
+                    inactive: !(o.active || o.hovered || o.picked),
                     shown_states: o.shown_states,
                 })
                 .collect();
@@ -1027,6 +1034,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     let camera = OrbitCamera::fit(&mesh.bounding_box().expect("a triangle has bounds"));
     let model = glam::DMat4::IDENTITY;
     let items = [false, true].map(|inactive| mf_render::DrawItem {
+        hole: false,
         mesh: &gpu,
         model,
         inactive,

@@ -14,7 +14,7 @@ mod session;
 
 pub use log::{LOG_FORMAT, LogError, READABLE_LOG_FORMATS};
 pub use mf_document::RevisionId;
-pub use mf_document::{Document, Geometry, GeometryKind, Object, ObjectId};
+pub use mf_document::{Document, Geometry, GeometryKind, HOLE, Object, ObjectId, ROLE};
 pub use record::{
     AffectedSummary, CommandId, CommandRecord, CommandStatus, GeometrySummary, ImportRecord,
     ObjectOutput, RecordedOperand,

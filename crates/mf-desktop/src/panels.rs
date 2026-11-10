@@ -850,9 +850,15 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                          clear the selection",
                     ),
                     (
-                        "Q / T / H / I",
+                        "Q / T / R / I",
                         "Tools: Select / Transform / Repair / Inspect",
                     ),
+                    ("S / C / M", "Shape tools: Split / Combine / Make solid"),
+                    (
+                        "Shift-click",
+                        "Select another object too (in the view or the Browser)",
+                    ),
+                    ("H", "Switch the selected objects between Solid and Hole"),
                     (
                         "T, then W / E / R",
                         "Transform the object: Move / Rotate / Scale (Cmd/Ctrl while dragging \
@@ -1243,13 +1249,20 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
     for (id, name, tris) in objects {
         let active = app.active == Some(id);
+        let hole = app.is_hole(id);
+        // The accessible label says the role too ("peg (hole)").
+        let label = if hole {
+            t!("role.row_hole", name = name)
+        } else {
+            name.clone()
+        };
         let text = if active {
             RichText::new(&name).color(theme::TEXT_STRONG)
         } else {
             RichText::new(&name).color(theme::TEXT_MUTED)
         };
         let tip = format!(
-            "{}{} · double-click to frame it · right-click for more",
+            "{}{} · Shift-click to select it too · double-click to frame it · right-click for more",
             count(tris, "triangle"),
             if active {
                 ""
@@ -1262,10 +1275,15 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui,
             &TreeItem::Object(id),
             Row {
-                icon: Some((icons::OBJECT, theme::TEXT_MUTED)),
+                // A Hole's row says so with its own icon.
+                icon: Some(if hole {
+                    (icons::HOLE_ROLE, theme::TEXT_MUTED)
+                } else {
+                    (icons::OBJECT, theme::TEXT_MUTED)
+                }),
                 text,
                 size: None,
-                label: &name,
+                label: &label,
             },
             |ui| {
                 ui.label(&tip);
@@ -1378,6 +1396,8 @@ fn tree_row(
     }
     if twice || (response.clicked() && enter) {
         app.tree_find(item);
+    } else if response.clicked() && ui.input(|i| i.modifiers.shift) {
+        app.tree_select_add(item);
     } else if response.clicked() {
         app.tree_select(item);
     }

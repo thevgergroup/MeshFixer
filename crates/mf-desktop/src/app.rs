@@ -20,7 +20,6 @@ use crate::analysis::{AnalysisCache, LatestWorker};
 use crate::defects::{Defect, HoleNumbers, HoleView, count, operation_label, thousands};
 use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
-use crate::theme;
 use crate::tools::{Interactive, LegendRow, ToolGroup, ToolKind};
 use crate::transform_tool::{self, Dragging, Field, Placement, TransformTool};
 use crate::viewport::{
@@ -30,6 +29,7 @@ use crate::worker::{
     self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
     RenderMesh, StateInputs, ViewHover, Workers,
 };
+use crate::{t, theme};
 use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 
 /// "Recent repairs" are the faces created by this many of the active
@@ -327,6 +327,11 @@ pub struct MeshFixerApp {
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
     pub combine: crate::shape_tools::CombineState,
+    /// Objects selected together (Shift-click in the view or the
+    /// Browser), in the order they were picked; the active object is one
+    /// of them. Empty (or one) means just the active object. Combine and
+    /// Split act on all of them; H toggles their roles.
+    pub picked: Vec<ObjectId>,
     pub solid: crate::shape_tools::SolidState,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
@@ -621,6 +626,7 @@ impl MeshFixerApp {
             shading: mf_render::Shading::default(),
             split: Default::default(),
             combine: Default::default(),
+            picked: Vec::new(),
             solid: Default::default(),
             refusal: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
@@ -1847,6 +1853,11 @@ impl MeshFixerApp {
     /// camera is shared by the whole document (MF-ISSUE-042) and keeps
     /// framing every object, so activating another one doesn't move it.
     pub fn set_active(&mut self, id: ObjectId) {
+        // Another object, not one of those picked together, ends the
+        // multi-selection.
+        if !self.picked.contains(&id) {
+            self.picked.clear();
+        }
         if self.active != Some(id) && self.selection.as_ref().is_some_and(|s| s.object != id) {
             self.selection = None;
             self.status = Some("Selection cleared (another object is active)".into());
@@ -1855,6 +1866,85 @@ impl MeshFixerApp {
             self.inspected = None;
         }
         self.active = Some(id);
+    }
+
+    /// The objects selected together, in pick order: those Shift-clicked
+    /// (that still exist), or just the active object.
+    pub fn selected_objects(&self) -> Vec<ObjectId> {
+        let doc = self.session.document();
+        let picked: Vec<ObjectId> = self
+            .picked
+            .iter()
+            .copied()
+            .filter(|&id| doc.object(id).is_some())
+            .collect();
+        if picked.len() > 1 {
+            picked
+        } else {
+            self.active.into_iter().collect()
+        }
+    }
+
+    /// Shift-click on an object (in the view or the Browser): add it to
+    /// the objects selected together (it becomes active), or take it out
+    /// (the last one picked becomes active).
+    pub fn toggle_picked(&mut self, id: ObjectId) {
+        if self.picked.is_empty()
+            && let Some(active) = self.active
+        {
+            self.picked.push(active);
+        }
+        if let Some(k) = self.picked.iter().position(|&p| p == id) {
+            if self.picked.len() == 1 {
+                return;
+            }
+            self.picked.remove(k);
+            if self.active == Some(id)
+                && let Some(&last) = self.picked.last()
+            {
+                self.set_active(last);
+            }
+        } else {
+            self.picked.push(id);
+            self.set_active(id);
+        }
+        self.clear_selection();
+    }
+
+    /// True if `id`'s role is Hole.
+    pub fn is_hole(&self, id: ObjectId) -> bool {
+        self.session
+            .document()
+            .object(id)
+            .is_some_and(|o| o.is_hole())
+    }
+
+    /// Toggle the Solid/Hole role of `ids` (H, or the Browser's menu) as
+    /// one undoable step: all become solids if every one is a hole,
+    /// otherwise all become holes.
+    pub fn toggle_role(&mut self, ids: &[ObjectId]) {
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let to_hole = !ids.iter().all(|&id| self.is_hole(id));
+        let changes = ids
+            .iter()
+            .map(|&object| mf_command::PropertyChange {
+                object,
+                key: mf_command::ROLE.into(),
+                value: to_hole.then(|| mf_command::HOLE.to_owned()),
+            })
+            .collect();
+        let label = match (to_hole, ids.len()) {
+            (true, 1) => t!("role.make_hole"),
+            (false, 1) => t!("role.make_solid"),
+            (true, n) => t!("role.make_holes", n = n),
+            (false, n) => t!("role.make_solids", n = n),
+        };
+        if self.session.set_properties(changes, label.clone()) {
+            self.after_history_move();
+            self.status = Some(label);
+        }
     }
 
     /// Loop IDs the viewport highlights: only a loop selection of the active
@@ -2085,15 +2175,24 @@ impl MeshFixerApp {
                     (Some(m), Some(current)) => Mesh::ptr_eq(current, m),
                     _ => false,
                 };
-                // While Combine is open, a click on another object picks
-                // it as the tool.
+                // Shift-click on an object (a whole-object pick: with a
+                // whole-object tool open, or on its main body with nothing
+                // smaller selected) adds it to, or takes it out of, the
+                // objects selected together.
                 if is_current
-                    && self.active_tool == crate::shape_tools::COMBINE
-                    && Some(object) != self.active
+                    && add
+                    && (self.tool_hides_defects()
+                        || (self.current_selection().is_none()
+                            && self.current_inspected().is_none()
+                            && matches!(&picked, Some((SelectionKind::Component, ids)) if ids == &[0])))
                     && picked.is_some()
                 {
-                    self.combine.tool = Some(object);
+                    self.toggle_picked(object);
                     return;
+                }
+                if is_current && picked.is_some() && !add {
+                    // A plain click on an object selects just it.
+                    self.picked.clear();
                 }
                 if is_current {
                     // With Transform open, or on the main body with no
@@ -2528,6 +2627,8 @@ impl MeshFixerApp {
                     } else {
                         0
                     },
+                    picked: self.picked.len() > 1 && self.picked.contains(&o.id),
+                    hole: o.is_hole(),
                 })
             })
             .collect()
@@ -2670,6 +2771,16 @@ impl MeshFixerApp {
         }
     }
 
+    /// A row of the tree Shift-clicked: an object row adds its object to
+    /// (or takes it out of) the objects selected together; any other row
+    /// is a plain click.
+    pub fn tree_select_add(&mut self, item: &TreeItem) {
+        match item {
+            TreeItem::Object(id) => self.toggle_picked(*id),
+            other => self.tree_select(other),
+        }
+    }
+
     /// A row of the tree clicked: select its item (the camera stays).
     pub fn tree_select(&mut self, item: &TreeItem) {
         match item {
@@ -2677,6 +2788,8 @@ impl MeshFixerApp {
                 if self.active != Some(*id) {
                     self.tree_hold = Some((self.active, self.now + TREE_HOLD_SECONDS));
                 }
+                // A plain click selects just this object.
+                self.picked.clear();
                 self.set_active(*id);
                 // The object's own row is a whole-object pick (like
                 // "Model"): any sub-selection left over, on this object or
@@ -2744,8 +2857,9 @@ impl MeshFixerApp {
     /// True if a row's item is the current target (the row shows selected).
     pub fn tree_selected(&self, item: &TreeItem) -> bool {
         match item {
-            // An object row says which object is active by its text.
-            TreeItem::Object(_) => false,
+            // An object row says which object is active by its text; the
+            // objects selected together are highlighted.
+            TreeItem::Object(id) => self.picked.len() > 1 && self.picked.contains(id),
             TreeItem::Model(id) => {
                 Some(*id) == self.active
                     && self.selection.is_none()
@@ -4397,6 +4511,14 @@ impl MeshFixerApp {
             });
         if delete {
             self.delete_active_object();
+        }
+        // H: the selected objects' role, Solid or Hole.
+        let role = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::H));
+        if role {
+            let ids = self.selected_objects();
+            self.toggle_role(&ids);
         }
         if !typing && !ctx.egui_wants_keyboard_input() {
             self.tool_keys(&ctx);

@@ -178,6 +178,8 @@ struct DrawUniforms {
     /// A layer's colour (unused for an object's own surface and outlines).
     color: [f32; 4],
     /// x: 1 for an inactive object (desaturated). y: line width in pixels.
+    /// z: unused for an object (a layer's depth pull). w: physical pixels
+    /// per point (a Hole's hatch spacing).
     params: [f32; 4],
     /// x: the face-state flags shown ([`DrawItem::shown_states`]).
     states: [u32; 4],
@@ -202,6 +204,10 @@ pub struct DrawItem<'a> {
     /// Which face-state flags ([`FaceStates`]) tint it: the overlays that
     /// are switched on. [`FaceStates::ALL`] shows every one.
     pub shown_states: u32,
+    /// A Hole (its role in a combine): drawn about 35% opaque with a grey
+    /// diagonal hatch (a pattern, not a colour), after every solid so
+    /// they show through it.
+    pub hole: bool,
 }
 
 /// One line overlay on an object (selected loops, cracks, tangled edges,
@@ -257,6 +263,9 @@ pub struct MeshRenderer {
     plate_slots: [DrawSlot; 2],
     glass_pipeline_ccw: wgpu::RenderPipeline,
     glass_pipeline_cw: wgpu::RenderPipeline,
+    /// A Hole object: translucent with a grey diagonal hatch.
+    hole_pipeline_ccw: wgpu::RenderPipeline,
+    hole_pipeline_cw: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     shading: Shading,
     split_preview: Option<(DVec3, DVec3)>,
@@ -341,6 +350,9 @@ impl MeshRenderer {
             /// The x-ray preset's surface: blended, every surface drawn
             /// (no depth test), writing no depth.
             Glass,
+            /// A Hole's surface: blended over what's already drawn,
+            /// depth-tested so a nearer solid hides it, writing no depth.
+            Translucent,
         }
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -369,14 +381,16 @@ impl MeshRenderer {
                 depth_compare: Some(match depth_mode {
                     DepthMode::XRay => wgpu::CompareFunction::Greater,
                     DepthMode::NoTest | DepthMode::Glass => wgpu::CompareFunction::Always,
-                    DepthMode::Opaque | DepthMode::Blended => wgpu::CompareFunction::LessEqual,
+                    DepthMode::Opaque | DepthMode::Blended | DepthMode::Translucent => {
+                        wgpu::CompareFunction::LessEqual
+                    }
                 }),
                 stencil: Default::default(),
                 bias: Default::default(),
             });
             let blend = matches!(
                 depth_mode,
-                DepthMode::XRay | DepthMode::Blended | DepthMode::Glass
+                DepthMode::XRay | DepthMode::Blended | DepthMode::Glass | DepthMode::Translucent
             )
             .then_some(blend_state);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -502,6 +516,19 @@ impl MeshRenderer {
         };
         let glass_pipeline_ccw = glass("mf x-ray preset ccw", wgpu::FrontFace::Ccw);
         let glass_pipeline_cw = glass("mf x-ray preset cw", wgpu::FrontFace::Cw);
+        let hole = |label: &str, front_face| {
+            pipeline_with(
+                label,
+                &surface_layout,
+                "vs_surface",
+                "fs_hole_surface",
+                &surface_buffers,
+                front_face,
+                DepthMode::Translucent,
+            )
+        };
+        let hole_pipeline_ccw = hole("mf hole ccw", wgpu::FrontFace::Ccw);
+        let hole_pipeline_cw = hole("mf hole cw", wgpu::FrontFace::Cw);
         // The stage's background gradient: one full-screen triangle, drawn
         // first, testing and writing no depth.
         let background_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -607,6 +634,8 @@ impl MeshRenderer {
         MeshRenderer {
             glass_pipeline_ccw,
             glass_pipeline_cw,
+            hole_pipeline_ccw,
+            hole_pipeline_cw,
             background_pipeline,
             shading: Shading::default(),
             split_preview: None,
@@ -799,7 +828,7 @@ impl MeshRenderer {
                     f32::from(u8::from(item.inactive)),
                     self.palette.boundary_width * self.pixels_per_point,
                     0.0,
-                    0.0,
+                    self.pixels_per_point,
                 ],
                 states: [item.shown_states & u32::from(FaceStates::ALL), 0, 0, 0],
             };
@@ -833,12 +862,23 @@ impl MeshRenderer {
 
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
         let glass = self.shading.preset == ShadingPreset::XRay;
-        for (slot, item) in self.draw_slots.iter().zip(items) {
-            let pipeline = match (glass, item.model.determinant() < 0.0) {
-                (true, true) => &self.glass_pipeline_cw,
-                (true, false) => &self.glass_pipeline_ccw,
-                (false, true) => &self.surface_pipeline_cw,
-                (false, false) => &self.surface_pipeline_ccw,
+        // Solids first, then Holes over them (blended, so what's behind or
+        // inside a hole shows through).
+        let drawn = self
+            .draw_slots
+            .iter()
+            .zip(items)
+            .filter(|(_, i)| !i.hole)
+            .chain(self.draw_slots.iter().zip(items).filter(|(_, i)| i.hole));
+        for (slot, item) in drawn {
+            let mirrored = item.model.determinant() < 0.0;
+            let pipeline = match (item.hole, glass, mirrored) {
+                (true, _, true) => &self.hole_pipeline_cw,
+                (true, _, false) => &self.hole_pipeline_ccw,
+                (false, true, true) => &self.glass_pipeline_cw,
+                (false, true, false) => &self.glass_pipeline_ccw,
+                (false, false, true) => &self.surface_pipeline_cw,
+                (false, false, false) => &self.surface_pipeline_ccw,
             };
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(pipeline);

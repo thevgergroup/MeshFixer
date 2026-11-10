@@ -1,17 +1,17 @@
 //! The Shape tools on the rail (UI plan §3, step 5): Split
-//! (`mesh.split_plane`), Combine (`mesh.boolean`) and Make solid
+//! (`mesh.split_plane`, every selected object), Combine (`mesh.combine`:
+//! join the selected solids and cut the selected holes, Tinkercad-style;
+//! `mesh.boolean` intersect under More) and Make solid
 //! (`mesh.make_solid`), registered through `shell::Tool` like every other
 //! tool: an icon, a one-level panel with ONE primary action, plain-language
 //! refusals with the next action as a button, and the job pool's progress
 //! and Cancel (the status bar).
 
 use std::collections::BTreeMap;
-use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use glam::DVec3;
 use mf_command::{Invocation, ObjectId};
-use mf_geometry::Mesh;
 use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 
 use crate::MeshFixerApp;
@@ -27,7 +27,7 @@ pub const MAKE_SOLID: &str = "make_solid";
 pub fn op_of(tool: &str) -> Option<&'static str> {
     match tool {
         SPLIT => Some("mesh.split_plane"),
-        COMBINE => Some("mesh.boolean"),
+        COMBINE => Some("mesh.combine"),
         MAKE_SOLID => Some("mesh.make_solid"),
         _ => None,
     }
@@ -109,42 +109,12 @@ impl SplitState {
     }
 }
 
-/// Combine's state: the tool object, the operation, and the overlap
-/// regions found between the two (`mesh.intersections`' detection, on a
-/// background thread), drawn in `INTERSECTION` while Combine is open.
+/// Combine's settings: whether the holes are kept (Combine acts on the
+/// objects selected together, [`MeshFixerApp::selected_objects`], each by
+/// its Solid/Hole role).
 #[derive(Debug, Default)]
 pub struct CombineState {
-    pub tool: Option<ObjectId>,
-    /// "union", "subtract" or "intersect".
-    pub operation: String,
-    pub keep_tool: bool,
-    overlap: Arc<Mutex<Option<Overlap>>>,
-    asked: Option<OverlapKey>,
-}
-
-/// What an overlap was found for.
-#[derive(Debug, Clone)]
-struct OverlapKey {
-    target: (ObjectId, [f64; 12]),
-    tool: (ObjectId, [f64; 12]),
-    meshes: (Mesh, Mesh),
-}
-
-impl PartialEq for OverlapKey {
-    fn eq(&self, other: &OverlapKey) -> bool {
-        self.target == other.target
-            && self.tool == other.tool
-            && Mesh::ptr_eq(&self.meshes.0, &other.meshes.0)
-            && Mesh::ptr_eq(&self.meshes.1, &other.meshes.1)
-    }
-}
-
-#[derive(Debug, Clone)]
-struct Overlap {
-    key: OverlapKey,
-    /// Crossing segments, world space.
-    segments: Vec<[DVec3; 2]>,
-    regions: usize,
+    pub keep_holes: bool,
 }
 
 /// Make solid's settings: the cell size (mm; `None` until the object's
@@ -208,19 +178,6 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_open: |app| {
             app.clear_selection();
             app.refusal = None;
-            if app.combine.operation.is_empty() {
-                app.combine.operation = "union".into();
-            }
-            let active = app.active;
-            if app.combine.tool.is_none_or(|t| Some(t) == active) {
-                app.combine.tool = app
-                    .session
-                    .document()
-                    .objects()
-                    .iter()
-                    .map(|o| o.id)
-                    .find(|&id| Some(id) != active);
-            }
         },
         ..T::new(
             COMBINE,
@@ -360,6 +317,18 @@ fn run(
     operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
 ) {
     let Some(target) = app.active else { return };
+    run_on(app, target, op_id, label, params, operands);
+}
+
+/// As [`run`], on `target` rather than the active object.
+fn run_on(
+    app: &mut MeshFixerApp,
+    target: ObjectId,
+    op_id: &str,
+    label: String,
+    params: BTreeMap<String, String>,
+    operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
+) {
     app.refusal = None;
     app.run_invocation(
         Invocation {
@@ -602,6 +571,10 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     )
     .on_hover_text(t!("split.gap_help"));
     widgets::caption(ui, t!("split.result"));
+    let n = app.selected_objects().len();
+    if n > 1 {
+        widgets::caption(ui, crate::tp!("split.targets", n));
+    }
     ui.add_space(theme::SPACE_L);
     let can = app.busy.is_none() && !open;
     if ui
@@ -618,12 +591,23 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ("keep".to_owned(), s.keep.clone()),
             ("cut_gap".to_owned(), s.gap.to_string()),
         ]);
-        run(
+        // Every selected object, in one command: the first is the target,
+        // the rest more targets.
+        let selected = app.selected_objects();
+        let Some((&first, rest)) = selected.split_first() else {
+            return;
+        };
+        let more = rest
+            .iter()
+            .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
+            .collect();
+        run_on(
             app,
+            first,
             "mesh.split_plane",
             t!("split.apply"),
             params,
-            Vec::new(),
+            more,
         );
     }
 }
@@ -632,92 +616,66 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 // Combine.
 // ---------------------------------------------------------------------
 
+/// The selected objects split by role: (solids, holes), each in pick
+/// order.
+pub fn combine_roles(app: &MeshFixerApp) -> (Vec<ObjectId>, Vec<ObjectId>) {
+    app.selected_objects()
+        .into_iter()
+        .partition(|&id| !app.is_hole(id))
+}
+
+/// "Joins N solids and cuts M holes", in whole sentences per plural.
+fn combine_summary(solids: usize, holes: usize) -> String {
+    match (solids == 1, holes == 1) {
+        (true, true) => t!("combine.summary.one_one", s = solids, h = holes),
+        (true, false) => t!("combine.summary.one_other", s = solids, h = holes),
+        (false, true) => t!("combine.summary.other_one", s = solids, h = holes),
+        (false, false) => t!("combine.summary.other_other", s = solids, h = holes),
+    }
+}
+
 fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    refusal_card(app, ui, "mesh.combine");
     refusal_card(app, ui, "mesh.boolean");
-    let objects: Vec<(ObjectId, String)> = app
-        .session
-        .document()
-        .objects()
-        .iter()
-        .map(|o| (o.id, o.name.clone()))
-        .collect();
-    let name = |id: Option<ObjectId>| {
-        id.and_then(|id| objects.iter().find(|(o, _)| *o == id))
-            .map(|(_, n)| n.clone())
-    };
-    section(ui, &t!("combine.section.target"));
-    widgets::body(ui, name(app.active).unwrap_or_else(|| "—".into()));
-    section(ui, &t!("combine.section.tool"));
-    widgets::caption(ui, t!("combine.tool_help"));
-    let current = name(app.combine.tool).unwrap_or_else(|| t!("combine.pick"));
-    let active = app.active;
-    egui::ComboBox::from_id_salt("combine tool")
-        .selected_text(current)
-        .width(ui.available_width() - 8.0)
-        .show_ui(ui, |ui| {
-            for (id, n) in &objects {
-                if Some(*id) != active {
-                    ui.selectable_value(&mut app.combine.tool, Some(*id), n);
-                }
-            }
-        });
-    if app.combine.tool == app.active {
-        app.combine.tool = None;
+    let selected = app.selected_objects();
+    let (solids, holes) = combine_roles(app);
+    if selected.len() < 2 {
+        widgets::body(ui, t!("combine.select_more"));
+    } else {
+        widgets::body(ui, combine_summary(solids.len(), holes.len()));
     }
-    section(ui, &t!("combine.section.operation"));
-    let ops = [
-        ("union", t!("combine.union")),
-        ("subtract", t!("combine.subtract")),
-        ("intersect", t!("combine.intersect")),
-    ];
-    let options: Vec<(&str, &str, bool)> = ops
+    // Each selected object with its role.
+    section(ui, &t!("combine.section.objects"));
+    let doc = app.session.document();
+    let rows: Vec<(String, bool)> = selected
         .iter()
-        .map(|(_, l)| (l.as_str(), l.as_str(), true))
+        .filter_map(|&id| doc.object(id).map(|o| (o.name.clone(), o.is_hole())))
         .collect();
-    let current = ops
-        .iter()
-        .position(|(k, _)| *k == app.combine.operation)
-        .unwrap_or_else(|| panic!("unknown operation {:?}", app.combine.operation));
-    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
-        app.combine.operation = ops[i].0.into();
-    }
-    widgets::caption(
-        ui,
-        match app.combine.operation.as_str() {
-            "union" => t!("combine.union_help"),
-            "subtract" => t!("combine.subtract_help"),
-            _ => t!("combine.intersect_help"),
-        },
-    );
-    ui.add_space(theme::SPACE_XS);
-    ui.checkbox(&mut app.combine.keep_tool, t!("combine.keep_tool"));
-    // Where they overlap.
-    section(ui, &t!("combine.section.overlap"));
-    ask_overlap(app);
-    let found = app
-        .combine
-        .overlap
-        .lock()
-        .expect("the overlap lock isn't poisoned")
-        .clone();
-    let line = match (&found, app.combine.tool) {
-        (_, None) => t!("combine.pick"),
-        (Some(o), _) if Some(&o.key) == current_key(app).as_ref() => {
-            if o.regions == 0 {
-                t!("combine.no_overlap")
+    for (name, hole) in rows {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(if hole {
+                    icons::HOLE_ROLE
+                } else {
+                    icons::OBJECT
+                })
+                .font(icons::font(theme::ICON_SIZE - 2.0))
+                .color(theme::TEXT_MUTED),
+            );
+            let role = if hole {
+                t!("combine.role.hole")
             } else {
-                crate::tp!("combine.overlaps", o.regions)
-            }
-        }
-        _ => t!("combine.finding"),
-    };
-    ui.horizontal(|ui| {
-        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        ui.painter().rect_filled(r, 2.0, theme::INTERSECTION);
-        widgets::caption(ui, line);
-    });
+                t!("combine.role.solid")
+            };
+            widgets::body(ui, format!("{name} · {role}"));
+        });
+    }
+    widgets::caption(ui, t!("combine.role_help"));
+    if !selected.is_empty() && solids.is_empty() {
+        widgets::caption(ui, t!("combine.needs_solid"));
+    }
     ui.add_space(theme::SPACE_L);
-    let can = app.busy.is_none() && app.combine.tool.is_some();
+    let can = app.busy.is_none() && selected.len() >= 2 && !solids.is_empty();
     if ui
         .add_enabled_ui(can, |ui| {
             widgets::wide_button(
@@ -729,88 +687,59 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .inner
         .clicked()
-        && let Some(tool) = app.combine.tool
+        && let Some((&first, others)) = solids.split_first()
     {
-        let params = BTreeMap::from([
-            ("operation".to_owned(), app.combine.operation.clone()),
-            ("keep_tool".to_owned(), app.combine.keep_tool.to_string()),
-        ]);
-        run(
+        let operands = others
+            .iter()
+            .map(|&id| ("solids".to_owned(), id, None))
+            .chain(holes.iter().map(|&id| ("holes".to_owned(), id, None)))
+            .collect();
+        let params =
+            BTreeMap::from([("keep_holes".to_owned(), app.combine.keep_holes.to_string())]);
+        run_on(
             app,
-            "mesh.boolean",
+            first,
+            "mesh.combine",
             t!("combine.apply"),
             params,
-            vec![("tool".to_owned(), tool, None)],
+            operands,
         );
     }
-}
-
-fn current_key(app: &MeshFixerApp) -> Option<OverlapKey> {
-    let doc = app.session.document();
-    let target = doc.object(app.active?)?;
-    let tool = doc.object(app.combine.tool?)?;
-    let (tm, om) = (target.mesh()?, tool.mesh()?);
-    Some(OverlapKey {
-        target: (
-            target.id,
-            app.shown_transform(target.id).unwrap_or(target.transform),
-        ),
-        tool: (
-            tool.id,
-            app.shown_transform(tool.id).unwrap_or(tool.transform),
-        ),
-        meshes: (tm.clone(), om.clone()),
-    })
-}
-
-/// Find where the target and the tool cross (exactly, as
-/// `mesh.intersections` does) on a background thread, once per placement.
-fn ask_overlap(app: &mut MeshFixerApp) {
-    let Some(key) = current_key(app) else { return };
-    if app.combine.asked.as_ref() == Some(&key) {
-        return;
-    }
-    app.combine.asked = Some(key.clone());
-    let doc = app.session.document();
-    let (Some(target), Some(tool)) = (doc.object(key.target.0), doc.object(key.tool.0)) else {
-        return;
-    };
-    let (Some(a), Some(b)) = (target.mesh().cloned(), tool.mesh().cloned()) else {
-        return;
-    };
-    let (ta, tb) = (key.target.1, key.tool.1);
-    let slot = app.combine.overlap.clone();
-    let ctx = app.repaint_context();
-    std::thread::spawn(move || {
-        let run = mf_runtime::RunContext::none();
-        let Some(b_to_a) = mf_geometry::affine::tool_to_target(&tb, &ta) else {
-            return;
-        };
-        let (Ok(abvh), Ok(bbvh)) = (
-            mf_geometry::Bvh::build(&a, &run),
-            mf_geometry::Bvh::build(&b, &run),
-        ) else {
-            return;
-        };
-        let m = mf_geometry::affine::to_dmat4(&b_to_a);
-        let Ok(r) = mf_geometry::intersections_between(&a, &abvh, &b, &bbvh, &m, &run) else {
-            return;
-        };
-        let segments = r
-            .regions
-            .iter()
-            .flat_map(|g| g.segments.iter())
-            .map(|s| s.map(|p| crate::transform_tool::world_point(&ta, DVec3::from(p))))
-            .collect();
-        *slot.lock().expect("the overlap lock isn't poisoned") = Some(Overlap {
-            key,
-            segments,
-            regions: r.regions.len(),
+    ui.add_space(theme::SPACE_S);
+    egui::CollapsingHeader::new(t!("combine.more"))
+        .id_salt("combine more")
+        .show(ui, |ui| {
+            ui.checkbox(&mut app.combine.keep_holes, t!("combine.keep_holes"));
+            ui.add_space(theme::SPACE_XS);
+            // Intersect: the overlap of exactly two objects.
+            let two = selected.len() == 2;
+            let can = app.busy.is_none() && two;
+            if ui
+                .add_enabled_ui(can, |ui| {
+                    widgets::wide_button(ui, Kind::Secondary, None, &t!("combine.intersect"))
+                })
+                .inner
+                .clicked()
+            {
+                let params = BTreeMap::from([("operation".to_owned(), "intersect".to_owned())]);
+                run_on(
+                    app,
+                    selected[0],
+                    "mesh.boolean",
+                    t!("combine.intersect"),
+                    params,
+                    vec![("tool".to_owned(), selected[1], None)],
+                );
+            }
+            widgets::caption(
+                ui,
+                if two {
+                    t!("combine.intersect_help")
+                } else {
+                    t!("combine.intersect_needs_two")
+                },
+            );
         });
-        if let Some(ctx) = ctx {
-            ctx.request_repaint();
-        }
-    });
 }
 
 // ---------------------------------------------------------------------
@@ -907,8 +836,7 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 // What the Shape tools draw over the view.
 // ---------------------------------------------------------------------
 
-/// Split's plane as a translucent disc, and Combine's overlap lines in
-/// `INTERSECTION`, over the 3D view.
+/// Split's plane as a translucent disc over the 3D view.
 pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     let (Some(rect), Some(cam)) = (app.viewport.last_rect, app.camera) else {
         return;
@@ -945,21 +873,6 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
                 pts,
                 egui::Stroke::new(1.0, theme::HOVER.gamma_multiply(0.55)),
             ));
-        }
-    }
-    if app.active_tool == COMBINE
-        && let Some(o) = app
-            .combine
-            .overlap
-            .lock()
-            .expect("the overlap lock isn't poisoned")
-            .as_ref()
-        && Some(&o.key) == current_key(app).as_ref()
-    {
-        for s in &o.segments {
-            if let (Some(a), Some(b)) = (at(s[0]), at(s[1])) {
-                painter.line_segment([a, b], egui::Stroke::new(3.0, theme::INTERSECTION));
-            }
         }
     }
 }

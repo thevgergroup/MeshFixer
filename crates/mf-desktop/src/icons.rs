@@ -59,6 +59,8 @@ pub const EXPORT: &str = "\u{EAF0}"; // export
 pub const OBJECT: &str = "\u{E1DA}"; // cube
 pub const MODEL: &str = "\u{ED0A}"; // cube-focus
 pub const HOLE: &str = "\u{E602}"; // circle-dashed
+/// An object whose role is Hole (cut away when combined).
+pub const HOLE_ROLE: &str = "\u{EC7C}"; // cube-transparent
 pub const CRACK: &str = "\u{E2DE}"; // lightning
 pub const LOOSE_PIECE: &str = "\u{EC5E}"; // shapes
 pub const TANGLED: &str = "\u{E280}"; // git-merge

@@ -94,6 +94,7 @@ pub fn render_image_with_chunk_limit(
     let gpu = GpuMesh::from_vertices_with_limit(&device, &crate::MeshVertices::build(mesh), limit);
     let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
     let items = [DrawItem {
+        hole: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
@@ -124,17 +125,31 @@ pub fn render_objects(
     height: u32,
     show_boundaries: bool,
 ) -> Result<RgbaImage, RenderError> {
+    let items: Vec<(&Mesh, DMat4, bool)> = objects.iter().map(|(m, t)| (*m, *t, false)).collect();
+    render_roles(&items, cam, width, height, show_boundaries)
+}
+
+/// As [`render_objects`], each object with its role: `true` draws it as a
+/// Hole ([`DrawItem::hole`]).
+pub fn render_roles(
+    objects: &[(&Mesh, DMat4, bool)],
+    cam: &OrbitCamera,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+) -> Result<RgbaImage, RenderError> {
     let (device, queue) = shared_device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES)?;
     let mut renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES), Palette::HEADLESS);
     let gpus: Vec<GpuMesh> = objects
         .iter()
-        .map(|(mesh, _)| GpuMesh::upload(&device, mesh))
+        .map(|(mesh, _, _)| GpuMesh::upload(&device, mesh))
         .collect();
     let items: Vec<DrawItem<'_>> = gpus
         .iter()
         .zip(objects)
-        .map(|(gpu, (_, model))| DrawItem {
+        .map(|(gpu, (_, model, hole))| DrawItem {
+            hole: *hole,
             mesh: gpu,
             model: *model,
             inactive: false,

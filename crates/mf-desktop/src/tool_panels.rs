@@ -102,7 +102,8 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         )
     })?;
     shell.register_tool(T {
-        shortcut: Some(egui::Key::H),
+        // R: H toggles the selected objects' Solid/Hole role.
+        shortcut: Some(egui::Key::R),
         help: "tool.repair.help",
         availability: needs_object,
         panel: Some(repair_panel),
@@ -209,8 +210,42 @@ fn is_marked(app: &MeshFixerApp, item: &TreeItem) -> bool {
 }
 
 /// The right-click actions on Browser rows (and later on the model).
+/// The objects a role change from `item`'s menu applies to: the objects
+/// selected together if the row's object is one of them, else just it.
+fn role_targets(app: &MeshFixerApp, item: &TreeItem) -> Vec<mf_command::ObjectId> {
+    let TreeItem::Object(id) = item else {
+        return Vec::new();
+    };
+    let selected = app.selected_objects();
+    if selected.contains(id) {
+        selected
+    } else {
+        vec![*id]
+    }
+}
+
 fn context_actions() -> Vec<ContextAction> {
     vec![
+        // An object's Solid/Hole role (also H): on the objects selected
+        // together if this row is one of them, otherwise on this object.
+        ContextAction {
+            id: "object.role",
+            applies_to: |_, item| matches!(item, TreeItem::Object(_)),
+            title: |app, item| {
+                let ids = role_targets(app, item);
+                let to_hole = !ids.iter().all(|&id| app.is_hole(id));
+                match (to_hole, ids.len()) {
+                    (true, 1) => t!("role.make_hole"),
+                    (false, 1) => t!("role.make_solid"),
+                    (true, n) => t!("role.make_holes", n = n),
+                    (false, n) => t!("role.make_solids", n = n),
+                }
+            },
+            run: |app, item| {
+                let ids = role_targets(app, item);
+                app.toggle_role(&ids);
+            },
+        },
         ContextAction {
             id: "defect.fill",
             applies_to: |app, item| {

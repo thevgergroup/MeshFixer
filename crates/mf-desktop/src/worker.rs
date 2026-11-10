@@ -109,6 +109,7 @@ impl Gpu {
         let Primer { renderer, target } = &mut *primer;
         let camera = mf_render::OrbitCamera::fit(bounds);
         let items = [mf_render::DrawItem {
+            hole: false,
             mesh,
             model: DMat4::IDENTITY,
             inactive: false,
