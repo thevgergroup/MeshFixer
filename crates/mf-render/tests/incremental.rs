@@ -118,9 +118,9 @@ fn filling_one_hole_reuploads_only_touched_chunks() {
         stats.surface_bytes <= 3 * SURFACE_CHUNK_BYTES,
         "at most two touched chunks plus the appended one: {stats:?}"
     );
-    // In fact only the chunk the fan was appended to: the centre vertex was
-    // appended too, which copies the last vertex chunk but keeps every
-    // position the other chunks' faces use.
+    // The chunk the fan was appended to, and (smooth shading, UI plan
+    // step 3) the chunks holding the faces around the hole's rim, whose
+    // corners now average in the new patch's normals: nothing else.
     let rebuilt: Vec<usize> = (0..after.chunks.len())
         .filter(|&i| {
             !before
@@ -129,7 +129,20 @@ fn filling_one_hole_reuploads_only_touched_chunks() {
                 .is_some_and(|c| std::sync::Arc::ptr_eq(c, &after.chunks[i]))
         })
         .collect();
-    assert_eq!(rebuilt, vec![filled.face_chunk_count() - 1]);
+    let rim: std::collections::BTreeSet<u32> = holed.topology().boundary_loops[0]
+        .vertices
+        .iter()
+        .copied()
+        .collect();
+    let mut expected: Vec<usize> = holed
+        .faces()
+        .filter(|(_, t)| t.iter().any(|v| rim.contains(v)))
+        .map(|(f, _)| f.0 as usize / mf_geometry::CHUNK)
+        .collect();
+    expected.push(filled.face_chunk_count() - 1);
+    expected.sort_unstable();
+    expected.dedup();
+    assert_eq!(rebuilt, expected);
     assert_eq!(stats.state_bytes, 0);
     assert_eq!(gpu.total_uploaded(), full + stats.total());
     assert_matches_full_rebuild(&device, &queue, &gpu, &filled, "synced");
@@ -450,4 +463,41 @@ fn origin_is_kept_unless_the_mesh_outgrows_f32_precision() {
     );
     // Nothing to draw: nothing to move.
     assert_eq!(render_origin(Some(DVec3::ONE), None), DVec3::ONE);
+}
+
+/// Smooth shading (UI plan step 3): a sphere's corners take their
+/// vertex's averaged normal (shared by every face around it), a cube's
+/// stay its faces' own (edges over the crease angle stay hard).
+#[test]
+fn spheres_shade_smooth_and_cubes_keep_hard_edges() {
+    use mf_render::surface_vertices;
+    let cube = mf_fixtures::cube(10.0);
+    for tri in surface_vertices(&cube, DVec3::ZERO).chunks(3) {
+        assert!(
+            tri.iter().all(|v| v.normal == tri[0].normal),
+            "a cube face is flat"
+        );
+    }
+    let sphere = mf_fixtures::uv_sphere(24, 32);
+    let verts = surface_vertices(&sphere, DVec3::ZERO);
+    // Every corner at the same position has the same normal.
+    let mut by_pos: std::collections::HashMap<[u32; 3], [f32; 3]> = Default::default();
+    let mut smooth = 0;
+    for tri in verts.chunks(3) {
+        if tri.iter().any(|v| v.normal != tri[0].normal) {
+            smooth += 1;
+        }
+        for v in tri {
+            let key = v.position.map(f32::to_bits);
+            let n = *by_pos.entry(key).or_insert(v.normal);
+            assert!(
+                (0..3).all(|k| (n[k] - v.normal[k]).abs() < 1e-5),
+                "one normal per sphere vertex"
+            );
+        }
+    }
+    assert!(
+        smooth > verts.len() / 6,
+        "most sphere faces are smooth-shaded"
+    );
 }

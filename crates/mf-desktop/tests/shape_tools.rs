@@ -257,3 +257,83 @@ fn a_self_overlapping_target_is_refused_with_make_solid_as_the_way_on() {
     );
     still(&mut h, "solid-after");
 }
+
+/// Owner report: after a split, picking one part (in the Browser or the
+/// view) makes that part the target, so Delete removes only it.
+#[test]
+fn after_a_split_delete_removes_only_the_picked_part() {
+    require_gpu!("after_a_split_delete_removes_only_the_picked_part");
+    let mut h = opened(WINDOW, vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut in two").click();
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    // The Browser row of the bottom part.
+    h.get_by_label("ball (bottom)").click();
+    settle(&mut h);
+    let bottom = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == "ball (bottom)")
+        .unwrap()
+        .id;
+    assert_eq!(
+        h.state().active,
+        Some(bottom),
+        "the picked part is the target"
+    );
+    h.key_press(egui::Key::Delete);
+    wait_until(&mut h, "the delete", |a| {
+        a.busy.is_none() && a.session.document().objects().len() == 1
+    });
+    settle(&mut h);
+    assert_eq!(objects(&h), ["ball (top)"]);
+
+    // Undo; then pick the bottom part in the view instead.
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "the undo", |a| {
+        a.busy.is_none() && a.session.document().objects().len() == 2
+    });
+    settle(&mut h);
+    let top = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == "ball (top)")
+        .unwrap()
+        .id;
+    h.state_mut().set_active(top);
+    settle(&mut h);
+    let at_bottom = h.state().screen_point([0.0, 0.0, 3.0]).unwrap();
+    h.event(egui::Event::PointerMoved(at_bottom));
+    h.step();
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at_bottom,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+    }
+    wait_until(&mut h, "the pick", |a| a.active == Some(bottom));
+    settle(&mut h);
+    h.key_press(egui::Key::Delete);
+    wait_until(&mut h, "the delete", |a| {
+        a.busy.is_none() && a.session.document().objects().len() == 1
+    });
+    assert_eq!(objects(&h), ["ball (top)"]);
+}

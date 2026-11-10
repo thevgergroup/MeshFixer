@@ -4478,6 +4478,7 @@ impl MeshFixerApp {
                 let plate = self.tool_hides_defects().then(|| self.plate());
                 let hint = self.transform_hint();
                 let split_preview = crate::shape_tools::split_preview(self);
+                let shading = crate::shape_tools::shading(self);
                 self.viewport.paint(
                     ui,
                     input,
@@ -4494,7 +4495,7 @@ impl MeshFixerApp {
                         gizmo,
                         plate,
                         tool_hint: hint,
-                        shading: self.shading,
+                        shading,
                         split_preview,
                     },
                 )

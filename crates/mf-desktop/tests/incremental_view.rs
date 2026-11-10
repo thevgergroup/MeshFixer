@@ -131,9 +131,12 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
         filled.surface_bytes
     );
     assert!(filled.surface_bytes > 0);
+    // Not a full rebuild: the new faces, and (smooth shading, UI plan
+    // step 3) the chunks holding faces around the filled holes' rims,
+    // which on this small, evenly holed sphere is most of them.
     assert!(
-        filled.surface_bytes < full / 2,
-        "the fill only appends: {filled:?} of {full}"
+        filled.surface_bytes < full,
+        "the fill re-uploads only touched chunks: {filled:?} of {full}"
     );
 
     harness.get_by_label("Undo").click();

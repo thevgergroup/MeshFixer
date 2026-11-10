@@ -41,8 +41,12 @@ fn timed_draws_report_a_gpu_time_per_frame() {
         eprintln!("this adapter has no GPU timestamps; nothing to check");
         return;
     };
-    let mesh = uv_sphere(64, 128);
-    let target = RenderTarget::new(&device, 256, 256, 4).unwrap();
+    // A small pass: Metal's begin/end timestamps come back out of order
+    // once a pass has real fragment work (see timer.rs), and the studio
+    // lighting (UI plan step 3) pushed the old 64x128 sphere at 256 px
+    // over that edge; what this checks is the timer's bookkeeping.
+    let mesh = uv_sphere(16, 32);
+    let target = RenderTarget::new(&device, 96, 96, 4).unwrap();
     let mut renderer = MeshRenderer::new(&device, RenderTarget::format(4), Palette::HEADLESS);
     let gpu = GpuMesh::from_vertices(&device, &MeshVertices::build(&mesh));
     let camera = OrbitCamera::fit(&mesh.bounding_box().unwrap());
