@@ -323,6 +323,16 @@ pub struct MeshFixerApp {
     pub first_use_hint: bool,
     /// How the model is shaded (View > Clay / Studio / X-ray, Wireframe).
     pub shading: mf_render::Shading,
+    /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
+    /// tool and operation, Make solid's settings.
+    pub split: crate::shape_tools::SplitState,
+    pub combine: crate::shape_tools::CombineState,
+    pub solid: crate::shape_tools::SolidState,
+    /// The last operation refusal, shown in its tool's panel in plain
+    /// words with the next action.
+    pub refusal: Option<crate::shape_tools::Refusal>,
+    /// The UI's context, for background work that asks for a frame.
+    egui_ctx: Option<egui::Context>,
     /// A placement committed from the Transform tool, drawn until its
     /// command finishes (so the object doesn't jump back meanwhile).
     preview: Option<(ObjectId, [f64; 12])>,
@@ -609,6 +619,11 @@ impl MeshFixerApp {
             show_settings: false,
             first_use_hint: true,
             shading: mf_render::Shading::default(),
+            split: Default::default(),
+            combine: Default::default(),
+            solid: Default::default(),
+            refusal: None,
+            egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
             pending_status: None,
             lowest: None,
@@ -1672,6 +1687,35 @@ impl MeshFixerApp {
         (tool.on_open)(self);
     }
 
+    /// The UI's context (background work asks it for a frame).
+    pub fn repaint_context(&self) -> Option<egui::Context> {
+        self.egui_ctx.clone()
+    }
+
+    /// Prepare and start `inv` on the job pool (progress and Cancel in the
+    /// status bar), as a whole-object tool's Apply does.
+    pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        match self.session.prepare(inv) {
+            Ok(prepared) => {
+                let run = self.start_job(format!("{label}…"), true);
+                self.workers.run(prepared, run);
+            }
+            Err(e) => {
+                self.error = Some(format!(
+                    "{label} can't run: {e}. Change the settings and Apply again."
+                ))
+            }
+        }
+    }
+
+    /// The gizmo the open tool draws (Transform's, Split's plane), with
+    /// its highlighted handle.
+    pub fn tool_gizmo(&self) -> Option<(Gizmo, Option<Handle>)> {
+        self.transform_gizmo()
+            .map(|g| (g, self.gizmo_highlight()))
+            .or_else(|| crate::shape_tools::split_gizmo(self))
+    }
+
     /// Run a registered command.
     pub fn run_command(&mut self, command: &crate::shell::Command) {
         if !(command.enabled)(self) {
@@ -1936,6 +1980,21 @@ impl MeshFixerApp {
                         self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
+                    // The Shape tools' refusals show in their panel, in
+                    // plain words with the next action.
+                    Err(CommandError::Operation(mf_operations::OpError::Failed {
+                        code,
+                        message,
+                    })) if crate::shape_tools::op_of(self.active_tool).is_some() => {
+                        self.status = Some(format!("Nothing was changed: {message}"));
+                        self.refusal = Some(crate::shape_tools::Refusal {
+                            op_id: crate::shape_tools::op_of(self.active_tool)
+                                .expect("checked above")
+                                .to_owned(),
+                            code: code.to_owned(),
+                            message,
+                        });
+                    }
                     Err(e) => {
                         self.error = Some(format!(
                             "The operation failed: {e}. Nothing was changed; try other settings \
@@ -2012,6 +2071,16 @@ impl MeshFixerApp {
                     (Some(m), Some(current)) => Mesh::ptr_eq(current, m),
                     _ => false,
                 };
+                // While Combine is open, a click on another object picks
+                // it as the tool.
+                if is_current
+                    && self.active_tool == crate::shape_tools::COMBINE
+                    && Some(object) != self.active
+                    && picked.is_some()
+                {
+                    self.combine.tool = Some(object);
+                    return;
+                }
                 if is_current {
                     // With Transform open, or on the main body with no
                     // defect targeted, a click makes the object the target
@@ -4405,9 +4474,10 @@ impl MeshFixerApp {
                         o.transform = t;
                     }
                 }
-                let gizmo = self.transform_gizmo().map(|g| (g, self.gizmo_highlight()));
+                let gizmo = self.tool_gizmo();
                 let plate = self.tool_hides_defects().then(|| self.plate());
                 let hint = self.transform_hint();
+                let split_preview = crate::shape_tools::split_preview(self);
                 self.viewport.paint(
                     ui,
                     input,
@@ -4425,6 +4495,7 @@ impl MeshFixerApp {
                         plate,
                         tool_hint: hint,
                         shading: self.shading,
+                        split_preview,
                     },
                 )
             })
@@ -4439,6 +4510,7 @@ impl MeshFixerApp {
         crate::tool_panels::inspector_card(self, &ctx);
         crate::tool_panels::first_use_hint(self, &ctx);
         crate::panels::overlays_popover(self, &ctx);
+        crate::shape_tools::view_overlay(self, &ctx);
         if let Some(c) = out.click
             && self.busy.is_none()
         {

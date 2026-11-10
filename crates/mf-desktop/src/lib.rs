@@ -11,6 +11,7 @@ pub mod icons;
 pub mod import_dialog;
 pub mod metrics;
 mod panels;
+pub mod shape_tools;
 pub mod shell;
 pub mod theme;
 mod tool_panels;

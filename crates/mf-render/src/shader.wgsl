@@ -28,8 +28,11 @@ struct Scene {
     // The background gradient: bottom, top.
     background: vec4<f32>,
     background_top: vec4<f32>,
-    // x: preset (0 clay, 1 studio, 2 x-ray), y: 1 for the wireframe.
+    // x: preset (0 clay, 1 studio, 2 x-ray), y: 1 for the wireframe,
+    // z: 1 while Split's plane previews.
     shading: vec4<f32>,
+    // Split's plane in the shifted frame: normal (xyz), offset (w).
+    split_plane: vec4<f32>,
 };
 
 struct Draw {
@@ -72,6 +75,8 @@ struct SurfaceOut {
     // Barycentric coordinates (each face is three consecutive vertices):
     // the wireframe draws where one of them is near 0.
     @location(2) bary: vec3<f32>,
+    // Shifted world position (Split's preview).
+    @location(3) world: vec3<f32>,
 };
 
 // Inactive objects are desaturated and dimmed (MF-ISSUE-042, theme.rs).
@@ -159,7 +164,9 @@ fn vs_surface(
     @location(1) normal: vec3<f32>,
 ) -> SurfaceOut {
     var out: SurfaceOut;
-    out.clip = scene.view_proj * draw.model * vec4<f32>(position, 1.0);
+    let world = draw.model * vec4<f32>(position, 1.0);
+    out.clip = scene.view_proj * world;
+    out.world = world.xyz;
     // Normals need the inverse-transpose of the linear part, not the model
     // matrix itself, to stay correct under non-uniform scale or shear
     // (MF-ISSUE-042).
@@ -190,6 +197,14 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
         rgb = mix(rgb, glow(base, in.normal), scene.cue.x);
     }
     rgb = mix(rgb, rgb * 0.45, wire(in.bary));
+    // Split's preview: the top part a little lighter, the bottom a little
+    // darker, and the cut drawn where the plane crosses the surface.
+    if (scene.shading.z > 0.5) {
+        let s = dot(scene.split_plane.xyz, in.world) + scene.split_plane.w;
+        rgb = rgb * select(0.72, 1.08, s > 0.0);
+        let line = 1.0 - smoothstep(0.0, fwidth(s) * 1.5, abs(s));
+        rgb = mix(rgb, vec3<f32>(1.0), line * 0.85);
+    }
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
 }
 

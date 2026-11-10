@@ -428,6 +428,7 @@ impl Shell {
 pub fn builtin() -> Shell {
     let mut shell = Shell::default();
     crate::tool_panels::register(&mut shell).expect("the built-in tools register");
+    crate::shape_tools::register(&mut shell).expect("the Shape tools register");
     crate::panels::register(&mut shell).expect("the built-in panels register");
     register_commands(&mut shell).expect("the built-in commands register");
     shell
@@ -596,7 +597,19 @@ mod tests {
     fn the_builtin_shell_registers_every_contribution() {
         let shell = builtin();
         let ids: Vec<&str> = shell.tools().iter().map(|t| t.id).collect();
-        assert_eq!(ids, ["select", "transform", "repair", "inspect", "export"]);
+        assert_eq!(
+            ids,
+            [
+                "select",
+                "transform",
+                "split",
+                "combine",
+                "make_solid",
+                "repair",
+                "inspect",
+                "export"
+            ]
+        );
         assert!(
             shell
                 .tools()
