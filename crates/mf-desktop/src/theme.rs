@@ -52,16 +52,16 @@ pub const INACTIVE_SATURATION: f32 = 0.0;
 pub const INACTIVE_BRIGHTNESS: f32 = 0.55;
 
 /// How strongly a face layer replaces the surface colour (0–1).
-pub const SELECTED_FACE_STRENGTH: f32 = 0.6;
-pub const HOVER_FACE_STRENGTH: f32 = 0.85;
+pub const SELECTED_FACE_STRENGTH: f32 = 0.18;
+pub const HOVER_FACE_STRENGTH: f32 = 0.2;
 pub const LOOSE_PIECE_STRENGTH: f32 = 0.6;
-pub const RECENT_REPAIR_STRENGTH: f32 = 0.45;
+pub const RECENT_REPAIR_STRENGTH: f32 = 0.25;
 /// Faces around a hole (View ▸ Show hole overview): the hole colour, low
 /// alpha, so a model with hundreds of holes shows where they are.
 pub const HOLE_NEIGHBOURHOOD_STRENGTH: f32 = 0.3;
 /// Faces next to a tangled edge: a light red, so the red edge line stays
 /// the strongest mark.
-pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.35;
+pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.25;
 
 /// The selection where nearer surfaces hide it (the x-ray pass) is drawn
 /// in `SELECTED` at this opacity: the same colour, so the same meaning.
@@ -69,8 +69,8 @@ pub const XRAY_OPACITY: f32 = 0.55;
 
 /// Outline widths in the 3D view, in points: defect outlines, and the
 /// selection / hover / crack / tangled-edge overlays drawn over them.
-pub const BOUNDARY_WIDTH: f32 = 2.0;
-pub const OVERLAY_WIDTH: f32 = 3.0;
+pub const BOUNDARY_WIDTH: f32 = 2.5;
+pub const OVERLAY_WIDTH: f32 = 3.5;
 
 // Neutrals: no meaning beyond "the model" and "the room it sits in".
 /// Front faces of the model.

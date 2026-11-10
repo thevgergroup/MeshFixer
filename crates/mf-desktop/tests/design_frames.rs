@@ -224,6 +224,17 @@ fn design_frame_inspect_and_export() {
         let mut h = opened(size, vec![("scan", scan())]);
         h.get_by_label("Inspect").click();
         settle(&mut h);
+        // Owner report: no label wraps mid-word. Each row is one line,
+        // label left and value right, the technical term in its tooltip.
+        for label in [
+            "Triangles: ",
+            "Pinched points: ",
+            "Near-duplicate points: ",
+            "Untraced open edges: ",
+        ] {
+            let row = h.get_by_label_contains(label).rect();
+            assert!(row.height() <= 24.0, "{label} wraps at {size:?}: {row:?}");
+        }
         still(&mut h, "inspect", size);
         h.get_by_label("Export").click();
         settle(&mut h);

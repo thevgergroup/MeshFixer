@@ -1919,63 +1919,82 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         );
     }
     section(ui, &t!("inspect.section.counts"));
-    let flag = |ok: bool| if ok { "yes" } else { "no" };
-    egui::Grid::new("diag")
-        .num_columns(2)
-        .spacing([theme::SPACE_M, theme::SPACE_XS])
-        .show(ui, |ui| {
-            let mut row = |k: &str, v: String| {
-                ui.label(RichText::new(k).color(theme::TEXT_MUTED));
-                ui.label(v);
-                ui.end_row();
-            };
-            row("Triangles", thousands(d.triangle_count as u64));
-            row("Vertices", thousands(d.vertex_count as u64));
-            row("Components", d.components.to_string());
-            row("Closed", flag(d.is_closed).into());
-            row("Manifold", flag(d.is_manifold).into());
-            row("Boundary loops", d.boundary_loops.len().to_string());
-            row("Boundary edges", d.boundary_edges.to_string());
-            row(
-                "Untraced boundary edges",
-                d.untraced_boundary_edges.to_string(),
-            );
-            row(
-                "Tangled edges (non-manifold)",
-                d.non_manifold_edges.to_string(),
-            );
-            row(
-                "Pinched points (non-manifold vertices)",
-                d.non_manifold_vertices.to_string(),
-            );
-            row("Degenerate triangles", d.degenerate_triangles.to_string());
-            row("Duplicate vertices", d.duplicate_vertices_exact.to_string());
-            row(
-                "Inconsistent edges",
-                d.inconsistent_orientation_edges.to_string(),
-            );
-            row(
-                "Surface area",
-                d.surface_area
-                    .map_or("overflow (coordinates too large)".into(), |a| {
-                        format!("{a:.4}")
-                    }),
-            );
-            row(
-                "Near-duplicate vertices",
-                d.duplicate_vertices_tolerance.to_string(),
-            );
-            row("Duplicate faces", d.duplicate_faces.to_string());
-            row(
-                "Unused space",
-                format!("{:.0}% of slots", d.dead_slot_ratio * 100.0),
-            );
-            row(
-                "Volume",
-                d.signed_volume
-                    .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
-            );
-        });
+    let flag = |ok: bool| if ok { "yes" } else { "no" }.to_owned();
+    let n = |v: usize| thousands(v as u64);
+    // Short plain labels; the technical term is the tooltip.
+    let rows: [(&str, &str, String); 18] = [
+        ("Triangles", "Live triangles", n(d.triangle_count)),
+        ("Vertices", "Live vertices", n(d.vertex_count)),
+        ("Pieces", "Connected components", n(d.components)),
+        ("Closed", "Watertight: no boundary edges", flag(d.is_closed)),
+        (
+            "Manifold",
+            "Every edge has at most two faces",
+            flag(d.is_manifold),
+        ),
+        ("Openings", "Boundary loops", n(d.boundary_loops.len())),
+        ("Open edges", "Boundary edges", n(d.boundary_edges)),
+        (
+            "Untraced open edges",
+            "Boundary edges at a pinched point, not in any loop",
+            n(d.untraced_boundary_edges),
+        ),
+        (
+            "Tangled edges",
+            "Non-manifold edges: more than two faces share each",
+            n(d.non_manifold_edges),
+        ),
+        (
+            "Pinched points",
+            "Non-manifold vertices",
+            n(d.non_manifold_vertices),
+        ),
+        (
+            "Flat triangles",
+            "Degenerate (zero-area) triangles",
+            n(d.degenerate_triangles),
+        ),
+        (
+            "Duplicate points",
+            "Exactly duplicate vertices",
+            n(d.duplicate_vertices_exact),
+        ),
+        (
+            "Near-duplicate points",
+            "Vertices within tolerance of another",
+            n(d.duplicate_vertices_tolerance),
+        ),
+        (
+            "Duplicate faces",
+            "Faces with the same three corners",
+            n(d.duplicate_faces),
+        ),
+        (
+            "Flipped edges",
+            "Edges whose two faces disagree on orientation",
+            n(d.inconsistent_orientation_edges),
+        ),
+        (
+            "Surface area",
+            "Total area of the faces",
+            d.surface_area
+                .map_or("too large".into(), |a| format!("{a:.4}")),
+        ),
+        (
+            "Volume",
+            "Signed volume (only for a closed mesh)",
+            d.signed_volume
+                .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
+        ),
+        (
+            "Unused space",
+            "Unused (tombstoned) slots from earlier edits",
+            format!("{:.0}% of slots", d.dead_slot_ratio * 100.0),
+        ),
+    ];
+    for (label, term, value) in rows {
+        stat_row(ui, label, term, &value);
+    }
     if !app.warnings.is_empty() {
         section(ui, &t!("inspect.section.warnings"));
         egui::CollapsingHeader::new(format!(
@@ -1989,6 +2008,49 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             }
         });
     }
+}
+
+/// One Inspect row: the label left (never wrapped), the value right
+/// (tabular digits), the technical term as the label's tooltip.
+fn stat_row(ui: &mut egui::Ui, label: &str, term: &str, value: &str) {
+    let width = ui.available_width();
+    let (rect, r) = ui.allocate_exact_size(egui::vec2(width, 22.0), egui::Sense::hover());
+    let p = ui.painter();
+    let mid = rect.center().y;
+    let value_galley = p.layout_no_wrap(
+        value.to_owned(),
+        egui::FontId::monospace(theme::TYPE_BODY - 1.0),
+        theme::TEXT,
+    );
+    let room = (width - value_galley.size().x - theme::SPACE_M).max(40.0);
+    let label_galley = egui::WidgetText::from(
+        RichText::new(label)
+            .size(theme::TYPE_BODY)
+            .color(theme::TEXT_MUTED),
+    )
+    .into_galley(
+        ui,
+        Some(egui::TextWrapMode::Truncate),
+        room,
+        egui::TextStyle::Body,
+    );
+    p.galley(
+        egui::pos2(rect.left(), mid - label_galley.size().y / 2.0),
+        label_galley,
+        theme::TEXT_MUTED,
+    );
+    p.galley(
+        egui::pos2(
+            rect.right() - value_galley.size().x,
+            mid - value_galley.size().y / 2.0,
+        ),
+        value_galley,
+        theme::TEXT,
+    );
+    let text = format!("{label}: {value}");
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, &text));
+    // allow-swallow: the tooltip's response carries nothing more
+    let _ = r.on_hover_text(term);
 }
 
 // ---------------------------------------------------------------------
