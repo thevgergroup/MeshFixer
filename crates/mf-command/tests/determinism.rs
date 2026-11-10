@@ -23,6 +23,11 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
             if spec.operands.iter().any(|o| o.required) {
                 continue;
             }
+            // Operations on a selection only (split by region, delete
+            // faces) are checked with their selections in their own tests.
+            if !spec.target.whole_object {
+                continue;
+            }
             // A split needs a closed model and a plane through it: a bias
             // cut with a gap through a closed sphere.
             let (input, raw_params) = if op.id() == "mesh.split_plane" {

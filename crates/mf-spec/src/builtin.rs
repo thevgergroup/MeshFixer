@@ -38,6 +38,14 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/mesh.intersections.yaml"),
     ),
     (
+        "mesh.split_region.yaml",
+        include_str!("../../../specs/operations/mesh.split_region.yaml"),
+    ),
+    (
+        "mesh.delete_faces.yaml",
+        include_str!("../../../specs/operations/mesh.delete_faces.yaml"),
+    ),
+    (
         "mesh.make_solid.yaml",
         include_str!("../../../specs/operations/mesh.make_solid.yaml"),
     ),

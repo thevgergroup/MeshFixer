@@ -305,6 +305,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::ArrangeOnPlate,
     &transform::Delete,
     &split::SplitPlane,
+    &split::region::SplitRegion,
+    &split::region::DeleteFaces,
     &sculpt::SculptStroke,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,

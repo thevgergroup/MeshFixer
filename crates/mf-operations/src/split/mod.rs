@@ -33,7 +33,9 @@ use mf_spec::Params;
 use crate::affine::{apply, apply_linear, inverse};
 use crate::layout::{Footprint, Plate, layout_on_plate};
 
+pub mod dovetail;
 pub mod pegs;
+pub mod region;
 use crate::{
     DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
     needs_document, unsupported_target,
@@ -173,12 +175,7 @@ impl Operation for SplitPlane {
         let keep = params.get_choice("keep")?;
         let gap = params.get_float("cut_gap")?;
         let pegs = params.get_choice("pegs")?;
-        if pegs == "dovetail" {
-            return Err(failed(
-                "dovetail_not_available",
-                "Dovetail joints aren't available yet. Choose dowels or attached pegs.",
-            ));
-        }
+
         let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         if len == 0.0 || !len.is_finite() {
             return Err(refusal(CutError::InvalidPlane));
@@ -401,6 +398,12 @@ fn alignment(
         .or(above.as_ref())
         .map(|p| p.section_regions.clone())
         .unwrap_or_default(); // allow-swallow: no part kept on either side means no section, so no holes
+    let dovetail = pegs == "dovetail";
+    let (shape, count) = if dovetail {
+        (PegShape::Round, 1)
+    } else {
+        (shape, count)
+    };
     let (holes, skipped) = pegs::place_holes(&regions, shape, d / scale, count, min_wall / scale)
         .map_err(|e| match e {
         PegError::DoesNotFit {
@@ -441,6 +444,52 @@ fn alignment(
             }
             _ => base_below,
         };
+        if dovetail {
+            let region = &regions[h.region];
+            let (lo, hi) = region.outer.iter().fold(
+                ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
+                |(lo, hi), p| {
+                    (
+                        [lo[0].min(p[0]), lo[1].min(p[1])],
+                        [hi[0].max(p[0]), hi[1].max(p[1])],
+                    )
+                },
+            );
+            let span = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2)).sqrt();
+            let wide = d + 2.0 * depth_below * dovetail::ANGLE_DEGREES.to_radians().tan();
+            let tail_half = dovetail::tail_half_length(
+                region,
+                h.center,
+                h.axis,
+                (wide / 2.0 + min_wall) / scale,
+                span,
+            ) * scale;
+            if tail_half <= 0.0 || depth_below <= allowance {
+                return Err(failed(
+                    "section_too_thin",
+                    format!(
+                        "Section {} is too small for a {d:.2} dovetail {depth_below:.2} deep. Use a \
+                         smaller hole diameter or depth, or Alignment: Dowels.",
+                        h.region + 1
+                    ),
+                ));
+            }
+            let (groove, tail) = dovetail::groove_and_tail(
+                base_below,
+                base_above,
+                world_n,
+                key,
+                d,
+                depth_below,
+                clearance,
+                allowance,
+                span * scale,
+                tail_half,
+            );
+            tools_below.push(groove);
+            pegs_above.push(tail);
+            continue;
+        }
         let hole = pegs::profile(h.shape, d, chord_tol);
         tools_below.push(pegs::prism_at(
             base_below,
@@ -550,6 +599,7 @@ fn alignment(
         dowels,
         serde_json::json!({
             "kind": pegs,
+            "dovetail_angle_degrees": dovetail.then_some(dovetail::ANGLE_DEGREES),
             "holes": holes.len(),
             "hole_diameter": d,
             "dowel_diameter": dowel_d,
