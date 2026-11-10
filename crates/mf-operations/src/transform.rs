@@ -77,16 +77,22 @@ fn lowest_point(
 ///   then within `3·(γ₄ + 2.01·u)·S + γ₄·S ≤ 5.6·γ₄·S` of zero (with
 ///   `u ≤ γ₄/4`).
 ///
-/// `8·γ₄·S` covers that with margin. Dropping an object twice therefore
-/// changes nothing the second time, rather than moving it by a few ulps.
-/// The first drop of an object far above the plate (`S₀ ≫ S`) can leave a
-/// residual larger than this; one more drop then removes it, which is
-/// still deterministic.
+/// `8·γ₄·S` covers that with margin. An object dropped from far above the
+/// plate (`S₀ ≫ S`) can be left with a residual larger than this, so
+/// `object.drop_to_plate` corrects again on the new transform until this
+/// bound holds (review I-B; see [`MAX_CORRECTIONS`]). It ends on a
+/// transform whose computed lowest point is within the bound, so a second
+/// drop computes the same value and changes nothing, by construction.
 fn resting_tolerance(scale: f64) -> f64 {
     let u = f64::EPSILON / 2.0;
     let gamma4 = 4.0 * u / (1.0 - 4.0 * u);
     8.0 * gamma4 * scale
 }
+
+/// Most corrections `object.drop_to_plate` makes before refusing. Each
+/// one shrinks the residual from `≈ γ₄·S₀` to `≈ γ₄·S` (the bound above);
+/// from any finite height it rests after two or three.
+pub const MAX_CORRECTIONS: usize = 8;
 
 /// Determinant of the linear part (3MF's rows are the column-vector
 /// matrix's columns; the determinant is the same).
@@ -214,17 +220,36 @@ impl Operation for DropToPlate {
         if !min_z.is_finite() || !scale.is_finite() {
             return Err(non_finite());
         }
-        // Already resting: within the rounding of computing world z at all
-        // (see `resting_tolerance`).
-        let resting = min_z.abs() <= resting_tolerance(scale);
+        // Lower (or raise) by the computed lowest point, then measure again
+        // on the new transform, until it rests within the rounding of
+        // computing world z at all (see `resting_tolerance`). The result is
+        // a transform this same computation calls resting, so dropping it
+        // again changes nothing.
         let mut transform = target.transform;
-        if !resting {
+        let (mut min_z, mut scale) = (min_z, scale);
+        let mut corrections = 0;
+        while min_z.abs() > resting_tolerance(scale) {
+            if corrections == MAX_CORRECTIONS {
+                return Err(OpError::Failed {
+                    code: "did_not_settle",
+                    message: format!(
+                        "the object didn't come to rest on the plate after {MAX_CORRECTIONS} \
+                         corrections (still {min_z} off); reset its transform and drop it again"
+                    ),
+                });
+            }
             transform[11] -= min_z;
             if !transform[11].is_finite() {
                 return Err(non_finite());
             }
+            (min_z, scale) = lowest_point(target.mesh, &transform, ctx)?
+                .expect("the mesh had vertices a moment ago");
+            if !min_z.is_finite() || !scale.is_finite() {
+                return Err(non_finite());
+            }
+            corrections += 1;
         }
-        let moved_z = if resting { 0.0 } else { -min_z };
+        let moved_z = transform[11] - target.transform[11];
         Ok(DocOutput {
             changes: transform_change(target, transform),
             report: serde_json::json!({ "moved_z": moved_z }),
@@ -343,6 +368,65 @@ mod tests {
             let second = drop(&mesh, once).unwrap();
             assert!(second.changes.is_empty(), "{t:?}: {:?}", second.changes);
             assert_eq!(second.report["moved_z"], serde_json::json!(0.0));
+        }
+    }
+
+    /// Review I-B: one drop from far above the plate (1e3 and 1e6 mm, on
+    /// 2 mm and 20 mm parts, at random rotations) comes to rest; a second
+    /// drop changes nothing.
+    #[test]
+    fn one_drop_from_far_above_rests() {
+        let unit = Mesh::new(
+            vec![
+                [0.3, -0.7, 0.9],
+                [1.0, 0.2, -0.6],
+                [-0.8, 0.9, 0.1],
+                [0.0, 0.0, -1.0],
+            ],
+            vec![[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]],
+        )
+        .unwrap();
+        let mut seed = 0xfeed_u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for size in [2.0, 20.0] {
+            for height in [1e3, 1e6] {
+                for _ in 0..500 {
+                    let (a, b) = (next() * 6.3, next() * 6.3);
+                    let k = size * (0.5 + next());
+                    let (sa, ca) = a.sin_cos();
+                    let (sb, cb) = b.sin_cos();
+                    let t = [
+                        k * cb,
+                        k * sb * ca,
+                        k * sb * sa,
+                        -k * sb,
+                        k * cb * ca,
+                        k * cb * sa,
+                        0.0,
+                        -k * sa,
+                        k * ca,
+                        next() * 100.0,
+                        next() * 100.0,
+                        height * (1.0 + next()),
+                    ];
+                    let once = drop(&unit, t).unwrap();
+                    assert!(
+                        (once.report["moved_z"].as_f64().unwrap() + height).abs() < 2.0 * height
+                    );
+                    let rested = dropped(&once, t);
+                    let second = drop(&unit, rested).unwrap();
+                    assert!(
+                        second.changes.is_empty(),
+                        "size {size} height {height} {t:?}: {:?}",
+                        second.changes
+                    );
+                }
+            }
         }
     }
 

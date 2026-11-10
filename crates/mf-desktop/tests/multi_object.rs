@@ -402,13 +402,16 @@ fn delete_key_deletes_the_active_object_undoably() {
     wait_until(&mut h, "import + analysis", |a| {
         a.session.document().objects().len() == 2 && a.current_analysis().is_some()
     });
-    h.run();
+    h.run_steps(4);
     let (left, right) = {
         let objects = h.state().session.document().objects().to_vec();
         (objects[0].id, objects[1].id)
     };
+    // Fixed frame counts, not `run` (which waits for repaints to stop): a
+    // newly active object's analysis keeps requesting frames, and under a
+    // parallel test load `run` can exceed its step budget.
     h.state_mut().set_active(right);
-    h.run();
+    h.run_steps(4);
 
     press(&mut h, egui::Key::Delete, egui::Modifiers::NONE);
     wait_until(&mut h, "the delete commits", |a| {
@@ -422,7 +425,7 @@ fn delete_key_deletes_the_active_object_undoably() {
     assert_eq!(h.state().object_views().len(), 1);
 
     press(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
-    h.run();
+    h.run_steps(4);
     let doc = h.state().session.document();
     assert_eq!(
         doc.objects().iter().map(|o| o.id).collect::<Vec<_>>(),
@@ -432,10 +435,10 @@ fn delete_key_deletes_the_active_object_undoably() {
     assert!(h.state().active.is_some());
 
     h.state_mut().redo();
-    h.run();
+    h.run_steps(4);
     assert!(h.state().session.document().object(right).is_none());
     assert_eq!(h.state().active, Some(left));
     h.state_mut().undo();
-    h.run();
+    h.run_steps(4);
     assert!(h.state().session.document().object(right).is_some());
 }

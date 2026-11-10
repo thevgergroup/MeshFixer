@@ -157,8 +157,12 @@ pub fn remove_created_degenerates(
                     continue;
                 }
                 // Neighbourhoods read from this pass's maps must be current.
-                // allow-swallow: vfaces maps a vertex to the faces using it; no entry means no faces, which is exactly what the empty list says
-                let faces: Vec<usize> = vfaces.get(&gone).cloned().unwrap_or_default();
+                // `gone` is a corner of face `f`, so it has faces; if the map
+                // somehow had none, collapsing would orphan its faces: skip
+                // the edge rather than collapse it on an empty list.
+                let Some(faces) = vfaces.get(&gone).filter(|f| !f.is_empty()).cloned() else {
+                    continue;
+                };
                 let near_keep = vfaces.get(&keep).into_iter().flatten();
                 if faces.iter().chain(near_keep).any(|&h| dirty[h]) {
                     continue;

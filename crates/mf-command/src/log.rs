@@ -96,11 +96,6 @@ pub enum LogError {
     },
     #[error("object {0} vanished from the replayed session after its command ran")]
     TargetMissing(ObjectId),
-    #[error("replay allocated object {actual}, but the log expected {expected}")]
-    ObjectIdMismatch {
-        expected: ObjectId,
-        actual: ObjectId,
-    },
     #[error("{op} is version {available}, but the log recorded version {recorded}")]
     VersionMismatch {
         op: String,

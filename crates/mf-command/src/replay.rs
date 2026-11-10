@@ -60,6 +60,9 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
     let commands = std::fs::read_to_string(dir.join("commands.jsonl"))?;
     let mut session = Session::new();
     let mut results = Vec::new();
+    // Objects whose replayed state legitimately differs in its last bits
+    // from the recorded one: outputs of `Equivalent` commands.
+    let mut drifted: std::collections::BTreeSet<mf_document::ObjectId> = Default::default();
     for (i, line) in commands
         .lines()
         .enumerate()
@@ -108,13 +111,9 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                 }
                 let mut obj = model.objects.swap_remove(part);
                 obj.name = name;
-                let id = session.import_object(obj, model.unit, model.source, part);
-                if id != object {
-                    return Err(LogError::ObjectIdMismatch {
-                        expected: object,
-                        actual: id,
-                    });
-                }
+                // The recorded id, not the next free one: an abandoned
+                // branch may have used ids before this import (review I-A).
+                session.import_object_as(obj, model.unit, model.source, part, object)?;
             }
             Event::SetOpenings { object, ids, label } => {
                 if !session.set_openings(object, ids, label) {
@@ -138,15 +137,20 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                 // Check the input before running: an output comparison is
                 // meaningless if the input already differs (review I4). A
                 // content difference with identical structure is expected
-                // after an earlier `Equivalent` verdict (platform drift).
-                let drifted = results
+                // for an object an earlier `Equivalent` command produced
+                // (platform drift), and only for such an object (review
+                // M-2); a command reading one may drift in turn.
+                let input_verdict = check_inputs(&session, &record, &drifted);
+                let reads_drifted = recorded_inputs(&record)
                     .iter()
-                    .any(|(_, v)| matches!(v, Verdict::Equivalent { .. }));
-                let input_verdict = check_inputs(&session, &record, drifted);
+                    .any(|(object, ..)| drifted.contains(object));
                 let verdict = match input_verdict {
                     Some(v) => v,
-                    None => run_and_classify(&mut session, &record, drifted)?,
+                    None => run_and_classify(&mut session, &record, reads_drifted)?,
                 };
+                if matches!(verdict, Verdict::Equivalent { .. }) {
+                    drifted.extend(changed_set(&record).into_iter().map(|(o, ..)| o));
+                }
                 let stop = matches!(
                     verdict,
                     Verdict::Failed { .. } | Verdict::InputMismatch { .. }
@@ -204,8 +208,13 @@ fn recorded_inputs(
 
 /// `None` if every operand the record read is in the replayed session as
 /// it was recorded; otherwise why the command can't be compared.
-fn check_inputs(session: &Session, record: &CommandRecord, drifted: bool) -> Option<Verdict> {
+fn check_inputs(
+    session: &Session,
+    record: &CommandRecord,
+    drifted_objects: &std::collections::BTreeSet<mf_document::ObjectId>,
+) -> Option<Verdict> {
     for (object, hash, structure, transform) in recorded_inputs(record) {
+        let drifted = drifted_objects.contains(&object);
         let Some(o) = session.document().object(object) else {
             return Some(Verdict::Failed {
                 error: format!(
@@ -249,12 +258,14 @@ fn mesh_diagonal(mesh: &mf_geometry::Mesh) -> f64 {
 }
 
 /// Compare a recorded transform with a replayed one (D7). Bit-equal is
-/// `Exact`. After earlier drift (an `Equivalent` verdict upstream), a
-/// transform computed from drifted geometry (drop to plate, say) may
-/// differ in its last bits: it is `Equivalent` when every linear entry is
-/// within `1e-9` and every translation within `1e-9 ×` the object's
-/// bounding-box diagonal (at least 1), the tolerance geometry gets (review
-/// I2). Anything else is a `Mismatch`.
+/// `Exact`. The linear part (rotation and scale) is always compared bit
+/// for bit: it is recorded, never computed from geometry. For an object
+/// that drifted (an earlier `Equivalent` command produced it or its
+/// command's inputs), a translation computed from that geometry (drop to
+/// plate, say) may differ in its last bits: it is `Equivalent` within
+/// `1e-9 ×` the object's bounding-box diagonal (at least 1), the
+/// tolerance geometry gets (reviews I2, M-2). Anything else is a
+/// `Mismatch`.
 fn compare_transforms(
     expected: &[f64; 12],
     actual: &[f64; 12],
@@ -271,13 +282,20 @@ fn compare_transforms(
     if !drifted {
         return mismatch;
     }
-    let diff = |k: usize| (expected[k] - actual[k]).abs();
-    let linear = (0..9).map(diff).fold(0.0, f64::max);
-    let translation = (9..12).map(diff).fold(0.0, f64::max);
+    if expected[..9]
+        .iter()
+        .map(|x| x.to_bits())
+        .ne(actual[..9].iter().map(|x| x.to_bits()))
+    {
+        return mismatch;
+    }
+    let translation = (9..12)
+        .map(|k| (expected[k] - actual[k]).abs())
+        .fold(0.0, f64::max);
     let tolerance = 1e-9 * diagonal().max(1.0);
-    if linear <= 1e-9 && translation <= tolerance {
+    if translation <= tolerance {
         Verdict::Equivalent {
-            max_deviation: translation.max(linear),
+            max_deviation: translation,
         }
     } else {
         mismatch

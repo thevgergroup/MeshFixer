@@ -110,6 +110,18 @@ pub enum CommandError {
     RepeatedOperand { op: String, name: String },
     #[error("object {object} can't be two operands of one command ({op})")]
     RepeatedObject { op: String, object: ObjectId },
+    /// A recorded object id (a replayed import, or an object a replayed or
+    /// re-executed command created) is already an object at this
+    /// revision: the log doesn't fit this history.
+    #[error("the log's recorded object {object} already exists in revision {revision}")]
+    RecordedIdTaken {
+        object: ObjectId,
+        revision: RevisionId,
+    },
+    /// A recorded object id is the largest id there is, so no later id
+    /// could follow it (a corrupt log).
+    #[error("the log's recorded object {object} is out of range (a corrupt log?)")]
+    RecordedIdOutOfRange { object: ObjectId },
     /// The operation returned changes its spec doesn't allow (a defect in
     /// the operation, refused rather than committed).
     #[error("{op} returned invalid object changes: {reason}")]
@@ -618,6 +630,47 @@ impl Session {
         )
     }
 
+    /// As [`Session::import_object`], giving the object the id the command
+    /// log recorded for it (replay): ids an abandoned branch used before
+    /// this import leave a gap the log keeps (review I-A). Refused if that
+    /// id is already an object here or is out of range.
+    pub fn import_object_as(
+        &mut self,
+        object: ModelObject,
+        unit: Unit,
+        source: SourceInfo,
+        part: usize,
+        id: ObjectId,
+    ) -> Result<ObjectId, CommandError> {
+        self.claim_recorded_id(id)?;
+        let units = self.document().objects().is_empty().then_some(unit);
+        Ok(self.add_object_as(
+            id,
+            Geometry::Mesh(object.mesh),
+            object.name,
+            Some(source),
+            part,
+            object.transform,
+            units,
+        ))
+    }
+
+    /// Check a recorded id can be used now (no object has it, and an id
+    /// can follow it) and move the counter past it.
+    fn claim_recorded_id(&mut self, id: ObjectId) -> Result<(), CommandError> {
+        if self.document().object(id).is_some() {
+            return Err(CommandError::RecordedIdTaken {
+                object: id,
+                revision: self.cursor,
+            });
+        }
+        let after =
+            id.0.checked_add(1)
+                .ok_or(CommandError::RecordedIdOutOfRange { object: id })?;
+        self.next_object = self.next_object.max(after);
+        Ok(())
+    }
+
     /// Add an object of any geometry kind (a history entry, like an import).
     pub fn add_geometry(
         &mut self,
@@ -639,6 +692,21 @@ impl Session {
     ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
+        self.add_object_as(id, geometry, name, source, part, transform, units)
+    }
+
+    /// As `add_object`, with the id already chosen.
+    #[allow(clippy::too_many_arguments)]
+    fn add_object_as(
+        &mut self,
+        id: ObjectId,
+        geometry: Geometry,
+        name: String,
+        source: Option<SourceInfo>,
+        part: usize,
+        transform: [f64; 12],
+        units: Option<Unit>,
+    ) -> ObjectId {
         let mut document = self.document().with_object(Object {
             id,
             name: name.clone(),
@@ -889,9 +957,9 @@ impl Session {
         let mut recorded_ids = match c.created_ids {
             Some(ids) if ids.len() == creates => {
                 if let Some(&taken) = ids.iter().find(|&&id| base.object(id).is_some()) {
-                    return Err(CommandError::InvalidChanges {
-                        op: c.op_id.to_owned(),
-                        reason: format!("the recorded id {taken} is already an object here"),
+                    return Err(CommandError::RecordedIdTaken {
+                        object: taken,
+                        revision: self.cursor,
                     });
                 }
                 Some(ids.into_iter())
@@ -959,7 +1027,15 @@ impl Session {
                         Some(id) => id,
                         None => ObjectId(next_object),
                     };
-                    next_object = next_object.max(id.0 + 1);
+                    let after = id.0.checked_add(1).ok_or_else(|| {
+                        CommandError::InvalidChanges {
+                            op: c.op_id.to_owned(),
+                            reason: format!(
+                                "the log's recorded object {id} is out of range (a corrupt log?)"
+                            ),
+                        }
+                    })?;
+                    next_object = next_object.max(after);
                     affected.created += mesh.face_count() as u64;
                     let (hash, structure_hash) =
                         info.hashes.expect("run hashes every created mesh");

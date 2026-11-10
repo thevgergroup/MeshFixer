@@ -936,3 +936,165 @@ fn a_source_in_a_missing_operand_is_refused() {
     }
     assert_eq!(s.current(), before);
 }
+
+/// Review I-A: an abandoned branch's created id comes before a later
+/// import; replay gives the import its recorded id.
+#[test]
+fn an_import_after_an_abandoned_branch_keeps_its_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, a, b) = two_objects(dir.path());
+    s.execute(consume_tool(a, b)).unwrap();
+    assert_eq!(created_by(&s), ObjectId(3));
+    assert!(s.undo());
+    let c_path = dir.path().join("c.3mf");
+    write_model_path(
+        &Model {
+            unit: Unit::Millimeter,
+            objects: vec![ModelObject {
+                name: "c".into(),
+                mesh: uv_sphere(6, 8),
+                transform: IDENTITY,
+            }],
+        },
+        &c_path,
+    )
+    .unwrap();
+    let (ids, _) = s.import_model(read_model(&c_path).unwrap());
+    assert_eq!(ids, vec![ObjectId(4)]);
+    s.execute(plain("object.drop_to_plate", ids[0])).unwrap();
+    let report = save_and_replay(&s, dir.path());
+    assert!(
+        report.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(
+        report
+            .session
+            .document()
+            .objects()
+            .iter()
+            .map(|o| o.id)
+            .collect::<Vec<_>>(),
+        vec![a, b, ObjectId(4)]
+    );
+    // An object made after the replay still gets a fresh id.
+    let mut replayed = report.session;
+    replayed.execute(consume_tool(a, b)).unwrap();
+    assert_eq!(created_by(&replayed), ObjectId(5));
+}
+
+/// Review I-B: a part far above the plate rests after one drop; a second
+/// drop makes no revision.
+#[test]
+fn one_drop_from_far_above_needs_no_second() {
+    for (size, height) in [(2.0, 1e3), (2.0, 1e6), (20.0, 1e3), (20.0, 1e6)] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, ids) = session_with(
+            dir.path(),
+            vec![(
+                "part",
+                cube(size),
+                rotation_translation(0, 33.0, [1.5, -2.5, height]),
+            )],
+        );
+        s.execute(plain("object.drop_to_plate", ids[0])).unwrap();
+        let rested = s.current();
+        let again = s.execute(plain("object.drop_to_plate", ids[0])).unwrap();
+        assert!(
+            matches!(again, CommitOutcome::NoChange { .. }),
+            "{size} mm at {height}: {again:?}"
+        );
+        assert_eq!(s.current(), rested, "no revision");
+        assert!(world_min_z(&s, ids[0]).abs() < 1e-9 * size);
+    }
+}
+
+/// Review M-2: drift is scoped to the objects it touched. A translation
+/// tolerance applies only to an object an `Equivalent` command produced
+/// (or one computed from it); the linear part is always bit-exact.
+#[test]
+fn drift_is_scoped_to_the_drifted_objects() {
+    // (drop which object, bump which entry, expect Equivalent?)
+    for (drop_drifted, entry, equivalent) in
+        [(true, 11, true), (false, 11, false), (true, 0, false)]
+    {
+        let dir = tempfile::tempdir().unwrap();
+        let mut holed = cube(1.0).edit();
+        holed.remove_face(FaceId(0)).unwrap();
+        let (mut s, ids) = session_with(
+            dir.path(),
+            vec![
+                (
+                    "holed",
+                    holed.finish().unwrap().0,
+                    rotation_translation(0, 30.0, [0.0, 0.0, 4.0]),
+                ),
+                (
+                    "other",
+                    tetrahedron(),
+                    rotation_translation(1, 20.0, [5.0, 0.0, 3.0]),
+                ),
+            ],
+        );
+        s.execute(plain("mesh.fill_holes", ids[0])).unwrap();
+        let dropped = if drop_drifted { ids[0] } else { ids[1] };
+        s.execute(plain("object.drop_to_plate", dropped)).unwrap();
+        let log = dir.path().join("session.mfx.log");
+        s.save_log(&log).unwrap();
+        let path = log.join("commands.jsonl");
+        let mut lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let mut commands = lines.iter_mut().filter(|e| e["kind"] == "command");
+        commands.next().unwrap()["output_hash"] = serde_json::json!("0".repeat(64));
+        let drop = commands.next().unwrap();
+        let v = drop["outputs"][0]["transform"][entry].as_f64().unwrap();
+        drop["outputs"][0]["transform"][entry] = serde_json::json!(v + 1e-13);
+        let edited: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        std::fs::write(&path, edited.join("\n") + "\n").unwrap();
+        let report = replay(&log).unwrap();
+        assert!(matches!(report.results[0].1, Verdict::Equivalent { .. }));
+        let verdict = &report.results[1].1;
+        let ctx = format!("drifted {drop_drifted}, entry {entry}: {verdict:?}");
+        if equivalent {
+            assert!(matches!(verdict, Verdict::Equivalent { .. }), "{ctx}");
+        } else {
+            assert!(matches!(verdict, Verdict::Mismatch { .. }), "{ctx}");
+        }
+    }
+}
+
+/// Reviews M-1 and M-4: a recorded created id that is already an object
+/// here, or that no id could follow, is refused by name, naming the log's
+/// record, not the operation.
+#[test]
+fn a_bad_recorded_created_id_is_refused_by_name() {
+    for (id, words) in [
+        (
+            serde_json::json!(1),
+            "recorded object #1 already exists in revision",
+        ),
+        (serde_json::json!(u64::MAX), "out of range"),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, a, b) = two_objects(dir.path());
+        s.execute(consume_tool(a, b)).unwrap();
+        let log = dir.path().join("session.mfx.log");
+        s.save_log(&log).unwrap();
+        edit_command(&log, |cmd| {
+            for o in cmd["outputs"].as_array_mut().unwrap() {
+                if o["created"] == serde_json::json!(true) {
+                    o["object"] = id.clone();
+                }
+            }
+        });
+        let report = replay(&log).unwrap();
+        match &report.results[0].1 {
+            Verdict::Failed { error } => assert!(error.contains(words), "{error}"),
+            other => panic!("{other:?}"),
+        }
+    }
+}
