@@ -202,6 +202,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
     let plate = Plate {
         size_mm: [256.0, 256.0],
         grid_mm: 10.0,
+        ..Plate::default()
     };
     // Framed on the plate's own extent (bigger than the cube), from close
     // to straight above, so the cube's footprint and the plate around it
@@ -624,21 +625,24 @@ fn plate_vertices_degenerate_input_is_empty_not_a_panic() {
     assert!(
         mf_render::plate_vertices(&Plate {
             size_mm: [0.0, 256.0],
-            grid_mm: 10.0
+            grid_mm: 10.0,
+            ..Plate::default()
         })
         .is_empty()
     );
     assert!(
         mf_render::plate_vertices(&Plate {
             size_mm: [256.0, 256.0],
-            grid_mm: 0.0
+            grid_mm: 0.0,
+            ..Plate::default()
         })
         .is_empty()
     );
     assert!(
         mf_render::plate_vertices(&Plate {
             size_mm: [256.0, 256.0],
-            grid_mm: -1.0
+            grid_mm: -1.0,
+            ..Plate::default()
         })
         .is_empty()
     );
@@ -790,6 +794,7 @@ fn plate_stays_at_world_origin_when_the_camera_target_moves() {
     let plate = Plate {
         size_mm: [256.0, 256.0],
         grid_mm: 10.0,
+        ..Plate::default()
     };
     let cam = top_down_camera(DVec3::new(5.0, 0.0, 0.0), 60.0, 128.0);
     let view = (160.0, 160.0);

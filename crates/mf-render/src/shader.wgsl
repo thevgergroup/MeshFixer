@@ -293,12 +293,15 @@ fn vs_plate(
 @fragment
 fn fs_plate(in: PlateOut) -> @location(0) vec4<f32> {
     let dist = distance(in.world, scene.eye_pos.xyz);
-    // Fades over the camera's own framing distance (eye_pos's own length
-    // from the origin the plate sits at): full strength near the camera,
-    // gone by twice that.
+    // Fades over the camera's own framing distance (eye_pos's length:
+    // how far the eye is from what it looks at): full strength near the
+    // camera, gone by four times that, so the grid reads around and well
+    // beyond the object.
     let scale = max(length(scene.eye_pos.xyz), 1e-3);
-    let fade = clamp(1.0 - dist / (scale * 2.0), 0.0, 1.0);
-    return vec4<f32>(scene.plate.rgb, scene.plate.a * fade);
+    let fade = clamp(1.0 - dist / (scale * 4.0), 0.0, 1.0);
+    // The line's colour: the plate's minor or major lines (renderer.rs
+    // `draw_plate` sets it per draw).
+    return vec4<f32>(draw.color.rgb, draw.color.a * fade);
 }
 
 // --- The transform gizmo (overlay.rs): screen-space geometry in pixel

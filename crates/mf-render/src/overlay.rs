@@ -69,11 +69,15 @@ impl GizmoPalette {
 }
 
 /// The build plate (D9): a grid at world z = 0. The default is 256 x 256
-/// mm with a 10 mm grid, matching a common consumer FDM bed.
+/// mm with a 10 mm grid, matching a common consumer FDM bed, and a
+/// stronger line every 50 mm ([`crate::Palette::plate_major`]) so the
+/// scale reads at any zoom.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plate {
     pub size_mm: [f64; 2],
     pub grid_mm: f64,
+    /// Every this far, a major line (0: none).
+    pub major_mm: f64,
 }
 
 impl Default for Plate {
@@ -81,6 +85,7 @@ impl Default for Plate {
         Plate {
             size_mm: [256.0, 256.0],
             grid_mm: 10.0,
+            major_mm: 50.0,
         }
     }
 }

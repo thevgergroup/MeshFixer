@@ -24,6 +24,9 @@ pub struct Palette {
     /// The build plate's grid (D9 `PLATE`): a neutral, so it never
     /// competes with a defect or selection colour.
     pub plate: [f32; 4],
+    /// The plate's major lines (every [`crate::Plate::major_mm`]): the same
+    /// neutral, a step brighter.
+    pub plate_major: [f32; 4],
     /// Saturation kept by an inactive object (0 = grey, 1 = unchanged).
     pub inactive_saturation: f32,
     /// Brightness multiplier of an inactive object.
@@ -76,7 +79,8 @@ impl Palette {
         surface: [0.70, 0.72, 0.76, 1.0],
         back_face: [0.62, 0.30, 0.30, 1.0],
         boundary: [1.0, 0.55, 0.05, 1.0],
-        plate: [70.0 / 255.0, 70.0 / 255.0, 70.0 / 255.0, 1.0],
+        plate: [100.0 / 255.0, 100.0 / 255.0, 100.0 / 255.0, 1.0],
+        plate_major: [140.0 / 255.0, 140.0 / 255.0, 140.0 / 255.0, 1.0],
         inactive_saturation: 0.0,
         inactive_brightness: 0.55,
         boundary_width: 1.0,
@@ -208,7 +212,8 @@ pub struct MeshRenderer {
     draw_slots: Vec<DrawSlot>,
     /// The plate's own draw uniforms (model = identity, its line width):
     /// one reusable slot, since only one plate is ever drawn.
-    plate_slot: DrawSlot,
+    /// The plate's minor and major lines' uniforms (two draws, one pass).
+    plate_slots: [DrawSlot; 2],
 }
 
 impl MeshRenderer {
@@ -500,7 +505,7 @@ impl MeshRenderer {
             wgpu::FrontFace::Ccw,
             DepthMode::NoTest,
         );
-        let plate_slot = {
+        let plate_slot = || {
             let buffer = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("mf plate draw uniforms"),
                 size: std::mem::size_of::<DrawUniforms>() as u64,
@@ -517,6 +522,7 @@ impl MeshRenderer {
             });
             DrawSlot { buffer, bind_group }
         };
+        let plate_slots = [plate_slot(), plate_slot()];
         MeshRenderer {
             xray_surface_pipeline_ccw,
             xray_surface_pipeline_cw,
@@ -535,7 +541,7 @@ impl MeshRenderer {
             scene_uniforms,
             scene_bind_group,
             draw_slots: Vec::new(),
-            plate_slot,
+            plate_slots,
         }
     }
 
@@ -758,33 +764,45 @@ impl MeshRenderer {
         plate: &crate::Plate,
         world_origin: DVec3,
     ) {
-        let vertices = crate::plate_vertices(plate);
-        if vertices.is_empty() {
-            return;
-        }
-        let u = DrawUniforms {
-            model: shifted_model(DMat4::IDENTITY, DVec3::ZERO, world_origin).to_cols_array_2d(),
-            normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
-            color: [0.0; 4],
-            params: [
-                0.0,
-                self.palette.overlay_width * self.pixels_per_point,
-                0.0,
-                0.0,
-            ],
-            states: [0; 4],
+        // Minor lines, then the major ones over them.
+        let major = crate::Plate {
+            grid_mm: plate.major_mm,
+            ..*plate
         };
-        queue.write_buffer(&self.plate_slot.buffer, 0, bytemuck::bytes_of(&u));
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mf plate vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
-        pass.set_bind_group(0, &self.scene_bind_group, &[]);
-        pass.set_bind_group(1, &self.plate_slot.bind_group, &[]);
-        pass.set_pipeline(&self.plate_pipeline);
-        pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw(0..6, 0..(vertices.len() / 2) as u32);
+        let layers = [
+            (plate, self.palette.plate),
+            (&major, self.palette.plate_major),
+        ];
+        for (slot, (grid, color)) in layers.into_iter().enumerate() {
+            let vertices = crate::plate_vertices(grid);
+            if vertices.is_empty() {
+                continue;
+            }
+            let u = DrawUniforms {
+                model: shifted_model(DMat4::IDENTITY, DVec3::ZERO, world_origin).to_cols_array_2d(),
+                normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
+                color,
+                params: [
+                    0.0,
+                    self.palette.overlay_width * self.pixels_per_point,
+                    0.0,
+                    0.0,
+                ],
+                states: [0; 4],
+            };
+            let slot = &self.plate_slots[slot];
+            queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mf plate vertices"),
+                contents: bytemuck::cast_slice(&vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            pass.set_bind_group(0, &self.scene_bind_group, &[]);
+            pass.set_bind_group(1, &slot.bind_group, &[]);
+            pass.set_pipeline(&self.plate_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..(vertices.len() / 2) as u32);
+        }
     }
 
     /// Draw the transform gizmo's handles (D8): screen-space quads with no

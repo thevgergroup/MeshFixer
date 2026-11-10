@@ -1192,27 +1192,70 @@ mod tests {
     /// transform finds.
     #[test]
     fn remeasuring_after_a_move_or_turn_matches_a_fresh_analysis() {
-        let mesh = holed_grid();
+        // Every kind: holes, a crack, a tangled edge (the plate's fin) and
+        // a loose piece (a tetrahedron above the plate).
+        let piece = mf_fixtures::translated(
+            &mf_fixtures::scaled(&mf_fixtures::tetrahedron(), 4.0),
+            [10.0, 10.0, 8.0],
+        );
+        let mesh = mf_fixtures::merge(&[mf_fixtures::plate_with_defects(), piece]);
         let diagnostics = mf_geometry::inspect(&mesh);
         let numbers = HoleNumbers::default();
         let before = classify_numbered(&mesh, &diagnostics, &IDENTITY, 1000, &numbers);
+        assert!(
+            !before.holes.is_empty()
+                && !before.cracks.is_empty()
+                && !before.loose.is_empty()
+                && !before.tangled.is_empty(),
+            "every kind of defect is here"
+        );
         let mut moved = IDENTITY;
         moved[9] = 4.0;
         moved[11] = -2.5;
         let mut turned = moved;
         (turned[0], turned[1], turned[3], turned[4]) = (0.0, 1.0, -1.0, 0.0);
+        let close = |a: &[Option<Place>], b: &[Option<Place>]| {
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.iter().zip(b) {
+                let (a, b) = (a.unwrap(), b.unwrap());
+                for k in 0..3 {
+                    assert!((a.bounds.min[k] - b.bounds.min[k]).abs() < 1e-9);
+                    assert!((a.bounds.max[k] - b.bounds.max[k]).abs() < 1e-9);
+                }
+            }
+        };
         for to in [moved, turned] {
             let again = remeasured(&before, &mesh, &diagnostics, &IDENTITY, &to, 1000, &numbers);
             let fresh = classify_numbered(&mesh, &diagnostics, &to, 1000, &numbers);
             assert_eq!(again.holes, fresh.holes);
-            assert_eq!(again.world_size, fresh.world_size);
-            for (a, b) in again.places.holes.iter().zip(&fresh.places.holes) {
-                let (a, b) = (a.unwrap(), b.unwrap());
-                for k in 0..3 {
-                    assert!((a.bounds.min[k] - b.bounds.min[k]).abs() < 1e-12);
-                    assert!((a.bounds.max[k] - b.bounds.max[k]).abs() < 1e-12);
+            assert_eq!(again.cracks, fresh.cracks);
+            assert_eq!(again.tangled, fresh.tangled);
+            assert_eq!(again.loose.len(), fresh.loose.len());
+            for (a, b) in again.loose.iter().zip(&fresh.loose) {
+                match (a, b) {
+                    (
+                        Defect::LoosePiece {
+                            component: c1,
+                            triangles: t1,
+                            size: s1,
+                        },
+                        Defect::LoosePiece {
+                            component: c2,
+                            triangles: t2,
+                            size: s2,
+                        },
+                    ) => {
+                        assert_eq!((c1, t1), (c2, t2));
+                        assert!((s1.unwrap() - s2.unwrap()).abs() < 1e-9);
+                    }
+                    other => panic!("not pieces: {other:?}"),
                 }
             }
+            assert_eq!(again.world_size, fresh.world_size);
+            close(&again.places.holes, &fresh.places.holes);
+            close(&again.places.cracks, &fresh.places.cracks);
+            close(&again.places.loose, &fresh.places.loose);
+            close(&again.places.tangled, &fresh.places.tangled);
         }
     }
 

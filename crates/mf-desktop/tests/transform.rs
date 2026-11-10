@@ -389,12 +389,14 @@ fn sheared_transform_disables_rotate_and_scale_fields() {
     assert_eq!(t[..9], sheared[..9], "the shear is kept");
 }
 
-/// A cube with a hole and a loose piece.
+/// Every kind of defect: the plate's holes, crack and tangled fin, and a
+/// loose tetrahedron above it.
 fn defective_file(dir: &std::path::Path) -> std::path::PathBuf {
-    let (positions, triangles) = mf_fixtures::tetrahedron().to_arrays();
-    let shifted = positions.iter().map(|p| [p[0] + 3.0, p[1], p[2]]).collect();
-    let far = mf_geometry::Mesh::new(shifted, triangles).unwrap();
-    let mesh = mf_fixtures::merge(&[mf_fixtures::cube_with_missing_face(), far]);
+    let piece = mf_fixtures::translated(
+        &mf_fixtures::scaled(&mf_fixtures::tetrahedron(), 4.0),
+        [10.0, 10.0, 8.0],
+    );
+    let mesh = mf_fixtures::merge(&[mf_fixtures::plate_with_defects(), piece]);
     model_file(dir, "scan", mesh, IDENTITY)
 }
 
@@ -524,20 +526,68 @@ fn tooltip_shown(h: &Harness<'_, MeshFixerApp>) -> bool {
     .is_some()
 }
 
-/// Review C1: a move keeps the analysis. The panels, the tree's counts and
-/// hovering never go blank while the object's measurements are made again
-/// (topology, render mesh and overlays belong to the mesh, not to where
-/// it is).
+/// The tree's defect rows ("Holes (2)", "Narrow cracks (1)", "Loose
+/// pieces (1)", "Tangled edges (1)"), as shown.
+fn defect_rows(h: &Harness<'_, MeshFixerApp>) -> Vec<String> {
+    [
+        "Holes (",
+        "Narrow cracks (",
+        "Loose pieces (",
+        "Tangled edges (",
+    ]
+    .iter()
+    .map(|prefix| {
+        h.query_by_label_contains(prefix)
+            .and_then(|n| n.accesskit_node().label())
+            .unwrap_or_else(|| panic!("the tree lists {prefix}…)"))
+    })
+    .collect()
+}
+
+/// Steps from a transform-only change until it has committed (or been
+/// undone) and the object is measured at its new placement. Every frame
+/// keeps the analysis, never shows "Analysing…" and keeps the tree's
+/// defect rows (counts included) as they were (review C1, F4, F5).
+fn settles_keeping_the_analysis(
+    h: &mut Harness<'_, MeshFixerApp>,
+    rows: &[String],
+    done: impl Fn(&MeshFixerApp) -> bool,
+) {
+    let start = Instant::now();
+    loop {
+        let app = h.state();
+        assert!(app.current_analysis().is_some(), "the analysis never goes");
+        assert!(!app.is_analyzing(), "no \"Analysing…\" after a move");
+        assert_eq!(defect_rows(h), rows, "the tree keeps its counts");
+        if app.busy.is_none() && done(app) && !app.is_remeasuring() {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "never settled: busy {:?}, remeasuring {}",
+            app.busy,
+            app.is_remeasuring(),
+        );
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    let a = h.state().current_analysis().unwrap();
+    assert_eq!(a.transform, transform(h), "measured at the new placement");
+}
+
+/// Review C1: a move keeps the analysis. The panels, the tree's counts
+/// (holes, cracks, loose pieces, tangled edges) and hovering never go
+/// blank while the object's measurements are made again (topology, render
+/// mesh and overlays belong to the mesh, not to where it is).
 #[test]
 fn a_move_keeps_the_analysis_and_hover_working() {
     require_gpu!("a_move_keeps_the_analysis_and_hover_working");
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(defective_file(dir.path()));
     h.run_steps(3);
-    let holes = |h: &Harness<'_, MeshFixerApp>| h.query_by_label_contains("Holes (").is_some();
-    assert!(holes(&h));
+    let rows = defect_rows(&h);
     open_transform(&mut h);
-    // A small object: off the 1 mm grid, so any drag moves it.
+    // Off the 1 mm grid, so any drag moves it.
     h.state_mut().transform_tool_mut().unwrap().snap = false;
     h.run_steps(3);
     let history = steps(&h);
@@ -545,32 +595,11 @@ fn a_move_keeps_the_analysis_and_hover_working() {
     press(&mut h, at);
     move_to(&mut h, at, at + dir_x * 80.0);
     release(&mut h, at + dir_x * 80.0);
-    let start = Instant::now();
-    loop {
-        let app = h.state();
-        assert!(app.current_analysis().is_some(), "the analysis never goes");
-        assert!(!app.is_analyzing(), "no \"Analysing…\" after a move");
-        assert!(holes(&h), "the tree keeps its counts");
-        if app.busy.is_none() && steps(&h) == history + 1 && !app.is_remeasuring() {
-            break;
-        }
-        assert!(
-            start.elapsed() < Duration::from_secs(20),
-            "the move never settled: busy {:?}, steps {} of {}, remeasuring {}, analysis at {:?}, object at {:?}",
-            app.busy,
-            steps(&h),
-            history + 1,
-            app.is_remeasuring(),
-            app.current_analysis().map(|a| a.transform),
-            transform(&h)
-        );
-        h.step();
-        std::thread::sleep(Duration::from_millis(2));
-    }
+    settles_keeping_the_analysis(&mut h, &rows, |a| {
+        a.session.history_labels().len() == history + 1
+    });
     let status = h.state().status.clone().unwrap();
     assert!(status.starts_with("Moved scan by "), "{status}");
-    let a = h.state().current_analysis().unwrap();
-    assert_eq!(a.transform, transform(&h), "measured at the new place");
     // Hover still works (with the tool closed: it hides defect hover).
     h.key_press(egui::Key::Escape);
     h.run_steps(2);
@@ -580,6 +609,36 @@ fn a_move_keeps_the_analysis_and_hover_working() {
         h.state().view_hover().is_some(),
         "hovering the moved hole finds it"
     );
+}
+
+/// F4: a turn keeps the analysis too (its measurements are made again in
+/// full, on a worker), and so does undoing it (F5): the counts of every
+/// kind of defect stay on screen throughout.
+#[test]
+fn a_turn_and_its_undo_keep_the_analysis() {
+    require_gpu!("a_turn_and_its_undo_keep_the_analysis");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(defective_file(dir.path()));
+    h.run_steps(3);
+    let rows = defect_rows(&h);
+    open_transform(&mut h);
+    h.run_steps(3);
+    let (history, revision) = (steps(&h), h.state().session.current());
+    type_into(&mut h, "Rotation Z", "90");
+    settles_keeping_the_analysis(&mut h, &rows, |a| {
+        a.session.history_labels().len() == history + 1
+    });
+    assert_eq!(
+        h.state().status.as_deref(),
+        Some("Rotated scan 90° about Z")
+    );
+    // Undo the turn (the field isn't focused any more: Cmd+Z is undo).
+    h.key_press(egui::Key::Escape);
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::Z);
+    h.step();
+    settles_keeping_the_analysis(&mut h, &rows, |a| a.session.current() == revision);
+    assert_eq!(transform(&h), IDENTITY);
 }
 
 /// Review I2: with Transform open, hovering a defect neither outlines it
@@ -770,6 +829,10 @@ fn big_model(transform: [f64; 12]) -> mf_io::ImportedModel {
 }
 
 /// The app with the 30M sphere open and analysed, and its render state.
+/// Prints how long each setup phase took (fix round 2, F1): generating the
+/// sphere, adding it to the document, and the first analysis to the first
+/// frame drawn. Setup has its own (generous) budget, apart from what a
+/// test then asserts about a move.
 fn opened_big(transform: [f64; 12]) -> (Harness<'static, MeshFixerApp>, egui_wgpu::RenderState) {
     let mut setup = egui_kittest::wgpu::default_wgpu_setup();
     if let egui_wgpu::WgpuSetup::CreateNew(create) = &mut setup {
@@ -783,13 +846,24 @@ fn opened_big(transform: [f64; 12]) -> (Harness<'static, MeshFixerApp>, egui_wgp
             render_state.clone(),
         ))
         .build_eframe(|cc| MeshFixerApp::with_settings(cc, None, Default::default()).unwrap());
-    h.state_mut().import_model(big_model(transform));
-    let start = Instant::now();
+    let t0 = Instant::now();
+    let model = big_model(transform);
+    let generated = t0.elapsed();
+    let t1 = Instant::now();
+    h.state_mut().import_model(model);
+    let imported = t1.elapsed();
+    let t2 = Instant::now();
     while !(h.state().current_analysis().is_some() && h.state().viewport.frames_rendered > 0) {
-        assert!(start.elapsed() < Duration::from_secs(1200), "30M analysis");
+        assert!(t2.elapsed() < Duration::from_secs(1200), "30M analysis");
         h.step();
         std::thread::sleep(Duration::from_millis(5));
     }
+    eprintln!(
+        "setup: 30M generated {:.2} s, added to the document {:.2} s, first analysis and frame {:.2} s",
+        generated.as_secs_f64(),
+        imported.as_secs_f64(),
+        t2.elapsed().as_secs_f64()
+    );
     (h, render_state)
 }
 
@@ -960,28 +1034,120 @@ fn ui_frames_stay_under_50ms_while_dropping_30m_to_plate() {
 }
 
 /// Review C1 at scale: after a move of a 30M object commits, the analysis
-/// stays (no "Analysing…", no blank panels) while it is measured again.
+/// stays (no "Analysing…", no blank panels) while it is measured again,
+/// and the re-measurement settles promptly. Phase times are printed (fix
+/// round 2, F1); setup has its own budget (`opened_big`).
 #[test]
 fn analysis_stays_available_after_moving_a_30m_object() {
     require_gpu!("analysis_stays_available_after_moving_a_30m_object");
     let (mut h, _rs) = opened_big(IDENTITY);
+    let t = Instant::now();
     open_transform(&mut h);
+    // Off the 1 mm grid: a short drag on a big sphere could round to no
+    // move at all, and nothing would commit.
+    h.state_mut().transform_tool_mut().unwrap().snap = false;
+    eprintln!("open Transform: {:.2} s", t.elapsed().as_secs_f64());
     let history = steps(&h);
     let (at, dir_x) = x_arrow(&h);
+    let t = Instant::now();
     press(&mut h, at);
     move_to(&mut h, at, at + dir_x * 60.0);
+    let mid = h.state().shown_transform(h.state().active.unwrap());
     release(&mut h, at + dir_x * 60.0);
-    let start = Instant::now();
+    eprintln!(
+        "drag (12 frames): {:.2} s, mid-drag x {:?}",
+        t.elapsed().as_secs_f64(),
+        mid.map(|m| m[9])
+    );
+    assert!(mid.is_some_and(|m| m[9] != 0.0), "the drag moved it");
+    let released = Instant::now();
+    let mut committed = None;
     loop {
         let app = h.state();
         assert!(app.current_analysis().is_some(), "the analysis never goes");
-        assert!(!app.is_analyzing());
-        if app.busy.is_none() && steps(&h) == history + 1 && !app.is_remeasuring() {
+        assert!(!app.is_analyzing(), "no \"Analysing…\" after a move");
+        let done = app.busy.is_none() && steps(&h) == history + 1;
+        if done && committed.is_none() {
+            committed = Some(released.elapsed());
+        }
+        if done && !app.is_remeasuring() {
             break;
         }
-        assert!(start.elapsed() < Duration::from_secs(120), "never settled");
+        match committed {
+            None => assert!(
+                released.elapsed() < Duration::from_secs(30),
+                "the move didn't commit in 30 s"
+            ),
+            Some(c) => assert!(
+                released.elapsed() - c < Duration::from_secs(5),
+                "the re-measurement took over 5 s"
+            ),
+        }
         h.step();
-        std::thread::sleep(Duration::from_millis(5));
+        std::thread::sleep(Duration::from_millis(2));
     }
-    eprintln!("move to measured: {:.2} s", start.elapsed().as_secs_f64());
+    let committed = committed.unwrap();
+    eprintln!(
+        "release to commit: {:.3} s; commit to measured: {:.3} s",
+        committed.as_secs_f64(),
+        (released.elapsed() - committed).as_secs_f64()
+    );
+}
+
+/// F2: turning a 30M object measures it again in full (world size is
+/// O(vertices)) on a worker: the analysis stays, and no UI frame (the
+/// camera orbiting, so the 30M mesh is redrawn every frame) takes 50 ms
+/// or more from the Enter that commits it until it is measured.
+#[test]
+fn turning_a_30m_object_keeps_the_analysis_and_frames_under_50ms() {
+    require_gpu!("turning_a_30m_object_keeps_the_analysis_and_frames_under_50ms");
+    let (mut h, rs) = opened_big(IDENTITY);
+    let frame = frame_texture(&rs);
+    open_transform(&mut h);
+    for _ in 0..5 {
+        h.step();
+        paint_and_wait(&h, &rs, &frame);
+    }
+    let history = steps(&h);
+    h.get_by_label("Rotation Z").focus();
+    h.run_steps(2);
+    h.key_press_modifiers(egui::Modifiers::COMMAND, egui::Key::A);
+    h.run_steps(1);
+    h.get_by_label("Rotation Z").type_text("90");
+    h.run_steps(1);
+    h.key_press(egui::Key::Enter);
+    let entered = Instant::now();
+    let mut frames = Vec::new();
+    let mut committed = None;
+    loop {
+        let start = Instant::now();
+        h.state_mut().camera.as_mut().unwrap().orbit(0.002, 0.0);
+        h.step();
+        paint_and_wait(&h, &rs, &frame);
+        frames.push(start.elapsed());
+        let app = h.state();
+        assert!(app.current_analysis().is_some(), "the analysis never goes");
+        assert!(!app.is_analyzing());
+        let done = app.busy.is_none() && steps(&h) == history + 1;
+        if done && committed.is_none() {
+            committed = Some(entered.elapsed());
+        }
+        if done && !app.is_remeasuring() {
+            break;
+        }
+        assert!(entered.elapsed() < Duration::from_secs(60), "never settled");
+    }
+    let committed = committed.unwrap();
+    let worst = frames.iter().max().unwrap();
+    let mut sorted = frames.clone();
+    sorted.sort();
+    eprintln!(
+        "turn: Enter to commit {:.3} s, commit to measured {:.3} s, {} frames, median {:.1} ms, worst {:.1} ms",
+        committed.as_secs_f64(),
+        (entered.elapsed() - committed).as_secs_f64(),
+        frames.len(),
+        sorted[sorted.len() / 2].as_secs_f64() * 1e3,
+        worst.as_secs_f64() * 1e3
+    );
+    assert!(*worst < FRAME_BUDGET, "a frame took {worst:?}");
 }

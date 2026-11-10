@@ -36,8 +36,11 @@ pub const AXIS_Z: Color32 = Color32::from_rgb(62, 139, 240);
 /// uniform scale) only (D9): a light neutral grey, distinct from `HOVER`.
 pub const GIZMO_FREE: Color32 = Color32::from_gray(180);
 /// The build-plate grid: a neutral, so it never competes with a defect or
-/// selection colour.
-pub const PLATE: Color32 = Color32::from_gray(70);
+/// selection colour. Light enough to read on `VIEWPORT_BACKGROUND`.
+pub const PLATE: Color32 = Color32::from_gray(100);
+/// The plate's major lines (every 50 mm): the same neutral, a step
+/// brighter, so the scale reads at any zoom.
+pub const PLATE_MAJOR: Color32 = Color32::from_gray(140);
 
 /// An inactive object keeps this much of its saturation…
 pub const INACTIVE_SATURATION: f32 = 0.0;
@@ -96,6 +99,7 @@ pub fn palette() -> mf_render::Palette {
         back_face: rgba(BACK_FACE),
         boundary: rgba(HOLE),
         plate: rgba(PLATE),
+        plate_major: rgba(PLATE_MAJOR),
         inactive_saturation: INACTIVE_SATURATION,
         inactive_brightness: INACTIVE_BRIGHTNESS,
         boundary_width: BOUNDARY_WIDTH,

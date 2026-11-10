@@ -1999,13 +1999,20 @@ impl MeshFixerApp {
                 let current = self.session.document().objects().iter().any(|o| {
                     o.transform == transform && o.mesh().is_some_and(|m| Mesh::ptr_eq(m, &mesh))
                 });
-                if current && let Some(a) = self.analyses.get_mut(&mesh) {
-                    a.transform = transform;
-                    let old = (
-                        std::mem::replace(&mut a.defects, defects),
-                        std::mem::replace(&mut a.hole_view, hole_view),
-                    );
-                    self.workers.discard(old);
+                if current {
+                    // A use of the revision shown: it becomes the most
+                    // recently used (fix round 2, F3).
+                    let mut old = None;
+                    self.analyses.update(&mesh, |a| {
+                        a.transform = transform;
+                        old = Some((
+                            std::mem::replace(&mut a.defects, defects),
+                            std::mem::replace(&mut a.hole_view, hole_view),
+                        ));
+                    });
+                    if let Some(old) = old {
+                        self.workers.discard(old);
+                    }
                 }
                 self.workers.discard(mesh);
             }
@@ -3734,6 +3741,7 @@ impl MeshFixerApp {
         mf_render::Plate {
             size_mm: d.size_mm.map(|v| v / mm),
             grid_mm: d.grid_mm / mm,
+            major_mm: d.major_mm / mm,
         }
     }
 
