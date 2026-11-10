@@ -122,18 +122,16 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                     ));
                 }
             }
-            Event::SetProperty {
-                object,
-                key,
-                value,
-                label,
-            } => {
-                if session.document().object(object).is_none() {
+            Event::SetProperties { changes, label } => {
+                if let Some(c) = changes
+                    .iter()
+                    .find(|c| session.document().object(c.object).is_none())
+                {
                     return Err(LogError::Command(
-                        crate::session::CommandError::UnknownObject(object),
+                        crate::session::CommandError::UnknownObject(c.object),
                     ));
                 }
-                session.set_property(object, &key, value, label);
+                session.set_properties(changes, label);
             }
             Event::Command(mut record) => {
                 // An earlier version's record replays with the parameters

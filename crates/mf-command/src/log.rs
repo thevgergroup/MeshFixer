@@ -17,7 +17,7 @@ use crate::session::{CommandError, Session};
 /// The format this build writes. Version 2 (Phase 1, D6) adds each
 /// command's `operands` and `outputs`; both default to empty, so a
 /// version 1 log reads as single-object commands. Version 2.1 adds the
-/// `set_property` event (an object's Solid/Hole role); a 2.0 log has
+/// `set_properties` event (an object's Solid/Hole role); a 2.0 log has
 /// none, so it reads unchanged. (A `many` operand is the same flat
 /// operand list, so it needed no new version.)
 pub const LOG_FORMAT: &str = "mfx-log/2.1";
@@ -60,12 +60,10 @@ pub(crate) enum Event {
         ids: Vec<u32>,
         label: String,
     },
-    /// An object property set (`value`) or removed (`None`), such as its
-    /// Solid/Hole role; changes no geometry (`mfx-log/2.1`).
-    SetProperty {
-        object: ObjectId,
-        key: String,
-        value: Option<String>,
+    /// Object properties set or removed in one step, such as Solid/Hole
+    /// roles; changes no geometry (`mfx-log/2.1`).
+    SetProperties {
+        changes: Vec<crate::session::PropertyChange>,
         label: String,
     },
 }
@@ -192,11 +190,9 @@ impl Session {
                     label: node.label.clone(),
                 });
             }
-            if let Some((object, key, value)) = &node.property {
-                events.push(Event::SetProperty {
-                    object: *object,
-                    key: key.clone(),
-                    value: value.clone(),
+            if !node.properties.is_empty() {
+                events.push(Event::SetProperties {
+                    changes: node.properties.clone(),
                     label: node.label.clone(),
                 });
             }

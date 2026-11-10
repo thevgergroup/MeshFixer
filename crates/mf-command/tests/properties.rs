@@ -45,6 +45,21 @@ fn role_is_an_undoable_step_and_replays() {
     assert!(!is_hole(&s, ids[1]));
     assert!(s.set_property(ids[1], ROLE, Some(HOLE.into()), "Make b a hole".into()));
     assert!(is_hole(&s, ids[1]));
+    // Several objects in one step.
+    let steps = s.history_labels().len();
+    let both = ids
+        .iter()
+        .map(|&object| mf_command::PropertyChange {
+            object,
+            key: ROLE.into(),
+            value: None,
+        })
+        .collect();
+    assert!(s.set_properties(both, "Make solids".into()));
+    assert_eq!(s.history_labels().len(), steps + 1);
+    assert!(!is_hole(&s, ids[0]) && !is_hole(&s, ids[1]));
+    assert!(s.undo());
+    assert!(is_hole(&s, ids[1]));
     // Setting the same value again is no step.
     assert!(!s.set_property(ids[1], ROLE, Some(HOLE.into()), "again".into()));
     assert!(s.undo());
@@ -83,7 +98,7 @@ fn role_is_an_undoable_step_and_replays() {
     let kept: Vec<String> = std::fs::read_to_string(&commands)
         .unwrap()
         .lines()
-        .filter(|l| !l.contains("\"set_property\""))
+        .filter(|l| !l.contains("\"set_properties\""))
         .map(str::to_owned)
         .collect();
     std::fs::write(&commands, kept.join("\n") + "\n").unwrap();

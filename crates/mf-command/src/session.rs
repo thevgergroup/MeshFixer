@@ -15,6 +15,15 @@ use crate::record::{
     RecordedOperand, platform,
 };
 
+/// One object property set (`value`) or removed (`None`) by
+/// [`Session::set_properties`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PropertyChange {
+    pub object: ObjectId,
+    pub key: String,
+    pub value: Option<String>,
+}
+
 /// The name operand 0 (the command's target) is recorded under.
 pub const TARGET_OPERAND: &str = "target";
 
@@ -543,10 +552,10 @@ pub struct RevisionNode {
     /// A "mark intentional openings" step: the object and the loop ids it
     /// set (logged, so replay reaches the same marks).
     pub openings: Option<(ObjectId, Vec<u32>)>,
-    /// A "set an object property" step (a Solid/Hole role): the object,
-    /// the key and the value it set (`None` removed it); logged, so
-    /// replay reaches the same properties.
-    pub property: Option<(ObjectId, String, Option<String>)>,
+    /// A "set object properties" step (Solid/Hole roles): each object,
+    /// key and value it set (`None` removed it), all in one step; logged,
+    /// so replay reaches the same properties. Empty for any other step.
+    pub properties: Vec<PropertyChange>,
 }
 
 /// History as a DAG of immutable document states. Undo and redo move a
@@ -578,7 +587,7 @@ impl Session {
                 document: Document::default(),
                 provenance: BTreeMap::new(),
                 openings: None,
-                property: None,
+                properties: Vec::new(),
             }],
             cursor: RevisionId(0),
             next_object: 1,
@@ -826,7 +835,7 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: None,
-            property: None,
+            properties: Vec::new(),
         });
         id
     }
@@ -1303,7 +1312,7 @@ impl Session {
             document,
             provenance,
             openings: None,
-            property: None,
+            properties: Vec::new(),
         });
         Ok(CommitOutcome::NewRevision { report })
     }
@@ -1450,15 +1459,13 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: Some((object, marks)),
-            property: None,
+            properties: Vec::new(),
         });
         true
     }
 
     /// Set `object`'s property `key` to `value` (`None` removes it), such
-    /// as its role ([`mf_document::ROLE`]): a document step that changes
-    /// no geometry, undone like any other. `label` names the history
-    /// step. False if the object doesn't exist or already has that value.
+    /// as its role ([`mf_document::ROLE`]): see [`Self::set_properties`].
     pub fn set_property(
         &mut self,
         object: ObjectId,
@@ -1466,15 +1473,39 @@ impl Session {
         value: Option<String>,
         label: String,
     ) -> bool {
-        let Some(current) = self.document().object(object) else {
-            return false;
-        };
-        if current.properties.get(key) == value.as_ref() {
+        self.set_properties(
+            vec![PropertyChange {
+                object,
+                key: key.to_owned(),
+                value,
+            }],
+            label,
+        )
+    }
+
+    /// Apply every property change (a role set on several objects at
+    /// once) as ONE document step that changes no geometry, undone like
+    /// any other. `label` names the history step. Changes that set what
+    /// is already there are dropped; false (and no step) if nothing is
+    /// left or an object doesn't exist.
+    pub fn set_properties(&mut self, changes: Vec<PropertyChange>, label: String) -> bool {
+        let mut document = self.document().clone();
+        let mut applied = Vec::new();
+        for c in changes {
+            let Some(current) = document.object(c.object) else {
+                return false;
+            };
+            if current.properties.get(&c.key) == c.value.as_ref() {
+                continue;
+            }
+            document = document
+                .with_property(c.object, &c.key, c.value.clone())
+                .expect("the object exists");
+            applied.push(c);
+        }
+        if applied.is_empty() {
             return false;
         }
-        let Some(document) = self.document().with_property(object, key, value.clone()) else {
-            return false;
-        };
         self.push(RevisionNode {
             id: RevisionId(0),
             parent: None,
@@ -1485,7 +1516,7 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: None,
-            property: Some((object, key.to_owned(), value)),
+            properties: applied,
         });
         true
     }

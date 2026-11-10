@@ -21,6 +21,6 @@ pub use record::{
 };
 pub use replay::{ReplayReport, Verdict, replay};
 pub use session::{
-    CommandError, CommitOutcome, Completed, Invocation, Prepared, RevisionNode, Session,
-    TARGET_OPERAND, target_of,
+    CommandError, CommitOutcome, Completed, Invocation, Prepared, PropertyChange, RevisionNode,
+    Session, TARGET_OPERAND, target_of,
 };
