@@ -81,6 +81,24 @@ pub struct ViewOptions<'a> {
     pub cue: SelectionCue,
     /// The hole overview's markers (window points), drawn over the view.
     pub markers: Option<Arc<egui::Mesh>>,
+    /// The open interactive tool's claim on the primary drag (I8): true
+    /// if a press at this point (points from the view's top-left) starts
+    /// the tool's drag rather than the camera's or a click. `None`: no
+    /// interactive tool is open.
+    pub tool_grabs: Option<&'a dyn Fn((f64, f64)) -> bool>,
+}
+
+/// The pointer, for the open interactive tool (points from the view's
+/// top-left).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolPointer {
+    /// A drag the tool claimed started where the button went down, and
+    /// the pointer is now at `at`.
+    Start { from: (f64, f64), at: (f64, f64) },
+    /// The tool's drag continues.
+    Move((f64, f64)),
+    /// The tool's drag ended (the button was released).
+    End((f64, f64)),
 }
 
 /// A box dragged in Select mode (or after B): `rect` in points from the
@@ -130,6 +148,11 @@ pub struct ViewOutput {
     pub pointer: Option<((f64, f64), (f64, f64))>,
     /// A box selection finished this frame.
     pub box_select: Option<BoxSelect>,
+    /// The open interactive tool's drag, this frame.
+    pub tool: Option<ToolPointer>,
+    /// Where the pointer is over the view (points from its top-left),
+    /// held button or not: what an interactive tool highlights under.
+    pub tool_hover: Option<(f64, f64)>,
 }
 
 /// One zoom step of the zoom buttons and keys.
@@ -160,6 +183,8 @@ pub struct Viewport {
     pub box_once: bool,
     /// Where the box being dragged started (window points).
     box_from: Option<egui::Pos2>,
+    /// The primary drag under way belongs to the open interactive tool.
+    tool_drag: bool,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
     /// The last frame that redrew the 3D view, and whether it was timed.
@@ -190,6 +215,7 @@ impl Viewport {
             frames_rendered: 0,
             box_once: false,
             box_from: None,
+            tool_drag: false,
         }
     }
 
@@ -211,6 +237,7 @@ impl Viewport {
             frame,
             cue,
             markers,
+            tool_grabs,
         } = options;
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -237,10 +264,50 @@ impl Viewport {
             return ViewOutput::default();
         };
         self.last_rect = Some(rect);
+        let local = |p: egui::Pos2| ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64);
+        // An open interactive tool gets the primary drag first (I8), where
+        // it claims the press; Alt and Shift camera drags always win.
+        let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
+        let mut tool = None;
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && !alt
+            && !shift
+            && let (Some(grabs), Some(origin)) =
+                (tool_grabs, ui.input(|i| i.pointer.press_origin()))
+            && grabs(local(origin))
+        {
+            self.tool_drag = true;
+            let at = response.interact_pointer_pos().unwrap_or(origin);
+            tool = Some(ToolPointer::Start {
+                from: local(origin),
+                at: local(at),
+            });
+        } else if self.tool_drag {
+            let at = response
+                .interact_pointer_pos()
+                .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+            if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                self.tool_drag = false;
+                tool = at.map(|p| ToolPointer::End(local(p)));
+            } else if let Some(p) = at {
+                tool = Some(ToolPointer::Move(local(p)));
+            }
+        }
+        let tool_hover = response
+            .hover_pos()
+            .or_else(|| {
+                self.tool_drag
+                    .then(|| ui.input(|i| i.pointer.latest_pos()))
+                    .flatten()
+            })
+            .map(local);
+        let claimed = |p: egui::Pos2| tool_grabs.is_some_and(|grabs| grabs(local(p)));
         let click = response
             .clicked()
             .then(|| response.interact_pointer_pos())
             .flatten()
+            // A click on the tool's handle isn't a pick.
+            .filter(|p| !claimed(*p))
             .map(|p| Click {
                 px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
                 size: (rect.width() as f64, rect.height() as f64),
@@ -255,7 +322,9 @@ impl Viewport {
                     (rect.width() as f64, rect.height() as f64),
                 )
             });
-        let selecting = self.box_once || self.nav_mode == NavMode::Select;
+        let selecting = (self.box_once || self.nav_mode == NavMode::Select)
+            && !self.tool_drag
+            && tool.is_none();
         let mut box_select = None;
         if selecting && response.drag_started_by(egui::PointerButton::Primary) {
             self.box_from = ui.input(|i| i.pointer.press_origin());
@@ -284,7 +353,8 @@ impl Viewport {
                 );
             }
         }
-        handle_input(ui, &response, rect, cam, self.nav_mode, selecting);
+        let owned = self.tool_drag || tool.is_some();
+        handle_input(ui, &response, rect, cam, self.nav_mode, selecting || owned);
 
         self.renderer
             .set_pixels_per_point(ui.ctx().pixels_per_point());
@@ -333,6 +403,8 @@ impl Viewport {
             action,
             pointer,
             box_select,
+            tool,
+            tool_hover,
         }
     }
 
@@ -658,6 +730,7 @@ fn handle_input(
     rect: egui::Rect,
     cam: &mut OrbitCamera,
     mode: NavMode,
+    // A box selection or an interactive tool owns the primary drag.
     selecting: bool,
 ) {
     let h = rect.height().max(1.0) as f64;

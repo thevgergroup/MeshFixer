@@ -21,6 +21,7 @@ use crate::defects::{Defect, HoleNumbers, HoleView, count, operation_label, thou
 use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
+use crate::tools::{Interactive, LeftTab, LegendRow, ToolGroup, ToolKind};
 use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
 use crate::worker::{
     self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
@@ -77,6 +78,10 @@ pub struct Tool {
     /// Parameters the target decides (hidden from the panel): an explicit
     /// target already says which hole or piece, so size limits follow it.
     pub fixed: BTreeMap<String, ParamValue>,
+    /// One-shot (parameters and Apply) or interactive (works in the view).
+    pub kind: ToolKind,
+    /// Its group in Properties' whole-object list (`None`: a targeted tool).
+    pub group: Option<ToolGroup>,
 }
 
 /// An Apply waiting for the user's go-ahead (MF-ISSUE-052).
@@ -271,8 +276,14 @@ pub struct MeshFixerApp {
     rss: Rss,
     /// The last few finished jobs: duration and heap peak.
     recent_jobs: RecentJobs,
-    /// The whole-object tool open in Properties (an operation id).
+    /// The whole-object tool open in Properties (its catalogue id,
+    /// `tools::CATALOGUE`).
     pub tool: Option<String>,
+    /// The interactive tool open, if one is: it owns the view's primary
+    /// drag and its keys, and supplies the legend (`tools::Interactive`).
+    pub interactive: Option<Interactive>,
+    /// The left panel's section shown (`tools::LeftTab`).
+    pub left_tab: LeftTab,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
     pub show_boundaries: bool,
     pub error: Option<String>,
@@ -510,6 +521,8 @@ impl MeshFixerApp {
             rss: Rss::default(),
             recent_jobs: RecentJobs::default(),
             tool: None,
+            interactive: None,
+            left_tab: LeftTab::default(),
             op_params: BTreeMap::new(),
             show_boundaries: true,
             error: None,
@@ -880,17 +893,18 @@ impl MeshFixerApp {
         if !targeted.is_empty() || self.target_blocks_whole_object() {
             return targeted;
         }
-        mf_spec::builtin::specs()
+        // A curated list (M4 final UX review I8), never the raw registry:
+        // object operations (delete, drop) and strokes have their own
+        // places, and a new spec isn't offered until it's listed.
+        crate::tools::CATALOGUE
             .iter()
-            // Object operations (move, drop, delete, booleans) have their
-            // own tools; Properties lists a mesh's repairs.
-            .filter(|s| !s.is_read_only() && s.target.whole_object && !s.acts_on_objects())
-            .map(|s| Tool {
-                op_id: s.id.clone(),
-                // allow-swallow: an operation without plain words is named by its id
-                label: operation_label(&s.id, None).unwrap_or_else(|| s.id.clone()),
+            .map(|e| Tool {
+                op_id: e.id.to_owned(),
+                label: tool_label(e.id),
                 selection: None,
                 fixed: BTreeMap::new(),
+                kind: e.kind,
+                group: Some(e.group),
             })
             .collect()
     }
@@ -939,6 +953,8 @@ impl MeshFixerApp {
                 .expect("built-in operations have plain names"),
             selection: Some(sel.clone()),
             fixed,
+            kind: ToolKind::OneShot,
+            group: None,
         };
         // Only holes fill_holes would fill: a pinched one is refused, so it
         // isn't offered (M4 final UX review I7).
@@ -1498,6 +1514,81 @@ impl MeshFixerApp {
         }
     }
 
+    /// Esc, in order: stop the running job; else cancel the open
+    /// interactive tool's drag; else leave that tool; else clear the
+    /// selection. One step per press.
+    pub fn escape(&mut self) {
+        if self.can_cancel() {
+            self.cancel_job();
+            return;
+        }
+        if self.cancel_tool_drag() {
+            return;
+        }
+        if self.interactive.is_some() {
+            self.leave_interactive();
+            return;
+        }
+        self.clear_selection();
+    }
+
+    /// Cancel the open interactive tool's drag, if one is under way:
+    /// nothing is committed. Returns whether there was one.
+    pub fn cancel_tool_drag(&mut self) -> bool {
+        match self.interactive.as_mut() {
+            None => false,
+            Some(t) => match *t {},
+        }
+    }
+
+    /// Open a whole-object tool from Properties (its catalogue id). An
+    /// interactive tool starts working in the view; another tool that
+    /// was open closes.
+    pub fn open_tool(&mut self, id: &str) {
+        self.leave_interactive();
+        self.tool = Some(id.to_owned());
+        self.interactive = crate::tools::Interactive::open(self, id);
+    }
+
+    /// Close the whole-object tool open in Properties.
+    pub fn close_tool(&mut self) {
+        self.leave_interactive();
+        self.tool = None;
+    }
+
+    /// Close the open interactive tool.
+    pub fn leave_interactive(&mut self) {
+        if let Some(t) = self.interactive.take()
+            && self.tool.as_deref() == Some(t.id())
+        {
+            self.tool = None;
+        }
+    }
+
+    /// What the legend lists: the open interactive tool's rows, or what
+    /// each overlay colour means.
+    pub fn legend_rows(&self) -> Vec<LegendRow> {
+        match &self.interactive {
+            Some(t) => match *t {},
+            None => crate::tools::default_legend(),
+        }
+    }
+
+    /// The overlay switch a legend row toggles.
+    pub fn switch_mut(&mut self, switch: crate::tools::Switch) -> &mut bool {
+        use crate::tools::Switch;
+        match switch {
+            Switch::Selection => &mut self.shown.selection,
+            Switch::Hover => &mut self.shown.hover,
+            Switch::Holes => &mut self.shown.holes,
+            Switch::HoleMarkers => &mut self.show_hole_markers,
+            Switch::Cracks => &mut self.shown.cracks,
+            Switch::LoosePieces => &mut self.shown.loose_pieces,
+            Switch::Tangled => &mut self.shown.non_manifold,
+            Switch::RecentRepairs => &mut self.shown.recent_repairs,
+        }
+    }
+
     pub fn clear_selection(&mut self) {
         if self.selection.is_some() || self.inspected.is_some() {
             self.status = None;
@@ -1569,6 +1660,8 @@ impl MeshFixerApp {
             label: "Delete object".into(),
             selection: None,
             fixed: BTreeMap::new(),
+            kind: ToolKind::OneShot,
+            group: None,
         });
     }
 
@@ -3111,6 +3204,8 @@ impl MeshFixerApp {
                 "max_loop_edges".into(),
                 ParamValue::Int(limit.unwrap_or(largest.max(default))),
             )]),
+            kind: ToolKind::OneShot,
+            group: None,
         };
         self.run_tool(&tool);
     }
@@ -3139,6 +3234,8 @@ impl MeshFixerApp {
                 ("max_relative_size".into(), ParamValue::Float(100.0)),
                 ("keep_largest".into(), ParamValue::Bool(true)),
             ]),
+            kind: ToolKind::OneShot,
+            group: None,
         };
         self.run_tool(&tool);
     }
@@ -3407,13 +3504,8 @@ impl MeshFixerApp {
                 i32::from(zoom_in) - i32::from(zoom_out),
             )
         });
-        // Esc stops a running job first; otherwise it clears the selection.
         if escape {
-            if self.can_cancel() {
-                self.cancel_job();
-            } else {
-                self.clear_selection();
-            }
+            self.escape();
         }
         if redo {
             self.redo();
@@ -3504,6 +3596,7 @@ impl MeshFixerApp {
                         frame: frame_index,
                         cue,
                         markers,
+                        tool_grabs: None,
                     },
                 )
             })
@@ -3555,6 +3648,11 @@ fn is_current_revision(doc: &mf_command::Document, mesh: &Mesh) -> bool {
 /// An operation's report in plain words for the status line. A 5M fill's
 /// raw report lists hundreds of loops: laying that out took ~35 ms of a
 /// frame, and it isn't for people anyway.
+/// A whole-object tool's name in Properties.
+fn tool_label(id: &str) -> String {
+    operation_label(id, None).expect("every listed tool has plain words")
+}
+
 /// History words for the object operations (they have no Properties
 /// button, so no `operation_label`).
 fn object_step_label(op_id: &str) -> Option<String> {

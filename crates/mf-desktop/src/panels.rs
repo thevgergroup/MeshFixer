@@ -12,6 +12,7 @@ use crate::defects::{
     tool_summary, unit_symbol,
 };
 use crate::theme;
+use crate::tools::{LeftTab, ToolKind};
 
 /// What an empty document says, in the tree and the 3D view.
 pub fn empty_state() -> String {
@@ -819,18 +820,38 @@ pub fn tree_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             });
         });
         ui.separator();
+        // One tab per section once there's more than one (the Parts
+        // library joins Objects in Phase 1 Task 23, I8).
+        if LeftTab::ALL.len() > 1 {
+            ui.horizontal(|ui| {
+                for &tab in LeftTab::ALL {
+                    if ui
+                        .selectable_label(app.left_tab == tab, tab.label())
+                        .clicked()
+                    {
+                        app.left_tab = tab;
+                    }
+                }
+            });
+            ui.separator();
+        }
         egui::Panel::bottom("legend")
             .show_separator_line(true)
             .show(ui, |ui| legend(app, ui));
-        egui::ScrollArea::vertical()
-            .id_salt("tree")
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                // Long rows are cut short ("…"), never widening the panel
-                // (and so shrinking the view, I5): tooltips have them all.
-                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                tree(app, ui)
-            });
+        match app.left_tab {
+            LeftTab::Objects => {
+                egui::ScrollArea::vertical()
+                    .id_salt("tree")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        // Long rows are cut short ("…"), never widening the
+                        // panel (and so shrinking the view, I5): tooltips
+                        // have them all.
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                        tree(app, ui)
+                    });
+            }
+        }
     });
     // Dragging the edge past the minimum collapses it too.
     if was && !open {
@@ -848,89 +869,39 @@ const PROPERTIES_WIDTH_NARROW: f32 = 240.0;
 const PROPERTIES_WIDTH_MAX: f32 = 480.0;
 
 /// The view's colours, each with its switch (View > Show defects hides
-/// every defect overlay at once).
+/// every defect overlay at once). Data-driven: an open interactive tool
+/// supplies its own rows (I8); collapsible, so the tree (and later the
+/// Parts library) gets the room on a laptop screen.
 fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.add_space(4.0);
-    ui.label(RichText::new("Legend").strong());
     let defects = app.show_boundaries;
-    let shown = &mut app.shown;
-    let markers = &mut app.show_hole_markers;
-    let rows: [(&mut bool, &str, egui::Color32, &str, bool); 8] = [
-        (
-            &mut shown.selection,
-            "Selection",
-            theme::SELECTED,
-            "The current target: outlined, or tinted; shown faintly through whatever hides it",
-            true,
-        ),
-        (
-            &mut shown.hover,
-            "Hover",
-            theme::HOVER,
-            "What the pointer is over, in the view or the tree",
-            true,
-        ),
-        (
-            &mut shown.holes,
-            "Holes",
-            theme::HOLE,
-            "Open boundaries, outlined",
-            defects,
-        ),
-        (
-            markers,
-            "Hole markers",
-            theme::HOLE,
-            "A dot on each hole too small to see at this zoom (behind the model: none)",
-            defects,
-        ),
-        (
-            &mut shown.cracks,
-            "Narrow cracks",
-            theme::CRACK,
-            "Boundaries whose edges almost touch",
-            defects,
-        ),
-        (
-            &mut shown.loose_pieces,
-            "Loose pieces",
-            theme::LOOSE_PIECE,
-            "Pieces not connected to the model (every one the tree lists), tinted; click one to select it",
-            defects,
-        ),
-        (
-            &mut shown.non_manifold,
-            "Tangled edges",
-            theme::NON_MANIFOLD,
-            "Tangled (non-manifold) edges: more than two triangles share each one. The triangles at them are tinted; click one to select its faces",
-            defects,
-        ),
-        (
-            &mut shown.recent_repairs,
-            "Recent repairs",
-            theme::RECENT_REPAIR,
-            "Faces made by the last 3 commands, tinted",
-            true,
-        ),
-    ];
-    for (on, name, color, meaning, enabled) in rows {
-        ui.horizontal(|ui| {
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-            ui.painter().rect_filled(rect, 2.0, color);
-            ui.add_enabled(enabled, egui::Checkbox::new(on, name))
-                .on_hover_text(meaning)
-                .on_disabled_hover_text("Hidden: View > Show defects is off");
+    egui::CollapsingHeader::new(RichText::new("Legend").strong())
+        .id_salt("legend")
+        .default_open(true)
+        .show(ui, |ui| {
+            for row in app.legend_rows() {
+                ui.horizontal(|ui| {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                    ui.painter().rect_filled(rect, 2.0, row.color);
+                    match row.switch {
+                        Some(switch) => {
+                            let enabled = defects || !switch.is_defect();
+                            ui.add_enabled(
+                                enabled,
+                                egui::Checkbox::new(app.switch_mut(switch), row.name),
+                            )
+                            .on_hover_text(row.meaning)
+                            .on_disabled_hover_text("Hidden: View > Show defects is off");
+                        }
+                        None => {
+                            ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
+                            ui.label(row.name).on_hover_text(row.meaning);
+                        }
+                    }
+                });
+            }
         });
-    }
-    // Shown with the holes (never hidden alone: the hole colour is under it).
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
-        ui.painter().rect_filled(rect, 2.0, theme::OPENING);
-        ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
-        ui.label("Intentional openings").on_hover_text(
-            "Openings you marked as meant to be open, outlined; shown and hidden with Holes",
-        );
-    });
 }
 
 fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
@@ -1905,26 +1876,34 @@ fn selection_title(sel: &Selection, n: usize) -> String {
 }
 
 /// The operations valid for the target. Targeted tools are open at once;
-/// whole-object tools open when chosen.
+/// whole-object tools are listed by group (`tools::CATALOGUE`, I8) and
+/// open when chosen.
 fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let tools = app.tools();
     if tools.is_empty() {
         return;
     }
     let targeted = tools.iter().any(|t| t.selection.is_some());
-    ui.label(
-        RichText::new(if targeted {
-            "Tool"
-        } else {
-            "Tools for the whole object"
-        })
-        .strong(),
-    );
-    for tool in &tools {
-        let open = targeted || app.tool.as_deref() == Some(&tool.op_id);
-        if targeted {
+    if targeted {
+        ui.label(RichText::new("Tool").strong());
+        for tool in &tools {
             ui.label(RichText::new(&tool.label).size(15.0).strong());
-        } else if ui
+            ui.indent(("tool", &tool.op_id), |ui| tool_body(app, ui, tool));
+        }
+        return;
+    }
+    ui.label(RichText::new("Tools for the whole object").strong());
+    let mut group = None;
+    for tool in &tools {
+        if tool.group != group {
+            group = tool.group;
+            if let Some(g) = group {
+                ui.add_space(4.0);
+                ui.label(RichText::new(g.label()).color(theme::TEXT_MUTED).small());
+            }
+        }
+        let open = app.tool.as_deref() == Some(&tool.op_id);
+        if ui
             .add(
                 egui::Button::new(&tool.label)
                     .selected(open)
@@ -1933,11 +1912,25 @@ fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .on_hover_text(if open { "Close" } else { "Open this tool" })
             .clicked()
         {
-            app.tool = if open { None } else { Some(tool.op_id.clone()) };
+            if open {
+                app.close_tool();
+            } else {
+                app.open_tool(&tool.op_id);
+            }
         }
-        if open {
-            ui.indent(("tool", &tool.op_id), |ui| tool_body(app, ui, tool));
+        if app.tool.as_deref() == Some(&tool.op_id) {
+            ui.indent(("tool", &tool.op_id), |ui| match tool.kind {
+                ToolKind::OneShot => tool_body(app, ui, tool),
+                ToolKind::Interactive => interactive_body(app, ui),
+            });
         }
+    }
+}
+
+/// The open interactive tool's panel.
+fn interactive_body(app: &mut MeshFixerApp, _ui: &mut egui::Ui) {
+    if let Some(t) = &app.interactive {
+        match *t {}
     }
 }
 

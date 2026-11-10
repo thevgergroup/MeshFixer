@@ -10,6 +10,7 @@ pub mod import_dialog;
 pub mod metrics;
 mod panels;
 pub mod theme;
+pub mod tools;
 pub mod viewport;
 pub mod worker;
 
