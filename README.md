@@ -14,6 +14,6 @@ scripts/run-tests.sh                     # all tests; timing tests run alone aft
 
 The toolchain is pinned in `rust-toolchain.toml` (Rust 1.99.1) so local clippy matches CI. Install Rust with rustup. Homebrew's `rust` package ignores the pin.
 
-CI is a two-tier gate. Every push and PR runs the fast gate above (`scripts/check.sh`'s checks, `ci.yml`). The heavy tests (timing, cancellation, frame-gate, 5M-triangle and the milestone evidence bundle, `heavy.yml`) and the fuzzing session (`fuzz.yml`) are on demand only, never on push or an ordinary PR event, started by a person: from the Actions tab (`workflow_dispatch`), or by adding the `run-heavy` / `run-fuzz` label to a PR. The label trigger exists because GitHub can only `workflow_dispatch` a workflow once it's on the default branch; until `heavy.yml`/`fuzz.yml` are merged, the label is how to start them from a PR branch. Each job checks that the label just added is the right one, so adding any other label is a no-op.
+Verification is local (owner ruling, 2026-11-11: no automatic GitHub Actions usage). Run `scripts/check.sh` (the fast gate: format, lint, licences, fast tests) before every commit. Run `scripts/check.sh --full` (adds the timing, cancellation, frame-gate and 5M-triangle tests) on demand, once work is complete, for example at milestone close. The GitHub workflows (`ci.yml`, `heavy.yml`, `fuzz.yml`) still exist, but are manual only: they never run on push or PR, only when started by hand from the Actions tab.
 
 Licensed under either of MIT or Apache-2.0 at your option.
