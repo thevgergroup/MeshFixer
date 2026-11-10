@@ -195,7 +195,8 @@ pub struct MeshRenderer {
     /// The build plate (D9): blended, depth-tested like an opaque pass.
     plate_pipeline: wgpu::RenderPipeline,
     /// The transform gizmo (D8): screen-space, no depth test.
-    gizmo_pipeline: wgpu::RenderPipeline,
+    gizmo_line_pipeline: wgpu::RenderPipeline,
+    gizmo_fill_pipeline: wgpu::RenderPipeline,
     palette: Palette,
     cue: SelectionCue,
     /// Physical pixels per point (line widths are in points).
@@ -454,29 +455,48 @@ impl MeshRenderer {
             wgpu::FrontFace::Ccw,
             DepthMode::Blended,
         );
-        // The gizmo: screen-space pixel quads, like the overlay lines, but
-        // with per-vertex colour/width (baked on the CPU, see overlay.rs)
-        // and no depth test at all, and no scene-colour/face-state bind
-        // groups beyond the scene uniforms (for the viewport size).
+        // The gizmo: screen-space pixel geometry, like the overlay lines,
+        // but with per-vertex colour (and, for the line half, width)
+        // baked on the CPU (see overlay.rs) and no depth test at all, and
+        // no scene-colour/face-state bind groups beyond the scene
+        // uniforms (for the viewport size). Two pipelines: `gizmo_line_*`
+        // for shafts/ring polylines (instanced quads, like the model's
+        // own overlay lines), `gizmo_fill_*` for the filled shapes
+        // (arrowheads, scale cubes, plane squares, point discs: a plain
+        // triangle list).
         let gizmo_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mf gizmo pipeline layout"),
             bind_group_layouts: &[Some(&scene_bgl)],
             immediate_size: 0,
         });
-        let gizmo_buffers = [Some(wgpu::VertexBufferLayout {
-            array_stride: 2 * std::mem::size_of::<crate::GizmoVertex>() as u64,
+        let gizmo_line_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: 2 * std::mem::size_of::<crate::GizmoLineVertex>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
                 0 => Float32x2, 1 => Float32x4, 2 => Float32,
                 3 => Float32x2, 4 => Float32x4, 5 => Float32,
             ],
         })];
-        let gizmo_pipeline = pipeline_with(
-            "mf gizmo",
+        let gizmo_line_pipeline = pipeline_with(
+            "mf gizmo line",
             &gizmo_layout,
-            "vs_gizmo",
-            "fs_gizmo",
-            &gizmo_buffers,
+            "vs_gizmo_line",
+            "fs_gizmo_line",
+            &gizmo_line_buffers,
+            wgpu::FrontFace::Ccw,
+            DepthMode::NoTest,
+        );
+        let gizmo_fill_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<crate::GizmoFillVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Vertex,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x4],
+        })];
+        let gizmo_fill_pipeline = pipeline_with(
+            "mf gizmo fill",
+            &gizmo_layout,
+            "vs_gizmo_fill",
+            "fs_gizmo_fill",
+            &gizmo_fill_buffers,
             wgpu::FrontFace::Ccw,
             DepthMode::NoTest,
         );
@@ -502,7 +522,8 @@ impl MeshRenderer {
             xray_surface_pipeline_cw,
             xray_line_pipeline,
             plate_pipeline,
-            gizmo_pipeline,
+            gizmo_line_pipeline,
+            gizmo_fill_pipeline,
             cue: SelectionCue::default(),
             surface_pipeline_ccw,
             surface_pipeline_cw,
@@ -777,20 +798,34 @@ impl MeshRenderer {
         highlight: Option<crate::Handle>,
         palette: &crate::GizmoPalette,
     ) {
-        let width = GIZMO_LINE_WIDTH_PT * self.pixels_per_point;
-        let vertices = crate::gizmo_vertices(shapes, highlight, palette, width);
-        if vertices.is_empty() {
-            return;
-        }
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("mf gizmo vertices"),
-            contents: bytemuck::cast_slice(&vertices),
-            usage: wgpu::BufferUsages::VERTEX,
-        });
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
-        pass.set_pipeline(&self.gizmo_pipeline);
-        pass.set_vertex_buffer(0, buffer.slice(..));
-        pass.draw(0..6, 0..(vertices.len() / 2) as u32);
+        // Filled shapes first (arrowheads, scale cubes, plane squares,
+        // point discs), then lines (shafts, a ring's front-facing
+        // polyline) over them, so an axis's shaft reaches visibly into
+        // its own arrowhead/cube rather than stopping short under it.
+        let fill = crate::gizmo_fill_vertices(shapes, highlight, palette);
+        if !fill.is_empty() {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mf gizmo fill vertices"),
+                contents: bytemuck::cast_slice(&fill),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            pass.set_pipeline(&self.gizmo_fill_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..fill.len() as u32, 0..1);
+        }
+        let width = GIZMO_LINE_WIDTH_PT * self.pixels_per_point;
+        let lines = crate::gizmo_line_vertices(shapes, highlight, palette, width);
+        if !lines.is_empty() {
+            let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mf gizmo line vertices"),
+                contents: bytemuck::cast_slice(&lines),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+            pass.set_pipeline(&self.gizmo_line_pipeline);
+            pass.set_vertex_buffer(0, buffer.slice(..));
+            pass.draw(0..6, 0..(lines.len() / 2) as u32);
+        }
     }
 }
 

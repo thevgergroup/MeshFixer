@@ -274,6 +274,13 @@ fn vs_plate(
     var side = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     var clip = mix(ca, cb, t[corner]);
     clip = vec4<f32>(clip.xy + normal * side[corner] * draw.params.y / px * clip.w, clip.zw);
+    // Pushed slightly *away* from the camera (fix round 1, review point
+    // 4): an object resting on the plate is exactly coplanar with it at
+    // z = 0, which without a bias is a depth tie the depth test can break
+    // either way (z-fighting). The plate loses every such tie, so a
+    // resting object's own opaque surface always wins, not just when its
+    // triangles happen to rasterise first.
+    clip.z = clip.z + 0.0005 * clip.w;
     var out: PlateOut;
     out.clip = clip;
     out.world = mix(wa, wb, t[corner]);
@@ -294,11 +301,21 @@ fn fs_plate(in: PlateOut) -> @location(0) vec4<f32> {
     return vec4<f32>(scene.plate.rgb, scene.plate.a * fade);
 }
 
-// --- The transform gizmo (overlay.rs `gizmo_vertices`): screen-space
-// quads in pixel coordinates (the same unit `screen_position` returns),
-// drawn last with no depth test so a handle is never hidden by the model
-// (D8). Each vertex already carries its own (possibly brightened) colour
-// and line width, computed on the CPU per handle. ---
+// --- The transform gizmo (overlay.rs): screen-space geometry in pixel
+// coordinates (the same unit `screen_position` returns), drawn last with
+// no depth test so a handle is never hidden by the model (D8). Lines
+// (shafts, a ring's front-facing polyline) go through `vs_gizmo_line`,
+// the same instanced-quad-per-segment trick as the model's own overlay
+// lines; filled shapes (arrowheads, scale cubes, plane squares, point
+// discs) go through `vs_gizmo_fill`, a plain triangle list. Every vertex
+// already carries its own (possibly brightened) colour, computed on the
+// CPU per handle (overlay.rs `gizmo_line_vertices`/`gizmo_fill_vertices`). ---
+
+fn pixel_to_ndc(p: vec2<f32>) -> vec2<f32> {
+    let px = scene.viewport.xy;
+    // Pixel space (y down) to NDC (y up): the inverse of `screen_position`.
+    return vec2<f32>(p.x / px.x * 2.0 - 1.0, 1.0 - p.y / px.y * 2.0);
+}
 
 struct GizmoOut {
     @builtin(position) clip: vec4<f32>,
@@ -306,7 +323,7 @@ struct GizmoOut {
 };
 
 @vertex
-fn vs_gizmo(
+fn vs_gizmo_line(
     @builtin(vertex_index) corner: u32,
     @location(0) a_position: vec2<f32>,
     @location(1) a_color: vec4<f32>,
@@ -326,15 +343,37 @@ fn vs_gizmo(
     var side = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
     let width = mix(a_width_px, b_width_px, t[corner]);
     let p = mix(a_position, b_position, t[corner]) + normal * side[corner] * width * 0.5;
-    // Pixel space (y down) to NDC (y up): the inverse of `screen_position`.
-    let ndc = vec2<f32>(p.x / px.x * 2.0 - 1.0, 1.0 - p.y / px.y * 2.0);
     var out: GizmoOut;
-    out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    // Depth is 1.0 (the far plane), not the near plane: irrelevant under
+    // the real `NoTest` pipeline (`CompareFunction::Always`, no depth
+    // write), but it is what makes "no depth test" an actual, checkable
+    // claim — at the far plane, the gizmo would lose a real depth test
+    // against literally anything else in the scene, so if it still draws
+    // over geometry, only `NoTest` (not a bug that happened to write a
+    // nearer depth) can explain it.
+    out.clip = vec4<f32>(pixel_to_ndc(p), 1.0, 1.0);
     out.color = mix(a_color, b_color, t[corner]);
     return out;
 }
 
 @fragment
-fn fs_gizmo(in: GizmoOut) -> @location(0) vec4<f32> {
+fn fs_gizmo_line(in: GizmoOut) -> @location(0) vec4<f32> {
+    return in.color;
+}
+
+@vertex
+fn vs_gizmo_fill(
+    @location(0) position: vec2<f32>,
+    @location(1) color: vec4<f32>,
+) -> GizmoOut {
+    var out: GizmoOut;
+    // See `vs_gizmo_line`'s comment: the far plane, not the near plane.
+    out.clip = vec4<f32>(pixel_to_ndc(position), 1.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_gizmo_fill(in: GizmoOut) -> @location(0) vec4<f32> {
     return in.color;
 }

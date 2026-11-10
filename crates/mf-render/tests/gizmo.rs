@@ -7,7 +7,8 @@
 use glam::DVec3;
 use mf_render::OrbitCamera;
 use mf_render::{
-    Decomposed, Gizmo, GizmoMode, Handle, PlateSnap, Snap, compose, decompose, model_matrix,
+    Decomposed, Gizmo, GizmoMode, Handle, HandleGeometry, PlateSnap, Snap, compose, decompose,
+    model_matrix,
 };
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -327,7 +328,10 @@ fn end_on_axis_is_not_hittable() {
         .iter()
         .find(|s| s.handle == Handle::Axis(0))
         .expect("x axis handle present when not end-on");
-    assert_eq!(gizmo.hit(&cam, VIEW, axis_x.b), Some(Handle::Axis(0)));
+    let HandleGeometry::Arrow { tip, .. } = axis_x.geometry else {
+        panic!("axis handle must have Arrow geometry: {axis_x:?}");
+    };
+    assert_eq!(gizmo.hit(&cam, VIEW, tip), Some(Handle::Axis(0)));
 
     // Looking almost straight down the X axis: yaw/pitch chosen so the
     // camera forward direction is within a couple of degrees of +/-X.
@@ -364,14 +368,168 @@ fn handles_keep_screen_size_at_any_zoom() {
             fov_y: 40f64.to_radians(),
             radius: 1.0 * zoom,
         };
+        let centre_px = screen_of(&cam, pivot, pivot);
         let shapes = gizmo.handles(&cam, VIEW);
         let axis_x = shapes
             .iter()
             .find(|s| s.handle == Handle::Axis(0))
             .expect("x axis handle present");
-        let len = ((axis_x.b.0 - axis_x.a.0).powi(2) + (axis_x.b.1 - axis_x.a.1).powi(2)).sqrt();
+        let HandleGeometry::Arrow { tip, .. } = axis_x.geometry else {
+            panic!("axis handle must have Arrow geometry: {axis_x:?}");
+        };
+        // Measured from the pivot's own screen position, not
+        // `shaft_start` (which is inset a few pixels from the pivot, a
+        // dead-zone reserved for the centre handle).
+        let len = ((tip.0 - centre_px.0).powi(2) + (tip.1 - centre_px.1).powi(2)).sqrt();
         assert!((len - 110.0).abs() < 1.0, "zoom {zoom}: len {len}");
     }
+}
+
+/// Fix round 1, review point 3: rings used to all draw/hit as the same
+/// screen-space circle (`radius: Some(size_pt)`, centred on the pivot),
+/// so the X and Y rings were indistinguishable — any point on that circle
+/// hit whichever ring happened to be found first. Each ring must now
+/// project its own 3D circle (perpendicular to its own axis), so from an
+/// oblique view the X and Y rings trace different screen ellipses and a
+/// point on one is not on the other.
+#[test]
+fn x_ring_and_y_ring_are_distinct_and_hittable_from_an_oblique_view() {
+    let cam = test_camera(); // oblique: yaw -45, pitch 25 degrees
+    let pivot = DVec3::ZERO;
+    let gizmo = Gizmo {
+        pivot,
+        mode: GizmoMode::Rotate,
+        size_pt: 110.0,
+    };
+    let shapes = gizmo.handles(&cam, VIEW);
+    let ring_points = |i: u8| {
+        let shape = shapes
+            .iter()
+            .find(|s| s.handle == Handle::Ring(i))
+            .unwrap_or_else(|| panic!("ring {i} present"));
+        match &shape.geometry {
+            HandleGeometry::Ring { points, .. } => points.clone(),
+            other => panic!("ring {i} must have Ring geometry: {other:?}"),
+        }
+    };
+    let x_points = ring_points(0);
+    let y_points = ring_points(1);
+    assert!(x_points.len() >= 8, "{}", x_points.len());
+    assert_eq!(x_points.len(), y_points.len());
+
+    // The two rings' projected ellipses are not the same set of points:
+    // at least one X-ring point is far (> 1pt) from every Y-ring point.
+    let min_dist_to_y = |p: (f64, f64)| {
+        y_points
+            .iter()
+            .map(|q| ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt())
+            .fold(f64::INFINITY, f64::min)
+    };
+    assert!(
+        x_points.iter().any(|&p| min_dist_to_y(p) > 1.0),
+        "the X and Y rings must trace different screen ellipses, not the same circle"
+    );
+
+    // Each ring is independently hittable at one of its own (front-facing)
+    // points, and that hit resolves to the ring whose points those are,
+    // not the other one. Picks the front-facing point *furthest* from the
+    // other ring's own polyline, not just the first one, since the two
+    // ellipses can pass close together (or cross) at some angles.
+    let x_shape = shapes.iter().find(|s| s.handle == Handle::Ring(0)).unwrap();
+    let y_shape = shapes.iter().find(|s| s.handle == Handle::Ring(1)).unwrap();
+    let (
+        HandleGeometry::Ring {
+            points: xp,
+            front: xf,
+        },
+        HandleGeometry::Ring {
+            points: yp,
+            front: yf,
+        },
+    ) = (&x_shape.geometry, &y_shape.geometry)
+    else {
+        panic!("expected Ring geometry");
+    };
+    let dist_to = |p: (f64, f64), others: &[(f64, f64)]| {
+        others
+            .iter()
+            .map(|q| ((p.0 - q.0).powi(2) + (p.1 - q.1).powi(2)).sqrt())
+            .fold(f64::INFINITY, f64::min)
+    };
+    let farthest_front_point = |points: &[(f64, f64)], front: &[bool], others: &[(f64, f64)]| {
+        points
+            .iter()
+            .zip(front)
+            .filter(|&(_, &f)| f)
+            .map(|(p, _)| *p)
+            .max_by(|a, b| dist_to(*a, others).total_cmp(&dist_to(*b, others)))
+            .expect("a ring must have at least one front-facing point")
+    };
+    let x_hit_px = farthest_front_point(xp, xf, yp);
+    let y_hit_px = farthest_front_point(yp, yf, xp);
+    assert_eq!(gizmo.hit(&cam, VIEW, x_hit_px), Some(Handle::Ring(0)));
+    assert_eq!(gizmo.hit(&cam, VIEW, y_hit_px), Some(Handle::Ring(1)));
+}
+
+/// Fix round 1, review point 3: a plane handle used to draw/hit as a bare
+/// diagonal line between two points; it must now be a small filled square,
+/// hittable anywhere in its interior (not just along an edge).
+#[test]
+fn plane_handle_hit_inside_its_square() {
+    let cam = test_camera();
+    let pivot = DVec3::ZERO;
+    let gizmo = Gizmo {
+        pivot,
+        mode: GizmoMode::Move,
+        size_pt: 110.0,
+    };
+    let shapes = gizmo.handles(&cam, VIEW);
+    // Plane(2) is the XY plane handle.
+    let plane = shapes
+        .iter()
+        .find(|s| s.handle == Handle::Plane(2))
+        .expect("XY plane handle present");
+    let HandleGeometry::Plane { corners } = &plane.geometry else {
+        panic!("plane handle must have Plane geometry: {plane:?}");
+    };
+    // The square's own centroid: well inside its interior, not on an edge.
+    let centroid = (
+        corners.iter().map(|c| c.0).sum::<f64>() / 4.0,
+        corners.iter().map(|c| c.1).sum::<f64>() / 4.0,
+    );
+    assert_eq!(gizmo.hit(&cam, VIEW, centroid), Some(Handle::Plane(2)));
+}
+
+/// Fix round 1, review point 3: the centre (and uniform-scale) point
+/// handle is a small disc, hittable near the pivot's own screen position.
+/// Every axis shaft now starts a few pixels out from the pivot (not
+/// exactly at it), leaving a dead-zone reserved for the centre disc —
+/// without that inset, a shaft beginning exactly at the pivot is always
+/// within the disc's own hit radius of it, and Task 1's priority order
+/// (axis beats centre) means the axis would always win there, making the
+/// centre handle practically unreachable.
+#[test]
+fn centre_disc_is_hittable() {
+    let cam = test_camera();
+    let pivot = DVec3::new(0.5, -0.5, 0.2);
+    let gizmo = Gizmo {
+        pivot,
+        mode: GizmoMode::Move,
+        size_pt: 110.0,
+    };
+    let centre_px = screen_of(&cam, pivot, pivot);
+    assert_eq!(gizmo.hit(&cam, VIEW, centre_px), Some(Handle::Centre));
+    // A couple of pixels off still lands inside the dead-zone.
+    let off_axis_px = (centre_px.0 + 3.0, centre_px.1 + 2.0);
+    assert_eq!(gizmo.hit(&cam, VIEW, off_axis_px), Some(Handle::Centre));
+
+    let shapes = gizmo.handles(&cam, VIEW);
+
+    let centre = shapes
+        .iter()
+        .find(|s| s.handle == Handle::Centre)
+        .expect("centre handle present");
+    assert!(matches!(centre.geometry, HandleGeometry::Point { .. }));
 }
 
 #[test]

@@ -60,18 +60,56 @@ impl Default for Gizmo {
     }
 }
 
-/// A screen-space shape the renderer draws for one handle: either a line
-/// (axes and planes, drawn as an arrow/quad along `a..b`) or a circle
-/// (rings), both in screen pixels.
-#[derive(Debug, Clone, Copy, PartialEq)]
+/// One handle's real screen geometry (fix round 1, review point 3):
+/// `HandleShape` used to give only a bare segment or a screen-space
+/// circle, which let axis arrows draw bare, rings draw as the same circle
+/// regardless of axis, and plane handles draw as unlabelled diagonals.
+/// Drawing and hit-testing both read this, so they can never disagree.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HandleGeometry {
+    /// An axis (`Handle::Axis`/`ScaleAxis`): a shaft from `shaft_start`
+    /// (the pivot) to `shaft_end`, then a head polygon from there to
+    /// `tip` — a triangle (arrowhead) for `Axis`, a quad (a cube's screen
+    /// outline) for `ScaleAxis`.
+    Arrow {
+        shaft_start: (f64, f64),
+        shaft_end: (f64, f64),
+        tip: (f64, f64),
+        head: Vec<(f64, f64)>,
+    },
+    /// A ring (`Handle::Ring`): the screen-projected 3D circle around the
+    /// pivot, perpendicular to the ring's axis, as a closed polyline
+    /// (`points.len()` segments, `points[0]` repeated at the end). Each
+    /// point is tagged with whether it is on the half of the ring nearer
+    /// the camera (see [`front_facing`]); only that half is meant to be
+    /// drawn solid and is hittable.
+    Ring {
+        points: Vec<(f64, f64)>,
+        front: Vec<bool>,
+    },
+    /// `Handle::ViewRing`: a plain screen-space circle (it has no single
+    /// world axis to project, so there is no front/back half).
+    Circle { center: (f64, f64), radius_px: f64 },
+    /// A plane handle (`Handle::Plane`): a small filled square in the
+    /// plane spanned by its two axes, as its four screen corners in
+    /// order (so edges are `corners[i]..corners[(i+1)%4]`).
+    Plane { corners: [(f64, f64); 4] },
+    /// A point handle (`Handle::Centre`/`ScaleUniform`): a filled disc.
+    Point { center: (f64, f64), radius_px: f64 },
+}
+
+/// One handle the renderer draws: which handle it is, and its real
+/// screen-space geometry ([`HandleGeometry`]).
+#[derive(Debug, Clone, PartialEq)]
 pub struct HandleShape {
     pub handle: Handle,
-    pub a: (f64, f64),
-    pub b: (f64, f64),
-    /// Set for ring/circle handles: the screen-space radius: `b` is then
-    /// unused and `a` is the screen-space centre.
-    pub radius: Option<f64>,
+    pub geometry: HandleGeometry,
 }
+
+/// Screen-pixel radius of a point handle's disc (`Centre`/`ScaleUniform`).
+pub const POINT_HANDLE_RADIUS_PX: f64 = 8.0;
+/// How many segments a ring handle's screen ellipse is tessellated into.
+pub const RING_SEGMENTS: usize = 64;
 
 const AXES: [DVec3; 3] = [DVec3::X, DVec3::Y, DVec3::Z];
 
@@ -146,6 +184,133 @@ fn handle_arm_length(
     0.5 * (lo + hi)
 }
 
+/// How far along the arm the shaft ends and the arrowhead/cube begins
+/// (fraction of the full arm length).
+const ARROW_HEAD_START: f64 = 0.75;
+/// Half-width of an arrowhead/cube head, in pixels, perpendicular to the shaft.
+const ARROW_HEAD_HALF_WIDTH_PX: f64 = 5.0;
+/// Plane handle square: inner/outer extent along each axis, as a fraction
+/// of that axis's own arm (so it sits "at about 0.3 arm").
+const PLANE_SQUARE_INNER: f64 = 0.22;
+const PLANE_SQUARE_OUTER: f64 = 0.38;
+/// How far an axis shaft starts from the pivot, in pixels: a dead-zone
+/// around the pivot reserved for the centre/uniform-scale point handle
+/// (otherwise a shaft that starts exactly at the pivot is always within
+/// the point handle's own hit radius of it, and priority always gives the
+/// axis the win there — Blender and Meshmixer leave the same visible gap).
+const ARROW_SHAFT_INSET_PX: f64 = POINT_HANDLE_RADIUS_PX + 4.0;
+
+/// An axis arrow's geometry: a shaft from `ARROW_SHAFT_INSET_PX` out of
+/// `base` to `ARROW_HEAD_START` of `tip`, then a head polygon out to
+/// `tip` — a triangle (arrowhead) for a `Move` axis, a square (a cube's
+/// screen outline) for a `Scale` axis.
+fn arrow_geometry(base: (f64, f64), tip: (f64, f64), cube_head: bool) -> HandleGeometry {
+    let dx = tip.0 - base.0;
+    let dy = tip.1 - base.1;
+    let len = (dx * dx + dy * dy).sqrt();
+    let (ux, uy) = if len > 1e-9 {
+        (dx / len, dy / len)
+    } else {
+        (1.0, 0.0)
+    };
+    // Perpendicular to the shaft, in screen space.
+    let (px, py) = (-uy, ux);
+    let inset = ARROW_SHAFT_INSET_PX.min(len * 0.5);
+    let shaft_start = (base.0 + ux * inset, base.1 + uy * inset);
+    let shaft_end = (
+        base.0 + dx * ARROW_HEAD_START,
+        base.1 + dy * ARROW_HEAD_START,
+    );
+    let w = ARROW_HEAD_HALF_WIDTH_PX;
+    let head = if cube_head {
+        // A small square (the screen outline of a cube) straddling the shaft end.
+        let back = (shaft_end.0 - ux * w, shaft_end.1 - uy * w);
+        vec![
+            (back.0 + px * w, back.1 + py * w),
+            (tip.0 + px * w, tip.1 + py * w),
+            (tip.0 - px * w, tip.1 - py * w),
+            (back.0 - px * w, back.1 - py * w),
+        ]
+    } else {
+        // A triangle (arrowhead) from the shaft end's width out to the tip.
+        vec![
+            (shaft_end.0 + px * w, shaft_end.1 + py * w),
+            (tip.0, tip.1),
+            (shaft_end.0 - px * w, shaft_end.1 - py * w),
+        ]
+    };
+    HandleGeometry::Arrow {
+        shaft_start,
+        shaft_end,
+        tip,
+        head,
+    }
+}
+
+/// True when 3D point `dir` (a unit direction from the ring's centre,
+/// lying in the ring's own plane) is on the half of the ring nearer the
+/// camera: the half whose direction from the centre points towards the
+/// camera's own direction, projected into the ring's plane. When the view
+/// is (near) edge-on to the ring's axis (looking straight along it), the
+/// whole ring is equally "near" and this reports `true` for every point,
+/// matching a flat-on ring having no occlusion to show.
+fn front_facing(centre: DVec3, normal: DVec3, dir: DVec3, eye: DVec3) -> bool {
+    let to_eye = (eye - centre).reject_from(normal);
+    if to_eye.length_squared() < 1e-18 {
+        return true;
+    }
+    dir.dot(to_eye.normalize()) >= 0.0
+}
+
+/// A ring handle's screen geometry: the 3D circle of world radius `radius`
+/// around `centre`, perpendicular to `normal`, projected to screen as a
+/// closed polyline of [`RING_SEGMENTS`] points, each tagged by
+/// [`front_facing`].
+fn ring_geometry(
+    cam: &OrbitCamera,
+    origin: DVec3,
+    view: (f64, f64),
+    centre: DVec3,
+    normal: DVec3,
+    radius: f64,
+) -> Option<HandleGeometry> {
+    let (u, v) = plane_basis_for_normal(normal);
+    let eye = cam.eye();
+    let mut points = Vec::with_capacity(RING_SEGMENTS);
+    let mut front = Vec::with_capacity(RING_SEGMENTS);
+    for i in 0..RING_SEGMENTS {
+        let theta = std::f64::consts::TAU * i as f64 / RING_SEGMENTS as f64;
+        let dir = u * theta.cos() + v * theta.sin();
+        let world = centre + dir * radius;
+        let p = screen_position(cam, origin, view, world.to_array())?;
+        points.push(p);
+        front.push(front_facing(centre, normal, dir, eye));
+    }
+    Some(HandleGeometry::Ring { points, front })
+}
+
+/// The two orthonormal in-plane axes for a ring/plane handle whose plane
+/// has unit `normal`, picked from the world axes where possible (matching
+/// [`plane_basis`]'s meaning for the three world-aligned rings), and
+/// falling back to an arbitrary orthonormal pair for `ViewRing`'s normal
+/// (the camera's own view direction, not a world axis).
+fn plane_basis_for_normal(normal: DVec3) -> (DVec3, DVec3) {
+    if let Some(i) = AXES
+        .iter()
+        .position(|a| (*a - normal).length_squared() < 1e-12)
+    {
+        return plane_basis(i as u8);
+    }
+    let helper = if normal.x.abs() < 0.9 {
+        DVec3::X
+    } else {
+        DVec3::Y
+    };
+    let u = helper.reject_from(normal).normalize_or_zero();
+    let v = normal.cross(u);
+    (u, v)
+}
+
 impl Gizmo {
     /// Screen-space shapes for the handles of the current mode, at a
     /// constant on-screen size regardless of camera distance.
@@ -169,49 +334,67 @@ impl Gizmo {
                     {
                         out.push(HandleShape {
                             handle: Handle::Axis(i as u8),
-                            a: centre_px,
-                            b: tip,
-                            radius: None,
+                            geometry: arrow_geometry(centre_px, tip, false),
                         });
                     }
                 }
                 for i in 0..3u8 {
                     let (u, v) = plane_basis(i);
-                    let arm_u = arm_along(u) * 0.3;
-                    let arm_v = arm_along(v) * 0.3;
-                    if let (Some(pu), Some(pv)) = (
-                        screen_position(cam, origin, view, (self.pivot + u * arm_u).to_array()),
-                        screen_position(cam, origin, view, (self.pivot + v * arm_v).to_array()),
-                    ) {
+                    let arm_u = arm_along(u);
+                    let arm_v = arm_along(v);
+                    if let Some(corners) =
+                        plane_square_geometry(cam, origin, view, self.pivot, u, v, arm_u, arm_v)
+                    {
                         out.push(HandleShape {
                             handle: Handle::Plane(i),
-                            a: pu,
-                            b: pv,
-                            radius: None,
+                            geometry: HandleGeometry::Plane { corners },
                         });
                     }
                 }
                 out.push(HandleShape {
                     handle: Handle::Centre,
-                    a: centre_px,
-                    b: centre_px,
-                    radius: None,
+                    geometry: HandleGeometry::Point {
+                        center: centre_px,
+                        radius_px: POINT_HANDLE_RADIUS_PX,
+                    },
                 });
             }
             GizmoMode::Rotate => {
                 for i in 0..3u8 {
-                    out.push(HandleShape {
-                        handle: Handle::Ring(i),
-                        a: centre_px,
-                        b: centre_px,
-                        radius: Some(self.size_pt),
-                    });
+                    let axis = AXES[i as usize];
+                    // The ring's radius is solved along its own *in-plane*
+                    // basis directions (`plane_basis`'s `u`/`v`), not
+                    // along the ring's normal (`axis` itself, which the
+                    // ring never extends along at all) — otherwise the
+                    // realised on-screen ellipse can land far larger or
+                    // smaller than `size_pt` under an oblique view. Two
+                    // in-plane directions generally foreshorten
+                    // differently, so this takes the smaller of the two
+                    // arm lengths (the more conservative bound) and also
+                    // caps it well short of the camera's own distance:
+                    // otherwise, under a view where every in-plane
+                    // direction foreshortens hard, the solved radius for
+                    // *either* direction can grow enough that the circle
+                    // sweeps close to the camera, where a handful of its
+                    // points' perspective-divided screen coordinates blow
+                    // up even though none are strictly behind the camera.
+                    let (u, v) = plane_basis(i);
+                    let radius = arm_along(u).min(arm_along(v)).min(cam.distance * 0.3);
+                    if let Some(geometry) =
+                        ring_geometry(cam, origin, view, self.pivot, axis, radius)
+                    {
+                        out.push(HandleShape {
+                            handle: Handle::Ring(i),
+                            geometry,
+                        });
+                    }
                 }
                 out.push(HandleShape {
                     handle: Handle::ViewRing,
-                    a: centre_px,
-                    b: centre_px,
-                    radius: Some(self.size_pt * 1.15),
+                    geometry: HandleGeometry::Circle {
+                        center: centre_px,
+                        radius_px: self.size_pt * 1.15,
+                    },
                 });
             }
             GizmoMode::Scale => {
@@ -222,17 +405,16 @@ impl Gizmo {
                     {
                         out.push(HandleShape {
                             handle: Handle::ScaleAxis(i as u8),
-                            a: centre_px,
-                            b: tip,
-                            radius: None,
+                            geometry: arrow_geometry(centre_px, tip, true),
                         });
                     }
                 }
                 out.push(HandleShape {
                     handle: Handle::ScaleUniform,
-                    a: centre_px,
-                    b: centre_px,
-                    radius: None,
+                    geometry: HandleGeometry::Point {
+                        center: centre_px,
+                        radius_px: POINT_HANDLE_RADIUS_PX,
+                    },
                 });
             }
         }
@@ -242,6 +424,10 @@ impl Gizmo {
     /// The nearest handle within 8pt of `px`, or `None`. Axes beat planes,
     /// which beat rings, which beat the centre. An axis within 10 degrees
     /// of end-on (the view direction nearly parallel to it) isn't offered.
+    /// Measures against the same geometry [`Self::handles`] draws (fix
+    /// round 1, review point 3): the ring's own projected polyline (front
+    /// half only — the dimmed back half isn't clickable, as in Blender and
+    /// Meshmixer), the plane square's interior, and the point disc.
     pub fn hit(&self, cam: &OrbitCamera, view: (f64, f64), px: (f64, f64)) -> Option<Handle> {
         const TOLERANCE: f64 = 8.0;
         let forward = (cam.target - cam.eye()).normalize_or_zero();
@@ -256,31 +442,48 @@ impl Gizmo {
         };
 
         for shape in self.handles(cam, view) {
-            match shape.handle {
-                Handle::Axis(i) | Handle::ScaleAxis(i) => {
-                    let axis = AXES[i as usize];
-                    if is_end_on(forward, axis) {
+            match (&shape.geometry, shape.handle) {
+                (
+                    HandleGeometry::Arrow {
+                        shaft_start, tip, ..
+                    },
+                    h,
+                ) => {
+                    let axis_index = match h {
+                        Handle::Axis(i) | Handle::ScaleAxis(i) => i,
+                        _ => unreachable!("arrow geometry is only axis/scale-axis"),
+                    };
+                    if is_end_on(forward, AXES[axis_index as usize]) {
                         continue;
                     }
-                    let (d, _) = point_segment_distance(px, shape.a, shape.b);
+                    // The whole arrow (shaft and head) is hittable along
+                    // its centreline, out to the full tip, not just the
+                    // shaft (fix round 1, review point 1: the head
+                    // extends past where the shaft itself ends).
+                    let (d, _) = point_segment_distance(px, *shaft_start, *tip);
                     consider(0, d, shape.handle);
                 }
-                Handle::Plane(_) => {
-                    let (d, _) = point_segment_distance(px, shape.a, shape.b);
-                    consider(1, d, shape.handle);
+                (HandleGeometry::Plane { corners }, h) => {
+                    let d = distance_to_quad(px, corners);
+                    consider(1, d, h);
                 }
-                Handle::Ring(_) | Handle::ViewRing => {
-                    let Some(r) = shape.radius else { continue };
-                    let dx = px.0 - shape.a.0;
-                    let dy = px.1 - shape.a.1;
-                    let d = ((dx * dx + dy * dy).sqrt() - r).abs();
-                    consider(2, d, shape.handle);
+                (HandleGeometry::Ring { points, front }, h) => {
+                    let d = distance_to_ring_front(px, points, front);
+                    if let Some(d) = d {
+                        consider(2, d, h);
+                    }
                 }
-                Handle::ScaleUniform | Handle::Centre => {
-                    let dx = px.0 - shape.a.0;
-                    let dy = px.1 - shape.a.1;
+                (HandleGeometry::Circle { center, radius_px }, h) => {
+                    let dx = px.0 - center.0;
+                    let dy = px.1 - center.1;
+                    let d = ((dx * dx + dy * dy).sqrt() - radius_px).abs();
+                    consider(2, d, h);
+                }
+                (HandleGeometry::Point { center, .. }, h) => {
+                    let dx = px.0 - center.0;
+                    let dy = px.1 - center.1;
                     let d = (dx * dx + dy * dy).sqrt();
-                    consider(3, d, shape.handle);
+                    consider(3, d, h);
                 }
             }
         }
@@ -399,6 +602,87 @@ fn point_segment_distance(p: (f64, f64), a: (f64, f64), b: (f64, f64)) -> (f64, 
     };
     let (cx, cy) = (a.0 + t * dx, a.1 + t * dy);
     (((p.0 - cx).powi(2) + (p.1 - cy).powi(2)).sqrt(), t)
+}
+
+/// A plane handle's four screen corners: a square between
+/// `PLANE_SQUARE_INNER` and `PLANE_SQUARE_OUTER` of each axis's own arm
+/// (`arm_u`/`arm_v`), in the plane spanned by `u`/`v` around `pivot`.
+#[allow(clippy::too_many_arguments)]
+fn plane_square_geometry(
+    cam: &OrbitCamera,
+    origin: DVec3,
+    view: (f64, f64),
+    pivot: DVec3,
+    u: DVec3,
+    v: DVec3,
+    arm_u: f64,
+    arm_v: f64,
+) -> Option<[(f64, f64); 4]> {
+    let corner = |fu: f64, fv: f64| {
+        let world = pivot + u * (arm_u * fu) + v * (arm_v * fv);
+        screen_position(cam, origin, view, world.to_array())
+    };
+    Some([
+        corner(PLANE_SQUARE_INNER, PLANE_SQUARE_INNER)?,
+        corner(PLANE_SQUARE_OUTER, PLANE_SQUARE_INNER)?,
+        corner(PLANE_SQUARE_OUTER, PLANE_SQUARE_OUTER)?,
+        corner(PLANE_SQUARE_INNER, PLANE_SQUARE_OUTER)?,
+    ])
+}
+
+/// True when `p` is inside the (possibly non-convex, but here always
+/// convex) screen-space quad `corners` (a standard even-odd ray cast).
+fn point_in_quad(p: (f64, f64), corners: &[(f64, f64); 4]) -> bool {
+    let mut inside = false;
+    let mut j = corners.len() - 1;
+    for i in 0..corners.len() {
+        let (xi, yi) = corners[i];
+        let (xj, yj) = corners[j];
+        if (yi > p.1) != (yj > p.1) {
+            let x_at_p1 = (xj - xi) * (p.1 - yi) / (yj - yi) + xi;
+            if p.0 < x_at_p1 {
+                inside = !inside;
+            }
+        }
+        j = i;
+    }
+    inside
+}
+
+/// Distance from `p` to the plane handle's square: zero when inside it
+/// (so the whole filled interior is hittable, not just its edge),
+/// otherwise the nearest of its four edges.
+fn distance_to_quad(p: (f64, f64), corners: &[(f64, f64); 4]) -> f64 {
+    if point_in_quad(p, corners) {
+        return 0.0;
+    }
+    (0..4)
+        .map(|i| point_segment_distance(p, corners[i], corners[(i + 1) % 4]).0)
+        .fold(f64::INFINITY, f64::min)
+}
+
+/// Distance from `p` to the nearest *front-facing* segment of a ring's
+/// closed polyline, or `None` if the ring has no front-facing points at
+/// all (degenerate: fewer than 2 points). A segment counts if either
+/// endpoint is front-facing, so the seam at the front/back boundary is
+/// still hittable right up to it.
+fn distance_to_ring_front(p: (f64, f64), points: &[(f64, f64)], front: &[bool]) -> Option<f64> {
+    let n = points.len();
+    if n < 2 {
+        return None;
+    }
+    let mut best = f64::INFINITY;
+    let mut any = false;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        if !front[i] && !front[j] {
+            continue;
+        }
+        any = true;
+        let (d, _) = point_segment_distance(p, points[i], points[j]);
+        best = best.min(d);
+    }
+    any.then_some(best)
 }
 
 /// The parameter `s` such that `line_origin + s*axis` is the closest point

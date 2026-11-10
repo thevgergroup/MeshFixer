@@ -11,11 +11,19 @@
 //! passes in (`mf-desktop`'s `theme.rs`, D9). This module only turns
 //! those values and [`crate::HandleShape`]/[`Plate`] into vertex data; the
 //! GPU pipelines live in `renderer.rs`.
+//!
+//! Each handle's real geometry ([`crate::HandleGeometry`], fix round 1)
+//! needs two kinds of vertex data: screen-space *lines* (axis shafts, a
+//! ring's polyline) drawn through the same instanced-quad trick as the
+//! existing 3 pt overlay lines ([`GizmoLineVertex`]/[`gizmo_line_vertices`]),
+//! and *filled* triangles (an arrowhead, a scale cube's head, a plane
+//! handle's square, a point handle's disc) as a plain triangle list
+//! ([`GizmoFillVertex`]/[`gizmo_fill_vertices`]).
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
 
-use crate::{Handle, HandleShape};
+use crate::{Handle, HandleGeometry, HandleShape};
 
 /// The gizmo's own colours (D8): the conventional axis colours, plus a
 /// neutral for handles with no single axis (the view ring, the uniform
@@ -84,30 +92,41 @@ impl Default for Plate {
 /// stays a plain screen-space quad, like the existing overlay lines).
 #[repr(C)]
 #[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
-pub struct GizmoVertex {
+pub struct GizmoLineVertex {
     pub position: [f32; 2],
     pub color: [f32; 4],
     pub width_px: f32,
 }
 
-/// How many segments a ring/circle handle is tessellated into for drawing.
-const RING_SEGMENTS: usize = 48;
+/// One screen-space gizmo *filled* vertex (arrowheads, scale cubes, plane
+/// squares, point discs): a plain triangle list, no width needed.
+#[repr(C)]
+#[derive(Debug, Clone, Copy, PartialEq, Pod, Zeroable)]
+pub struct GizmoFillVertex {
+    pub position: [f32; 2],
+    pub color: [f32; 4],
+}
+
+/// How many triangles a point handle's disc is tessellated into.
+const POINT_DISC_SEGMENTS: usize = 16;
 
 /// The base gizmo line width, in points (like [`crate::Palette::overlay_width`]
 /// for the ordinary overlay lines); the hovered handle draws at twice this.
 pub const GIZMO_LINE_WIDTH_PT: f32 = 2.0;
 
 /// Screen-space line-segment vertices (pairs, one segment per two
-/// vertices) for every shape in `shapes`, coloured by `palette` per
+/// vertices) for every shape in `shapes` that has one (an axis's shaft, a
+/// ring's front-facing polyline segments — the dimmed back half is left
+/// out, as in Blender and Meshmixer), coloured by `palette` per
 /// [`GizmoPalette::color_for`]. `highlight`'s shape, if present, is drawn
 /// 40% lighter and twice as wide (the same rule as the selection pulse,
 /// D8/visual-language.md).
-pub fn gizmo_vertices(
+pub fn gizmo_line_vertices(
     shapes: &[HandleShape],
     highlight: Option<Handle>,
     palette: &GizmoPalette,
     line_width_pt: f32,
-) -> Vec<GizmoVertex> {
+) -> Vec<GizmoLineVertex> {
     let mut out = Vec::new();
     for shape in shapes {
         let emphasized = highlight == Some(shape.handle);
@@ -117,9 +136,44 @@ pub fn gizmo_vertices(
         } else {
             line_width_pt
         };
-        match shape.radius {
-            Some(r) => push_ring(&mut out, shape.a, r, color, width),
-            None => push_segment(&mut out, shape.a, shape.b, color, width),
+        match &shape.geometry {
+            HandleGeometry::Arrow {
+                shaft_start,
+                shaft_end,
+                ..
+            } => push_segment(&mut out, *shaft_start, *shaft_end, color, width),
+            HandleGeometry::Ring { points, front } => {
+                push_ring_front(&mut out, points, front, color, width)
+            }
+            HandleGeometry::Circle { center, radius_px } => {
+                push_circle(&mut out, *center, *radius_px, color, width)
+            }
+            HandleGeometry::Plane { .. } | HandleGeometry::Point { .. } => {}
+        }
+    }
+    out
+}
+
+/// Filled triangle vertices for every shape in `shapes` that is filled (an
+/// arrowhead or scale cube, a plane handle's square, a point handle's
+/// disc), coloured and emphasised the same way as
+/// [`gizmo_line_vertices`].
+pub fn gizmo_fill_vertices(
+    shapes: &[HandleShape],
+    highlight: Option<Handle>,
+    palette: &GizmoPalette,
+) -> Vec<GizmoFillVertex> {
+    let mut out = Vec::new();
+    for shape in shapes {
+        let emphasized = highlight == Some(shape.handle);
+        let color = lighten(palette.color_for(shape.handle), emphasized);
+        match &shape.geometry {
+            HandleGeometry::Arrow { head, .. } => push_fan(&mut out, head, color),
+            HandleGeometry::Plane { corners } => push_fan(&mut out, corners, color),
+            HandleGeometry::Point { center, radius_px } => {
+                push_disc(&mut out, *center, *radius_px, color)
+            }
+            HandleGeometry::Ring { .. } | HandleGeometry::Circle { .. } => {}
         }
     }
     out
@@ -136,37 +190,90 @@ fn lighten(c: [f32; 4], emphasize: bool) -> [f32; 4] {
 }
 
 fn push_segment(
-    out: &mut Vec<GizmoVertex>,
+    out: &mut Vec<GizmoLineVertex>,
     a: (f64, f64),
     b: (f64, f64),
     color: [f32; 4],
     width_px: f32,
 ) {
-    out.push(GizmoVertex {
+    out.push(GizmoLineVertex {
         position: [a.0 as f32, a.1 as f32],
         color,
         width_px,
     });
-    out.push(GizmoVertex {
+    out.push(GizmoLineVertex {
         position: [b.0 as f32, b.1 as f32],
         color,
         width_px,
     });
 }
 
-fn push_ring(
-    out: &mut Vec<GizmoVertex>,
+/// Pushes a closed polyline's segments, skipping any whose both endpoints
+/// are on the dimmed back half (fix round 1: the ring must look like an
+/// ellipse with only its near half solid, not a plain circle).
+fn push_ring_front(
+    out: &mut Vec<GizmoLineVertex>,
+    points: &[(f64, f64)],
+    front: &[bool],
+    color: [f32; 4],
+    width_px: f32,
+) {
+    let n = points.len();
+    for i in 0..n {
+        let j = (i + 1) % n;
+        if !front[i] && !front[j] {
+            continue;
+        }
+        push_segment(out, points[i], points[j], color, width_px);
+    }
+}
+
+fn push_circle(
+    out: &mut Vec<GizmoLineVertex>,
     centre: (f64, f64),
     radius: f64,
     color: [f32; 4],
     width_px: f32,
 ) {
-    for i in 0..RING_SEGMENTS {
-        let a0 = std::f64::consts::TAU * i as f64 / RING_SEGMENTS as f64;
-        let a1 = std::f64::consts::TAU * (i + 1) as f64 / RING_SEGMENTS as f64;
+    const SEGMENTS: usize = 48;
+    for i in 0..SEGMENTS {
+        let a0 = std::f64::consts::TAU * i as f64 / SEGMENTS as f64;
+        let a1 = std::f64::consts::TAU * (i + 1) as f64 / SEGMENTS as f64;
         let p0 = (centre.0 + radius * a0.cos(), centre.1 + radius * a0.sin());
         let p1 = (centre.0 + radius * a1.cos(), centre.1 + radius * a1.sin());
         push_segment(out, p0, p1, color, width_px);
+    }
+}
+
+/// Triangle-fans a convex polygon (`points[0]` as the fan's centre).
+fn push_fan(out: &mut Vec<GizmoFillVertex>, points: &[(f64, f64)], color: [f32; 4]) {
+    if points.len() < 3 {
+        return;
+    }
+    let v = |p: (f64, f64)| GizmoFillVertex {
+        position: [p.0 as f32, p.1 as f32],
+        color,
+    };
+    for i in 1..points.len() - 1 {
+        out.push(v(points[0]));
+        out.push(v(points[i]));
+        out.push(v(points[i + 1]));
+    }
+}
+
+fn push_disc(out: &mut Vec<GizmoFillVertex>, centre: (f64, f64), radius: f64, color: [f32; 4]) {
+    let v = |p: (f64, f64)| GizmoFillVertex {
+        position: [p.0 as f32, p.1 as f32],
+        color,
+    };
+    for i in 0..POINT_DISC_SEGMENTS {
+        let a0 = std::f64::consts::TAU * i as f64 / POINT_DISC_SEGMENTS as f64;
+        let a1 = std::f64::consts::TAU * (i + 1) as f64 / POINT_DISC_SEGMENTS as f64;
+        let p0 = (centre.0 + radius * a0.cos(), centre.1 + radius * a0.sin());
+        let p1 = (centre.0 + radius * a1.cos(), centre.1 + radius * a1.sin());
+        out.push(v(centre));
+        out.push(v(p0));
+        out.push(v(p1));
     }
 }
 
