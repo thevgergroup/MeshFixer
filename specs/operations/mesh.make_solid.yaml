@@ -1,0 +1,38 @@
+id: mesh.make_solid
+version: 1
+summary: "Make solid: rebuilds the surface as one closed solid; fine detail smaller than the cell size is lost."
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  # A face-set region (remeshed and stitched back) is deferred: refused by
+  # name (region_not_supported) in this version.
+  kinds: []
+parameters:
+  - name: cell_size
+    type: float
+    # 0: 1/256 of the bounding-box diagonal (the default). Recorded as
+    # given; replay computes the same size from the same input.
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Size of the grid cells (0: 1/256 of the object's diagonal); detail smaller than this is lost"
+  - name: offset
+    type: float
+    default: 0.0
+    unit: mm
+    description: Grow (positive) or shrink (negative) the surface by this distance
+  - name: preserve_sharp
+    type: bool
+    default: true
+    description: "Keep the surface where the grid puts it (on), or smooth it once (off)"
+preconditions:
+  - the object has faces
+  - the grid (bounds plus padding, divided by the cell size) has at most 40,000,000 points; otherwise refused by name (grid_too_large) with the cell size that would fit, never coarsened silently
+postconditions:
+  - the result is closed, manifold, consistently oriented, has no degenerate faces and doesn't intersect itself, checked exactly (D4); otherwise refused by name
+  - every face is new; the old surface is replaced
+  - the same input and parameters give the same result at any thread count
+effects: [geometry_changes, topology_changes]
+runtime:
+  cancellable: true
+  progress: true

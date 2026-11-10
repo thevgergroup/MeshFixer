@@ -1,0 +1,95 @@
+id: mesh.split_plane
+version: 1
+summary: Cut a closed object in two along a plane and close each part with a flat cap.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: plane_point
+    type: vec3
+    default: [0, 0, 0]
+    unit: mm
+    description: "A point on the cut plane, in world space (document units once prepared): x,y,z"
+  - name: plane_normal
+    type: vec3
+    default: [0, 0, 1]
+    description: "The cut plane's normal in world space, x,y,z (any length but zero). The part on the side it points to is the top part"
+  - name: keep
+    type: choice
+    default: both
+    values: [both, above, below]
+    description: "Which parts to keep: both (the top part keeps the object, the bottom part is a new object), or only the part above or below the plane"
+  - name: cut_gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Thickness of the slab removed at the cut, centred on the plane, so the parts don't touch (D23; 0 cuts without a gap)"
+  # Alignment holes and dowels (Task 13, D12). Until the boolean engine
+  # lands, anything but pegs: none is refused by name (pegs_need_booleans).
+  - name: pegs
+    type: choice
+    default: none
+    values: [none, dowels, attached, dovetail]
+    description: "Alignment: none, holes in both cut faces with loose dowels laid out on the plate, pegs attached to the top part, or a dovetail"
+  - name: peg_shape
+    type: choice
+    default: round
+    values: [round, square, keyed]
+    description: "Shape of the alignment holes and dowels"
+  - name: hole_diameter
+    type: float
+    default: 5.0
+    min: 0.0
+    unit: mm
+    description: "Diameter (or width) of each alignment hole"
+  - name: hole_depth_above
+    type: float
+    default: 6.0
+    min: 0.0
+    unit: mm
+    description: "How deep each hole goes into the top part"
+  - name: hole_depth_below
+    type: float
+    default: 6.0
+    min: 0.0
+    unit: mm
+    description: "How deep each hole goes into the bottom part"
+  - name: peg_count
+    type: integer
+    default: 0
+    min: 0
+    description: "Holes per section region; 0 places them automatically"
+  - name: peg_clearance
+    type: float
+    default: 0.2
+    min: 0.0
+    unit: mm
+    default_from: fit.peg_clearance
+    description: "The dowel is this much thinner than its hole (from the print fit profile)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    default_from: fit.length_allowance
+    description: "The dowel is this much shorter than the two holes together (from the print fit profile)"
+  - name: min_wall
+    type: float
+    default: 1.5
+    min: 0.0
+    unit: mm
+    description: "Thinnest wall left between a hole and the outside"
+preconditions:
+  - target is a whole, closed, manifold object
+  - the plane crosses the object
+postconditions:
+  - each kept part is closed; its cap lies on the plane (offset by half the cut gap)
+  - faces away from the plane are kept with their ids, bit for bit
+  - with keep both, the target becomes "<name> (top)" and "<name> (bottom)" is created with the same transform
+  - the report lists each part's cap faces
+effects: [geometry_changes, topology_changes, creates_objects]
+runtime:
+  cancellable: true
+  progress: true

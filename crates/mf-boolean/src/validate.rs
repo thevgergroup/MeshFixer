@@ -120,12 +120,19 @@ fn prechecks(
 
 /// Checks a boolean result (D4, Task 7b): everything [`validate_solid`]
 /// checks, except that a self-intersection already present in an input is
-/// the input's, not the kernel's. A pair of intersecting output faces is
-/// *new* unless both lie on faces of the same operand that intersect each
-/// other in that operand (found through `result.origin` and the operands'
-/// `face_ids`). Faces of the two operands meeting is always new: the
-/// kernel should have resolved it. Two pieces of one input face meeting is
-/// new too.
+/// the input's, not the kernel's. A pair of intersecting output faces
+/// `(f, g)` is excused only when it is *that* crossing (Task 7b review
+/// C1, geometry-granular): `f` and `g` lie on faces `x` and `y` of the
+/// same operand (found through `result.origin` and the operands'
+/// `face_ids`), `x` and `y` intersect each other in that operand, and
+/// `f` lies within `x` and `g` within `y` (every corner exactly on the
+/// input face: in its plane and inside it, by exact orientations). Then
+/// `f ∩ g ⊆ x ∩ y`: the output crossing lies inside the input's own
+/// crossing set. A piece that has moved off its input face (a kernel
+/// defect, or a constructed point rounded off the plane) is never
+/// excused, however its labelled faces met. Faces of the two operands
+/// meeting is always new: the kernel should have resolved it. Two pieces
+/// of one input face meeting is new too.
 ///
 /// Labels in `result.origin` that name no input face make the pair new.
 pub fn validate_boolean(
@@ -147,6 +154,13 @@ pub fn validate_boolean(
         .iter()
         .map(|o| source.get(o).copied())
         .collect();
+    let on_source = |f: u32, i: usize, x: u32| -> bool {
+        let m = inputs[i];
+        let face = corners(&m.positions, m.triangles[x as usize]);
+        corners(positions, triangles[f as usize])
+            .iter()
+            .all(|&p| point_on_triangle(p, face))
+    };
     let counts = |f: u32, g: u32| -> bool {
         let (Some(Some((i, x))), Some(Some((j, y)))) = (src.get(f as usize), src.get(g as usize))
         else {
@@ -156,13 +170,24 @@ pub fn validate_boolean(
             return true;
         }
         let m = inputs[*i];
-        !input_faces_intersect(
+        !(input_faces_intersect(
             &m.positions,
             m.triangles[*x as usize],
             m.triangles[*y as usize],
-        )
+        ) && on_source(f, *i, *x)
+            && on_source(g, *j, *y))
     };
     check_intersections(positions, triangles, &counts, ctx)
+}
+
+/// Whether `p` lies in closed triangle `t` (exactly: in its plane, and
+/// inside or on it). A degenerate `t` contains nothing.
+fn point_on_triangle(p: [f64; 3], t: [[f64; 3]; 3]) -> bool {
+    let [a, b, c] = t;
+    let Some(k) = drop_axis(a, b, c) else {
+        return false;
+    };
+    o3(a, b, c, p) == 0.0 && point_in_tri_2d(p, t, k)
 }
 
 /// Whether faces `a` and `b` of an input intersect (by the same rule as
@@ -210,7 +235,6 @@ pub fn self_intersecting_faces(
 }
 
 /// Whether some edge is used by only one face.
-#[cfg(feature = "manifold-cpp")]
 pub(crate) fn has_open_edge(triangles: &[[u32; 3]]) -> bool {
     matches!(
         check_edges(triangles, &RunContext::none()),
@@ -247,7 +271,7 @@ fn o2(a: [f64; 3], b: [f64; 3], c: [f64; 3], drop: usize) -> f64 {
 /// The axis to drop so the triangle's projection keeps the most area
 /// (exact orientations, so a non-degenerate triangle never projects to a
 /// segment). `None` for a degenerate triangle.
-fn drop_axis(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<usize> {
+pub(crate) fn drop_axis(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<usize> {
     let mut best = None;
     let mut best_abs = 0.0;
     for k in 0..3 {
@@ -258,6 +282,39 @@ fn drop_axis(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> Option<usize> {
         }
     }
     best
+}
+
+/// `orient2d` of three 2D points.
+pub(crate) fn o2_coords(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    orient2d(
+        Coord { x: a[0], y: a[1] },
+        Coord { x: b[0], y: b[1] },
+        Coord { x: c[0], y: c[1] },
+    )
+}
+
+/// Whether a face of `a` meets a face of `b` (exactly, touching counts).
+/// Degenerate faces are tested as they are.
+pub(crate) fn operands_meet(
+    a: &KernelMesh,
+    b: &KernelMesh,
+    ctx: &RunContext,
+) -> Result<bool, SolidError> {
+    if a.triangles.is_empty() || b.triangles.is_empty() {
+        return Ok(false);
+    }
+    let n = a.triangles.len() as u32;
+    let base = a.positions.len() as u32;
+    let mut positions = a.positions.clone();
+    positions.extend_from_slice(&b.positions);
+    let mut triangles = a.triangles.clone();
+    triangles.extend(b.triangles.iter().map(|t| t.map(|v| v + base)));
+    let across = |f: u32, g: u32| (f < n) != (g < n);
+    match check_intersections(&positions, &triangles, &across, ctx) {
+        Ok(()) => Ok(false),
+        Err(SolidError::SelfIntersecting { .. }) => Ok(true),
+        Err(e) => Err(e),
+    }
 }
 
 fn corners(p: &[[f64; 3]], t: [u32; 3]) -> [[f64; 3]; 3] {

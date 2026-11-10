@@ -176,6 +176,8 @@ struct PreparedOperand {
     /// `None` for the target; the spec's role otherwise.
     role: Option<OperandRole>,
     object: ObjectId,
+    /// The object's name, which an operation may derive new names from.
+    object_name: String,
     mesh: Mesh,
     transform: [f64; 12],
     target: Target,
@@ -236,6 +238,7 @@ impl Prepared {
             .iter()
             .map(|o| OperandInput {
                 object: o.object,
+                name: &o.object_name,
                 mesh: &o.mesh,
                 transform: o.transform,
                 target: o.target.clone(),
@@ -283,9 +286,9 @@ impl Prepared {
                         openings: None,
                     }
                 }
-                ObjectChange::Transform { .. } | ObjectChange::Remove { .. } => {
-                    ChangeInfo::default()
-                }
+                ObjectChange::Transform { .. }
+                | ObjectChange::Remove { .. }
+                | ObjectChange::Rename { .. } => ChangeInfo::default(),
             });
         }
         let target = &self.operands[0];
@@ -358,7 +361,9 @@ fn check_changes(
             ObjectChange::Geometry { provenance, .. } | ObjectChange::Create { provenance, .. } => {
                 provenance
             }
-            ObjectChange::Transform { .. } | ObjectChange::Remove { .. } => continue,
+            ObjectChange::Transform { .. }
+            | ObjectChange::Remove { .. }
+            | ObjectChange::Rename { .. } => continue,
         };
         for (_, sources) in &provenance.created_faces {
             for &(k, face) in &sources.operands {
@@ -377,13 +382,14 @@ fn check_changes(
             }
         }
     }
-    // Per operand: (geometry, transform, removed).
-    let mut seen = vec![(false, false, false); operands.len()];
+    // Per operand: (geometry, transform, removed, renamed).
+    let mut seen = vec![(false, false, false, false); operands.len()];
     for change in changes {
         let (operand, slot) = match change {
             ObjectChange::Geometry { operand, .. } => (*operand, 0),
             ObjectChange::Transform { operand, .. } => (*operand, 1),
             ObjectChange::Remove { operand } => (*operand, 2),
+            ObjectChange::Rename { operand, .. } => (*operand, 3),
             ObjectChange::Create { .. } => continue,
         };
         let o = operands.get(operand).ok_or_else(|| {
@@ -408,7 +414,7 @@ fn check_changes(
             }
         }
         let s = &mut seen[operand];
-        let flags = [&mut s.0, &mut s.1, &mut s.2];
+        let flags = [&mut s.0, &mut s.1, &mut s.2, &mut s.3];
         if *flags[slot] {
             return Err(invalid(format!(
                 "operand '{}' has two changes of one kind",
@@ -416,7 +422,7 @@ fn check_changes(
             )));
         }
         *flags[slot] = true;
-        if s.2 && (s.0 || s.1) {
+        if s.2 && (s.0 || s.1 || s.3) {
             return Err(invalid(format!(
                 "operand '{}' is both changed and removed",
                 o.name
@@ -897,6 +903,7 @@ impl Session {
             target,
             selection,
             openings: object.openings.clone(),
+            object_name: object.name.clone(),
         })
     }
 
@@ -1005,6 +1012,11 @@ impl Session {
                 ObjectChange::Transform { operand, transform } => {
                     let id = c.operands[operand].object;
                     document = document.with_transform(id, transform).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Rename { operand, name } => {
+                    let id = c.operands[operand].object;
+                    document = document.with_name(id, name).ok_or(unknown(id))?;
                     operand_changed[operand] = true;
                 }
                 ObjectChange::Remove { operand } => {

@@ -1,0 +1,25 @@
+id: mesh.intersections
+version: 1
+summary: Find where the object crosses another object, or itself (exact), grouped into regions.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+operands:
+  # Optional: without it, the object's own self-intersections. Placed in
+  # the target's frame exactly as mesh.boolean places its tool (D10).
+  - name: other
+    role: read
+    kinds: [object]
+    required: false
+parameters: []
+preconditions:
+  - the target (and the other object, if given) are meshes
+postconditions:
+  - geometry unchanged
+  - every pair of faces whose interiors cross is counted once, decided exactly (touching at a shared or coincident vertex or edge is not a crossing)
+  - the same regions at any thread count
+effects: [read_only]
+runtime:
+  cancellable: true
+  progress: true

@@ -43,6 +43,7 @@ on the `deny.toml` allowlist; no exception is needed.
 | `dashu-int`, `dashu-ratio`, `dashu-base` 0.5 | MIT OR Apache-2.0 | the kernel's exact rational arithmetic |
 | `num-modular` 0.6 | Apache-2.0 | a `dashu` dependency |
 | `robust` 1.2 | MIT OR Apache-2.0 | exact predicates for `validate_solid`, D2 |
+| `spade` 2.15 | MIT OR Apache-2.0 | constrained Delaunay triangulation of cut caps (`mesh.split_plane`), D3; added in Phase 1 Task 12 |
 
 **Obligations when distributing MeshFixer binaries:** include the Apache-2.0
 licence text (already shipped as `LICENSE-APACHE`). `manifold-rust` 0.19.2

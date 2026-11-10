@@ -1,0 +1,47 @@
+id: mesh.boolean
+version: 1
+summary: Combine the target with a tool object (union, subtract or intersect), locally around the tool, with an exact check of the result.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+operands:
+  # The tool, consumed (removed once the command commits) unless
+  # keep_tool is set (D10). Brought into the target's frame first, so the
+  # target keeps its id, name, transform and every face outside the
+  # window, bitwise.
+  - name: tool
+    role: consumed
+    kinds: [object, component]
+    required: true
+parameters:
+  - name: operation
+    type: choice
+    values: [union, subtract, intersect]
+    default: union
+    description: "union: keep both; subtract: cut the tool out of the target; intersect: keep only the overlap"
+  - name: keep_tool
+    type: bool
+    default: false
+    description: Keep the tool object instead of removing it
+  - name: blend_width
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    # Used by P1-M5's blend (D14); 0 is a plain boolean, the only value
+    # this version accepts.
+    description: Width of the blended seam (0 for none)
+preconditions:
+  - the target and the tool are meshes; the tool is closed
+  - for subtract and intersect, the target is closed (D15)
+  - the tool and the target touch (otherwise no_overlap)
+postconditions:
+  - the result is closed (except openings the target had away from the tool), manifold, consistently oriented, with no degenerate face and no new self-intersection, checked exactly (D4); otherwise refused by name
+  - faces of the target outside the window around the tool are kept bitwise with their ids (D5)
+  - every created face names its source, a target face or a tool face (operand 1)
+  - a temporary closure of a target opening never survives (D15)
+effects: [geometry_changes, topology_changes, removes_objects]
+runtime:
+  cancellable: true
+  progress: true

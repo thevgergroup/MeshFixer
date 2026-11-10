@@ -19,4 +19,5 @@ thiserror.workspace = true
 
 [dev-dependencies]
 mf-fixtures.workspace = true
+mf-io.workspace = true
 mf-runtime.workspace = true

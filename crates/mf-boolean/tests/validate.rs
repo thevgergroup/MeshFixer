@@ -187,6 +187,70 @@ fn an_operands_own_self_intersection_is_not_new() {
 }
 
 #[test]
+fn a_crossing_away_from_the_inputs_own_crossing_is_new() {
+    // Task 7b review C1: operand a already intersects itself (two
+    // overlapping cubes). The "result" carries the same labels, but the
+    // second cube has moved: its faces no longer lie on the input faces
+    // they name, so where they cross the first cube is not the input's own
+    // crossing, even though the labelled input faces did cross somewhere.
+    let a = operand(
+        &merge(&[cube(1.0), translated(&cube(1.0), [0.5, 0.25, 0.125])]),
+        0,
+    );
+    let b = operand(&translated(&cube(1.0), [5.0, 0.0, 0.0]), 1);
+    let mut r = result_of(&[&a, &b]);
+    for p in &mut r.positions[8..16] {
+        p[0] += 0.0625;
+    }
+    assert!(matches!(
+        validate_boolean(&r, [&a, &b], &RunContext::none()),
+        Err(SolidError::SelfIntersecting { .. })
+    ));
+}
+
+#[test]
+fn a_piece_of_an_input_face_crossing_where_the_input_crossed_is_excused() {
+    // The excused pair must lie on its input faces: split one face of the
+    // second cube into two pieces (both on the input face), and the
+    // pre-existing crossing stays excused.
+    let a = operand(
+        &merge(&[cube(1.0), translated(&cube(1.0), [0.5, 0.25, 0.125])]),
+        0,
+    );
+    let b = operand(&translated(&cube(1.0), [5.0, 0.0, 0.0]), 1);
+    let mut r = result_of(&[&a, &b]);
+    // Subdivide every face of a's second cube into 4 at its edge
+    // midpoints (exact: the cube's coordinates are dyadic), each piece
+    // keeping its face's label; neighbours share the midpoints.
+    let mut mids = std::collections::HashMap::new();
+    let mut triangles = Vec::new();
+    let mut origin = Vec::new();
+    for (t, o) in r.triangles.iter().zip(&r.origin) {
+        if o.0 != 0 || o.1 < 12 {
+            triangles.push(*t);
+            origin.push(*o);
+            continue;
+        }
+        let mut m = |u: u32, v: u32| {
+            *mids.entry((u.min(v), u.max(v))).or_insert_with(|| {
+                let (p, q) = (r.positions[u as usize], r.positions[v as usize]);
+                r.positions.push([0, 1, 2].map(|k| (p[k] + q[k]) / 2.0));
+                (r.positions.len() - 1) as u32
+            })
+        };
+        let [x, y, z] = *t;
+        let (mxy, myz, mzx) = (m(x, y), m(y, z), m(z, x));
+        for piece in [[x, mxy, mzx], [mxy, y, myz], [mzx, myz, z], [mxy, myz, mzx]] {
+            triangles.push(piece);
+            origin.push(*o);
+        }
+    }
+    r.triangles = triangles;
+    r.origin = origin;
+    validate_boolean(&r, [&a, &b], &RunContext::none()).unwrap();
+}
+
+#[test]
 fn faces_of_the_two_operands_intersecting_are_new() {
     let a = operand(&cube(1.0), 0);
     let b = operand(&translated(&cube(1.0), [0.5, 0.25, 0.125]), 1);

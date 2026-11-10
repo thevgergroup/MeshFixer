@@ -1169,3 +1169,154 @@ fn delete_chooses_its_object_and_never_writes_an_empty_document() {
     assert!(stderr.contains("every object was deleted"), "{stderr}");
     assert!(!out.exists());
 }
+
+/// The boolean demo path (Phase 1 Tasks 8, 8a, 9): union and subtract a
+/// part, find intersections, the `operand_overlaps_itself` refusal with
+/// its next action, Make solid, then the boolean that was refused.
+#[test]
+fn boolean_make_solid_and_intersections_demo() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let ok = |o: Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o
+    };
+    ok(meshfixer(&["gen-fixture", "boolean-demo", &p("demo.3mf")]));
+    for op in ["union", "subtract", "intersect"] {
+        ok(meshfixer(&[
+            "boolean",
+            &p("demo.3mf"),
+            "--tool",
+            "1",
+            "--operation",
+            op,
+            "-o",
+            &p("out.3mf"),
+        ]));
+    }
+    let found = ok(meshfixer(&[
+        "intersections",
+        &p("demo.3mf"),
+        "--other",
+        "1",
+    ]));
+    let report: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert!(report["pair_count"].as_u64().unwrap() > 0);
+    let refused = meshfixer(&[
+        "boolean",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("x.3mf"),
+    ]);
+    assert!(!refused.status.success());
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("operand_overlaps_itself") && err.contains("Run Make solid"),
+        "{err}"
+    );
+    ok(meshfixer(&[
+        "make-solid",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--cell-size",
+        "0.5",
+        "-o",
+        &p("solid.3mf"),
+    ]));
+    ok(meshfixer(&[
+        "boolean",
+        &p("solid.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("joined.3mf"),
+    ]));
+}
+
+/// D20: `--fit-profile` fills the parameters the user didn't set from a
+/// saved profile, and the log records those values.
+#[test]
+fn fit_profile_flag_sets_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("block.stl");
+    write_path(
+        &cube(10.0),
+        &input,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join("meshfixer")).unwrap();
+    std::fs::write(
+        config.join("meshfixer").join("fit-profiles.yaml"),
+        "active: Tight\nprofiles:\n  - name: Tight\n    peg_clearance: 0.15\n    length_allowance: 0.3\n    hinge_gap: 0.4\n    clasp_interference: 0.3\n",
+    )
+    .unwrap();
+    let run = |profile: Option<&str>, log: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "run",
+            input.to_str().unwrap(),
+            "--op",
+            "mesh.split_plane",
+            "--param",
+            "plane_point=0,0,5",
+        ];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--save-log", log.to_str().unwrap()]);
+        let out_path = log.with_extension("3mf");
+        args.extend_from_slice(&["-o", out_path.to_str().unwrap()]);
+        if let Some(p) = profile {
+            args.extend_from_slice(&["--fit-profile", p]);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+            .args(&args)
+            .env("MESHFIXER_CONFIG_DIR", &config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(log.join("commands.jsonl")).unwrap()
+    };
+    let tight = run(Some("Tight"), &dir.path().join("a.mfx.log"), &[]);
+    assert!(tight.contains("\"peg_clearance\":0.15"), "{tight}");
+    assert!(tight.contains("\"length_allowance\":0.3"), "{tight}");
+    // An explicit --param beats the profile.
+    let explicit = run(
+        Some("Tight"),
+        &dir.path().join("b.mfx.log"),
+        &["--param", "peg_clearance=0.05"],
+    );
+    assert!(explicit.contains("\"peg_clearance\":0.05"), "{explicit}");
+    // No flag: the built-in profile, whatever is active in Settings.
+    let builtin = run(None, &dir.path().join("c.mfx.log"), &[]);
+    assert!(builtin.contains("\"peg_clearance\":0.2"), "{builtin}");
+    // An unknown profile is a usage error naming the ones there are.
+    let out = Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+        .args([
+            "run",
+            input.to_str().unwrap(),
+            "--op",
+            "mesh.split_plane",
+            "--fit-profile",
+            "Nope",
+            "-o",
+            dir.path().join("x.3mf").to_str().unwrap(),
+        ])
+        .env("MESHFIXER_CONFIG_DIR", &config)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Nope") && err.contains("Tight"), "{err}");
+}
