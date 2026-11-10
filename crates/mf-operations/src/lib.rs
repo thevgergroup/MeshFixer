@@ -12,6 +12,7 @@ use mf_spec::{Params, SpecError};
 mod affine;
 mod boolean;
 mod compact;
+pub mod materials;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
 pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};

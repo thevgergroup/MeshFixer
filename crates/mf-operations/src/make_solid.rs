@@ -197,9 +197,28 @@ impl Operation for MakeSolid {
             edit.remove_vertex(v).map_err(geometry)?;
         }
         let ids: Vec<VertexId> = verts.iter().map(|&p| edit.add_vertex(p)).collect();
+        // With materials (MF-ISSUE-091), each new face names the nearest
+        // input face as its source, so it prints in that face's material.
+        let nearest = if input.has_materials() {
+            Some(Bvh::build(input, ctx)?)
+        } else {
+            None
+        };
         for t in &tris {
             ticker.tick()?;
-            edit.add_face(t.map(|v| ids[v as usize].0), Sources::default())
+            let sources = match &nearest {
+                None => Sources::default(),
+                Some(bvh) => {
+                    let c: [f64; 3] = std::array::from_fn(|k| {
+                        t.iter().map(|&v| verts[v as usize][k]).sum::<f64>() / 3.0
+                    });
+                    Sources {
+                        faces: nearest_face(input, bvh, c, h).into_iter().collect(),
+                        ..Sources::default()
+                    }
+                }
+            };
+            edit.add_face(t.map(|v| ids[v as usize].0), sources)
                 .map_err(geometry)?;
         }
         let (mesh, provenance): (Mesh, Provenance) = edit.finish().map_err(geometry)?;
@@ -215,6 +234,82 @@ impl Operation for MakeSolid {
             change: Some((mesh, provenance)),
         })
     }
+}
+
+/// The input face closest to `p` (ties to the lower id), searching boxes
+/// from `start` wide outward.
+fn nearest_face(input: &Mesh, bvh: &Bvh, p: [f64; 3], start: f64) -> Option<FaceId> {
+    let diag = input.bounding_box().map_or(1.0, |b| b.diagonal());
+    let mut r = start.max(diag * 1e-6);
+    loop {
+        let mut best: Option<(f64, FaceId)> = None;
+        bvh.for_each_overlapping(
+            std::array::from_fn(|k| p[k] - r),
+            std::array::from_fn(|k| p[k] + r),
+            |f| {
+                if let Some(t) = input.face(f) {
+                    let d = point_triangle_distance2(p, t.map(|v| input.corner_position(v)));
+                    if best.is_none_or(|(bd, bf)| d < bd || (d == bd && f < bf)) {
+                        best = Some((d, f));
+                    }
+                }
+            },
+        );
+        // A face found within r is the nearest only if nothing outside the
+        // box could be closer: its distance must be at most r.
+        if let Some((d, f)) = best
+            && d.sqrt() <= r
+        {
+            return Some(f);
+        }
+        if r > 4.0 * diag {
+            return best.map(|(_, f)| f);
+        }
+        r *= 2.0;
+    }
+}
+
+/// Squared distance from `p` to the triangle `t` (Ericson, *Real-Time
+/// Collision Detection*, 5.1.5).
+fn point_triangle_distance2(p: [f64; 3], t: [[f64; 3]; 3]) -> f64 {
+    let sub = |a: [f64; 3], b: [f64; 3]| [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    let dot = |a: [f64; 3], b: [f64; 3]| a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    let [a, b, c] = t;
+    let (ab, ac, ap) = (sub(b, a), sub(c, a), sub(p, a));
+    let (d1, d2) = (dot(ab, ap), dot(ac, ap));
+    let at = |u: f64, v: f64| -> f64 {
+        let q: [f64; 3] = std::array::from_fn(|k| a[k] + u * ab[k] + v * ac[k]);
+        let d = sub(p, q);
+        dot(d, d)
+    };
+    if d1 <= 0.0 && d2 <= 0.0 {
+        return at(0.0, 0.0);
+    }
+    let bp = sub(p, b);
+    let (d3, d4) = (dot(ab, bp), dot(ac, bp));
+    if d3 >= 0.0 && d4 <= d3 {
+        return at(1.0, 0.0);
+    }
+    let vc = d1 * d4 - d3 * d2;
+    if vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0 {
+        return at(d1 / (d1 - d3), 0.0);
+    }
+    let cp = sub(p, c);
+    let (d5, d6) = (dot(ab, cp), dot(ac, cp));
+    if d6 >= 0.0 && d5 <= d6 {
+        return at(0.0, 1.0);
+    }
+    let vb = d5 * d2 - d1 * d6;
+    if vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0 {
+        return at(0.0, d2 / (d2 - d6));
+    }
+    let va = d3 * d6 - d5 * d4;
+    if va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0 {
+        let w = (d4 - d3) / ((d4 - d3) + (d5 - d6));
+        return at(1.0 - w, w);
+    }
+    let denom = 1.0 / (va + vb + vc);
+    at(vb * denom, vc * denom)
 }
 
 fn geometry(e: mf_geometry::GeometryError) -> OpError {

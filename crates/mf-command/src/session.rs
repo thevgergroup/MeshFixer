@@ -249,6 +249,50 @@ impl Prepared {
         #[cfg(feature = "test-position-jitter")]
         let output = crate::jitter::perturb(output);
         check_changes(self.op.id(), &self.operands, &output.changes)?;
+        // Materials follow provenance (MF-ISSUE-091), for every operation.
+        let mut output = output;
+        {
+            let meshes: Vec<&Mesh> = self.operands.iter().map(|o| &o.mesh).collect();
+            let mut changes = Vec::with_capacity(output.changes.len());
+            for change in std::mem::take(&mut output.changes) {
+                changes.push(match change {
+                    ObjectChange::Geometry {
+                        operand,
+                        mesh,
+                        provenance,
+                    } => ObjectChange::Geometry {
+                        mesh: mf_operations::materials::inherit(
+                            mesh,
+                            &provenance,
+                            meshes.get(operand).copied(),
+                            &meshes,
+                            ctx,
+                        )?,
+                        operand,
+                        provenance,
+                    },
+                    ObjectChange::Create {
+                        name,
+                        mesh,
+                        transform,
+                        provenance,
+                    } => ObjectChange::Create {
+                        mesh: mf_operations::materials::inherit(
+                            mesh,
+                            &provenance,
+                            meshes.first().copied(),
+                            &meshes,
+                            ctx,
+                        )?,
+                        name,
+                        transform,
+                        provenance,
+                    },
+                    other => other,
+                });
+            }
+            output.changes = changes;
+        }
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6). Still
         // cancellable: the first hash of a freshly imported mesh is O(n).

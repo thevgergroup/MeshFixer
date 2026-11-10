@@ -37,6 +37,12 @@ impl ChunkBytes for [u32; 3] {
     }
 }
 
+impl ChunkBytes for u32 {
+    fn hash_into(&self, h: &mut blake3::Hasher) {
+        h.update(&self.to_le_bytes());
+    }
+}
+
 impl ChunkBytes for u64 {
     fn hash_into(&self, h: &mut blake3::Hasher) {
         h.update(&self.to_le_bytes());
