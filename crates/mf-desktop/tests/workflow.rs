@@ -55,7 +55,13 @@ fn open_inspect_apply_undo_redo() {
         unwelded: 0,
         seed: 2,
     };
-    mf_io::write_path(&damaged_sphere(&spec), &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &damaged_sphere(&spec),
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
 
     let mut harness = Harness::builder()
         .with_size((1440.0, 900.0))

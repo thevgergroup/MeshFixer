@@ -16,7 +16,13 @@ fn setup(dir: &Path) -> Session {
         translated(&tetrahedron(), [5.0, 0.0, 0.0]),
         translated(&cube(0.1), [9.0, 0.0, 0.0]),
     ]);
-    write_path(&mesh, &src, Format::StlBinary).unwrap();
+    write_path(
+        &mesh,
+        &src,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let mut s = Session::new();
     let id = s.import(read_path(&src).unwrap(), "scan".into());
     s.execute(Invocation {
@@ -74,7 +80,13 @@ fn v1_records_replay_as_flat_exactly() {
         }
     }
     let src = dir.path().join("sphere.stl");
-    write_path(&e.finish().unwrap().0, &src, Format::StlBinary).unwrap();
+    write_path(
+        &e.finish().unwrap().0,
+        &src,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let fill = |style: &str| {
         let mut s = Session::new();
         let id = s.import(read_path(&src).unwrap(), "sphere".into());
@@ -168,7 +180,13 @@ fn replay_rejects_changed_source() {
     let s = setup(dir.path());
     let log = dir.path().join("session.mfx.log");
     s.save_log(&log).unwrap();
-    write_path(&cube(3.0), &dir.path().join("scan.stl"), Format::StlBinary).unwrap();
+    write_path(
+        &cube(3.0),
+        &dir.path().join("scan.stl"),
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     match replay(&log) {
         Err(LogError::SourceChanged { path, .. }) => assert!(path.ends_with("scan.stl")),
         other => panic!("expected SourceChanged, got {:?}", other.map(|r| r.results)),
@@ -318,7 +336,13 @@ fn holed_plate(dir: &Path) -> (Session, mf_command::ObjectId) {
     }
     let mesh = e.finish().unwrap().0;
     let src = dir.join("plate.stl");
-    write_path(&mesh, &src, Format::StlBinary).unwrap();
+    write_path(
+        &mesh,
+        &src,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let mut s = Session::new();
     let id = s.import(read_path(&src).unwrap(), "plate".into());
     (s, id)

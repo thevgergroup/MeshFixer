@@ -36,7 +36,13 @@ fn open() -> (tempfile::TempDir, Harness<'static, MeshFixerApp>) {
     let mut e = mf_fixtures::grid(n).edit();
     e.remove_face(FaceId(2 * (n + 1))).unwrap();
     let (m, _) = e.finish().unwrap();
-    mf_io::write_path(&m, &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &m,
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let mut h = Harness::builder()
         .with_size(WINDOW)
         .with_max_steps(16)

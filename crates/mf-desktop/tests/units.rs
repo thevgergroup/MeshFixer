@@ -51,7 +51,13 @@ fn metre_scale_box(dir: &Path) -> PathBuf {
         .map(|p| [p[0] * 0.5, p[1] * 0.4, p[2] * 0.3])
         .collect();
     let mesh = mf_geometry::Mesh::new(positions, triangles).unwrap();
-    mf_io::write_path(&mesh, &path, mf_io::Format::StlBinary).unwrap();
+    mf_io::write_path(
+        &mesh,
+        &path,
+        mf_io::Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 

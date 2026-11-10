@@ -16,7 +16,7 @@ fn meshfixer(args: &[&str]) -> Output {
 fn damaged(dir: &Path) -> String {
     let p = dir.join("damaged.stl");
     let m = merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]);
-    write_path(&m, &p, Format::StlBinary).unwrap();
+    write_path(&m, &p, Format::StlBinary, mf_io::threemf::Unit::Millimeter).unwrap();
     p.to_str().unwrap().to_owned()
 }
 
@@ -286,7 +286,13 @@ fn select_arg_parses_and_reaches_the_record() {
         translated(&tetrahedron(), [5.0, 0.0, 0.0]),
         translated(&tetrahedron(), [9.0, 0.0, 0.0]),
     ]);
-    write_path(&m, &input, Format::StlBinary).unwrap();
+    write_path(
+        &m,
+        &input,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let out = dir.path().join("out.stl");
     let log = dir.path().join("s.mfx.log");
     let r = meshfixer(&[
@@ -436,7 +442,13 @@ fn select_ids_in_later_steps_refer_to_the_imported_mesh() {
         e.remove_face(mf_geometry::FaceId(cell(i, j))).unwrap();
     }
     let input = dir.path().join("holes.obj");
-    write_path(&e.finish().unwrap().0, &input, Format::Obj).unwrap();
+    write_path(
+        &e.finish().unwrap().0,
+        &input,
+        Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let input = input.to_str().unwrap();
     let before = holes(input);
     assert_eq!(before.len(), 3);
@@ -473,7 +485,7 @@ fn select_ids_in_later_steps_refer_to_the_imported_mesh() {
 fn big_damaged(dir: &Path, triangles: usize) -> String {
     let p = dir.join("big.stl");
     let m = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(triangles, 3));
-    write_path(&m, &p, Format::StlBinary).unwrap();
+    write_path(&m, &p, Format::StlBinary, mf_io::threemf::Unit::Millimeter).unwrap();
     p.to_str().unwrap().to_owned()
 }
 

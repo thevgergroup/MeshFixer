@@ -138,7 +138,13 @@ fn compact_remaps_and_selections_translate() {
 
 fn logged_session(dir: &Path) -> Session {
     let src = dir.join("scan.stl");
-    write_path(&island_first(), &src, Format::StlBinary).unwrap();
+    write_path(
+        &island_first(),
+        &src,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let mut s = Session::new();
     let id = s.import(read_path(&src).unwrap(), "scan".into());
     remove_island(&mut s, id);

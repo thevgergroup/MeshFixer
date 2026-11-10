@@ -51,7 +51,13 @@ fn body_specks_and_part(dir: &std::path::Path) -> std::path::PathBuf {
         [0.0, 20.0, 0.0],
     ));
     let path = dir.join("dress.obj");
-    mf_io::write_path(&mf_fixtures::merge(&parts), &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &mf_fixtures::merge(&parts),
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 

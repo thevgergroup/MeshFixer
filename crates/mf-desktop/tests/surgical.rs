@@ -48,7 +48,13 @@ fn two_hole_grid(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     e.remove_face(FaceId(2 * (n + 1))).unwrap(); // cell (1,1): hole at vertex (1,1) = 8
     e.remove_face(FaceId(2 * (4 * n + 4))).unwrap(); // cell (4,4): hole at vertex (4,4) = 32
     let (m, _) = e.finish().unwrap();
-    mf_io::write_path(&m, &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &m,
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 

@@ -520,12 +520,15 @@ fn export(
             unit: doc.units(),
             objects,
         };
-        metrics.record("export", || {
+        let warnings = metrics.record("export", || {
             mf_io::write_model_path_with(&model, output, ctx)
         })?;
+        for w in &warnings {
+            eprintln!("warning: {w}");
+        }
     } else {
         metrics.record("export", || {
-            mf_io::write_path_with(mesh, output, format, ctx)
+            mf_io::write_path_with(mesh, output, format, doc.units(), ctx)
         })?;
     }
     Ok(())
@@ -630,7 +633,7 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let mesh =
         mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(triangles, seed));
     ctx.checkpoint()?;
-    mf_io::write_path_with(&mesh, output, format, ctx)?;
+    mf_io::write_path_with(&mesh, output, format, mf_io::threemf::Unit::Millimeter, ctx)?;
     eprintln!(
         "wrote {} triangles to {}",
         mesh.triangle_count(),
@@ -1152,14 +1155,13 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
         let format = Format::from_path(out).ok_or_else(|| {
             Failure::Usage(format!("unsupported output format: {}", out.display()))
         })?;
-        let mesh = report
-            .session
-            .document()
+        let doc = report.session.document();
+        let mesh = doc
             .objects()
             .first()
             .and_then(|o| o.mesh())
             .ok_or_else(|| Failure::Runtime("the log produced no mesh".into()))?;
-        mf_io::write_path_with(mesh, out, format, ctx)?;
+        mf_io::write_path_with(mesh, out, format, doc.units(), ctx)?;
     }
     if report.all_verified() {
         println!("all {} command(s) verified", report.results.len());

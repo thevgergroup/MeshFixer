@@ -748,11 +748,20 @@ impl MeshFixerApp {
 
     /// Export to `path`, in the format its extension names: 3MF writes
     /// every object with its transform and the document's unit; STL and
-    /// OBJ write the active object.
+    /// OBJ write the active object with its transform applied
+    /// (MF-ISSUE-035), and say so in the status once the export finishes.
     pub fn export_to(&mut self, path: PathBuf) {
-        let Some(mesh) = self.active_mesh().cloned() else {
+        let Some(active) = self
+            .active
+            .and_then(|id| self.session.document().object(id))
+        else {
             return;
         };
+        let Some(mesh) = active.mesh().cloned() else {
+            return;
+        };
+        let transform = active.transform;
+        let unit = self.session.document().units();
         match Format::from_path(&path) {
             Some(Format::ThreeMf) => match self.document_model() {
                 Ok(model) => {
@@ -767,9 +776,10 @@ impl MeshFixerApp {
                 }
             },
             Some(format) => {
+                let mesh = mf_io::transform_mesh(&mesh, &transform);
                 let run = self.start_job(format!("Exporting {}", path.display()), true);
                 self.workers
-                    .export(worker::ExportJob::Mesh(mesh, format), path, run);
+                    .export(worker::ExportJob::Mesh(mesh, format, unit), path, run);
             }
             None => {
                 self.error = Some(format!(
@@ -1719,10 +1729,25 @@ impl MeshFixerApp {
             Message::Exported(result) => {
                 let too_late = self.finish_job();
                 match result {
-                    Ok(path) if too_late => {
+                    Ok((path, _)) if too_late => {
                         self.status = Some(format!("{TOO_LATE}: exported {}", path.display()))
                     }
-                    Ok(path) => self.status = Some(format!("Exported {}", path.display())),
+                    Ok((path, warnings)) => {
+                        // MF-ISSUE-035: STL/OBJ exports apply the object's
+                        // transform, which a user can't see from the file
+                        // name alone, so say so plainly. MF-ISSUE-034:
+                        // empty objects left out of a 3MF export are named.
+                        let mut note = format!(
+                            "Exported with each object's position applied: {}",
+                            path.display()
+                        );
+                        if !warnings.is_empty() {
+                            note.push_str(" (");
+                            note.push_str(&warnings.join("; "));
+                            note.push(')');
+                        }
+                        self.status = Some(note);
+                    }
                     Err(IoError::Cancelled) => self.status = Some(CANCELLED_EXPORT.into()),
                     Err(e) => {
                         self.error = Some(format!(

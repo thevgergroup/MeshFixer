@@ -52,7 +52,13 @@ fn open(path: std::path::PathBuf) -> Harness<'static, MeshFixerApp> {
 
 fn write(dir: &std::path::Path, name: &str, mesh: &mf_geometry::Mesh) -> std::path::PathBuf {
     let path = dir.join(name);
-    mf_io::write_path(mesh, &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        mesh,
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 

@@ -245,35 +245,39 @@ pub fn read_with_limits(
         String::from_utf8(buf).map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))
     };
 
-    // Locate the model part through the package relationships.
-    let model_path = match read_entry(&mut zip, "_rels/.rels", false) {
-        Ok(rels) => {
-            let mut reader = quick_xml::Reader::from_str(&rels);
-            let mut target = None;
-            loop {
-                match reader.read_event() {
-                    Ok(Event::Empty(e)) | Ok(Event::Start(e))
-                        if e.local_name().as_ref() == "Relationship" =>
-                    {
-                        if attr(&e, "Type").map_err(not_3mf)?.as_deref() == Some(MODEL_REL) {
-                            target = attr(&e, "Target").map_err(not_3mf)?;
-                        }
+    // Locate the model part through the package relationships. Only a
+    // _rels/.rels entry that is genuinely absent from the archive falls
+    // back to the standard path (with a warning); one that is present but
+    // unreadable or corrupt (a bad size/ratio, invalid UTF-8, malformed
+    // XML, or missing the model relationship) is a named error, never a
+    // silent fallback (MF-ISSUE-039).
+    let model_path = if zip.by_name("_rels/.rels").is_err() {
+        warnings.push(format!(
+            "3MF archive has no _rels/.rels; using the standard path {DEFAULT_MODEL_PATH}"
+        ));
+        DEFAULT_MODEL_PATH.to_owned()
+    } else {
+        let rels = read_entry(&mut zip, "_rels/.rels", false)
+            .map_err(|e| not_3mf(format!("_rels/.rels is present but unreadable: {e}")))?;
+        let mut reader = quick_xml::Reader::from_str(&rels);
+        let mut target = None;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Empty(e)) | Ok(Event::Start(e))
+                    if e.local_name().as_ref() == "Relationship" =>
+                {
+                    if attr(&e, "Type").map_err(not_3mf)?.as_deref() == Some(MODEL_REL) {
+                        target = attr(&e, "Target").map_err(not_3mf)?;
                     }
-                    Ok(Event::Eof) => break,
-                    Err(e) => return Err(not_3mf(format!("_rels/.rels: {e}"))),
-                    _ => {}
                 }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(not_3mf(format!("_rels/.rels: {e}"))),
+                _ => {}
             }
-            target
-                .map(|t| t.trim_start_matches('/').to_owned())
-                .ok_or_else(|| not_3mf("_rels/.rels has no 3D model relationship".into()))?
         }
-        Err(_) => {
-            warnings.push(format!(
-                "3MF archive has no _rels/.rels; using the standard path {DEFAULT_MODEL_PATH}"
-            ));
-            DEFAULT_MODEL_PATH.to_owned()
-        }
+        target
+            .map(|t| t.trim_start_matches('/').to_owned())
+            .ok_or_else(|| not_3mf("_rels/.rels has no 3D model relationship".into()))?
     };
     let text = read_entry(&mut zip, &model_path, true)?;
 
@@ -530,15 +534,41 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Encode a model as a 3MF archive. Only live vertices and faces are written.
+/// Encode a model as a 3MF archive. Only live vertices and faces are
+/// written. Empty objects (no vertices or triangles — the core schema needs
+/// at least 3 vertices and 1 triangle) are left out, since writing one
+/// produces an invalid 3MF object (MF-ISSUE-034); use
+/// [`write_filtering_empty`] to learn which objects, if any, were left out.
 pub fn write(model: &Model) -> Result<Vec<u8>, String> {
+    write_filtering_empty(model).map(|(bytes, _warnings)| bytes)
+}
+
+/// As [`write`], also returning a warning naming each object left out for
+/// being empty (MF-ISSUE-034).
+pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), String> {
     use std::fmt::Write as _;
+    let mut warnings = Vec::new();
+    let kept: Vec<&ModelObject> = model
+        .objects
+        .iter()
+        .filter(|o| {
+            if o.mesh.is_empty() {
+                warnings.push(format!(
+                    "object '{}' has no geometry; left out of the export",
+                    o.name
+                ));
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"",
     );
     // allow-swallow: writing to a String can't fail
     let _ = write!(xml, " unit=\"{}\">\n <resources>\n", model.unit.as_attr());
-    for (k, o) in model.objects.iter().enumerate() {
+    for (k, o) in kept.iter().enumerate() {
         // allow-swallow: writing to a String can't fail
         let _ = write!(
             xml,
@@ -565,7 +595,7 @@ pub fn write(model: &Model) -> Result<Vec<u8>, String> {
         xml.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }
     xml.push_str(" </resources>\n <build>\n");
-    for (k, o) in model.objects.iter().enumerate() {
+    for (k, o) in kept.iter().enumerate() {
         if o.transform == IDENTITY {
             // allow-swallow: writing to a String can't fail
             let _ = writeln!(xml, "  <item objectid=\"{}\"/>", k + 1);
@@ -603,5 +633,14 @@ pub fn write(model: &Model) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
     }
     zip.finish().map_err(|e| e.to_string())?;
-    Ok(buf.into_inner())
+    Ok((buf.into_inner(), warnings))
+}
+
+/// Encode `model` and write it to `path` in one step (tests and simple
+/// callers); the caller-facing export path is [`crate::write_model_path`],
+/// which also verifies by reading the bytes back.
+pub fn write_checked(model: &Model, path: &std::path::Path) -> Result<Vec<String>, String> {
+    let (bytes, warnings) = write_filtering_empty(model)?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+    Ok(warnings)
 }

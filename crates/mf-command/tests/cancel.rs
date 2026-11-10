@@ -117,7 +117,13 @@ fn cancel_when<T>(
 
 fn write_big_stl(dir: &Path) -> std::path::PathBuf {
     let path = dir.join("big.stl");
-    mf_io::write_path(&big_mesh(), &path, Format::StlBinary).unwrap();
+    mf_io::write_path(
+        &big_mesh(),
+        &path,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 
@@ -427,7 +433,7 @@ fn progress_reaches_one_on_success() {
         ("m.3mf", Format::ThreeMf, indexed),
     ] {
         let path = dir.path().join(name);
-        mf_io::write_path(&mesh, &path, format).unwrap();
+        mf_io::write_path(&mesh, &path, format, mf_io::threemf::Unit::Millimeter).unwrap();
         let ctx = RunContext::none();
         let (progress, reader) = ctx.progress.channel();
         let ctx = RunContext {

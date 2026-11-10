@@ -405,7 +405,9 @@ pub enum Message {
         mesh: Mesh,
         render: Arc<RenderMesh>,
     },
-    Exported(Result<PathBuf, IoError>),
+    /// On success, warnings from the export (for example, an empty object
+    /// left out by name, MF-ISSUE-034); 3MF-only, always empty for STL/OBJ.
+    Exported(Result<(PathBuf, Vec<String>), IoError>),
     Replayed(Result<Vec<String>, String>),
     /// An overlay built for `target` on `object`'s revision `mesh`.
     Overlay {
@@ -940,10 +942,12 @@ impl Workers {
     pub fn export(&self, job: ExportJob, path: PathBuf, ctx: RunContext) {
         self.spawn_job("export", move || {
             let result = match &job {
-                ExportJob::Mesh(mesh, format) => mf_io::write_path_with(mesh, &path, *format, &ctx),
+                ExportJob::Mesh(mesh, format, unit) => {
+                    mf_io::write_path_with(mesh, &path, *format, *unit, &ctx).map(|()| Vec::new())
+                }
                 ExportJob::Model(model) => mf_io::write_model_path_with(model, &path, &ctx),
             };
-            Message::Exported(result.map(|()| path))
+            Message::Exported(result.map(|warnings| (path, warnings)))
         });
     }
 }
@@ -1634,7 +1638,9 @@ fn nearest_edge_candidates<T>(candidates: &mut Vec<T>, distance: impl Fn(&T) -> 
 
 /// What to export: one mesh, or a whole 3MF model.
 pub enum ExportJob {
-    Mesh(Mesh, Format),
+    /// A single mesh, already at the object's transform (MF-ISSUE-035),
+    /// with the document's unit for a 3MF export of it.
+    Mesh(Mesh, Format, mf_io::threemf::Unit),
     Model(mf_io::threemf::Model),
 }
 

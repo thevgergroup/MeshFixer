@@ -55,7 +55,13 @@ fn metrics_panel_shows_gpu_bytes_and_thread_budget() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("damaged.stl");
     let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(20_000, 3));
-    mf_io::write_path(&mesh, &path, mf_io::Format::StlBinary).unwrap();
+    mf_io::write_path(
+        &mesh,
+        &path,
+        mf_io::Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let mut h = Harness::builder()
         .with_size((1440.0, 900.0))
         .wgpu()

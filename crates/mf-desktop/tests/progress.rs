@@ -563,7 +563,13 @@ fn ui_frames_stay_under_50ms_while_a_5m_file_imports() {
     let _heavy = heavy();
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("big.stl");
-    mf_io::write_path(&big_mesh(), &path, Format::StlBinary).unwrap();
+    mf_io::write_path(
+        &big_mesh(),
+        &path,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     gate("5M STL import", |_attempt| {
         let (mut harness, render_state) = empty_app();
         let painter = Painter::new(render_state, [1440, 900]);

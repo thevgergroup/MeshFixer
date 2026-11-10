@@ -36,7 +36,13 @@ fn two_hole_grid(dir: &std::path::Path) -> std::path::PathBuf {
     e.remove_face(FaceId(2 * (n + 1))).unwrap();
     e.remove_face(FaceId(2 * (4 * n + 4))).unwrap();
     let (m, _) = e.finish().unwrap();
-    mf_io::write_path(&m, &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &m,
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 
@@ -457,7 +463,13 @@ fn cube_and_crumbs(dir: &std::path::Path) -> std::path::PathBuf {
             [3.0 + 2.0 * k as f64, 0.0, 0.0],
         ));
     }
-    mf_io::write_path(&mf_fixtures::merge(&parts), &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &mf_fixtures::merge(&parts),
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 

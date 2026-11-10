@@ -24,7 +24,13 @@ fn stl_import_peak_bounded() {
     let _g = SERIAL.lock().unwrap();
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("f.stl");
-    write_path(&fixture(), &p, Format::StlBinary).unwrap();
+    write_path(
+        &fixture(),
+        &p,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     let file_len = std::fs::metadata(&p).unwrap().len();
     let (imported, phase) = measure("import", || read_path(&p).unwrap());
     let mesh_bytes = imported.mesh.heap_bytes();
@@ -46,7 +52,9 @@ fn export_peak_bounded() {
     let mesh = fixture();
     for (name, format) in [("e.stl", Format::StlBinary), ("e.obj", Format::Obj)] {
         let p = dir.path().join(name);
-        let ((), phase) = measure("export", || write_path(&mesh, &p, format).unwrap());
+        let ((), phase) = measure("export", || {
+            write_path(&mesh, &p, format, mf_io::threemf::Unit::Millimeter).unwrap()
+        });
         let encoded = std::fs::metadata(&p).unwrap().len();
         let bound = encoded + mesh.heap_bytes() * 3 / 2;
         assert!(

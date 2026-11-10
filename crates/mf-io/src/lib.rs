@@ -284,13 +284,51 @@ pub fn read_path(path: &Path) -> Result<Imported, IoError> {
     })
 }
 
-/// Export `mesh`, never leaving a partial file behind.
+/// Apply a 3MF row-major 3×4 affine (see [`threemf::IDENTITY`]) to `mesh`'s
+/// positions, in f64, for formats (STL, OBJ) that have no transform of
+/// their own to carry it (MF-ISSUE-035). A mirrored transform (negative
+/// determinant of the linear part) flips every triangle's winding so
+/// normals stay outward after the transform.
+pub fn transform_mesh(mesh: &Mesh, transform: &[f64; 12]) -> Mesh {
+    if *transform == threemf::IDENTITY {
+        return mesh.clone();
+    }
+    let t = transform;
+    let apply = |p: [f64; 3]| {
+        [
+            t[0] * p[0] + t[3] * p[1] + t[6] * p[2] + t[9],
+            t[1] * p[0] + t[4] * p[1] + t[7] * p[2] + t[10],
+            t[2] * p[0] + t[5] * p[1] + t[8] * p[2] + t[11],
+        ]
+    };
+    // Determinant of the linear part (3MF's row-major rows are this
+    // matrix's columns, which doesn't change the determinant).
+    let det = t[0] * (t[4] * t[8] - t[5] * t[7]) - t[1] * (t[3] * t[8] - t[5] * t[6])
+        + t[2] * (t[3] * t[7] - t[4] * t[6]);
+    let (positions, mut triangles) = mesh.to_arrays();
+    let positions = positions.into_iter().map(apply).collect();
+    if det < 0.0 {
+        for tri in &mut triangles {
+            tri.swap(1, 2);
+        }
+    }
+    Mesh::new(positions, triangles).expect("a transformed valid mesh stays valid")
+}
+
+/// Export `mesh`, never leaving a partial file behind. `unit` is the
+/// document's unit; STL and OBJ don't record one, but a 3MF export writes
+/// it (MF-ISSUE-035) instead of hard-coding millimetres.
 ///
 /// The file is encoded in memory, re-parsed to verify it, written to a temp
 /// file in the same directory, flushed to disk, and renamed over `path`.
 /// If any step fails, an existing file at `path` is left unchanged.
-pub fn write_path(mesh: &Mesh, path: &Path, format: Format) -> Result<(), IoError> {
-    write_path_with(mesh, path, format, &RunContext::none())
+pub fn write_path(
+    mesh: &Mesh,
+    path: &Path,
+    format: Format,
+    unit: threemf::Unit,
+) -> Result<(), IoError> {
+    write_path_with(mesh, path, format, unit, &RunContext::none())
 }
 
 /// Progress stage of [`write_path_with`] and [`write_model_path_with`]:
@@ -307,6 +345,7 @@ pub fn write_path_with(
     mesh: &Mesh,
     path: &Path,
     format: Format,
+    unit: threemf::Unit,
     ctx: &RunContext,
 ) -> Result<(), IoError> {
     let fail = |reason: String| IoError::Export {
@@ -321,14 +360,14 @@ pub fn write_path_with(
         Format::Obj => obj::write(mesh).into_bytes(),
         Format::ThreeMf => {
             let model = threemf::Model {
-                unit: threemf::Unit::Millimeter,
+                unit,
                 objects: vec![threemf::ModelObject {
                     name: "object".into(),
                     mesh: mesh.clone(),
                     transform: threemf::IDENTITY,
                 }],
             };
-            return write_model_path_with(&model, path, ctx);
+            return write_model_path_with(&model, path, ctx).map(|_warnings| ());
         }
     };
     ctx.progress.report(WRITING, WRITE_FROM * 0.8);
@@ -338,24 +377,27 @@ pub fn write_path_with(
 }
 
 /// Export a whole model as 3MF (objects, transforms, unit), verified and
-/// atomic like [`write_path`].
+/// atomic like [`write_path`]. Empty objects are left out, named in a
+/// warning (MF-ISSUE-034); see [`write_model_path_with`] for the warnings.
 pub fn write_model_path(model: &threemf::Model, path: &Path) -> Result<(), IoError> {
-    write_model_path_with(model, path, &RunContext::none())
+    write_model_path_with(model, path, &RunContext::none()).map(|_warnings| ())
 }
 
-/// As [`write_model_path`], cancellable like [`write_path_with`].
+/// As [`write_model_path`], cancellable like [`write_path_with`], returning
+/// warnings on success (for example, an empty object left out of the
+/// export, named — MF-ISSUE-034).
 pub fn write_model_path_with(
     model: &threemf::Model,
     path: &Path,
     ctx: &RunContext,
-) -> Result<(), IoError> {
+) -> Result<Vec<String>, IoError> {
     let fail = |reason: String| IoError::Export {
         path: path.to_owned(),
         reason,
     };
     ctx.progress.report(WRITING, 0.0);
     ctx.checkpoint()?;
-    let bytes = threemf::write(model).map_err(fail)?;
+    let (bytes, write_warnings) = threemf::write_filtering_empty(model).map_err(fail)?;
     ctx.progress.report(WRITING, WRITE_FROM * 0.5);
     ctx.checkpoint()?;
     let (back, warnings) =
@@ -366,20 +408,37 @@ pub fn write_model_path_with(
             warnings.join("; ")
         )));
     }
-    let same = back.unit == model.unit
-        && back.objects.len() == model.objects.len()
-        && back.objects.iter().zip(&model.objects).all(|(b, m)| {
-            b.transform == m.transform
-                && b.mesh.face_count() == m.mesh.face_count()
-                && b.mesh
-                    .vertices()
-                    .map(|(_, p)| p)
-                    .eq(m.mesh.vertices().map(|(_, p)| p))
-        });
-    if !same {
+    // Compared against the model with empty objects already left out
+    // (MF-ISSUE-034), since those never make it into `bytes`.
+    let kept = threemf::Model {
+        unit: model.unit,
+        objects: model
+            .objects
+            .iter()
+            .filter(|o| !o.mesh.is_empty())
+            .cloned()
+            .collect(),
+    };
+    if !models_match_for_verification(&kept, &back) {
         return Err(fail("verification found a different model".into()));
     }
-    atomic_write(path, &bytes, ctx)
+    atomic_write(path, &bytes, ctx)?;
+    Ok(write_warnings)
+}
+
+/// Whether two models, as read back after an export, describe the same
+/// data: the same unit, the same objects in the same order with the same
+/// name and transform, and meshes with exactly the same triangle indices
+/// (not just the same face count and the same set of positions) and vertex
+/// positions (MF-ISSUE-033).
+pub fn models_match_for_verification(asked: &threemf::Model, got: &threemf::Model) -> bool {
+    asked.unit == got.unit
+        && asked.objects.len() == got.objects.len()
+        && asked.objects.iter().zip(&got.objects).all(|(a, b)| {
+            a.name == b.name
+                && a.transform == b.transform
+                && a.mesh.to_arrays() == b.mesh.to_arrays()
+        })
 }
 
 /// Bytes written between checkpoints.
