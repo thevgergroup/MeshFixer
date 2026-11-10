@@ -201,8 +201,20 @@ impl FitProfiles {
         std::fs::write(&path, text).map_err(|e| unwritable(e.to_string()))
     }
 
+    /// The profile named `name` exactly.
     pub fn get(&self, name: &str) -> Option<&FitProfile> {
         self.profiles.iter().find(|p| p.name == name)
+    }
+
+    /// The profile a user asked for by name (`--fit-profile`): an exact
+    /// name first; otherwise "default" in any case means the built-in
+    /// profile ("Default FDM, 0.4 mm nozzle").
+    pub fn lookup(&self, name: &str) -> Option<&FitProfile> {
+        self.get(name).or_else(|| {
+            name.eq_ignore_ascii_case("default")
+                .then(|| self.get(BUILTIN_NAME))
+                .flatten()
+        })
     }
 
     /// The active profile.

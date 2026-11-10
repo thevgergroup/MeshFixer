@@ -206,3 +206,17 @@ fn profiles_round_trip_and_the_builtin_is_read_only() {
     p.delete("Tight PETG").unwrap();
     assert_eq!(p.active, BUILTIN_NAME);
 }
+
+#[test]
+fn default_in_any_case_is_the_built_in_profile() {
+    let dir = tempfile::tempdir().unwrap();
+    let profiles = mf_parts::FitProfiles::load(dir.path()).unwrap();
+    for name in ["Default", "default", "DEFAULT"] {
+        assert_eq!(
+            profiles.lookup(name),
+            Some(&mf_parts::FitProfile::builtin()),
+            "{name}"
+        );
+    }
+    assert_eq!(profiles.lookup("Nope"), None);
+}
