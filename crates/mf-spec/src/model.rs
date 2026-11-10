@@ -452,6 +452,7 @@ fn parse_f64_csv<const N: usize>(text: &str) -> Option<[f64; N]> {
     }
     let mut out = [0.0_f64; N];
     for (slot, part) in out.iter_mut().zip(parts) {
+        // allow-swallow: any unparsable part makes the whole value invalid; the caller reports it by name (SpecError::InvalidValue) with the expected form
         let v: f64 = part.parse().ok()?;
         if !v.is_finite() {
             return None;

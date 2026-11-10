@@ -1077,3 +1077,95 @@ fn run_operand_mistakes_are_usage_errors() {
         assert!(!out.exists());
     }
 }
+
+/// Review I3: no operation writes over its input, however the output path
+/// is spelled; the input is left as it was.
+#[test]
+fn an_output_that_is_the_input_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let before = std::fs::read(&input).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let spelled = sub.join("..").join("two.3mf");
+    for output in [input.to_str().unwrap(), spelled.to_str().unwrap()] {
+        for args in [
+            vec!["delete", input.to_str().unwrap(), "-o", output],
+            vec![
+                "run",
+                input.to_str().unwrap(),
+                "-o",
+                output,
+                "--op",
+                "object.drop_to_plate",
+            ],
+        ] {
+            let r = meshfixer(&args);
+            assert_eq!(
+                r.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
+            assert!(String::from_utf8_lossy(&r.stderr).contains("is the input file"));
+        }
+    }
+    assert_eq!(std::fs::read(&input).unwrap(), before, "input untouched");
+}
+
+/// Review I3: `delete --object` picks the object by position or name; the
+/// 3MF keeps the others. Deleting the last object refuses to write an
+/// empty document, by name.
+#[test]
+fn delete_chooses_its_object_and_never_writes_an_empty_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    for (choice, kept) in [("1", "a"), ("a", "b")] {
+        let out = dir.path().join(format!("out-{choice}.3mf"));
+        let r = meshfixer(&[
+            "delete",
+            input.to_str().unwrap(),
+            "--object",
+            choice,
+            "-o",
+            out.to_str().unwrap(),
+        ]);
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        let back = mf_io::read_model(&out).unwrap();
+        let names: Vec<&str> = back.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec![kept]);
+    }
+    for bad in ["2", "nope"] {
+        let r = meshfixer(&[
+            "delete",
+            input.to_str().unwrap(),
+            "--object",
+            bad,
+            "-o",
+            dir.path().join("x.3mf").to_str().unwrap(),
+        ]);
+        assert_eq!(r.status.code(), Some(2), "{bad}");
+    }
+    // A one-object file: deleting it leaves nothing to write.
+    let single = dir.path().join("single.stl");
+    write_path(
+        &cube(1.0),
+        &single,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
+    let out = dir.path().join("empty.3mf");
+    let r = meshfixer(&[
+        "delete",
+        single.to_str().unwrap(),
+        "--units",
+        "mm",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(r.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(stderr.contains("every object was deleted"), "{stderr}");
+    assert!(!out.exists());
+}

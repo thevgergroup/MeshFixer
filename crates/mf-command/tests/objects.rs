@@ -712,3 +712,227 @@ fn operand_provenance_is_total() {
         );
     }
 }
+
+/// Edit one command line of a saved log in place.
+fn edit_command(log: &Path, edit: impl Fn(&mut serde_json::Value)) {
+    let path = log.join("commands.jsonl");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut lines: Vec<serde_json::Value> = text
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    edit(lines.iter_mut().find(|e| e["kind"] == "command").unwrap());
+    let edited: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+    std::fs::write(&path, edited.join("\n") + "\n").unwrap();
+}
+
+fn two_objects(dir: &Path) -> (Session, ObjectId, ObjectId) {
+    let (s, ids) = session_with(
+        dir,
+        vec![
+            ("a", cube(1.0), IDENTITY),
+            (
+                "b",
+                tetrahedron(),
+                rotation_translation(2, 45.0, [0.5, 0.5, 0.5]),
+            ),
+        ],
+    );
+    (s, ids[0], ids[1])
+}
+
+fn created_by(s: &Session) -> ObjectId {
+    let record = s.node(s.current()).unwrap().record.clone().unwrap();
+    record.outputs.iter().find(|o| o.created).unwrap().object
+}
+
+/// Review C1: an object created on a branch that was undone used an id;
+/// the command run again creates another id, and replaying the log (which
+/// only has the second branch) must give it that same id.
+#[test]
+fn created_ids_replay_after_an_undone_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, a, b) = two_objects(dir.path());
+    s.execute(consume_tool(a, b)).unwrap();
+    let first = created_by(&s);
+    let first_record = s.node(s.current()).unwrap().record.clone().unwrap();
+    assert_eq!(first, ObjectId(3));
+    assert!(s.undo());
+    let base = s.current();
+    s.execute(consume_tool(a, b)).unwrap();
+    let second = created_by(&s);
+    assert_eq!(second, ObjectId(4), "ids are never reused within a session");
+
+    let report = save_and_replay(&s, dir.path());
+    assert!(
+        report.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    assert!(report.session.document().object(second).is_some());
+    assert!(report.session.document().object(first).is_none());
+
+    // Re-executing the first branch's record onto the base gives its
+    // created object the id it recorded.
+    s.reexecute(&first_record, base).unwrap();
+    assert_eq!(created_by(&s), first);
+}
+
+/// Review I1: a replayed command that changes an object the record doesn't
+/// list is a `Mismatch`, even if every listed object matches.
+#[test]
+fn an_extra_change_in_replay_is_a_mismatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, a, b) = two_objects(dir.path());
+    s.execute(consume_tool(a, b)).unwrap();
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    // Forget that the tool was removed.
+    edit_command(&log, |cmd| {
+        let outputs = cmd["outputs"].as_array_mut().unwrap();
+        outputs.retain(|o| o["removed"] != serde_json::json!(true));
+    });
+    let report = replay(&log).unwrap();
+    assert!(
+        matches!(report.results[0].1, Verdict::Mismatch { .. }),
+        "{:?}",
+        report.results
+    );
+}
+
+/// Review I5: a tampered operand input (its geometry hash, or its
+/// transform) is an `InputMismatch`, checked before running.
+#[test]
+fn a_changed_operand_input_is_an_input_mismatch() {
+    for field in ["input_revision_hash", "input_transform"] {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut s, a, b) = two_objects(dir.path());
+        s.execute(consume_tool(a, b)).unwrap();
+        let log = dir.path().join("session.mfx.log");
+        s.save_log(&log).unwrap();
+        edit_command(&log, |cmd| {
+            let operand = &mut cmd["operands"][1];
+            if field == "input_transform" {
+                operand[field][9] = serde_json::json!(0.75);
+            } else {
+                operand[field] = serde_json::json!("0".repeat(64));
+            }
+        });
+        let report = replay(&log).unwrap();
+        assert!(
+            matches!(report.results[0].1, Verdict::InputMismatch { .. }),
+            "{field}: {:?}",
+            report.results
+        );
+    }
+}
+
+/// Review I5: a selection on an object the command doesn't change (the
+/// boolean-like command's kept target, or a bystander) survives it.
+#[test]
+fn a_selection_on_another_object_survives_the_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, ids) = session_with(
+        dir.path(),
+        vec![
+            ("a", cube(1.0), IDENTITY),
+            ("b", tetrahedron(), IDENTITY),
+            ("c", uv_sphere(6, 8), IDENTITY),
+        ],
+    );
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
+    let select = |s: &Session, object| Selection {
+        object,
+        revision: s.current(),
+        kind: SelectionKind::Faces,
+        ids: vec![0, 2],
+    };
+    let on_a = select(&s, a);
+    let on_c = select(&s, c);
+    s.execute(consume_tool(a, b)).unwrap();
+    s.execute(set_transform(
+        c,
+        &rotation_translation(0, 10.0, [1.0, 0.0, 0.0]),
+    ))
+    .unwrap();
+    for sel in [on_a, on_c] {
+        match s.translate(&sel, s.current()) {
+            Translation::Mapped(t) => assert_eq!(t.ids, vec![0, 2]),
+            other => panic!("{:?}: {other:?}", sel.object),
+        }
+    }
+}
+
+/// Review I2: after an earlier command replayed as `Equivalent` (drift), a
+/// transform computed from geometry (drop to plate) that differs in its
+/// last bits is `Equivalent`, not `Mismatch`; a real difference is still a
+/// `Mismatch`.
+#[test]
+fn a_computed_transform_after_drift_is_equivalent() {
+    for (bump, equivalent) in [(1e-13, true), (1e-3, false)] {
+        let dir = tempfile::tempdir().unwrap();
+        let mut holed = cube(1.0).edit();
+        holed.remove_face(FaceId(0)).unwrap();
+        let (mut s, ids) = session_with(
+            dir.path(),
+            vec![(
+                "part",
+                holed.finish().unwrap().0,
+                rotation_translation(0, 30.0, [0.0, 0.0, 4.0]),
+            )],
+        );
+        s.execute(plain("mesh.fill_holes", ids[0])).unwrap();
+        s.execute(plain("object.drop_to_plate", ids[0])).unwrap();
+        let log = dir.path().join("session.mfx.log");
+        s.save_log(&log).unwrap();
+        let path = log.join("commands.jsonl");
+        let mut lines: Vec<serde_json::Value> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let mut commands = lines.iter_mut().filter(|e| e["kind"] == "command");
+        // Drift: the fill's recorded bits differ (same structure), as
+        // another platform's would.
+        let fill = commands.next().unwrap();
+        fill["output_hash"] = serde_json::json!("0".repeat(64));
+        let drop = commands.next().unwrap();
+        let z = drop["outputs"][0]["transform"][11].as_f64().unwrap();
+        drop["outputs"][0]["transform"][11] = serde_json::json!(z + bump);
+        let edited: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        std::fs::write(&path, edited.join("\n") + "\n").unwrap();
+        let report = replay(&log).unwrap();
+        assert!(
+            matches!(report.results[0].1, Verdict::Equivalent { .. }),
+            "{:?}",
+            report.results
+        );
+        let verdict = &report.results[1].1;
+        assert_eq!(
+            matches!(verdict, Verdict::Equivalent { .. }),
+            equivalent,
+            "bump {bump}: {verdict:?}"
+        );
+        if !equivalent {
+            assert!(matches!(verdict, Verdict::Mismatch { .. }), "{verdict:?}");
+        }
+    }
+}
+
+/// A created face that names a face of an operand that doesn't exist is
+/// refused before anything commits.
+#[test]
+fn a_source_in_a_missing_operand_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, a, b) = two_objects(dir.path());
+    let before = s.current();
+    let mut inv = consume_tool(a, b);
+    inv.raw_params.insert("bad_source".into(), "true".into());
+    match s.execute(inv) {
+        Err(mf_command::CommandError::InvalidChanges { reason, .. }) => {
+            assert!(reason.contains("operand 7"), "{reason}")
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(s.current(), before);
+}

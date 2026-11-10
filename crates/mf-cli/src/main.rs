@@ -413,6 +413,7 @@ fn cli() -> Command {
                         ),
                 )
                 .arg(select_arg(true))
+                .arg(object_arg())
                 .arg(
                     Arg::new("save-log")
                         .long("save-log")
@@ -446,16 +447,57 @@ fn cli() -> Command {
                 .arg(input_arg())
                 .arg(units_arg())
                 .arg(output_arg())
+                .arg(object_arg())
                 .arg(select_arg(false)),
         );
     }
     cmd
 }
 
-/// Import every object of the file; commands act on the first one.
+/// `--object`: which object of the input a command acts on.
+fn object_arg() -> Arg {
+    Arg::new("object").long("object").help(
+        "Object to act on: its position in the input file (0 is the first) or its name \
+         (default: the first)",
+    )
+}
+
+/// Refuse to write over the input file (review I3): `-o` naming the input,
+/// however it's spelled (relative, `..`, a symlink), would destroy the
+/// source before the result is verified, and break the command log's
+/// source hash. Compares canonical paths; an output that doesn't exist
+/// yet is compared through its canonical parent directory.
+fn refuse_overwriting_input(input: &Path, output: &Path) -> Result<(), Failure> {
+    let canonical = |p: &Path| -> Option<PathBuf> {
+        if let Ok(c) = p.canonicalize() {
+            return Some(c);
+        }
+        let name = p.file_name()?;
+        let parent = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        Some(parent.canonicalize().ok()?.join(name)) // allow-swallow: a missing parent can't be the input's directory; the write then fails by name
+    };
+    let same = match (canonical(input), canonical(output)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    if same {
+        return Err(Failure::Usage(format!(
+            "the output {} is the input file; write the result to another file (-o)",
+            output.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Import every object of the file; commands act on the one `object`
+/// names (a position in the file or a name), by default the first.
 fn open(
     path: &Path,
     units: Option<mf_io::threemf::Unit>,
+    object: Option<&String>,
     metrics: &mut Metrics,
     ctx: &RunContext,
 ) -> Result<(Session, ObjectId), Failure> {
@@ -483,18 +525,56 @@ fn open(
     let first = *ids
         .first()
         .ok_or_else(|| Failure::Runtime(format!("{} contains no mesh objects", path.display())))?;
-    if ids.len() > 1 {
-        eprintln!(
-            "note: {} has {} objects; commands act on the first ('{}'), 3MF output keeps them all",
-            path.display(),
-            ids.len(),
-            session
-                .document()
-                .object(first)
-                .map_or("", |o| o.name.as_str())
-        );
-    }
-    Ok((session, first))
+    let Some(choice) = object else {
+        if ids.len() > 1 {
+            eprintln!(
+                "note: {} has {} objects; commands act on the first ('{}', choose another with \
+                 --object), 3MF output keeps them all",
+                path.display(),
+                ids.len(),
+                session
+                    .document()
+                    .object(first)
+                    .map_or("", |o| o.name.as_str())
+            );
+        }
+        return Ok((session, first));
+    };
+    let objects = session.document().objects();
+    let names: Vec<String> = objects.iter().map(|o| format!("'{}'", o.name)).collect();
+    let chosen = match choice.trim().parse::<usize>() {
+        Ok(index) => objects.get(index).map(|o| o.id).ok_or_else(|| {
+            Failure::Usage(format!(
+                "--object {index}: {} has {} object(s), numbered from 0",
+                path.display(),
+                objects.len()
+            ))
+        })?,
+        Err(_) => {
+            let matching: Vec<ObjectId> = objects
+                .iter()
+                .filter(|o| &o.name == choice)
+                .map(|o| o.id)
+                .collect();
+            match matching.as_slice() {
+                [one] => *one,
+                [] => {
+                    return Err(Failure::Usage(format!(
+                        "--object '{choice}': no object has that name (they are {})",
+                        names.join(", ")
+                    )));
+                }
+                _ => {
+                    return Err(Failure::Usage(format!(
+                        "--object '{choice}': several objects have that name; give its position \
+                         (0 to {}) instead",
+                        objects.len() - 1
+                    )));
+                }
+            }
+        }
+    };
+    Ok((session, chosen))
 }
 
 /// Write the result: every object (with transforms and units) for 3MF,
@@ -508,6 +588,13 @@ fn export(
     ctx: &RunContext,
 ) -> Result<(), Failure> {
     let doc = session.document();
+    if doc.objects().is_empty() {
+        return Err(Failure::Runtime(format!(
+            "nothing to write to {}: every object was deleted; delete a different object \
+             (--object), or leave the object.delete step out",
+            output.display()
+        )));
+    }
     if format == Format::ThreeMf {
         if let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) {
             metrics.structures(mesh);
@@ -581,7 +668,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<()
     let path = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let (mut session, id) = open(path, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(path, units_of(m), None, metrics, ctx)?;
     if let Some(mesh) = session.document().object(id).and_then(|o| o.mesh()) {
         let mesh = mesh.clone();
         metrics.record("topology", || mesh.topology_with(ctx))?;
@@ -1170,6 +1257,7 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
+    refuse_overwriting_input(input, output)?;
     let seq = op_sequence(m)?;
     // Validate every step before touching files.
     for Step {
@@ -1189,7 +1277,13 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
             )));
         }
     }
-    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(
+        input,
+        units_of(m),
+        m.get_one::<String>("object"),
+        metrics,
+        ctx,
+    )?;
     let import = session.current();
     // Objects in input-file order, for `--operand name=<index>`.
     let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
@@ -1322,6 +1416,7 @@ fn run_operation(
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
+    refuse_overwriting_input(input, output)?;
     // Validate parameters and selection before touching the filesystem.
     let select = m
         .get_one::<String>("select")
@@ -1331,7 +1426,13 @@ fn run_operation(
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
-    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(
+        input,
+        units_of(m),
+        m.get_one::<String>("object"),
+        metrics,
+        ctx,
+    )?;
     let selection = selection_for(&session, id, session.current(), &select)?;
     let outcome = metrics.record("operation", || {
         execute(

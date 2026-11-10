@@ -51,8 +51,10 @@ consumes or keeps.
 
 *Accept:* `operands_section_validates_against_schema` (`crates/mf-spec`)
 parses an operand-bearing spec against the schema with no errors, and
-confirms every existing built-in spec still validates with an empty
-operands list. `vec3_and_affine_params_validate_and_round_trip` confirms
+confirms every built-in spec validates against it, with every spec
+written before Phase 1 (the `mesh.*` operations) still parsing with an
+empty operands list. Later specs may declare operands (the test-only
+`test.consume_tool`, Task 3). `vec3_and_affine_params_validate_and_round_trip` confirms
 the two new parameter kinds this contract needs (next section)
 round-trip through a command log. Task 3's `operand_provenance_is_total`
 and `undo_boolean_restores_the_tool_with_its_id` extend this to the

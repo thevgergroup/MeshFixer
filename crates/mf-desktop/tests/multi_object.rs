@@ -369,3 +369,73 @@ fn picking_ready_includes_every_objects_topology() {
         );
     }
 }
+
+fn press(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    for pressed in [true, false] {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+    }
+    h.step();
+}
+
+/// Phase 1 Task 3 (review I4): the Delete key on an object target runs
+/// `object.delete` as an undoable command. The active object moves to one
+/// that exists; undo brings the deleted object back with its id, redo
+/// removes it again, and the app keeps drawing without the missing one.
+#[test]
+fn delete_key_deletes_the_active_object_undoably() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("delete_key_deletes_the_active_object_undoably");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_translated_cubes(dir.path());
+    let mut h = Harness::builder()
+        .with_size((1440.0, 900.0))
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
+    wait_until(&mut h, "import + analysis", |a| {
+        a.session.document().objects().len() == 2 && a.current_analysis().is_some()
+    });
+    h.run();
+    let (left, right) = {
+        let objects = h.state().session.document().objects().to_vec();
+        (objects[0].id, objects[1].id)
+    };
+    h.state_mut().set_active(right);
+    h.run();
+
+    press(&mut h, egui::Key::Delete, egui::Modifiers::NONE);
+    wait_until(&mut h, "the delete commits", |a| {
+        a.busy.is_none() && a.session.document().object(right).is_none()
+    });
+    assert_eq!(
+        h.state().active,
+        Some(left),
+        "the remaining object is active"
+    );
+    assert_eq!(h.state().object_views().len(), 1);
+
+    press(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    h.run();
+    let doc = h.state().session.document();
+    assert_eq!(
+        doc.objects().iter().map(|o| o.id).collect::<Vec<_>>(),
+        vec![left, right],
+        "undo restores the object with its id"
+    );
+    assert!(h.state().active.is_some());
+
+    h.state_mut().redo();
+    h.run();
+    assert!(h.state().session.document().object(right).is_none());
+    assert_eq!(h.state().active, Some(left));
+    h.state_mut().undo();
+    h.run();
+    assert!(h.state().session.document().object(right).is_some());
+}

@@ -35,8 +35,10 @@ pub fn world_min_z_with(
     Ok(lowest_point(mesh, transform, ctx)?.map(|(z, _)| z))
 }
 
-/// The lowest world z, and the largest magnitude of a term summed to
-/// compute any world z (the scale of its rounding error).
+/// The lowest world z, and `S`: the largest, over vertices, of the sum of
+/// the absolute values of the four terms summed to compute a world z
+/// (`|m02 x| + |m12 y| + |m22 z| + |m32|`), the scale of its rounding
+/// error (see [`resting_tolerance`]).
 fn lowest_point(
     mesh: &Mesh,
     transform: &[f64; 12],
@@ -45,17 +47,45 @@ fn lowest_point(
     let t = transform;
     let span = ctx.span(FINDING_LOWEST_POINT, 0.0, 1.0, mesh.vertex_count());
     let mut min: Option<f64> = None;
-    let mut scale = t[11].abs();
+    let mut scale = 0.0_f64;
     for (n, (_, p)) in mesh.vertices().enumerate() {
         span.at(n)?;
         let terms = [t[2] * p[0], t[5] * p[1], t[8] * p[2]];
         let z = terms[0] + terms[1] + terms[2] + t[11];
         min = Some(min.map_or(z, |m| m.min(z)));
-        scale = terms.iter().fold(scale, |s, x| s.max(x.abs()));
+        scale = scale.max(terms.iter().map(|x| x.abs()).sum::<f64>() + t[11].abs());
     }
     ctx.checkpoint()?;
     span.finish();
     Ok(min.map(|z| (z, scale)))
+}
+
+/// How far from zero a computed lowest z may be and still mean "resting
+/// on the plate", for a transform whose world-z terms have scale `S` (see
+/// [`lowest_point`]).
+///
+/// Derivation (Higham, *Accuracy and Stability*, §3.1 and §3.5; `u =
+/// ε/2`, `γₙ = n·u / (1 − n·u)`):
+/// - A computed world z is a 4-term dot product (`t[11]` times an exact 1),
+///   so it is within `γ₄·S` of the exact value. A computed minimum within
+///   `γ₄·S` of zero is therefore indistinguishable from zero.
+/// - A drop with scale `S₀` sets `t' = fl(t − m)`. The exact lowest z
+///   afterwards is `(min w − m) + δ(t − m)` with `|δ| ≤ u`, so at most
+///   `γ₄·S₀ + u·(2 + γ₄)·S₀ ≤ γ₄·S₀ + 2.01·u·S₀`.
+/// - After a drop the translation is about the object's own extent, so
+///   `S₀ ≤ 3·S` for the next call's scale `S`. The next computed minimum is
+///   then within `3·(γ₄ + 2.01·u)·S + γ₄·S ≤ 5.6·γ₄·S` of zero (with
+///   `u ≤ γ₄/4`).
+///
+/// `8·γ₄·S` covers that with margin. Dropping an object twice therefore
+/// changes nothing the second time, rather than moving it by a few ulps.
+/// The first drop of an object far above the plate (`S₀ ≫ S`) can leave a
+/// residual larger than this; one more drop then removes it, which is
+/// still deterministic.
+fn resting_tolerance(scale: f64) -> f64 {
+    let u = f64::EPSILON / 2.0;
+    let gamma4 = 4.0 * u / (1.0 - 4.0 * u);
+    8.0 * gamma4 * scale
 }
 
 /// Determinant of the linear part (3MF's rows are the column-vector
@@ -175,17 +205,29 @@ impl Operation for DropToPlate {
                 code: "empty_object",
                 message: "the object has no geometry to rest on the plate".into(),
             })?;
-        // Already resting: within the rounding of computing world z at
-        // all (a few ulps of its largest term), so dropping twice is one
-        // change, not a drift of ulps.
-        let resting = min_z.abs() <= 4.0 * f64::EPSILON * scale;
+        let non_finite = || OpError::Failed {
+            code: "non_finite_position",
+            message: "the object's lowest point is out of floating-point range (a vertex or the \
+                      transform is too large); reset its transform, or scale it down first"
+                .into(),
+        };
+        if !min_z.is_finite() || !scale.is_finite() {
+            return Err(non_finite());
+        }
+        // Already resting: within the rounding of computing world z at all
+        // (see `resting_tolerance`).
+        let resting = min_z.abs() <= resting_tolerance(scale);
         let mut transform = target.transform;
         if !resting {
             transform[11] -= min_z;
+            if !transform[11].is_finite() {
+                return Err(non_finite());
+            }
         }
+        let moved_z = if resting { 0.0 } else { -min_z };
         Ok(DocOutput {
             changes: transform_change(target, transform),
-            report: serde_json::json!({ "moved_z": -min_z }),
+            report: serde_json::json!({ "moved_z": moved_z }),
         })
     }
 }
@@ -223,5 +265,99 @@ impl Operation for Delete {
             changes: vec![ObjectChange::Remove { operand: 0 }],
             report: serde_json::json!({ "removed_faces": target.mesh.face_count() }),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
+
+    use super::*;
+    use mf_document::ObjectId;
+
+    fn drop(mesh: &Mesh, transform: [f64; 12]) -> Result<DocOutput, OpError> {
+        DropToPlate.execute_doc(
+            &[OperandInput {
+                object: ObjectId(1),
+                mesh,
+                transform,
+                target: Target::WholeObject,
+            }],
+            &Params::default(),
+            &RunContext::none(),
+        )
+    }
+
+    fn dropped(out: &DocOutput, t: [f64; 12]) -> [f64; 12] {
+        match out.changes.as_slice() {
+            [ObjectChange::Transform { transform, .. }] => *transform,
+            [] => t,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Rotated, scaled and translated meshes: a second drop never moves
+    /// the object again (the "resting" bound holds), and a resting object
+    /// reports `moved_z: 0`.
+    #[test]
+    fn dropping_twice_changes_nothing_the_second_time() {
+        let mesh = Mesh::new(
+            vec![
+                [0.3, -1.7, 2.9],
+                [4.1, 0.2, -0.6],
+                [-2.2, 3.3, 1.1],
+                [0.0, 0.0, -5.5],
+            ],
+            vec![[0, 1, 2], [0, 2, 3], [0, 3, 1], [1, 3, 2]],
+        )
+        .unwrap();
+        let mut seed = 0x1234_5678_u64;
+        let mut next = || {
+            seed = seed
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            (seed >> 11) as f64 / (1u64 << 53) as f64
+        };
+        for _ in 0..500 {
+            let (a, b) = (next() * 6.3, next() * 6.3);
+            let k = 0.1 + next() * 10.0;
+            let (sa, ca) = a.sin_cos();
+            let (sb, cb) = b.sin_cos();
+            // Rotation about x then z, scaled; translation within the
+            // object's own extent (as after a first drop).
+            let t = [
+                k * cb,
+                k * sb * ca,
+                k * sb * sa,
+                -k * sb,
+                k * cb * ca,
+                k * cb * sa,
+                0.0,
+                -k * sa,
+                k * ca,
+                next() * 20.0 - 10.0,
+                next() * 20.0 - 10.0,
+                (next() * 20.0 - 10.0) * k,
+            ];
+            let once = dropped(&drop(&mesh, t).unwrap(), t);
+            let second = drop(&mesh, once).unwrap();
+            assert!(second.changes.is_empty(), "{t:?}: {:?}", second.changes);
+            assert_eq!(second.report["moved_z"], serde_json::json!(0.0));
+        }
+    }
+
+    #[test]
+    fn a_non_finite_result_is_refused_by_name() {
+        let mesh = Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 1e300]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        let mut t = mf_io::threemf::IDENTITY;
+        t[8] = 1e10;
+        match drop(&mesh, t) {
+            Err(OpError::Failed { code, .. }) => assert_eq!(code, "non_finite_position"),
+            other => panic!("{:?}", other.map(|o| o.changes)),
+        }
     }
 }

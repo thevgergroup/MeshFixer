@@ -1540,6 +1540,38 @@ impl MeshFixerApp {
         Some(sel.ids.clone())
     }
 
+    /// After a command commits: a created object becomes active (the
+    /// command's result, such as a boolean's), and an active object the
+    /// command removed hands over to one that exists.
+    fn after_object_changes(&mut self) {
+        let created = self
+            .session
+            .node(self.session.current())
+            .and_then(|n| n.record.as_ref())
+            .and_then(|rec| rec.outputs.iter().find(|o| o.created))
+            .map(|o| o.object);
+        if let Some(id) = created {
+            self.set_active(id);
+        }
+        self.sync_active();
+    }
+
+    /// Delete the active object (the Delete key on an object target): the
+    /// `object.delete` command, undoable like any other. Only when nothing
+    /// smaller (a hole, a piece, faces) is selected: then Delete would be
+    /// ambiguous, so it does nothing.
+    pub fn delete_active_object(&mut self) {
+        if self.busy.is_some() || self.active.is_none() || self.current_selection().is_some() {
+            return;
+        }
+        self.run_tool(&Tool {
+            op_id: "object.delete".into(),
+            label: "Delete object".into(),
+            selection: None,
+            fixed: BTreeMap::new(),
+        });
+    }
+
     /// Keep `active` pointing at an object that exists in the current document.
     fn sync_active(&mut self) {
         let doc = self.session.document();
@@ -1590,6 +1622,10 @@ impl MeshFixerApp {
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(report(&r));
+                        // A command can remove, place or create objects
+                        // (D6): keep `active` on an object that exists,
+                        // and make a newly created one active.
+                        self.after_object_changes();
                         // The command's result stays: a filled hole's
                         // "selection cleared" would only repeat it.
                         if let Some(note) = self.retarget_selection()
@@ -3384,6 +3420,15 @@ impl MeshFixerApp {
         } else if undo {
             self.undo();
         }
+        let delete = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| {
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
+                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
+            });
+        if delete {
+            self.delete_active_object();
+        }
         if !ctx.egui_wants_keyboard_input() {
             // + / = and − zoom toward the view centre, one step per press.
             if zoom != 0
@@ -3510,12 +3555,27 @@ fn is_current_revision(doc: &mf_command::Document, mesh: &Mesh) -> bool {
 /// An operation's report in plain words for the status line. A 5M fill's
 /// raw report lists hundreds of loops: laying that out took ~35 ms of a
 /// frame, and it isn't for people anyway.
+/// History words for the object operations (they have no Properties
+/// button, so no `operation_label`).
+fn object_step_label(op_id: &str) -> Option<String> {
+    Some(
+        match op_id {
+            "object.delete" => "Delete object",
+            "object.set_transform" => "Move object",
+            "object.drop_to_plate" => "Drop to plate",
+            _ => return None,
+        }
+        .into(),
+    )
+}
+
 fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
     let len = |key: &str| report[key].as_array().map_or(0, Vec::len);
     // allow-swallow: the operation's own report; a count it leaves out reads as 0
     let num = |key: &str| report[key].as_u64().unwrap_or_default();
     let s = |n: u64| if n == 1 { "" } else { "s" };
     match op_id {
+        "object.delete" => "Object deleted. Undo brings it back.".into(),
         "mesh.fill_holes" => {
             let (filled, skipped) = (len("filled_loops") as u64, len("skipped_loops") as u64);
             let faces = num("created_faces");
@@ -3734,7 +3794,7 @@ fn step_label(node: &mf_command::RevisionNode) -> String {
         .as_ref()
         .and_then(|rec| {
             let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
-            operation_label(&rec.op_id, target)
+            operation_label(&rec.op_id, target).or_else(|| object_step_label(&rec.op_id))
         })
         // allow-swallow: a step with no plain words keeps the session's own label
         .unwrap_or_else(|| node.label.clone())

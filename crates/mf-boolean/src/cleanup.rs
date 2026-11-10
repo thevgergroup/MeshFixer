@@ -157,6 +157,7 @@ pub fn remove_created_degenerates(
                     continue;
                 }
                 // Neighbourhoods read from this pass's maps must be current.
+                // allow-swallow: vfaces maps a vertex to the faces using it; no entry means no faces, which is exactly what the empty list says
                 let faces: Vec<usize> = vfaces.get(&gone).cloned().unwrap_or_default();
                 let near_keep = vfaces.get(&keep).into_iter().flatten();
                 if faces.iter().chain(near_keep).any(|&h| dirty[h]) {
@@ -183,16 +184,19 @@ pub fn remove_created_degenerates(
             }
             // A cap: the middle corner m, strictly between the other two
             // along the axis where they differ most (exact comparisons).
-            let axis = (0..3)
-                .max_by(|&a, &b| {
-                    let ext = |k: usize| {
-                        let lo = c.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
-                        let hi = c.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
-                        hi - lo
-                    };
-                    ext(a).total_cmp(&ext(b))
-                })
-                .unwrap_or(0);
+            let ext = |k: usize| {
+                let lo = c.iter().map(|p| p[k]).fold(f64::INFINITY, f64::min);
+                let hi = c.iter().map(|p| p[k]).fold(f64::NEG_INFINITY, f64::max);
+                hi - lo
+            };
+            // The widest axis; on a tie the later one, as `max_by` would.
+            let axis = (1..3).fold(0, |best, k| {
+                if ext(k).total_cmp(&ext(best)).is_ge() {
+                    k
+                } else {
+                    best
+                }
+            });
             let Some(mi) = (0..3).find(|&i| {
                 let (x, y, z) = (c[i][axis], c[(i + 1) % 3][axis], c[(i + 2) % 3][axis]);
                 (y < x && x < z) || (z < x && x < y)

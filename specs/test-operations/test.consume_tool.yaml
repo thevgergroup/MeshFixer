@@ -15,7 +15,12 @@ operands:
     role: consumed
     kinds: [object]
     required: true
-parameters: []
+parameters:
+  - name: bad_source
+    type: bool
+    default: false
+    description: "Test-only: also name a face of an operand that doesn't exist as a source, so the command layer must refuse the result"
+
 preconditions: []
 postconditions:
   - the tool is removed

@@ -181,6 +181,9 @@ pub struct Prepared {
     /// Operand 0 is the target; the rest in the spec's `operands:` order.
     operands: Vec<PreparedOperand>,
     params: Params,
+    /// The ids a recorded run of this command gave the objects it created
+    /// (replay and re-execution), so the same objects get the same ids.
+    created_ids: Option<Vec<ObjectId>>,
 }
 
 /// What `run` worked out for one [`ObjectChange`], so `commit` does no
@@ -284,6 +287,7 @@ impl Prepared {
             output,
             operands: recorded,
             info,
+            created_ids: self.created_ids,
             duration: start.elapsed(),
         })
     }
@@ -314,6 +318,14 @@ fn translate_openings(
     }
 }
 
+/// How many objects `changes` create.
+fn changes_creating(changes: &[ObjectChange]) -> usize {
+    changes
+        .iter()
+        .filter(|c| matches!(c, ObjectChange::Create { .. }))
+        .count()
+}
+
 /// Refuse changes an operation isn't allowed to make: an operand index out
 /// of range, two changes of one kind to one object, a change to a removed
 /// object, or any change to an operand the spec marks `read` or `kept`
@@ -327,6 +339,32 @@ fn check_changes(
         op: op.to_owned(),
         reason,
     };
+    // Every operand face a created face names must exist: an index in
+    // range and a live face of that operand's input (MF-P1-SEL-001).
+    for change in changes {
+        let provenance = match change {
+            ObjectChange::Geometry { provenance, .. } | ObjectChange::Create { provenance, .. } => {
+                provenance
+            }
+            ObjectChange::Transform { .. } | ObjectChange::Remove { .. } => continue,
+        };
+        for (_, sources) in &provenance.created_faces {
+            for &(k, face) in &sources.operands {
+                let o = operands.get(k as usize).ok_or_else(|| {
+                    invalid(format!(
+                        "a created face names operand {k}, but there are {}",
+                        operands.len()
+                    ))
+                })?;
+                if !o.mesh.is_face_live(face) {
+                    return Err(invalid(format!(
+                        "a created face names face {} of operand '{}', which isn't a face of it",
+                        face.0, o.name
+                    )));
+                }
+            }
+        }
+    }
     // Per operand: (geometry, transform, removed).
     let mut seen = vec![(false, false, false); operands.len()];
     for change in changes {
@@ -389,6 +427,8 @@ pub struct Completed {
     operands: Vec<RecordedOperand>,
     /// Per entry of `output.changes`.
     info: Vec<ChangeInfo>,
+    /// Recorded ids for the created objects (see `Prepared::created_ids`).
+    created_ids: Option<Vec<ObjectId>>,
     pub duration: Duration,
 }
 
@@ -714,6 +754,7 @@ impl Session {
             op,
             operands: prepared,
             params,
+            created_ids: None,
         })
     }
 
@@ -840,6 +881,25 @@ impl Session {
         let mut document = base.clone();
         let mut provenance = BTreeMap::new();
         let mut next_object = self.next_object;
+        // A replayed or re-executed command gives its created objects the
+        // ids it recorded, so later commands (and selections) that name
+        // them still find them, whatever ids other branches took (review
+        // C1). Without a record, ids come from the session's counter.
+        let creates = changes_creating(&c.output.changes);
+        let mut recorded_ids = match c.created_ids {
+            Some(ids) if ids.len() == creates => {
+                if let Some(&taken) = ids.iter().find(|&&id| base.object(id).is_some()) {
+                    return Err(CommandError::InvalidChanges {
+                        op: c.op_id.to_owned(),
+                        reason: format!("the recorded id {taken} is already an object here"),
+                    });
+                }
+                Some(ids.into_iter())
+            }
+            // A different number of created objects: the replay's verdict
+            // reports the difference (the outputs won't match).
+            _ => None,
+        };
         let mut affected = AffectedSummary {
             removed: 0,
             created: 0,
@@ -895,8 +955,11 @@ impl Session {
                     transform,
                     provenance: p,
                 } => {
-                    let id = ObjectId(next_object);
-                    next_object += 1;
+                    let id = match recorded_ids.as_mut().and_then(Iterator::next) {
+                        Some(id) => id,
+                        None => ObjectId(next_object),
+                    };
+                    next_object = next_object.max(id.0 + 1);
                     affected.created += mesh.face_count() as u64;
                     let (hash, structure_hash) =
                         info.hashes.expect("run hashes every created mesh");
@@ -1042,11 +1105,17 @@ impl Session {
         selection: Option<Selection>,
         params: Params,
     ) -> Result<CommitOutcome, CommandError> {
-        self.execute_recorded_with_operands(op_id, target, selection, Vec::new(), params)
+        let completed = self
+            .prepare_validated(op_id, target, selection, Vec::new(), params)?
+            .run(&RunContext::none())?;
+        self.commit(completed)
     }
 
     /// As [`Self::execute_recorded`], with the command's other operands
-    /// (`(name, object, selection)`, as in [`Invocation::operands`]).
+    /// (`(name, object, selection)`, as in [`Invocation::operands`]) and
+    /// the ids its recorded run gave the objects it created (empty if it
+    /// created none): a command that creates as many objects as were
+    /// recorded gives them those ids (review C1).
     pub fn execute_recorded_with_operands(
         &mut self,
         op_id: &str,
@@ -1054,10 +1123,11 @@ impl Session {
         selection: Option<Selection>,
         operands: Vec<(String, ObjectId, Option<Selection>)>,
         params: Params,
+        created: Vec<ObjectId>,
     ) -> Result<CommitOutcome, CommandError> {
-        let completed = self
-            .prepare_validated(op_id, target, selection, operands, params)?
-            .run(&RunContext::none())?;
+        let mut prepared = self.prepare_validated(op_id, target, selection, operands, params)?;
+        prepared.created_ids = Some(created);
+        let completed = prepared.run(&RunContext::none())?;
         self.commit(completed)
     }
 
@@ -1117,12 +1187,19 @@ impl Session {
         }
         let back = self.cursor;
         self.checkout(onto);
+        let created = record
+            .outputs
+            .iter()
+            .filter(|o| o.created)
+            .map(|o| o.object)
+            .collect();
         let result = self.execute_recorded_with_operands(
             &record.op_id,
             record.target,
             selection,
             operands,
             params,
+            created,
         );
         if result.is_err() {
             self.checkout(back);

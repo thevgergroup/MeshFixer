@@ -92,9 +92,10 @@ impl Operation for TestConsumeTool {
     fn execute_doc(
         &self,
         inputs: &[OperandInput],
-        _params: &Params,
+        params: &Params,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
+        let bad_source = params.get_bool("bad_source")?;
         let [target, tool] = inputs else {
             return Err(OpError::Failed {
                 code: "missing_operand",
@@ -138,7 +139,11 @@ impl Operation for TestConsumeTool {
                 edit.add_face(
                     tri,
                     Sources {
-                        operands: vec![(k as u32, f)],
+                        operands: if bad_source {
+                            vec![(k as u32, f), (7, f)]
+                        } else {
+                            vec![(k as u32, f)]
+                        },
                         ..Sources::default()
                     },
                 )
