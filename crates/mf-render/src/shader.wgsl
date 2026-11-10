@@ -241,8 +241,23 @@ fn fs_glass_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @loca
     let n = normalize(in.normal);
     let edge_on = pow(1.0 - abs(dot(n, v)), 2.0);
     let w = wire(in.bary);
-    let rgb = mix(base, base * 0.5, w);
-    let a = clamp(0.10 + 0.45 * edge_on + 0.5 * w, 0.0, 1.0);
+    var rgb = mix(base, base * 0.5, w);
+    var a = clamp(0.10 + 0.45 * edge_on + 0.5 * w, 0.0, 1.0);
+    // Split's section view: the part above the plane a faint ghost, the
+    // part below shaded and nearly solid, and the cut drawn at the plane,
+    // so the inside of the cut shows.
+    if (scene.shading.z > 0.5) {
+        let s = dot(scene.split_plane.xyz, in.world) + scene.split_plane.w;
+        let line = 1.0 - smoothstep(0.0, fwidth(s) * 1.5, abs(s));
+        if (s > 0.0) {
+            a = 0.06 + 0.2 * edge_on;
+        } else {
+            rgb = lit(base, in.normal);
+            a = 0.8;
+        }
+        rgb = mix(rgb, vec3<f32>(1.0), line);
+        a = max(a, line);
+    }
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
 }
 

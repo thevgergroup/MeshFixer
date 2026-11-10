@@ -58,6 +58,9 @@ pub struct SplitState {
     /// The object the plane was placed for (a new active object places it
     /// again).
     pub placed_for: Option<ObjectId>,
+    /// The section view (on by default): the part above the plane
+    /// ghosted, the part below shaded, the cut drawn at the plane.
+    pub section: bool,
 }
 
 impl Default for SplitState {
@@ -70,6 +73,7 @@ impl Default for SplitState {
             keep: "both".into(),
             gap: 0.0,
             placed_for: None,
+            section: true,
         }
     }
 }
@@ -408,6 +412,19 @@ pub fn split_gizmo(app: &MeshFixerApp) -> Option<(Gizmo, Option<Handle>)> {
     Some((g, highlight))
 }
 
+/// How the view is shaded: the section view while Split shows it, else
+/// the View menu's choice.
+pub fn shading(app: &MeshFixerApp) -> mf_render::Shading {
+    if split_preview(app).is_some() && app.split.section {
+        mf_render::Shading {
+            preset: mf_render::ShadingPreset::XRay,
+            ..app.shading
+        }
+    } else {
+        app.shading
+    }
+}
+
 /// The plane as the renderer's split preview: (point, normal) in world.
 pub fn split_preview(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
     (app.active_tool == SPLIT && app.active_mesh().is_some())
@@ -556,6 +573,9 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if changed {
         app.split.set(p, (rx, ry));
     }
+    ui.add_space(theme::SPACE_XS);
+    ui.checkbox(&mut app.split.section, t!("split.section_view"))
+        .on_hover_text(t!("split.section_view.tip"));
     // Settings.
     section(ui, &t!("split.section.keep"));
     let keeps = [

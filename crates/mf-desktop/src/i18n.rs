@@ -393,6 +393,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("split.section.plane", "Cut plane"),
     ("split.section.point", "Point ({unit})"),
     ("split.section.tilt", "Tilt"),
+    ("split.section_view", "Section view"),
+    (
+        "split.section_view.tip",
+        "See through the part above the plane and into the cut",
+    ),
     ("split.tilt", "Tilt"),
     ("split.vertical_x", "Vertical X"),
     ("split.vertical_y", "Vertical Y"),
