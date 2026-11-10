@@ -2,9 +2,14 @@ id: mesh.split_plane
 version: 1
 summary: Cut a closed object in two along a plane and close each part with a flat cap.
 geometry_kinds: [mesh]
+# Every selected object (many): each one the plane crosses becomes its
+# "(top)" part (keeping its id) and a created "(bottom)" part; one the
+# plane misses is listed in the report's `missed`, unless it misses them
+# all (plane_misses_object). One command, one undo step.
 target:
   whole_object: true
   kinds: []
+  many: true
 parameters:
   - name: plane_point
     type: vec3

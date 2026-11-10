@@ -240,3 +240,62 @@ fn pegs_replay_exact() {
     );
     assert_eq!(state(&report.session), after);
 }
+
+/// Several targets in one command: every object the plane crosses gets
+/// "(top)" and "(bottom)" parts, one the plane misses is listed in the
+/// report, one undo restores everything, and replay is Exact.
+#[test]
+fn split_several_targets_in_one_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("doc.3mf");
+    let placed = |x: f64, z: f64| rotation_translation(2, 0.0, [x, 0.0, z]);
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: [("a", 0.0, 0.0), ("b", 5.0, 0.0), ("high", 10.0, 20.0)]
+            .into_iter()
+            .map(|(name, x, z)| ModelObject {
+                name: name.into(),
+                mesh: uv_sphere(11, 24),
+                transform: placed(x, z),
+            })
+            .collect(),
+    };
+    write_model_path(&model, &path).unwrap();
+    let mut s = Session::new();
+    let (ids, _) = s.import_model(read_model(&path).unwrap());
+    let before = state(&s);
+    let mut inv = split(ids[0], &[]);
+    inv.operands = vec![
+        ("target".into(), ids[1], None),
+        ("target".into(), ids[2], None),
+    ];
+    let report = match s.execute(inv).unwrap() {
+        mf_command::CommitOutcome::NewRevision { report } => report,
+        other => panic!("{other:?}"),
+    };
+    let mut got = names(&s);
+    got.sort();
+    assert_eq!(
+        got,
+        ["a (bottom)", "a (top)", "b (bottom)", "b (top)", "high"]
+    );
+    assert_eq!(report["missed"], serde_json::json!(["high"]), "{report}");
+    assert_eq!(report["objects"].as_array().unwrap().len(), 2);
+    assert!(s.undo());
+    assert_eq!(state(&s), before, "one undo restores every object");
+    assert!(s.redo());
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let replayed = replay(&log).unwrap();
+    assert!(
+        replayed.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        replayed.results
+    );
+    assert_eq!(state(&replayed.session), state(&s));
+    // A plane that misses every target is refused.
+    let mut miss = split(ids[0], &[("plane_point", "0,0,100")]);
+    miss.operands = vec![("target".into(), ids[1], None)];
+    let err = s.execute(miss).unwrap_err().to_string();
+    assert!(err.contains("any of the selected objects"), "{err}");
+}

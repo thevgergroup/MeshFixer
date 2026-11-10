@@ -13,6 +13,9 @@
 //!   (top)") and the bottom part is created as "scan (bottom)" with the
 //!   same transform. `keep: above` or `below` keeps only that part, in the
 //!   target, and the other part's faces are listed as removed.
+//! - **Several targets** (the target is `many`): each is cut as above, as
+//!   its own operand, in one command; one the plane misses is listed in
+//!   the report's `missed` (refused only when it misses them all).
 //! - **The created part is an edit of the target's mesh**, so its faces
 //!   away from the plane keep their slot ids and share storage with the
 //!   target's history (a 30M split allocates no per-face provenance). Its
@@ -101,12 +104,12 @@ fn refusal(e: CutError) -> OpError {
 }
 
 /// A part's provenance as a created object's: its created faces name
-/// their sources as faces of operand 0.
-fn as_created(mut p: Provenance) -> Provenance {
+/// their sources as faces of operand `k` (the target it was cut from).
+fn as_created(mut p: Provenance, k: usize) -> Provenance {
     for (_, s) in &mut p.created_faces {
         let faces = std::mem::take(&mut s.faces);
         *s = Sources {
-            operands: faces.into_iter().map(|f| (0, f)).collect(),
+            operands: faces.into_iter().map(|f| (k as u32, f)).collect(),
             ..Sources::default()
         };
     }
@@ -162,142 +165,218 @@ impl Operation for SplitPlane {
         params: &Params,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        let target: &OperandInput = inputs
-            .first()
-            .ok_or_else(|| failed("missing_target", "mesh.split_plane was run with no target"))?;
-        if target.target != Target::WholeObject {
-            return Err(unsupported_target(self.id(), &target.target));
-        }
-        let point = params.get_vec3("plane_point")?;
-        let normal = params.get_vec3("plane_normal")?;
-        let keep = params.get_choice("keep")?;
-        let gap = params.get_float("cut_gap")?;
-        let pegs = params.get_choice("pegs")?;
-        if pegs == "dovetail" {
+        if inputs.is_empty() {
             return Err(failed(
-                "dovetail_not_available",
-                "Dovetail joints aren't available yet. Choose dowels or attached pegs.",
+                "missing_target",
+                "mesh.split_plane was run with no target",
             ));
         }
-        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-        if len == 0.0 || !len.is_finite() {
-            return Err(refusal(CutError::InvalidPlane));
-        }
-        let inv = inverse(&target.transform).ok_or_else(|| {
-            failed(
-                "singular_transform",
-                "The object's transform flattens it, so the plane can't be placed in it; reset \
-                 its transform first.",
-            )
-        })?;
-        ctx.checkpoint()?;
-        // The two cut planes, in world space then object space.
-        let unit = normal.map(|c| c / len);
-        let shifted = |sign: f64| -> [f64; 3] {
-            if gap == 0.0 {
-                point
-            } else {
-                std::array::from_fn(|i| point[i] + sign * unit[i] * gap / 2.0)
-            }
-        };
-        let object_normal = normal_to_object(&target.transform, normal);
-        let plane_above = Plane {
-            point: apply(&inv, shifted(1.0)),
-            normal: object_normal,
-        };
-        let plane_below = Plane {
-            point: apply(&inv, shifted(-1.0)),
-            normal: object_normal,
-        };
-        mf_boolean::check_closed(target.mesh, ctx).map_err(refusal)?;
-        let above = (keep != "below")
-            .then(|| mf_boolean::cut_half(target.mesh, &plane_above, Side::Above, ctx))
-            .transpose()
-            .map_err(refusal)?;
-        let below = (keep != "above")
-            .then(|| mf_boolean::cut_half(target.mesh, &plane_below, Side::Below, ctx))
-            .transpose()
-            .map_err(refusal)?;
-        ctx.checkpoint()?;
-        let mut above = above;
-        let mut below = below;
-        let mut created_dowels = Vec::new();
-        let mut peg_report = serde_json::Value::Null;
-        if pegs != "none" {
-            let world_n = unit;
-            let out = alignment(
-                params, pegs, target, scene, world_n, &mut above, &mut below, ctx,
-            )?;
-            created_dowels = out.0;
-            peg_report = out.1;
-        }
-        let (top_name, bottom_name) = split_names(target.name);
+        // Each target is cut on its own; dowels made for one are laid out
+        // clear of those made for the ones before it.
+        let mut scene = scene.to_vec();
         let mut changes = Vec::new();
-        let mut parts = Vec::new();
-        let regions = below
-            .as_ref()
-            .or(above.as_ref())
-            .map_or(0, |p| p.section_regions.len());
-        match (above, below) {
-            (Some(above), Some(below)) => {
-                parts.push(part_report(&top_name, "target", &above));
-                parts.push(part_report(&bottom_name, "created", &below));
-                changes.push(ObjectChange::Geometry {
-                    operand: 0,
-                    mesh: above.mesh,
-                    provenance: above.provenance,
-                });
-                changes.push(ObjectChange::Rename {
-                    operand: 0,
-                    name: top_name,
-                });
-                changes.push(ObjectChange::Create {
-                    name: bottom_name,
-                    mesh: below.mesh,
-                    transform: target.transform,
-                    provenance: as_created(below.provenance),
-                });
+        let mut cut = Vec::new();
+        let mut missed = Vec::new();
+        for (k, target) in inputs.iter().enumerate() {
+            match split_one(k, target, &scene, params, ctx) {
+                Ok(one) => {
+                    for c in &one.changes {
+                        if let ObjectChange::Create {
+                            mesh, transform, ..
+                        } = c
+                        {
+                            scene.extend(crate::SceneObject::of(
+                                target.object,
+                                mesh,
+                                transform,
+                                ctx,
+                            )?);
+                        }
+                    }
+                    changes.extend(one.changes);
+                    cut.push(one.report);
+                }
+                // With several targets, one the plane misses is listed,
+                // not refused (unless the plane misses them all).
+                Err(OpError::Failed {
+                    code: "plane_misses_object",
+                    ..
+                }) if inputs.len() > 1 => missed.push(target.name.to_owned()),
+                Err(OpError::Failed { code, message }) if inputs.len() > 1 => {
+                    return Err(OpError::Failed {
+                        code,
+                        message: format!("'{}': {message}", target.name),
+                    });
+                }
+                Err(e) => return Err(e),
             }
-            (Some(part), None) | (None, Some(part)) => {
-                let name = if keep == "above" {
-                    top_name
-                } else {
-                    bottom_name
-                };
-                parts.push(part_report(&name, "target", &part));
-                changes.push(ObjectChange::Geometry {
-                    operand: 0,
-                    mesh: part.mesh,
-                    provenance: part.provenance,
-                });
-                changes.push(ObjectChange::Rename { operand: 0, name });
-            }
-            (None, None) => unreachable!("keep is both, above or below"),
         }
-        for (k, (mesh, transform)) in created_dowels.into_iter().enumerate() {
-            let provenance = Provenance {
-                created_faces: mesh.faces().map(|(f, _)| (f, Sources::default())).collect(),
-                created_vertices: mesh.vertices().map(|(v, _)| v).collect(),
-                ..Provenance::default()
-            };
+        if cut.is_empty() {
+            return Err(failed(
+                "plane_misses_object",
+                "The cut plane doesn't pass through any of the selected objects (or the gap is \
+                 wider than them). Move the plane so it crosses a model.",
+            ));
+        }
+        // The first cut object's report at the top level (the one-target
+        // shape), then every cut object's and the missed ones.
+        let mut report = cut[0].clone();
+        let parts: Vec<serde_json::Value> = cut
+            .iter()
+            .flat_map(|r| r["parts"].as_array().cloned().unwrap_or_default())
+            .collect();
+        report["parts"] = serde_json::Value::Array(parts);
+        report["objects"] = serde_json::Value::Array(cut);
+        report["missed"] = serde_json::json!(missed);
+        Ok(DocOutput { changes, report })
+    }
+}
+
+/// One target's split: its changes (operand `k`) and report.
+struct SplitOne {
+    changes: Vec<ObjectChange>,
+    report: serde_json::Value,
+}
+
+fn split_one(
+    k: usize,
+    target: &OperandInput,
+    scene: &[crate::SceneObject],
+    params: &Params,
+    ctx: &RunContext,
+) -> Result<SplitOne, OpError> {
+    if target.target != Target::WholeObject {
+        return Err(unsupported_target("mesh.split_plane", &target.target));
+    }
+    let point = params.get_vec3("plane_point")?;
+    let normal = params.get_vec3("plane_normal")?;
+    let keep = params.get_choice("keep")?;
+    let gap = params.get_float("cut_gap")?;
+    let pegs = params.get_choice("pegs")?;
+    if pegs == "dovetail" {
+        return Err(failed(
+            "dovetail_not_available",
+            "Dovetail joints aren't available yet. Choose dowels or attached pegs.",
+        ));
+    }
+    let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
+    if len == 0.0 || !len.is_finite() {
+        return Err(refusal(CutError::InvalidPlane));
+    }
+    let inv = inverse(&target.transform).ok_or_else(|| {
+        failed(
+            "singular_transform",
+            "The object's transform flattens it, so the plane can't be placed in it; reset \
+             its transform first.",
+        )
+    })?;
+    ctx.checkpoint()?;
+    // The two cut planes, in world space then object space.
+    let unit = normal.map(|c| c / len);
+    let shifted = |sign: f64| -> [f64; 3] {
+        if gap == 0.0 {
+            point
+        } else {
+            std::array::from_fn(|i| point[i] + sign * unit[i] * gap / 2.0)
+        }
+    };
+    let object_normal = normal_to_object(&target.transform, normal);
+    let plane_above = Plane {
+        point: apply(&inv, shifted(1.0)),
+        normal: object_normal,
+    };
+    let plane_below = Plane {
+        point: apply(&inv, shifted(-1.0)),
+        normal: object_normal,
+    };
+    mf_boolean::check_closed(target.mesh, ctx).map_err(refusal)?;
+    let above = (keep != "below")
+        .then(|| mf_boolean::cut_half(target.mesh, &plane_above, Side::Above, ctx))
+        .transpose()
+        .map_err(refusal)?;
+    let below = (keep != "above")
+        .then(|| mf_boolean::cut_half(target.mesh, &plane_below, Side::Below, ctx))
+        .transpose()
+        .map_err(refusal)?;
+    ctx.checkpoint()?;
+    let mut above = above;
+    let mut below = below;
+    let mut created_dowels = Vec::new();
+    let mut peg_report = serde_json::Value::Null;
+    if pegs != "none" {
+        let world_n = unit;
+        let out = alignment(
+            params, pegs, target, scene, world_n, &mut above, &mut below, ctx,
+        )?;
+        created_dowels = out.0;
+        peg_report = out.1;
+    }
+    let (top_name, bottom_name) = split_names(target.name);
+    let mut changes = Vec::new();
+    let mut parts = Vec::new();
+    let regions = below
+        .as_ref()
+        .or(above.as_ref())
+        .map_or(0, |p| p.section_regions.len());
+    match (above, below) {
+        (Some(above), Some(below)) => {
+            parts.push(part_report(&top_name, "target", &above));
+            parts.push(part_report(&bottom_name, "created", &below));
+            changes.push(ObjectChange::Geometry {
+                operand: k,
+                mesh: above.mesh,
+                provenance: above.provenance,
+            });
+            changes.push(ObjectChange::Rename {
+                operand: k,
+                name: top_name,
+            });
             changes.push(ObjectChange::Create {
-                name: format!("{} dowel {}", target.name, k + 1),
-                mesh,
-                transform,
-                provenance,
+                name: bottom_name,
+                mesh: below.mesh,
+                transform: target.transform,
+                provenance: as_created(below.provenance, k),
             });
         }
-        Ok(DocOutput {
-            changes,
-            report: serde_json::json!({
-                "parts": parts,
-                "section_regions": regions,
-                "plane_point_object": plane_above.point,
-                "plane_normal_object": object_normal,
-                "pegs": peg_report,
-            }),
-        })
+        (Some(part), None) | (None, Some(part)) => {
+            let name = if keep == "above" {
+                top_name
+            } else {
+                bottom_name
+            };
+            parts.push(part_report(&name, "target", &part));
+            changes.push(ObjectChange::Geometry {
+                operand: k,
+                mesh: part.mesh,
+                provenance: part.provenance,
+            });
+            changes.push(ObjectChange::Rename { operand: k, name });
+        }
+        (None, None) => unreachable!("keep is both, above or below"),
     }
+    for (k, (mesh, transform)) in created_dowels.into_iter().enumerate() {
+        let provenance = Provenance {
+            created_faces: mesh.faces().map(|(f, _)| (f, Sources::default())).collect(),
+            created_vertices: mesh.vertices().map(|(v, _)| v).collect(),
+            ..Provenance::default()
+        };
+        changes.push(ObjectChange::Create {
+            name: format!("{} dowel {}", target.name, k + 1),
+            mesh,
+            transform,
+            provenance,
+        });
+    }
+    Ok(SplitOne {
+        changes,
+        report: serde_json::json!({
+            "parts": parts,
+            "section_regions": regions,
+            "plane_point_object": plane_above.point,
+            "plane_normal_object": object_normal,
+            "pegs": peg_report,
+        }),
+    })
 }
 
 /// The world footprint of `mesh` placed by `t` (its bounding box's
