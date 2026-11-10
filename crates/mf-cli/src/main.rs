@@ -271,11 +271,14 @@ fn cli() -> Command {
             .arg(
                 Arg::new("kind")
                     .required(true)
-                    .value_parser(["damaged", "scene"])
+                    .value_parser(["damaged", "scene", "boolean-demo"])
                     .help(
                         "damaged: UV sphere with holes, islands and unwelded corners; \
                          scene: the two-object demo (a damaged scan and a plate with a \
-                         hole, a crack and a tangled edge, each at its own transform), 3MF only",
+                         hole, a crack and a tangled edge, each at its own transform), 3MF only; \
+                         boolean-demo: 0 a sphere 'scan', 1 a 'part' (cube) sunk into its side, \
+                         2 a 'crossed scan' (a sphere with a box crossing its surface: it \
+                         overlaps itself), 3 a 'probe' (cube) where it crosses itself, 3MF only",
                     ),
             )
             .arg(output_positional())
@@ -438,18 +441,37 @@ fn cli() -> Command {
                         .help("Export the replayed result of the first object"),
                 ),
         );
+    // `inspect` has its own command; every other operation gets one,
+    // with `--<operand> <object index>` for each operand it takes (e.g.
+    // `boolean --tool 1`). A read-only operation prints its report and
+    // needs no output.
     for spec in mf_spec::builtin::specs()
         .iter()
-        .filter(|s| !s.is_read_only())
+        .filter(|s| s.id != "mesh.inspect")
     {
-        cmd = cmd.subcommand(
-            mf_spec::cli::to_command(spec)
-                .arg(input_arg())
-                .arg(units_arg())
-                .arg(output_arg())
-                .arg(object_arg())
-                .arg(select_arg(false)),
-        );
+        let mut sub = mf_spec::cli::to_command(spec)
+            .arg(input_arg())
+            .arg(units_arg())
+            .arg(if spec.is_read_only() {
+                output_arg().required(false)
+            } else {
+                output_arg()
+            })
+            .arg(object_arg())
+            .arg(select_arg(false));
+        for o in &spec.operands {
+            sub = sub.arg(
+                Arg::new(o.name.clone())
+                    .long(o.name.clone())
+                    .required(o.required)
+                    .value_parser(clap::value_parser!(usize))
+                    .help(format!(
+                        "The '{}' object ({:?}): its position in the input file (0 is the first)",
+                        o.name, o.role
+                    )),
+            );
+        }
+        cmd = cmd.subcommand(sub);
     }
     cmd
 }
@@ -727,6 +749,34 @@ fn render(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     Ok(())
 }
 
+/// `gen-fixture boolean-demo`: a sphere "scan" (radius 20 mm), a 10 mm
+/// cube "part" sunk into its +x side, a "crossed scan" (a sphere with a
+/// box crossing its surface, off to the side), and a "probe" cube where
+/// the crossed scan crosses itself.
+fn boolean_demo() -> Vec<(String, mf_geometry::Mesh, [f64; 12])> {
+    use mf_fixtures::{cube, merge, scaled, translated, uv_sphere};
+    let at = |x: f64, y: f64, z: f64| [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, y, z];
+    vec![
+        (
+            "scan".into(),
+            scaled(&uv_sphere(96, 192), 20.0),
+            at(0.0, 0.0, 20.0),
+        ),
+        ("part".into(), cube(10.0), at(15.0, -5.0, 15.0)),
+        (
+            "crossed scan".into(),
+            merge(&[
+                scaled(&uv_sphere(64, 128), 10.0),
+                translated(&cube(4.0), [-12.0, -2.0, -2.0]),
+            ]),
+            at(60.0, 0.0, 10.0),
+        ),
+        // Where the crossed scan crosses itself: booleans there are
+        // refused until Make solid.
+        ("probe".into(), cube(5.0), at(47.5, -2.5, 7.5)),
+    ]
+}
+
 fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let output = m
         .get_one::<PathBuf>("output")
@@ -734,15 +784,21 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
-    if m.get_one::<String>("kind").map(String::as_str) == Some("scene") {
+    let kind = m.get_one::<String>("kind").map(String::as_str);
+    if kind == Some("scene") || kind == Some("boolean-demo") {
         if format != Format::ThreeMf {
             return Err(Failure::Usage(
                 "the scene has several objects: write it as .3mf".into(),
             ));
         }
+        let scene = if kind == Some("scene") {
+            mf_fixtures::demo_scene()
+        } else {
+            boolean_demo()
+        };
         let model = mf_io::threemf::Model {
             unit: mf_io::threemf::Unit::Millimeter,
-            objects: mf_fixtures::demo_scene()
+            objects: scene
                 .into_iter()
                 .map(|(name, mesh, transform)| mf_io::threemf::ModelObject {
                     name,
@@ -1410,13 +1466,17 @@ fn run_operation(
     let input = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let output = m
-        .get_one::<PathBuf>("output")
-        .ok_or_else(|| Failure::Usage("missing output".into()))?;
-    let format = Format::from_path(output).ok_or_else(|| {
-        Failure::Usage(format!("unsupported output format: {}", output.display()))
-    })?;
-    refuse_overwriting_input(input, output)?;
+    let output = match m.get_one::<PathBuf>("output") {
+        Some(output) => {
+            let format = Format::from_path(output).ok_or_else(|| {
+                Failure::Usage(format!("unsupported output format: {}", output.display()))
+            })?;
+            refuse_overwriting_input(input, output)?;
+            Some((output, format))
+        }
+        None if spec.is_read_only() => None,
+        None => return Err(Failure::Usage("missing output".into())),
+    };
     // Validate parameters and selection before touching the filesystem.
     let select = m
         .get_one::<String>("select")
@@ -1434,11 +1494,25 @@ fn run_operation(
         ctx,
     )?;
     let selection = selection_for(&session, id, session.current(), &select)?;
+    // `--<operand> <index>`: objects in input-file order.
+    let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
+    let operands = spec
+        .operands
+        .iter()
+        .filter_map(|o| m.get_one::<usize>(&o.name).map(|&i| (o.name.clone(), i)))
+        .map(|(name, index)| match objects.get(index) {
+            Some(&object) => Ok((name, object, None)),
+            None => Err(Failure::Usage(format!(
+                "--{name} {index}: the input has {} object(s), numbered from 0",
+                objects.len()
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let outcome = metrics.record("operation", || {
         execute(
             &mut session,
             Invocation {
-                operands: Vec::new(),
+                operands,
                 selection,
                 op_id: spec.id.clone(),
                 target: id,
@@ -1447,10 +1521,15 @@ fn run_operation(
             ctx,
         )
     })?;
-    if let CommitOutcome::NewRevision { report } = outcome {
-        eprintln!("{}: {report}", spec.id);
+    match outcome {
+        CommitOutcome::NewRevision { report } => eprintln!("{}: {report}", spec.id),
+        CommitOutcome::Report(report) => println!("{report}"),
+        CommitOutcome::NoChange { report } => eprintln!("{}: no change ({report})", spec.id),
     }
-    export(&session, id, output, format, metrics, ctx)
+    match output {
+        Some((output, format)) => export(&session, id, output, format, metrics, ctx),
+        None => Ok(()),
+    }
 }
 
 /// Progress lines are at most this often (10 a second).
