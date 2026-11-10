@@ -76,6 +76,10 @@ pub struct BrushParams {
     /// The view direction the stroke was drawn along: dab centres are
     /// projected along it onto the surface as it is mid-stroke.
     pub view_dir: [f64; 3],
+    /// Dynamic detail (MF-SCULPT-002): the target edge length as a
+    /// fraction of the radius; 0 is off. After each dab the faces wholly
+    /// inside its footprint are remeshed toward it.
+    pub detail: f64,
 }
 
 /// One dab of a stroke, in a remappable form (MF-HIST-002): a point on a

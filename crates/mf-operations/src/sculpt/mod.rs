@@ -11,11 +11,13 @@
 mod brush;
 mod falloff;
 mod index;
+mod remesh;
 mod stroke;
 
 pub use brush::{BrushKind, BrushParams, DabSample};
 pub use falloff::Falloff;
 pub use index::SculptIndex;
+pub use remesh::{RegionAdjacency, RemeshStats, remesh_band, remesh_region};
 pub use stroke::{DabDelta, StrokeState};
 
 use mf_geometry::{FaceId, Mesh};
@@ -91,6 +93,10 @@ pub fn brush_params(
             .map(FaceId)
             .collect(),
         view_dir: apply_linear(&inv, params.get_vec3("view_dir")?),
+        detail: match params.get_choice("detail_mode")? {
+            "off" => 0.0,
+            _ => params.get_float("detail")?,
+        },
     })
 }
 
