@@ -86,6 +86,9 @@ fn open_inspect_apply_undo_redo() {
 
     // Nothing is selected, so Properties offers the whole-object tools:
     // open "Remove loose pieces" and apply it.
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();

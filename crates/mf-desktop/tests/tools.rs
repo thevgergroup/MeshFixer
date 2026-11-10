@@ -66,7 +66,14 @@ fn whole_object_tools_are_curated_and_grouped() {
         .map(|e| e.id.to_owned())
         .collect();
     assert_eq!(ids, catalogue);
-    for label in ["Repair", "Housekeeping", "Fill all holes", "Compact"] {
+    // The rail lists the built tools; Repair holds the repairs and the
+    // housekeeping.
+    for label in ["Select", "Transform", "Repair", "Inspect", "Export"] {
+        h.get_by_label(label);
+    }
+    h.get_by_label("Repair").click();
+    h.run();
+    for label in ["Fill all holes", "Remove loose pieces", "Compact"] {
         h.get_by_label(label);
     }
     for raw in [
@@ -79,17 +86,22 @@ fn whole_object_tools_are_curated_and_grouped() {
     }
 }
 
-/// The legend folds away (its rows go) and comes back.
+/// The legend is the Overlays popover (ui-plan.md §7, §11): closed by
+/// default so it takes no room, opened from the navigation bar (or View >
+/// Overlays), with the model's own colours and the overlay meanings in two
+/// titled groups.
 #[test]
-fn the_legend_collapses_to_make_room() {
-    require_gpu!("the_legend_collapses_to_make_room");
+fn the_overlays_popover_opens_and_closes() {
+    require_gpu!("the_overlays_popover_opens_and_closes");
     let (_dir, mut h) = open_cube();
     h.run();
+    assert!(h.query_by_label("Recent repairs").is_none());
+    h.get_by_label("Overlays").click();
+    h.run();
+    h.get_by_label("Model colours");
+    h.get_by_label("Overlay colours");
     h.get_by_label("Recent repairs");
-    h.get_by_label("Legend").click();
+    h.get_by_label("Overlays").click();
     h.run();
     assert!(h.query_by_label("Recent repairs").is_none());
-    h.get_by_label("Legend").click();
-    h.run();
-    h.get_by_label("Recent repairs");
 }

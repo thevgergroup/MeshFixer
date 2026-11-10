@@ -66,3 +66,23 @@ They are C++ sources fetched at build time (pinned), not crates, so
 **Obligations if a build with `manifold-cpp` is ever distributed:** include
 the Apache-2.0 licence text (already shipped as `LICENSE-APACHE`); neither
 project ships a `NOTICE` file at these versions.
+
+## Icon font: Phosphor Icons (desktop app, Phase 1 design stream)
+
+Added 2026-11-10. The desktop app embeds the Phosphor icon font (regular
+weight) for its tool rail, tree, panels and toolbars.
+
+| File | Licence | Licence text |
+|---|---|---|
+| `crates/mf-desktop/assets/fonts/Phosphor.ttf` (Phosphor Icons 2.x, regular; sha256 `06b91e02…d173a10`) | MIT (Copyright (c) 2023 Phosphor Icons) | `licenses/third-party/phosphor/LICENSE.txt` |
+
+The font file was taken from the `egui-phosphor` 0.14.0 crate (MIT OR
+Apache-2.0), which packages it for egui. That crate targets egui 0.36, so it
+isn't a dependency: depending on it would pull a second egui into the build.
+The font is vendored instead and is not a crate, so `cargo deny` doesn't see
+it; MIT is on the `deny.toml` allowlist, so no exception is needed. The icon
+codepoints in `crates/mf-desktop/src/icons.rs` are Phosphor's.
+
+**Obligations when distributing MeshFixer binaries:** include the MIT licence
+text above with the distribution (tracked with the egui fonts under
+MF-ISSUE-016).

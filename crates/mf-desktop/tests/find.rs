@@ -980,6 +980,9 @@ fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
     h.run_steps(3);
     let id = h.state().session.document().objects()[0].id;
     let points = object_points(h.state(), id);
+    // One object with nothing to fix: the Browser starts folded away.
+    h.get_by_label("Show Browser").click();
+    h.run_steps(3);
     double_click_row(&mut h, "slab");
     finish_move(&mut h);
     let cam = h.state().camera.unwrap();

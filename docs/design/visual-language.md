@@ -1,6 +1,74 @@
 # MeshFixer layout and visual language
 
-Status: adopted in M4 Task 2 (Checkpoint A). Code: `crates/mf-desktop/src/theme.rs` (colour tokens), `defects.rs` (plain-language copy), `panels.rs` (layout), `viewport.rs` (camera input).
+Status: adopted in M4 Task 2 (Checkpoint A); the shell and visual system below were rebuilt in Phase 1 to the owner-approved UI plan (`docs/design/ui-plan.md`, 2026-11-11). Where the M4 text further down describes the old two-panel layout ("Objects & Defects" left, "Properties & Tools" right, a breadcrumb in the bottom bar), the "Shell" section here supersedes it. Code: `theme.rs` (tokens), `widgets.rs` (the widget kit), `icons.rs` (the icon font), `i18n.rs` (message ids), `shell.rs` (the registries), `tool_panels.rs` (the rail, the tool dock and the tools), `panels.rs` (menu bar, status bar, Browser, History, Overlays, windows), `defects.rs` (plain-language copy), `viewport.rs` (camera input, the navigation bar).
+
+## Shell (UI plan §3, §5)
+
+```
+┌ File Edit View Tools Help ─────────────────────────────────────────── ⚙ ┐
+│ ▣  │ ✥ Transform        ✕ │                               │ Browser  History ▯│
+│Sel │ Move, rotate, scale  │      (the model, the gizmo)   │ ▣ scan            │
+│ ✥  │ Mode [Move|Rot|Scale]│                               │  ◎ Model          │
+│Tran│ Position (mm)        │                               │  ◌ Holes       4  │
+│────│ X[  ] Y[  ] Z[  ]    │                               │    ◌ Small     4  │
+│ ✚  │ …                    │                               │      Hole 1  13 e │
+│Rep │ [Drop] [Reset]       │                               │  ⚡ Narrow cracks 0│
+│ ☰  │ [      Done      ]   │       ⟳ ✋ 🔍 ⬚ │ − + │ ⛶ ⌂ │ ≡  (nav, dim)     │
+├────┴──────────────────────┴───────────────────────────────┴───────────────────┤
+│ ↶ ↷  Ready                                       3,951 triangles · 45 × 44 × 43 mm │
+└────────────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Rail** (left, 64 pt; 48 pt with icons only below a 1,100 pt window). Every registered tool: an icon and a short label, grouped by category with thin rules (Arrange: Select, Transform; Fix: Repair, Inspect; Output: Export; Shape and Add arrive with Split, Combine, Make solid, Sculpt, Parts). Only built tools show. The active tool has a filled tile (`ACCENT_SOFT`) and a 3 pt accent bar at the rail's inner edge; its icon takes the lighter accent. A tool that can't open now (no object) is greyed with the reason in its tooltip. Tooltip: name, shortcut, one line of help. Shortcuts: Q Select, T Transform, H Repair, I Inspect. Clicking the open tool's rail button takes it back to its top level.
+- **Tool dock** (left of the view, 280 pt, resizable 240–420; 256 pt on a laptop window). The open tool's panel only: a header (icon in the accent, name at title size, one line of help, ✕), then its sections, then its one primary action. It closes with Select (no tool): Select has no panel. On a window under 1,360 pt the tool dock and the Browser can't both be open: opening the Browser folds the tool dock to a 36 pt strip with the tool's icon, and the strip brings it back (and folds the Browser).
+- **Inspector card** (Select, no tool open): a small card at the view's top-left corner, outside the protected centre, built from the registered inspector sections: the object's name, size and triangles; whether it prints, as a chip (a check in the text colour, or the icon of what's wrong in that defect's colour); and the single most useful next action as the card's one primary button ("Open Repair" with holes or pieces; "Open Transform", secondary, when it's ready to print). With a target selected it shows the target in plain words, and its operation ("Fill hole", "Remove piece") as the primary button, which opens Repair with the target. With nothing open: "Nothing open yet" and Open a mesh….
+- **Browser** (right dock, 248 pt, collapsible to a 36 pt strip of icons). Tabs: Browser and History (registered `shell::Panel`s). The Browser lists every object, and under the active one "Model" and each defect category as a disclosure row: caret, the category's icon in its meaning colour (faint when empty), name, and the count as a subtle badge. Rows have no buttons: a row's actions are its right-click menu (registered context actions: Fill Hole 3, Remove Piece 2, Mark … as intentional, Unmark, Select the faces at …, Frame …) and Repair. It opens by default unless the document is one object with nothing to fix; the default is decided once, when the first analysis is in, so repairing everything doesn't fold it away. Below 1,100 pt it is a drawer over the view's right edge.
+- **History** (tab): every step of the current path as a full-width row; the current step is highlighted, steps Redo would take are greyed and italic; Branches… lists the whole tree. Click a step to go back to it.
+- **Status bar** (one line): Undo and Redo as icon buttons, then the message (a running job's words in a fixed-width slot, then its progress bar and Cancel, so they don't move as the percentage counts), the import-warnings button, and the active object's stats at the right (triangles · size).
+- **Navigation bar** (bottom centre of the view, dim at 60% opacity until the pointer is over it): Orbit, Pan, Zoom, Box select (the drag mode; the current one accent-filled), Zoom out / in (hold to repeat), Frame selection, Reset view, and Overlays. Icons with accessible names and tooltips naming their keys.
+- **Overlays popover** (View > Overlays…, or the navigation bar): the legend, at the view's top-right, in two titled groups: "Model" (the model's own colours: the clay surface and back faces until materials arrive, MF-ISSUE-092) and "Overlays" (each overlay colour with its switch; the open tool's own rows while it supplies them, e.g. Transform's axes).
+- **First-use hint**: "Pick a tool on the left: Transform (T) to move, rotate or scale", in a small card at the view's top centre, with a model open and no tool used yet; it goes when a tool opens or with its ✕ (per session until layouts persist, MF-ISSUE-095).
+- **Settings** (⚙ at the menu bar's right): a page per registered settings page (today: Developer, with the pseudo-locale).
+- **Protected centre.** No widget sits in the central 60% of the view except what the user is manipulating (the gizmo). The inspector card, the hint, the Overlays popover, the Transform line and the navigation bar are at the edges.
+
+### Tools (UI plan §7)
+
+- **Transform**: Mode as a segmented control (Move | Rotate | Scale; W / E / R); Position (mm), Rotation (°) and Scale (%) as three fields each, labelled X / Y / Z in the axis colours; Options (Uniform scale, Snap); Drop to plate and Reset as secondary buttons; Done as the primary.
+- **Repair**: one tool, one level deep. At the top, whether it prints (the chip). Sections, each with an icon in its meaning colour and a count badge: Holes (how many to fill, Previous / Next hole, each size group with Fill all N … and Mark intentional, and Fill all holes), Narrow cracks (what they are, why they can't be welded yet), Loose pieces (Remove loose pieces), Tangled edges, Housekeeping (Compact, and the unused-space suggestion when it applies), and Done. The panel's one primary is the first section with work to do (Fill all holes, else Remove loose pieces). Choosing an operation replaces the list with its settings and Apply (primary) and Defaults (tertiary); "‹ All repairs" (or Esc) returns. A defect selected in the Browser or the view shows the same way, with its operation, and Previous / Next hole beside the back link.
+- **Inspect**: Printability (the chip), then every number the analysis reports, then the import's warnings.
+- **Export**: Export… (primary), Save Command Log… and Replay Command Log… (secondary).
+- **Esc**, in order (plan §5): cancel the running job; cancel the tool's drag; one level back inside the tool (a selection, then a sub-operation's settings); leave the tool; clear the selection.
+
+### The pluggable shell (`shell.rs`, plan §5)
+
+Built-ins register through the same calls a plugin makes: `register_tool` (id, name and help as message ids, a required icon, category, order, shortcut, availability, panel, the view's input: `claims` and `viewport_input`, keys, overlays, hides_defects, on_open, on_close, back), `register_command` (the app's commands, one per tool, and one per operation spec, automatically), `register_panel` (Browser, History), `register_overlay` (each legend row), `register_inspector_section` (summary, printability), `register_context_action` (the Browser's right-click actions) and `register_settings_page` (Developer). A tool without an icon, or whose "icon" isn't one icon-font glyph, or whose name isn't in the message catalogue, is refused at registration (test `a_tool_without_an_icon_is_rejected`). The rail, the Tools menu, the tool dock, the view's input routing, the Overlays popover, the inspector card, the right-click menus and Settings are all drawn from the registries. Not yet on the contract: the built-in overlays' drawing (MF-ISSUE-094).
+
+## Visual system (UI plan §4)
+
+| Token | Value | Use |
+|---|---|---|
+| `RAIL` | `#17191C` | the rail, the menu bar, the status bar |
+| `PANEL` | `#1E2024` | the tool dock, the Browser |
+| `CARD` | `#25282D` | the inspector card, the Overlays popover, the hint, the navigation bar |
+| `SEPARATOR` / `CONTROL` | `#2A2D32` | hairlines; a secondary button's fill |
+| `CONTROL_HOVER` / `CONTROL_ACTIVE` | `#353940` / `#40454D` | secondary and tertiary buttons under the pointer / pressed |
+| `FIELD` | `#141619` | text fields and a segmented control's track (inset) |
+| `TEXT_STRONG` / `TEXT` / `TEXT_MUTED` / `TEXT_FAINT` | `#F4F5F7` / `#E6E8EB` / `#9AA0A8` / `#5C6168` | titles and section labels / body / secondary / disabled |
+| `ACCENT` / `ACCENT_HOVER` | `#5B5FEF` / `#6D71F5` | "active and primary" in the chrome only: the active tool, the current segment, the current tab's bar, a focused control's ring, the one primary button. Never geometry |
+| `ACCENT_SOFT` | accent wash | behind the rail's active tool |
+
+- **The accent is indigo, not the plan's `#3D8BFD`.** That blue is within a few degrees of `AXIS_Z` (`#3E8BF0`), and plan principle 7 (axis colours are never reused for chrome) wins, so the accent moved towards indigo: still a calm blue, clearly apart from the Z axis and from `CRACK`'s magenta. White on it reads at 4.9:1. One token to change if the owner prefers otherwise.
+- **Cyan stays the target's** (MF-ISSUE-056 resolved for the chrome): a selected Browser row is a cyan wash with cyan text because it is the target; the active tool, the current drag mode and the current history step use the accent, never cyan.
+- **Type scale**: Title 16, Section 13 (in `TEXT_STRONG`: the bundled font has one weight, so "semibold" is the brightest text colour), Body 13, Caption 11. Icons 16 pt beside text, 22 pt on the rail.
+- **Spacing**: a 4 pt grid; panel padding 12, section gap 12–16, rows and controls 28 pt; one corner radius, 6.
+- **Buttons** (`widgets::button`, hand-painted so all three read the same everywhere): primary (accent fill, white text, centred), secondary (`CONTROL` fill, centred), tertiary (text only, left-aligned, a fill under the pointer). A focused button gets an accent ring. One primary per panel.
+- **Segmented controls** for modes (Transform's Move | Rotate | Scale): one inset track, the current segment accent-filled.
+- **Icons**: Phosphor (regular, MIT), vendored as a font (`assets/fonts/Phosphor.ttf`; `egui-phosphor` targets egui 0.36), one constant per icon in `icons.rs`, tinted with the text colour, the accent only when active. Recorded in THIRD_PARTY_NOTICES.md.
+- **Scroll bars are solid**, not floating: a floating bar widens under the pointer and re-wrapped the panel's text, moving what was under the pointer. Tool settings are rows, not a grid, for the same reason (a grid's rows settle a frame late).
+
+## Internationalisation (UI plan §10)
+
+Every string the shell added or moved goes through `t!("id")` / `tp!("id", n)` over a sorted static English catalogue (`i18n.rs`); a missing id panics (a bug, found by any test that draws it). Plurals are `.one` / `.other` entries. View > Pseudo-locale (or `MF_PSEUDO_LOCALE=1`, or Settings > Developer) accents every catalogued string, lengthens it ~40% and brackets it in ⟦…⟧, so literals not yet converted (MF-ISSUE-090) and layouts that break with longer text show in frames.
 
 Someone who has used Meshmixer or Fusion should understand the screen without an engineer. Three rules follow from that:
 

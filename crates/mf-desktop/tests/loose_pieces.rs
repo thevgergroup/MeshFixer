@@ -98,6 +98,9 @@ fn remove_loose_pieces_previews_tints_and_asks_before_a_large_removal() {
         state(a, part[0]) & FaceStates::LOOSE_PIECE != 0
     });
 
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    h.get_by_label("Repair").click();
+    h.run_steps(2);
     h.get_by_label("Remove loose pieces").click();
     h.run();
     // The preview, in words: 5 of the 7 pieces, 60 of 2,052 triangles.

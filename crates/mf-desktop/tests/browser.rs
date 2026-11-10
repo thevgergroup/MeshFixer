@@ -159,6 +159,24 @@ fn key(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key, modifiers: egui::Modif
     h.step();
 }
 
+/// Opens the Repair tool from the rail (its whole-object actions live
+/// there, ui-plan.md §7).
+fn open_repair(h: &mut Harness<'_, MeshFixerApp>) {
+    if h.state().active_tool != "repair" {
+        h.get_by_label("Repair").click();
+        h.run_steps(3);
+    }
+}
+
+/// Runs a Browser row's right-click action (its registered context
+/// action, e.g. "Fill Hole 3").
+fn row_action(h: &mut Harness<'_, MeshFixerApp>, row: &str, action: &str) {
+    h.get_by_label(row).click_secondary();
+    h.run_steps(3);
+    h.get_by_label(action).click();
+    h.step();
+}
+
 /// The holes the browser lists, in its order.
 fn listed(app: &MeshFixerApp) -> Vec<Defect> {
     let a = app.current_analysis().unwrap();
@@ -266,7 +284,9 @@ fn clicking_a_hole_in_the_viewport_opens_fill_options_for_it() {
             .next()
             .is_some()
     );
-    h.get_by_label("Fill hole");
+    // The inspector card offers its operation; it opens in Repair.
+    h.get_by_label("Fill hole").click();
+    h.run();
     h.get_by_label("Refine");
     h.get_by_label("Apply");
 }
@@ -306,8 +326,8 @@ fn one_click_fill_from_defect_list_fills_only_that_hole() {
         .find(|d| matches!(d, Defect::Hole { edges: 8, .. }))
         .unwrap();
     let rev = h.state().session.current();
-    h.get_by_label(&format!("Fill Hole {}", number(&hole)))
-        .click();
+    let label = row(h.state(), &hole);
+    row_action(&mut h, &label, &format!("Fill Hole {}", number(&hole)));
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -331,7 +351,9 @@ fn hole_numbers_stay_after_a_fill() {
     let holes = listed(h.state());
     let three = holes.iter().find(|d| number(d) == 3).unwrap().clone();
     let rev = h.state().session.current();
-    h.get_by_label("Fill Hole 1").click();
+    let one = holes.iter().find(|d| number(d) == 1).unwrap();
+    let label = row(h.state(), one);
+    row_action(&mut h, &label, "Fill Hole 1");
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -356,6 +378,7 @@ fn size_groups_count_and_fill_a_group_in_one_command() {
     assert_eq!(view.group(HoleGroup::Tiny).len(), 250);
     assert_eq!(view.group(HoleGroup::Small).len(), 50);
     assert_eq!(view.group(HoleGroup::Large).len(), 1, "the rim");
+    open_repair(&mut h);
     h.get_by_label("Tiny holes (up to 8 edges) · 250");
     h.get_by_label("Small holes (9–30 edges) · 50");
     let rev = h.state().session.current();
@@ -380,6 +403,7 @@ fn size_groups_count_and_fill_a_group_in_one_command() {
 fn batch_fill_slider_previews_count_and_undoes_in_one_step() {
     require_gpu!("batch_fill_slider_previews_count_and_undoes_in_one_step");
     let mut h = opened(three_hundred_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run();
     h.get_by_label("Fill holes up to");
@@ -434,8 +458,8 @@ fn intentional_openings_survive_edits_and_are_excluded_from_fill_all() {
         .find(|d| matches!(d, Defect::Hole { edges: 8, .. }))
         .unwrap();
     let rev = h.state().session.current();
-    h.get_by_label(&format!("Fill Hole {}", number(other)))
-        .click();
+    let label = row(h.state(), other);
+    row_action(&mut h, &label, &format!("Fill Hole {}", number(other)));
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -456,6 +480,7 @@ fn intentional_openings_survive_edits_and_are_excluded_from_fill_all() {
     // Fill all holes leaves it open.
     h.state_mut().clear_selection();
     h.run();
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run();
     let rev = h.state().session.current();
@@ -499,7 +524,8 @@ fn next_hole_selects_and_frames_in_order() {
         let c = centre(&loop_points(h.state(), want));
         assert!(off_centre(h.state(), c) < 0.05, "step {k}: framed");
     }
-    // The on-screen buttons do the same.
+    // Repair's buttons do the same.
+    open_repair(&mut h);
     h.get_by_label("Next hole").click();
     settle_camera(&mut h);
     assert_eq!(selected_loops(h.state()), vec![order[1]]);
@@ -693,6 +719,10 @@ fn every_operation_parameter_has_a_tooltip() {
         let Some(label) = mf_desktop::defects::operation_label(&spec.id, None) else {
             continue;
         };
+        if !mf_desktop::tools::CATALOGUE.iter().any(|e| e.id == spec.id) {
+            continue;
+        }
+        open_repair(&mut h);
         h.get_by_label(&label).click();
         h.run();
         for p in &spec.parameters {
@@ -713,7 +743,8 @@ fn every_operation_parameter_has_a_tooltip() {
             h.event(egui::Event::PointerGone);
             h.run();
         }
-        h.get_by_label(&label).click();
+        // Back to Repair's list.
+        h.get_by_label("All repairs").click();
         h.run();
     }
 }
@@ -785,11 +816,11 @@ fn next_hole_scrolls_the_tree_to_its_row() {
     h.run_steps(60);
     assert_eq!(selected_loops(h.state()), vec![loop_id(&last)]);
     let r = h.get_by_label(&label).rect();
-    let tree = h.get_by_label("Objects & Defects").rect();
+    let tree = h.get_by_label("Browser").rect();
     let view = h.state().viewport.last_rect.unwrap();
     assert!(
-        r.right() <= view.left() + 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
-        "the row is in view in the tree: {r:?}"
+        r.left() >= view.right() - 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
+        "the row is in view in the Browser: {r:?}"
     );
 }
 
@@ -816,6 +847,10 @@ fn fill_style_choice_changes_the_patch() {
         h.state_mut().select_defect(&hole);
         // Selecting frames the hole with an animated move.
         h.run_steps(60);
+        if h.state().active_tool != "repair" {
+            h.get_by_label("Fill hole").click();
+            h.run();
+        }
         assert!(h.get_all_by_label("Fill hole").next().is_some());
         h.get_by_label(label).click();
         h.run_steps(2);
@@ -840,6 +875,8 @@ fn fill_style_choice_changes_the_patch() {
     };
     h.state_mut().select_defect(&hole);
     h.run_steps(60);
+    h.get_by_label("Fill hole").click();
+    h.run();
     // Each style: its name, then one plain line saying what it does.
     for (value, label, words) in [
         ("flat", "Flat", "flat"),
@@ -881,6 +918,7 @@ fn fill_style_choice_changes_the_patch() {
 fn smooth_styles_show_refine_as_always_on() {
     require_gpu!("smooth_styles_show_refine_as_always_on");
     let mut h = opened(three_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run_steps(2);
     let note = "Smooth and Curvature always add points so the patch can curve";
@@ -919,8 +957,9 @@ fn smooth_styles_show_refine_as_always_on() {
 fn batch_fill_uses_the_chosen_style() {
     require_gpu!("batch_fill_uses_the_chosen_style");
     let mut h = opened(three_hundred_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
-    h.run_steps(2);
+    h.run_steps(3);
     h.get_by_label("Curvature-matched").click();
     h.run_steps(2);
     let rev = h.state().session.current();

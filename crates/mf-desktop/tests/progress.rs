@@ -219,6 +219,9 @@ fn wait_until(
 }
 
 fn start_fill(harness: &mut Harness<'_, MeshFixerApp>) {
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Fill all holes").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
@@ -504,6 +507,9 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
         let labels = harness.state().session.history_labels().len();
         let rendered = harness.state().viewport.frames_rendered;
 
+        // Repair holds the whole-object repairs (ui-plan.md §7).
+        harness.get_by_label("Repair").click();
+        harness.run_steps(2);
         harness.get_by_label("Fill all holes").click();
         harness.run_steps(2);
         harness.get_by_label("Apply").click();

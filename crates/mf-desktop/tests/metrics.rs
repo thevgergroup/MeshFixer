@@ -108,6 +108,9 @@ fn metrics_panel_shows_gpu_bytes_and_thread_budget() {
     }
     // An operation (with the panel open), so there's a duration and a
     // peak to show; the snapshot catches up within half a second.
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    h.get_by_label("Repair").click();
+    h.run_steps(2);
     h.get_by_label("Fill all holes").click();
     h.run_steps(2);
     h.get_by_label("Apply").click();

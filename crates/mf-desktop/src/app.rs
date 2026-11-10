@@ -21,7 +21,7 @@ use crate::defects::{Defect, HoleNumbers, HoleView, count, operation_label, thou
 use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
-use crate::tools::{Interactive, LeftTab, LegendRow, ToolGroup, ToolKind};
+use crate::tools::{Interactive, LegendRow, ToolGroup, ToolKind};
 use crate::transform_tool::{self, Dragging, Field, Placement, TransformTool};
 use crate::viewport::{
     Click, NavAction, ObjectView, ToolPointer, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
@@ -68,6 +68,15 @@ struct RunningJob {
     cancel_requested: bool,
     /// When and at what heap level it started (View ▸ Metrics).
     start: JobStart,
+}
+
+/// On a laptop-size window (narrower than [`crate::tool_panels::NARROW_WINDOW`])
+/// the tool panel and the Browser can't both be open (ui-plan.md §3):
+/// which one the user last asked for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NarrowFocus {
+    Tool,
+    Browser,
 }
 
 /// An operation offered in Properties for the current target.
@@ -284,14 +293,34 @@ pub struct MeshFixerApp {
     rss: Rss,
     /// The last few finished jobs: duration and heap peak.
     recent_jobs: RecentJobs,
-    /// The whole-object tool open in Properties (its catalogue id,
-    /// `tools::CATALOGUE`).
+    /// The one-shot operation open inside the Repair tool (its catalogue
+    /// id, `tools::CATALOGUE`): its settings replace Repair's list.
     pub tool: Option<String>,
-    /// The interactive tool open, if one is: it owns the view's primary
-    /// drag and its keys, and supplies the legend (`tools::Interactive`).
+    /// The interactive tool's state while it is open (Transform's gizmo
+    /// mode, drag and fields; `tools::Interactive`).
     pub interactive: Option<Interactive>,
-    /// The left panel's section shown (`tools::LeftTab`).
-    pub left_tab: LeftTab,
+    /// The shell's registries (ui-plan.md §5): tools, commands, panels,
+    /// overlays, inspector sections, context actions, settings pages.
+    pub shell: Arc<crate::shell::Shell>,
+    /// The tool open on the rail (a `shell::Tool` id): "select" when no
+    /// tool is open.
+    pub active_tool: &'static str,
+    /// The Browser: `None` until the user opens or closes it (then it
+    /// follows the default: open unless the document is one object with
+    /// nothing to fix).
+    pub browser_open: Option<bool>,
+    /// The right dock's tab (a `shell::Panel` id).
+    pub right_tab: &'static str,
+    /// On a laptop-size window the tool panel and the Browser can't both
+    /// be open: which one the user last asked for.
+    pub narrow_focus: NarrowFocus,
+    /// View ▸ Overlays: the popover listing what each colour means.
+    pub show_overlays: bool,
+    /// The Settings window.
+    pub show_settings: bool,
+    /// The first-use hint ("Pick a tool on the left…"): shown with a
+    /// model open until a tool is used or it is dismissed.
+    pub first_use_hint: bool,
     /// A placement committed from the Transform tool, drawn until its
     /// command finishes (so the object doesn't jump back meanwhile).
     preview: Option<(ObjectId, [f64; 12])>,
@@ -390,10 +419,9 @@ pub struct MeshFixerApp {
     /// default, so the view shows where the holes are: M4 final UX I6).
     /// View > Show hole overview shows them too, with its tint.
     pub show_hole_markers: bool,
-    /// The side panels (View > Hide side panels, Cmd/Ctrl+\, or each
-    /// panel's « / »): hidden, the view has the window (M4 final UX I5).
-    pub show_tree: bool,
-    pub show_properties: bool,
+    /// The side panels (View > Hide side panels, Cmd/Ctrl+\): hidden, the
+    /// view has the window but the rail (M4 final UX I5).
+    pub side_panels_hidden: bool,
     /// Works out the overview's markers on the background pool.
     marker_worker: LatestWorker<worker::MarkerRequest>,
     /// What the markers were last asked for, and its number.
@@ -570,7 +598,14 @@ impl MeshFixerApp {
             recent_jobs: RecentJobs::default(),
             tool: None,
             interactive: None,
-            left_tab: LeftTab::default(),
+            shell: Arc::new(crate::shell::builtin()),
+            active_tool: crate::tool_panels::SELECT,
+            browser_open: None,
+            right_tab: crate::panels::BROWSER,
+            narrow_focus: NarrowFocus::Tool,
+            show_overlays: false,
+            show_settings: false,
+            first_use_hint: true,
             preview: None,
             pending_status: None,
             lowest: None,
@@ -617,8 +652,7 @@ impl MeshFixerApp {
             hole_list_requested: None,
             show_hole_overview: false,
             show_hole_markers: true,
-            show_tree: true,
-            show_properties: true,
+            side_panels_hidden: false,
             marker_worker,
             marker_query: None,
             markers: None,
@@ -1577,9 +1611,10 @@ impl MeshFixerApp {
         }
     }
 
-    /// Esc, in order: stop the running job; else cancel the open
-    /// interactive tool's drag; else leave that tool; else clear the
-    /// selection. One step per press.
+    /// Esc, in order (ui-plan.md §5): stop the running job; else cancel
+    /// the open tool's drag; else go one level back inside the tool (a
+    /// sub-tool's settings, a selection); else leave the tool; else clear
+    /// the selection. One step per press.
     pub fn escape(&mut self) {
         if self.can_cancel() {
             self.cancel_job();
@@ -1588,11 +1623,88 @@ impl MeshFixerApp {
         if self.cancel_tool_drag() {
             return;
         }
-        if self.interactive.is_some() {
-            self.leave_interactive();
+        let tool = self.active_tool_def();
+        if (tool.back)(self) {
+            return;
+        }
+        if self.active_tool != crate::tool_panels::SELECT {
+            self.close_rail_tool();
             return;
         }
         self.clear_selection();
+    }
+
+    /// The open tool's registration.
+    pub fn active_tool_def(&self) -> crate::shell::Tool {
+        *self
+            .shell
+            .tool(self.active_tool)
+            .or_else(|| self.shell.tool(crate::tool_panels::SELECT))
+            .expect("Select is registered")
+    }
+
+    /// Open rail tool `id` (a `shell::Tool` id): the open one closes,
+    /// keeping its work. Opening the open one does nothing; an
+    /// unavailable one stays shut (its reason in the status line).
+    pub fn open_rail_tool(&mut self, id: &str) {
+        let Some(tool) = self.shell.tool(id).copied() else {
+            return;
+        };
+        if let crate::shell::Availability::Unavailable(why) = (tool.availability)(self) {
+            self.status = Some(why);
+            return;
+        }
+        if tool.id != crate::tool_panels::SELECT {
+            self.first_use_hint = false;
+            self.narrow_focus = NarrowFocus::Tool;
+        }
+        if self.active_tool == tool.id {
+            // The open tool's rail button takes it back to its top level.
+            while (tool.back)(self) {}
+            return;
+        }
+        let old = self.active_tool_def();
+        (old.on_close)(self, crate::shell::Close::Commit);
+        self.active_tool = tool.id;
+        (tool.on_open)(self);
+    }
+
+    /// Run a registered command.
+    pub fn run_command(&mut self, command: &crate::shell::Command) {
+        if !(command.enabled)(self) {
+            return;
+        }
+        match &command.action {
+            crate::shell::Action::Run(run) => run(self),
+            crate::shell::Action::Operation(op) => {
+                if let Some(tool) = op.strip_prefix("tool:") {
+                    if tool == crate::tool_panels::TRANSFORM {
+                        self.open_transform();
+                    } else {
+                        self.open_rail_tool(tool);
+                    }
+                    return;
+                }
+                match op.as_str() {
+                    "object.set_transform" => self.open_transform(),
+                    "object.drop_to_plate" => self.drop_to_plate(),
+                    "object.delete" => self.delete_active_object(),
+                    "mesh.inspect" => self.open_rail_tool(crate::tool_panels::INSPECT),
+                    other if crate::tools::entry(other).is_some() => self.open_tool(other),
+                    _ => {
+                        self.status = Some(format!(
+                            "{} isn't offered in the app yet",
+                            command.title.text()
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    /// Close the open rail tool: back to Select.
+    pub fn close_rail_tool(&mut self) {
+        self.open_rail_tool(crate::tool_panels::SELECT);
     }
 
     /// Cancel the open interactive tool's drag, if one is under way:
@@ -1604,39 +1716,51 @@ impl MeshFixerApp {
         }
     }
 
-    /// Open a whole-object tool from Properties (its catalogue id). An
-    /// interactive tool starts working in the view; another tool that
-    /// was open closes.
+    /// Open a whole-object tool by its catalogue id: Transform opens on
+    /// the rail; a one-shot operation opens its settings inside Repair.
     pub fn open_tool(&mut self, id: &str) {
-        self.leave_interactive();
-        self.interactive = crate::tools::Interactive::open(self, id);
         let interactive = crate::tools::entry(id).is_some_and(|e| e.kind == ToolKind::Interactive);
-        // An interactive tool that can't open here (no object) stays shut.
-        self.tool = (!interactive || self.interactive.is_some()).then(|| id.to_owned());
+        if interactive {
+            self.open_rail_tool(crate::tool_panels::TRANSFORM);
+            return;
+        }
+        if self.active_tool != crate::tool_panels::REPAIR {
+            self.open_rail_tool(crate::tool_panels::REPAIR);
+        }
+        if self.active_tool == crate::tool_panels::REPAIR {
+            self.tool = Some(id.to_owned());
+        }
     }
 
-    /// Close the whole-object tool open in Properties.
+    /// Close the one-shot operation's settings (back to Repair's list), or
+    /// the Transform tool.
     pub fn close_tool(&mut self) {
-        self.leave_interactive();
+        if self.active_tool == crate::tool_panels::TRANSFORM {
+            self.close_rail_tool();
+        }
         self.tool = None;
     }
 
-    /// Close the open interactive tool.
+    /// Leave the Transform tool (its state goes; the rail goes back to
+    /// Select).
     pub fn leave_interactive(&mut self) {
-        if let Some(t) = self.interactive.take()
-            && self.tool.as_deref() == Some(t.id())
-        {
-            self.tool = None;
+        self.interactive = None;
+        if self.active_tool == crate::tool_panels::TRANSFORM {
+            self.active_tool = crate::tool_panels::SELECT;
         }
     }
 
-    /// What the legend lists: the open interactive tool's rows, or what
-    /// each overlay colour means.
+    /// What the Overlays popover lists: the open tool's own rows, or every
+    /// registered overlay's legend entry.
     pub fn legend_rows(&self) -> Vec<LegendRow> {
-        match &self.interactive {
-            Some(t) => t.legend(),
-            None => crate::tools::default_legend(),
-        }
+        let tool = self.active_tool_def();
+        (tool.overlays)(self).unwrap_or_else(|| {
+            self.shell
+                .overlays()
+                .iter()
+                .map(|o| o.legend.clone())
+                .collect()
+        })
     }
 
     /// The overlay switch a legend row toggles.
@@ -2885,9 +3009,8 @@ impl MeshFixerApp {
     /// True while an open tool hides the defect and recent-repair
     /// overlays (Transform: D8, so the axis colours mean one thing).
     pub fn tool_hides_defects(&self) -> bool {
-        self.interactive
-            .as_ref()
-            .is_some_and(Interactive::hides_defects)
+        let tool = self.active_tool_def();
+        (tool.hides_defects)(self)
     }
 
     /// True if the view outlines the holes this frame.
@@ -3472,11 +3595,10 @@ impl MeshFixerApp {
         }
     }
 
-    /// Hide both side panels, or show both if both are hidden.
+    /// Hide both side panels (the tool panel and the Browser), or show
+    /// them again.
     pub fn toggle_side_panels(&mut self) {
-        let show = !(self.show_tree || self.show_properties);
-        self.show_tree = show;
-        self.show_properties = show;
+        self.side_panels_hidden = !self.side_panels_hidden;
     }
 
     /// True if the view draws hole markers (they're on by default).
@@ -3604,7 +3726,15 @@ impl MeshFixerApp {
         }
         self.clear_selection();
         if self.transform_tool().is_none() {
-            self.open_tool(transform_tool::ID);
+            self.open_rail_tool(crate::tool_panels::TRANSFORM);
+        }
+    }
+
+    /// Transform's own state, when it opens (its rail `on_open`).
+    pub(crate) fn start_transform(&mut self) {
+        self.interactive = crate::tools::Interactive::open(self, transform_tool::ID);
+        if self.interactive.is_none() {
+            self.active_tool = crate::tool_panels::SELECT;
         }
     }
 
@@ -3614,25 +3744,32 @@ impl MeshFixerApp {
     /// Scale, as in Meshmixer). A key no open tool uses is left for the
     /// rest of the app.
     fn tool_keys(&mut self, ctx: &egui::Context) {
-        for e in crate::tools::CATALOGUE {
-            let Some(key) = e.shortcut else { continue };
-            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
-                if e.id == transform_tool::ID {
-                    self.open_transform();
-                } else {
-                    self.open_tool(e.id);
-                }
-            }
-        }
-        let keys = crate::tools::tool_keys(self.interactive.as_ref());
+        // The open tool's own keys first: they win over another tool's
+        // shortcut while it is open.
+        let tool = self.active_tool_def();
+        let keys = (tool.keys)(self);
         let pressed = ctx.input_mut(|i| {
             keys.iter()
                 .find(|(k, _)| i.consume_key(egui::Modifiers::NONE, *k))
                 .map(|(_, what)| *what)
         });
-        match pressed {
-            Some(crate::tools::ToolKey::Mode(mode)) => self.set_transform_mode(mode),
-            None => {}
+        if let Some(k) = pressed {
+            (tool.on_key)(self, k);
+        }
+        let shortcuts: Vec<(&'static str, egui::Key)> = self
+            .shell
+            .tools()
+            .iter()
+            .filter_map(|t| t.shortcut.map(|k| (t.id, k)))
+            .collect();
+        for (id, key) in shortcuts {
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, key)) {
+                if id == crate::tool_panels::TRANSFORM {
+                    self.open_transform();
+                } else {
+                    self.open_rail_tool(id);
+                }
+            }
         }
     }
 
@@ -3716,7 +3853,7 @@ impl MeshFixerApp {
     /// What a press in the view hits: the gizmo, the camera it's seen
     /// with and the view's size (points). `None` while a job runs (no
     /// command could commit) or nothing is shown.
-    fn transform_grab(&self) -> Option<(Gizmo, OrbitCamera, (f64, f64))> {
+    pub(crate) fn transform_grab(&self) -> Option<(Gizmo, OrbitCamera, (f64, f64))> {
         if self.busy.is_some() {
             return None;
         }
@@ -3813,7 +3950,7 @@ impl MeshFixerApp {
     /// The view's pointer for the Transform tool: a drag on a handle
     /// moves the object's drawn placement only (its model matrix); the
     /// release commits one `object.set_transform`.
-    fn transform_pointer(
+    pub(crate) fn transform_pointer(
         &mut self,
         pointer: Option<ToolPointer>,
         hover: Option<(f64, f64)>,
@@ -4195,10 +4332,12 @@ impl MeshFixerApp {
         self.hover = None;
         crate::panels::menu_bar(self, ui);
         crate::panels::error_banner(self, ui);
-        crate::panels::history_bar(self, ui);
-        crate::panels::tree_panel(self, ui);
-        crate::panels::properties_panel(self, ui);
+        crate::panels::status_bar(self, ui);
+        crate::tool_panels::rail(self, ui);
+        crate::tool_panels::tool_dock(self, ui);
+        crate::panels::right_dock(self, ui);
         crate::panels::replay_window(self, &ctx);
+        crate::panels::settings_window(self, &ctx);
         crate::panels::controls_window(self, &ctx);
         self.unit_dialog(&ctx);
         crate::panels::confirm_window(self, &ctx);
@@ -4238,20 +4377,25 @@ impl MeshFixerApp {
             .markers_shown()
             .then(|| self.markers.as_ref().map(|(_, m)| m.mesh.clone()))
             .flatten();
-        let grab = self.transform_grab();
-        let grabs =
-            grab.map(|(g, cam, view)| move |px: (f64, f64)| g.hit(&cam, view, px).is_some());
+        // The open tool claims the presses it wants (Transform: its
+        // handles) ahead of the camera and picking.
+        let tool = self.active_tool_def();
+        let claims = (tool.claims)(self);
         let out = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
                 let drawable = !objects.is_empty();
-                let input = self.viewport.input(
-                    ui,
-                    &mut self.camera,
-                    drawable,
-                    grabs.as_ref().map(|f| f as &dyn Fn((f64, f64)) -> bool),
-                );
+                let input = self
+                    .viewport
+                    .input(ui, &mut self.camera, drawable, claims.as_deref());
                 let modifiers = ui.input(|i| i.modifiers);
-                self.transform_pointer(input.out.tool, input.out.tool_hover, modifiers);
+                (tool.viewport_input)(
+                    self,
+                    &crate::shell::ToolInput {
+                        pointer: input.out.tool,
+                        hover: input.out.tool_hover,
+                        modifiers,
+                    },
+                );
                 let mut objects = objects;
                 for o in &mut objects {
                     if let Some(t) = self.shown_transform(o.id) {
@@ -4284,8 +4428,12 @@ impl MeshFixerApp {
         match out.action {
             Some(NavAction::FrameSelection) => self.frame_target(),
             Some(NavAction::ResetView) => self.fit_camera(),
+            Some(NavAction::Overlays) => self.show_overlays = !self.show_overlays,
             None => {}
         }
+        crate::tool_panels::inspector_card(self, &ctx);
+        crate::tool_panels::first_use_hint(self, &ctx);
+        crate::panels::overlays_popover(self, &ctx);
         if let Some(c) = out.click
             && self.busy.is_none()
         {

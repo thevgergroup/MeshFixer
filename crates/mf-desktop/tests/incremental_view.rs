@@ -114,6 +114,9 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
     let full = opened.surface_bytes;
     let a = harness.state().session.current();
 
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Fill all holes").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
@@ -139,6 +142,9 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
 
     // A branch off the original: its render mesh is built from what's on
     // screen (the original), not from the fill it doesn't descend from.
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
@@ -194,6 +200,9 @@ fn cached_revisions_are_bounded_by_gpu_bytes() {
             .state_mut()
             .import_model(model(damaged_sphere(&spec)));
         wait_shown(&mut harness, "import");
+        // Repair holds the whole-object repairs (ui-plan.md §7).
+        harness.get_by_label("Repair").click();
+        harness.run_steps(2);
         harness.get_by_label("Fill all holes").click();
         harness.run_steps(2);
         harness.get_by_label("Apply").click();

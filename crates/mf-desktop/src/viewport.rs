@@ -155,6 +155,8 @@ pub enum NavMode {
 pub enum NavAction {
     FrameSelection,
     ResetView,
+    /// The Overlays popover (what each colour means).
+    Overlays,
 }
 
 /// What happened in the viewport this frame.
@@ -204,6 +206,8 @@ pub struct Viewport {
     box_from: Option<egui::Pos2>,
     /// The primary drag under way belongs to the open interactive tool.
     tool_drag: bool,
+    /// Where the navigation bar was last drawn (it is dim until hovered).
+    nav_rect: Option<egui::Rect>,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
     /// The last frame that redrew the 3D view, and whether it was timed.
@@ -235,6 +239,7 @@ impl Viewport {
             box_once: false,
             box_from: None,
             tool_drag: false,
+            nav_rect: None,
         }
     }
 
@@ -516,66 +521,91 @@ impl Viewport {
         }
     }
 
-    /// The on-screen navigation bar at the view's bottom-right, for people
-    /// without a mouse wheel: drag mode (Orbit / Pan / Zoom), zoom out / in
-    /// (hold to repeat), frame selection and reset view. Camera maths only.
-    /// In a narrow view (a laptop window with both panels open) it takes
-    /// two rows, so it fits. Returns the action and where the bar is.
+    /// The navigation bar at the view's bottom centre (ui-plan.md §3), for
+    /// people without a mouse wheel: drag mode (Orbit / Pan / Zoom / Box
+    /// select), zoom out / in (hold to repeat), frame selection, reset
+    /// view and the Overlays popover, as icons with accessible names and
+    /// tooltips. Dim until the pointer is over it. Camera maths only.
+    /// Returns the action and where the bar is.
     fn navigation_bar(
         &mut self,
         ui: &egui::Ui,
         rect: egui::Rect,
         cam: &mut OrbitCamera,
     ) -> (Option<NavAction>, egui::Rect) {
+        use crate::{icons, t, widgets};
         let mut action = None;
         let mut zoom_steps = 0i32;
         let mut held = None;
-        let two_rows = rect.width() < NARROW_VIEW;
+        let hovered = self.nav_rect.is_some_and(|r| {
+            ui.ctx()
+                .pointer_hover_pos()
+                .is_some_and(|p| r.expand(6.0).contains(p))
+        });
         let bar = egui::Area::new(egui::Id::unique("navigation bar"))
             .order(egui::Order::Middle)
-            .pivot(egui::Align2::RIGHT_BOTTOM)
-            .fixed_pos(rect.right_bottom() - egui::vec2(10.0, 10.0))
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(rect.center_bottom() - egui::vec2(0.0, theme::SPACE_M))
             .constrain_to(rect)
             .show(ui.ctx(), |ui| {
+                if !hovered {
+                    ui.multiply_opacity(0.6);
+                }
                 egui::Frame::new()
-                    .fill(theme::VIEWPORT_BACKGROUND.gamma_multiply(0.92))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        theme::TEXT_MUTED.gamma_multiply(0.4),
-                    ))
-                    .corner_radius(6.0)
-                    .inner_margin(6.0)
+                    .fill(theme::CARD.gamma_multiply(0.92))
+                    .stroke(egui::Stroke::new(1.0, theme::SEPARATOR))
+                    .corner_radius(theme::RADIUS + 2.0)
+                    .inner_margin(4.0)
                     .show(ui, |ui| {
-                        let modes = |ui: &mut egui::Ui, nav_mode: &mut NavMode| {
-                            for (mode, label, tip) in [
-                                (NavMode::Orbit, "Orbit", "Drag orbits"),
-                                (NavMode::Pan, "Pan", "Drag pans (or Shift + drag)"),
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            const SIZE: f32 = 28.0;
+                            for (mode, icon, label, tip) in [
+                                (
+                                    NavMode::Orbit,
+                                    icons::ORBIT,
+                                    t!("nav.orbit"),
+                                    t!("nav.orbit.tip"),
+                                ),
+                                (NavMode::Pan, icons::PAN, t!("nav.pan"), t!("nav.pan.tip")),
                                 (
                                     NavMode::Zoom,
-                                    "Zoom",
-                                    "Drag up/down zooms (or Option/Alt + drag)",
+                                    icons::ZOOM,
+                                    t!("nav.zoom"),
+                                    t!("nav.zoom.tip"),
                                 ),
                                 (
                                     NavMode::Select,
-                                    "Select",
-                                    "Drag a box: selects the visible holes in it (B for one box; Shift adds)",
+                                    icons::BOX_SELECT,
+                                    t!("nav.box"),
+                                    t!("nav.box.tip"),
                                 ),
                             ] {
-                                if ui
-                                    .selectable_label(*nav_mode == mode, label)
+                                let on = self.nav_mode == mode;
+                                if widgets::icon_button(ui, icon, &label, Some(on), SIZE)
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
-                                    *nav_mode = mode;
+                                    self.nav_mode = mode;
                                 }
                             }
-                        };
-                        let mut buttons = |ui: &mut egui::Ui| {
-                            for (zoom_in, text, label, tip) in [
-                                (false, "−", "Zoom out", "Zoom out (−); hold to repeat"),
-                                (true, "+", "Zoom in", "Zoom in (+ or =); hold to repeat"),
+                            divider(ui);
+                            for (zoom_in, icon, label, tip) in [
+                                (
+                                    false,
+                                    icons::ZOOM_OUT,
+                                    t!("nav.zoom_out"),
+                                    t!("nav.zoom_out.tip"),
+                                ),
+                                (
+                                    true,
+                                    icons::ZOOM_IN,
+                                    t!("nav.zoom_in"),
+                                    t!("nav.zoom_in.tip"),
+                                ),
                             ] {
-                                let r = labelled(ui.button(text), label).on_hover_text(tip);
+                                let r = widgets::icon_button(ui, icon, &label, None, SIZE)
+                                    .on_hover_text(tip);
                                 if r.clicked() {
                                     zoom_steps += if zoom_in { 1 } else { -1 };
                                 }
@@ -583,36 +613,44 @@ impl Viewport {
                                     held = Some(zoom_in);
                                 }
                             }
-                            ui.separator();
-                            if labelled(ui.button("Frame"), "Frame selection")
-                                .on_hover_text("Frame selection (F)")
+                            divider(ui);
+                            if widgets::icon_button(ui, icons::FRAME, &t!("cmd.frame"), None, SIZE)
+                                .on_hover_text(t!("nav.frame.tip"))
                                 .clicked()
                             {
                                 action = Some(NavAction::FrameSelection);
                             }
-                            if labelled(ui.button("Reset"), "Reset view")
-                                .on_hover_text("Reset view (Home, or Cmd/Ctrl+0)")
-                                .clicked()
+                            if widgets::icon_button(
+                                ui,
+                                icons::HOME,
+                                &t!("cmd.reset_view"),
+                                None,
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.reset.tip"))
+                            .clicked()
                             {
                                 action = Some(NavAction::ResetView);
                             }
-                        };
-                        if two_rows {
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| modes(ui, &mut self.nav_mode));
-                                ui.horizontal(&mut buttons);
-                            });
-                        } else {
-                            ui.horizontal(|ui| {
-                                modes(ui, &mut self.nav_mode);
-                                ui.separator();
-                                buttons(ui);
-                            });
-                        }
+                            divider(ui);
+                            if widgets::icon_button(
+                                ui,
+                                icons::OVERLAYS,
+                                &t!("nav.overlays"),
+                                None,
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.overlays.tip"))
+                            .clicked()
+                            {
+                                action = Some(NavAction::Overlays);
+                            }
+                        });
                     });
             })
             .response
             .rect;
+        self.nav_rect = Some(bar);
         // Holding a zoom button repeats the step.
         let now = ui.input(|i| i.time);
         match (held, self.hold) {
@@ -992,8 +1030,14 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     renderer.set_selection_cue(SelectionCue::default());
 }
 
-/// Below this width (points) the navigation bar takes two rows.
-const NARROW_VIEW: f32 = 640.0;
+/// A thin vertical rule between groups of the navigation bar.
+fn divider(ui: &mut egui::Ui) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 20.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [r.center_top(), r.center_bottom()],
+        egui::Stroke::new(1.0, theme::SEPARATOR),
+    );
+}
 
 /// The controls hint at the view's bottom-left.
 fn controls_hint(ui: &egui::Ui) -> Arc<egui::Galley> {
@@ -1011,13 +1055,6 @@ fn updating_text(ui: &egui::Ui) -> Arc<egui::Galley> {
         egui::FontId::proportional(14.0),
         theme::TEXT_MUTED,
     )
-}
-
-/// Give a symbol button an accessible name (and the name tests find it by).
-fn labelled(response: egui::Response, label: &str) -> egui::Response {
-    let enabled = response.enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    response
 }
 
 /// `shape` laid out in points, in target pixels (`ppp` pixels per point).

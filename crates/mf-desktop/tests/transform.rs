@@ -411,6 +411,9 @@ fn transform_tool_hides_defect_tints_and_shows_axes_in_legend() {
         | u32::from(FaceStates::RECENT_REPAIR);
     assert!(h.state().holes_drawn());
     assert_ne!(h.state().shown_states() & defect_bits, 0);
+    // The Overlays popover lists the defect colours…
+    h.get_by_label("Overlays").click();
+    h.run_steps(3);
     h.get_by_label("Loose pieces");
 
     open_transform(&mut h);

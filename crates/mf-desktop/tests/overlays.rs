@@ -183,7 +183,10 @@ fn small_components_are_tinted_and_clickable() {
     let p = pixel(&mut h, top);
     assert!(amber(p), "the loose piece is tinted amber: {p:?}");
 
-    // Its legend entry hides the tint, and shows it again.
+    // Its entry in the Overlays popover hides the tint, and shows it
+    // again.
+    h.get_by_label("Overlays").click();
+    h.run_steps(3);
     h.get_by_label("Loose pieces").click();
     h.run_steps(3);
     let p = pixel(&mut h, top);
@@ -191,6 +194,8 @@ fn small_components_are_tinted_and_clickable() {
     h.get_by_label("Loose pieces").click();
     h.run_steps(3);
     assert!(amber(pixel(&mut h, top)));
+    h.get_by_label("Overlays").click();
+    h.run_steps(3);
 
     // Clicking it selects the piece, which then shows the selection colour.
     click_at(&mut h, top);

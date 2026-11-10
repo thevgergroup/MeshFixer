@@ -76,9 +76,9 @@ pub const BACK_FACE: Color32 = Color32::from_rgb(78, 84, 100);
 pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(38, 41, 46);
 /// Primary text drawn over the 3D view (the open tool's line): a neutral,
 /// never a geometry colour.
-pub const TEXT: Color32 = Color32::from_gray(225);
+pub const TEXT: Color32 = Color32::from_rgb(0xE6, 0xE8, 0xEB);
 /// Secondary text: details, hints, steps you can redo.
-pub const TEXT_MUTED: Color32 = Color32::from_gray(150);
+pub const TEXT_MUTED: Color32 = Color32::from_rgb(0x9A, 0xA0, 0xA8);
 /// The running job's progress bar (a neutral: progress is not a defect,
 /// nor the selection).
 pub const PROGRESS: Color32 = Color32::from_gray(120);
@@ -134,18 +134,163 @@ pub fn gizmo_palette() -> mf_render::GizmoPalette {
     }
 }
 
+// The chrome (ui-plan.md §4): neutral charcoal, deliberately dimmer than
+// the model, stepped by elevation. None of these means anything beyond
+// "a surface".
+/// The rail, the menu bar and the status bar: the frame around everything.
+pub const RAIL: Color32 = Color32::from_rgb(0x17, 0x19, 0x1C);
+/// The docked panels (the tool panel, the Browser).
+pub const PANEL: Color32 = Color32::from_rgb(0x1E, 0x20, 0x24);
+/// Separators, and a secondary button's fill.
+pub const SEPARATOR: Color32 = Color32::from_rgb(0x2A, 0x2D, 0x32);
+/// A raised card: the inspector card, the Overlays popover, the nav bar.
+pub const CARD: Color32 = Color32::from_rgb(0x25, 0x28, 0x2D);
+/// A secondary button's fill (the plan's subtle fill).
+pub const CONTROL: Color32 = SEPARATOR;
+/// The same, under the pointer.
+pub const CONTROL_HOVER: Color32 = Color32::from_rgb(0x35, 0x39, 0x40);
+/// The same, pressed.
+pub const CONTROL_ACTIVE: Color32 = Color32::from_rgb(0x40, 0x45, 0x4D);
+/// Text fields and a segmented control's track: inset, darker than the panel.
+pub const FIELD: Color32 = Color32::from_rgb(0x14, 0x16, 0x19);
+/// Titles: the brightest text.
+pub const TEXT_STRONG: Color32 = Color32::from_rgb(0xF4, 0xF5, 0xF7);
+/// Disabled text.
+pub const TEXT_FAINT: Color32 = Color32::from_rgb(0x5C, 0x61, 0x68);
+
+/// The accent: "active and primary" in the chrome and nothing else (the
+/// active tool on the rail, the current segment of a segmented control,
+/// the current history step, a focused field, the one primary button of
+/// a panel). An indigo blue: the plan's #3D8BFD is within a few degrees
+/// of `AXIS_Z` (#3E8BF0), and principle 7 (axis colours are never reused
+/// for chrome) wins, so the accent moves towards indigo, still a calm
+/// blue, clearly apart from the Z axis and from `CRACK`'s magenta. White
+/// text on it reads at 4.9:1.
+pub const ACCENT: Color32 = Color32::from_rgb(0x5B, 0x5F, 0xEF);
+/// The accent under the pointer.
+pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0x6D, 0x71, 0xF5);
+/// The accent as a wash behind an active item (the rail's active tool).
+pub const ACCENT_SOFT: Color32 = Color32::from_rgba_premultiplied(0x1F, 0x20, 0x51, 0x55);
+/// Text and icons on an accent fill.
+pub const ON_ACCENT: Color32 = Color32::WHITE;
+
+// Spacing (ui-plan.md §4): a 4 pt grid.
+pub const SPACE_XS: f32 = 4.0;
+pub const SPACE_S: f32 = 8.0;
+/// Panel padding.
+pub const SPACE_M: f32 = 12.0;
+/// The gap between a panel's sections.
+pub const SPACE_L: f32 = 16.0;
+pub const SPACE_XL: f32 = 24.0;
+/// The one corner radius: buttons, fields, cards, chips, rail tiles.
+pub const RADIUS: f32 = 6.0;
+/// A control's height (buttons, fields, segmented controls) and a
+/// Browser row's height.
+pub const ROW_HEIGHT: f32 = 28.0;
+pub const CONTROL_HEIGHT: f32 = ROW_HEIGHT;
+
+// The type scale (ui-plan.md §4), in points. The bundled font has one
+// weight, so a section label's "semibold" is the brightest text colour.
+/// A panel's title (the tool's name, the object's name).
+pub const TYPE_TITLE: f32 = 16.0;
+/// Section labels ("Position", "Holes").
+pub const TYPE_SECTION: f32 = 13.0;
+/// Body text, buttons, fields, rows.
+pub const TYPE_BODY: f32 = 13.0;
+/// Captions: one-line help, sizes in rows, hints, the rail's labels.
+pub const TYPE_CAPTION: f32 = 11.0;
+/// An icon beside text.
+pub const ICON_SIZE: f32 = 16.0;
+/// A rail tool's icon.
+pub const RAIL_ICON_SIZE: f32 = 22.0;
+
 /// Panels use the same tokens: selection is cyan, hover a light outline.
 pub fn apply(ctx: &egui::Context) {
+    crate::icons::install(ctx);
+    crate::i18n::init_from_env();
     ctx.set_visuals_of(egui::Theme::Dark, visuals());
+    ctx.style_mut_of(egui::Theme::Dark, style);
     ctx.set_theme(egui::Theme::Dark);
+}
+
+/// The type scale and the 4 pt spacing grid, as egui's style.
+fn style(s: &mut egui::Style) {
+    use egui::{FontFamily::Proportional, FontId, TextStyle};
+    s.text_styles = [
+        (TextStyle::Heading, FontId::new(TYPE_TITLE, Proportional)),
+        (TextStyle::Body, FontId::new(TYPE_BODY, Proportional)),
+        (TextStyle::Button, FontId::new(TYPE_BODY, Proportional)),
+        (TextStyle::Small, FontId::new(TYPE_CAPTION, Proportional)),
+        (
+            TextStyle::Monospace,
+            FontId::new(12.0, egui::FontFamily::Monospace),
+        ),
+    ]
+    .into();
+    let sp = &mut s.spacing;
+    sp.item_spacing = egui::vec2(SPACE_S, SPACE_XS);
+    sp.button_padding = egui::vec2(SPACE_M, SPACE_XS);
+    sp.interact_size = egui::vec2(40.0, 24.0);
+    sp.indent = SPACE_L;
+    sp.icon_spacing = 6.0;
+    sp.menu_margin = egui::Margin::same(6);
+    sp.window_margin = egui::Margin::same(SPACE_M as i8);
+    // Solid scroll bars: a floating bar that widens under the pointer
+    // re-wraps the panel's text, so what's under the pointer moves.
+    sp.scroll.floating = false;
+    sp.scroll.bar_width = 6.0;
 }
 
 fn visuals() -> egui::Visuals {
     let mut v = egui::Visuals::dark();
-    v.selection.bg_fill = SELECTED.gamma_multiply(0.35);
+    let radius = egui::CornerRadius::same(RADIUS as u8);
+    // A selected row is the current target: the selection's cyan, as a
+    // wash with cyan text (never the accent, which means "active tool").
+    v.selection.bg_fill = SELECTED.gamma_multiply(0.16);
     v.selection.stroke = egui::Stroke::new(1.0, SELECTED);
-    v.widgets.hovered.bg_stroke = egui::Stroke::new(1.0, HOVER);
-    v.widgets.hovered.fg_stroke = egui::Stroke::new(1.5, HOVER);
-    v.extreme_bg_color = VIEWPORT_BACKGROUND;
+    v.panel_fill = PANEL;
+    v.window_fill = CARD;
+    v.window_stroke = egui::Stroke::new(1.0, SEPARATOR);
+    v.window_corner_radius = egui::CornerRadius::same(8);
+    v.menu_corner_radius = radius;
+    v.faint_bg_color = CARD;
+    v.extreme_bg_color = FIELD;
+    v.text_edit_bg_color = Some(FIELD);
+    v.override_text_color = None;
+    v.collapsing_header_frame = false;
+    v.indent_has_left_vline = false;
+    v.striped = false;
+    v.slider_trailing_fill = true;
+    v.handle_shape = egui::style::HandleShape::Circle;
+    v.interact_cursor = Some(egui::CursorIcon::PointingHand);
+    let w = &mut v.widgets;
+    // Labels and frames.
+    w.noninteractive.bg_fill = PANEL;
+    w.noninteractive.weak_bg_fill = PANEL;
+    w.noninteractive.bg_stroke = egui::Stroke::new(1.0, SEPARATOR);
+    w.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+    w.noninteractive.corner_radius = radius;
+    // Secondary buttons, checkboxes, fields at rest.
+    w.inactive.bg_fill = CONTROL;
+    w.inactive.weak_bg_fill = CONTROL;
+    w.inactive.bg_stroke = egui::Stroke::NONE;
+    w.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT);
+    w.inactive.corner_radius = radius;
+    w.inactive.expansion = 0.0;
+    w.hovered.bg_fill = CONTROL_HOVER;
+    w.hovered.weak_bg_fill = CONTROL_HOVER;
+    w.hovered.bg_stroke = egui::Stroke::new(1.0, HOVER.gamma_multiply(0.35));
+    w.hovered.fg_stroke = egui::Stroke::new(1.5, HOVER);
+    w.hovered.corner_radius = radius;
+    w.hovered.expansion = 0.0;
+    w.active.bg_fill = CONTROL_ACTIVE;
+    w.active.weak_bg_fill = CONTROL_ACTIVE;
+    w.active.bg_stroke = egui::Stroke::new(1.0, HOVER.gamma_multiply(0.5));
+    w.active.fg_stroke = egui::Stroke::new(1.5, TEXT_STRONG);
+    w.active.corner_radius = radius;
+    w.active.expansion = 0.0;
+    w.open.bg_fill = CONTROL_ACTIVE;
+    w.open.weak_bg_fill = CONTROL;
+    w.open.corner_radius = radius;
     v
 }
