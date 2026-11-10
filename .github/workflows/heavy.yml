@@ -3,19 +3,13 @@ name: Heavy tests
 # proven, e.g. before merging a milestone PR or at milestone close. It runs the
 # full test suite (incl. timing, cancellation, frame-gate and 5M-triangle
 # tests) on all three OSes, the 400 MB memory gate, the evidence bundle and
-# the cross-OS replay check. Never on push, a schedule, or an ordinary PR
-# event: only workflow_dispatch from the Actions tab, or a person adding the
-# `run-heavy` label to a PR (controller ruling, 2026-11-10: GitHub can only
-# dispatch a workflow once it's on the default branch, and this one isn't
-# yet, so the labeled trigger is how it's started from a PR branch until
-# then). Every job below is guarded to run only when the label just added
-# is `run-heavy`, so adding any other label never starts this workflow.
+# the cross-OS replay check. Manual only (owner ruling, 2026-11-11: no
+# automatic GitHub Actions usage): started by hand from the Actions tab.
 #
 # The boolean kernel qualification (Phase 1 Tasks 7 and 7b, ADR-0002) is its
-# own job, `kernel-qualification`, started only by the `run-qualify` label or
-# by a dispatch with `qualify` ticked; the full-test job skips it (see
-# scripts/run-tests.sh), so a kernel's verdict never turns a milestone's
-# heavy run red.
+# own job, `kernel-qualification`, which runs only when a dispatch has
+# `qualify` ticked. The full-test job skips it (see scripts/run-tests.sh), so a
+# kernel's verdict never turns a milestone's heavy run red.
 on:
   workflow_dispatch:
     inputs:
@@ -23,15 +17,13 @@ on:
         description: "Also run the boolean kernel qualification (kernel-qualification job)"
         type: boolean
         default: false
-  pull_request:
-    types: [labeled]
 
 env:
   CARGO_TERM_COLOR: never
 
 jobs:
   full-tests:
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
+    if: github.event_name == 'workflow_dispatch'
     strategy:
       fail-fast: false
       matrix:
@@ -109,7 +101,7 @@ jobs:
     # fixture makes ≈4.8M) plus its cached topology stays within 400 MB,
     # counted by the allocator. Process RSS and GPU buffers of a
     # realistic session are reported (evidence job), not gated.
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -130,7 +122,7 @@ jobs:
   evidence:
     # Durable milestone evidence: screenshots, sample repaired model,
     # diagnostics and benchmark numbers with machine info.
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     env:
       MF_REQUIRE_GPU: "1"
@@ -197,7 +189,7 @@ jobs:
     # macOS and Windows as Exact or Equivalent (the summary says which). The
     # log includes a refined fill_holes, which computes new vertex positions
     # (MF-ISSUE-025).
-    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
+    if: github.event_name == 'workflow_dispatch'
     needs: evidence
     strategy:
       fail-fast: false

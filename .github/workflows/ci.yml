@@ -1,11 +1,11 @@
 name: CI
-# Every push and PR: format, lint, licences and the FAST test suite.
-# Heavy, timing and 5M-triangle tests, the memory gate, evidence and the
-# cross-OS replay run on demand only: Actions → "Heavy tests" → Run workflow
-# (heavy.yml). Fuzzing is on demand too (fuzz.yml).
+# Manual only (owner ruling, 2026-11-11): GitHub Actions minutes are not to be
+# spent automatically. Verification is local: scripts/check.sh (fast gate) at
+# every commit, and scripts/check.sh --full on demand at milestone close.
+# This workflow, heavy.yml and fuzz.yml run only when started by hand from the
+# Actions tab.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: never
