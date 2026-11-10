@@ -18,6 +18,8 @@ robust.workspace = true
 glam.workspace = true
 
 [dev-dependencies]
+mf-boolean.workspace = true
+mf-io.workspace = true
 mf-metrics.workspace = true
 mf-fixtures.workspace = true
 serde_json.workspace = true

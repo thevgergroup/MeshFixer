@@ -20,6 +20,7 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 /// tables fit (one hole bigger than this runs alone).
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
+mod intersections;
 mod make_solid;
 pub use make_solid::{
     MAX_GRID_POINTS as MAKE_SOLID_MAX_GRID_POINTS, STAGES as MAKE_SOLID_STAGES,
@@ -203,6 +204,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &compact::Compact,
     &fill_holes::FillHoles,
     &inspect::Inspect,
+    &intersections::Intersections,
     &make_solid::MakeSolid,
     &remove_small::RemoveSmallComponents,
     &transform::SetTransform,
