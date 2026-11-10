@@ -873,3 +873,151 @@ fn a_hole_whose_only_chord_was_taken_says_so() {
         other => panic!("{:?}", other.map(|r| r.2)),
     }
 }
+
+/// MF-ISSUE-055: the owner's demo sphere (`artifacts/m4/demo/
+/// sphere-three-holes.obj`): a 192×96 UV sphere of radius 50 with round
+/// holes cut around `holes` (unit direction, angular radius in degrees),
+/// removing every face whose centroid lies within the radius.
+fn holed_sphere(holes: &[([f64; 3], f64)]) -> Mesh {
+    let unit = |p: [f64; 3]| {
+        let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        p.map(|x| x / n)
+    };
+    let s = uv_sphere(96, 192);
+    let positions: Vec<[f64; 3]> = s.vertices().map(|(_, p)| p.map(|x| 50.0 * x)).collect();
+    let kept: Vec<[u32; 3]> = s
+        .faces()
+        .map(|(_, t)| t)
+        .filter(|t| {
+            let c = unit([0, 1, 2].map(|k| t.iter().map(|&v| positions[v as usize][k]).sum()));
+            !holes.iter().any(|&(d, r)| {
+                let d = unit(d);
+                c[0] * d[0] + c[1] * d[1] + c[2] * d[2] > r.to_radians().cos()
+            })
+        })
+        .collect();
+    // Drop the vertices inside the holes, renumbering the rest.
+    let mut new_id = vec![u32::MAX; positions.len()];
+    let mut out = Vec::new();
+    for t in &kept {
+        for &v in t {
+            if new_id[v as usize] == u32::MAX {
+                new_id[v as usize] = out.len() as u32;
+                out.push(positions[v as usize]);
+            }
+        }
+    }
+    let tris = kept.iter().map(|t| t.map(|v| new_id[v as usize])).collect();
+    Mesh::new(out, tris).unwrap()
+}
+
+fn sphere_dir(theta: f64, phi: f64) -> [f64; 3] {
+    let (t, p) = (theta.to_radians(), phi.to_radians());
+    [t.sin() * p.cos(), t.sin() * p.sin(), t.cos()]
+}
+
+/// Per hole (in `holes` order): its edge count and the worst radial
+/// deviation of its fill's new vertices from the sphere, relative to R.
+fn sphere_fill_deviation(
+    holes: &[([f64; 3], f64)],
+    style: &str,
+) -> (Vec<(usize, f64)>, Mesh, serde_json::Value) {
+    let m = holed_sphere(holes);
+    let (out, prov, report) = fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+    let mut worst = vec![0.0f64; holes.len()];
+    for v in &prov.created_vertices {
+        let p = out.position(*v).unwrap();
+        let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        let nearest = (0..holes.len())
+            .max_by(|&a, &b| {
+                let dot = |d: [f64; 3]| (d[0] * p[0] + d[1] * p[1] + d[2] * p[2]) / r;
+                dot(holes[a].0).total_cmp(&dot(holes[b].0))
+            })
+            .unwrap();
+        worst[nearest] = worst[nearest].max((r - 50.0).abs() / 50.0);
+    }
+    let mut edges = vec![0usize; holes.len()];
+    for l in &m.topology().boundary_loops {
+        let p = m.position(VertexId(l.vertices[0])).unwrap();
+        let nearest = (0..holes.len())
+            .max_by(|&a, &b| {
+                let dot = |d: [f64; 3]| d[0] * p[0] + d[1] * p[1] + d[2] * p[2];
+                dot(holes[a].0).total_cmp(&dot(holes[b].0))
+            })
+            .unwrap();
+        edges[nearest] = l.edge_count;
+    }
+    (edges.into_iter().zip(worst).collect(), out, report)
+}
+
+/// MF-ISSUE-055 (open, moved to M5 as an algorithm limit): on the owner's
+/// three-hole sphere, smooth fills every hole to within 1% of R; curvature
+/// does on the small hole, and the holes over the measured limit carry a
+/// plain-language warning recommending smooth (the style is kept).
+#[test]
+fn curvature_fill_on_large_holes_is_labelled_less_accurate() {
+    let demo = [
+        (sphere_dir(78.71, 0.0), 12.0),
+        (sphere_dir(89.98, 120.45), 22.0),
+        (sphere_dir(142.0, -116.57), 32.0),
+    ];
+    let (smooth, out, report) = sphere_fill_deviation(&demo, "smooth");
+    let edges: Vec<usize> = smooth.iter().map(|&(e, _)| e).collect();
+    assert_eq!(edges, [55, 94, 198]);
+    for &(e, d) in &smooth {
+        assert!(d < 0.01, "smooth, {e}-edge hole: {:.3}% of R", 100.0 * d);
+    }
+    let d = inspect(&out);
+    assert!(
+        d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+        "{d:?}"
+    );
+    assert!(report.get("warnings").is_none(), "{report}");
+
+    let (curvature, out, report) = sphere_fill_deviation(&demo, "curvature");
+    let d = inspect(&out);
+    assert!(
+        d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+        "{d:?}"
+    );
+    for &(e, d) in &curvature {
+        if e <= mf_operations::CURVATURE_ACCURATE_EDGES {
+            assert!(d < 0.01, "curvature, {e}-edge hole: {:.3}% of R", 100.0 * d);
+        }
+    }
+    // The two large holes are past the limit: labelled, still curvature.
+    assert_eq!(
+        report["warnings"],
+        serde_json::json!([mf_operations::curvature_limit_warning(2)])
+    );
+    assert_eq!(
+        mf_operations::curvature_limit_warning(2),
+        "Curvature matching is less accurate on large holes: 2 holes filled here have more \
+         than 60 edges, and the fill may bulge away from the surface. Smooth fill is \
+         recommended for holes this size."
+    );
+    let flagged: Vec<bool> = report["filled_loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["curvature_less_accurate"] == true)
+        .collect();
+    assert_eq!(flagged.iter().filter(|&&f| f).count(), 2, "{report}");
+    for l in report["filled_loops"].as_array().unwrap() {
+        let flagged = l["curvature_less_accurate"] == true;
+        let over = l["edges"].as_u64().unwrap() as usize > mf_operations::CURVATURE_ACCURATE_EDGES;
+        assert_eq!(flagged, over, "{l}");
+        assert!(l["faired_vertices"].as_u64().unwrap() > 0, "{l}");
+    }
+}
+
+/// Just under the limit (a 60-edge hole) curvature stays within 1% of R
+/// and carries no warning.
+#[test]
+fn curvature_fill_at_the_limit_is_within_one_percent() {
+    let holes = [(sphere_dir(90.0, 0.0), 15.0)];
+    let (dev, _, report) = sphere_fill_deviation(&holes, "curvature");
+    assert_eq!(dev[0].0, mf_operations::CURVATURE_ACCURATE_EDGES);
+    assert!(dev[0].1 < 0.01, "{:.3}% of R", 100.0 * dev[0].1);
+    assert!(report.get("warnings").is_none(), "{report}");
+}

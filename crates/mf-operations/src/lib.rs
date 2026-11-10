@@ -10,6 +10,7 @@ use mf_spec::{Params, SpecError};
 
 mod compact;
 mod fill_holes;
+pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 
 /// Most bytes `mesh.fill_holes` spends on triangulation tables at once:
 /// holes are triangulated in parallel only while their summed O(n²)

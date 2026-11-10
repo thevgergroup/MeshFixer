@@ -196,7 +196,7 @@ Selections bound to one revision are never applied to another without translatio
 - `smooth`, the default: bi-Laplacian fairing (Δ²x = 0) of the patch interior, with the boundary and 1-ring fixed, so the patch meets the surface with matching slope (C1).
 - `curvature`: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
 
-`smooth` and `curvature` always refine (fairing moves the added vertices; without them the patch would be flat). Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`.
+`smooth` and `curvature` always refine (fairing moves the added vertices; without them the patch would be flat). Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`. Known limit (MF-ISSUE-055, open): `curvature` is accurate to 1% of the surface only on holes of up to 60 edges; a curvature fill of a larger hole keeps its style, marks the loop `curvature_less_accurate` in the report and adds a plain-language `warnings` entry recommending `smooth`.
 *Accept:*
 - On a 44-edge hole in a unit-radius sphere (the cap within 30° of a pole removed), every patch vertex is within 2% of the radius with `smooth`, and within 1% with `curvature`. The limit depends on the cap: the continuous Δ² solution overshoots by ≈ 1.04% of the radius at 30° and ≈ 2.0% at 35°, so a change in refinement density can move the measurement by a few tenths of a percent.
 - On procedural holes, the patch's mean edge length is within ±25% of the boundary's mean, and no patch triangle has a minimum angle below 5°.

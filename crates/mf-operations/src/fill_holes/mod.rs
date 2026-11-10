@@ -27,6 +27,28 @@ use crate::{
 
 pub struct FillHoles;
 
+/// MF-ISSUE-055 (open, an algorithm limit): the largest hole `curvature`
+/// fills to within 1% of the surface, measured on a radius-50 UV sphere
+/// (192×96): 50–60-edge holes stay under 1%, a 64-edge hole reaches 1.3%,
+/// 94 edges 2.6%, ~200 edges 12%, while `smooth` stays under 1%. Above it
+/// the report says so and recommends smooth; the style is never switched.
+pub const CURVATURE_ACCURATE_EDGES: usize = 60;
+
+/// The plain-language warning for `count` curvature-filled holes over
+/// [`CURVATURE_ACCURATE_EDGES`].
+pub fn curvature_limit_warning(count: usize) -> String {
+    let (holes, has) = if count == 1 {
+        ("1 hole".to_owned(), "has")
+    } else {
+        (format!("{count} holes"), "have")
+    };
+    format!(
+        "Curvature matching is less accurate on large holes: {holes} filled here {has} more \
+         than {CURVATURE_ACCURATE_EDGES} edges, and the fill may bulge away from the surface. \
+         Smooth fill is recommended for holes this size."
+    )
+}
+
 fn failed(code: &'static str, message: String) -> OpError {
     OpError::Failed { code, message }
 }
@@ -477,6 +499,7 @@ impl Operation for FillHoles {
         let mut used_chords: BTreeMap<(u32, u32), u32> = BTreeMap::new();
         let mut edit = input.edit();
         let mut filled = Vec::new();
+        let mut beyond_curvature_limit = 0;
         for (li, ((l, mut patch), mut faired)) in fill.iter().zip(patches).zip(fairing).enumerate()
         {
             // The first chord an earlier patch took from this loop, and
@@ -611,8 +634,17 @@ impl Operation for FillHoles {
             if let Some(Ok(f)) = faired {
                 entry["faired_vertices"] = json!(f.vertices);
             }
+            if style == Style::Curvature && l.edge_count > CURVATURE_ACCURATE_EDGES {
+                entry["curvature_less_accurate"] = json!(true);
+                beyond_curvature_limit += 1;
+            }
             filled.push(entry);
         }
+        let warnings: Vec<String> = if beyond_curvature_limit > 0 {
+            vec![curvature_limit_warning(beyond_curvature_limit)]
+        } else {
+            Vec::new()
+        };
         let report = json!({
             "filled_loops": filled,
             "skipped_loops": skipped,
@@ -635,6 +667,10 @@ impl Operation for FillHoles {
             "created_faces": prov.created_faces.len(),
             "created_vertices": prov.created_vertices.len(),
         });
+        let mut report = report;
+        if !warnings.is_empty() {
+            report["warnings"] = json!(warnings);
+        }
         ctx.progress.report(last_stage, 1.0);
         Ok(OpOutput {
             change: Some((mesh, prov)),

@@ -3351,6 +3351,14 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
                     "; {skipped} left open (too large or can't be filled)"
                 ));
             }
+            // MF-ISSUE-055: curvature matching on large holes, in the
+            // operation's own words.
+            for w in report["warnings"].as_array().into_iter().flatten() {
+                if let Some(w) = w.as_str() {
+                    text.push_str(". ");
+                    text.push_str(w);
+                }
+            }
             text
         }
         "mesh.remove_small_components" => {
@@ -3545,6 +3553,20 @@ mod tests {
         assert_eq!(
             plain_report("mesh.fill_holes", &fill),
             "Filled 2 holes with 10 new faces; 1 left open (too large or can't be filled)"
+        );
+        // MF-ISSUE-055: the curvature-limit warning reaches the status line.
+        let warned = serde_json::json!({
+            "created_faces": 10,
+            "filled_loops": [{"id": 1}],
+            "skipped_loops": [],
+            "warnings": [mf_operations::curvature_limit_warning(1)],
+        });
+        assert_eq!(
+            plain_report("mesh.fill_holes", &warned),
+            format!(
+                "Filled 1 hole with 10 new faces. {}",
+                mf_operations::curvature_limit_warning(1)
+            )
         );
         let removed = serde_json::json!({"removed_components": 1, "removed_triangles": 12});
         assert_eq!(
