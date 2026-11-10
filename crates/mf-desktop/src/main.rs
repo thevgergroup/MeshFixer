@@ -46,7 +46,10 @@ fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: eframe::egui::ViewportBuilder::default()
             .with_title("MeshFixer")
-            .with_inner_size([1440.0, 900.0]),
+            .with_inner_size([1440.0, 900.0])
+            // A laptop window still fits the panels and the view (M4 final
+            // UX I5); the panels collapse below that (View > Hide side panels).
+            .with_min_inner_size([960.0, 600.0]),
         wgpu_options: mf_desktop::gpu::wgpu_configuration(),
         ..Default::default()
     };

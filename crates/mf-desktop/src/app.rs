@@ -279,6 +279,13 @@ pub struct MeshFixerApp {
     pub status: Option<String>,
     /// Every warning from the latest import (MF-ISSUE-004), not just the last.
     pub warnings: Vec<String>,
+    /// The last command's result when it carried a warning (MF-ISSUE-055's
+    /// curvature limit): shown in full at the top of Properties until
+    /// dismissed or the next command finishes, so neither a later status
+    /// message nor the status line's width can hide it (M4 final UX I1).
+    pub notice: Option<String>,
+    /// View > Import warnings: the last import's warnings, grouped (I2).
+    pub show_warnings: bool,
     /// Lines of the last replay report, shown in a window.
     pub replay_report: Option<Vec<String>>,
     /// What the next operation targets, bound to the current revision. It is
@@ -350,6 +357,14 @@ pub struct MeshFixerApp {
     /// View ▸ Show hole overview: a faint tint around every hole and a
     /// marker at each one too small to see.
     pub show_hole_overview: bool,
+    /// A marker on each listed hole too small to see at this zoom (on by
+    /// default, so the view shows where the holes are: M4 final UX I6).
+    /// View > Show hole overview shows them too, with its tint.
+    pub show_hole_markers: bool,
+    /// The side panels (View > Hide side panels, Cmd/Ctrl+\, or each
+    /// panel's « / »): hidden, the view has the window (M4 final UX I5).
+    pub show_tree: bool,
+    pub show_properties: bool,
     /// Works out the overview's markers on the background pool.
     marker_worker: LatestWorker<worker::MarkerRequest>,
     /// What the markers were last asked for, and its number.
@@ -500,6 +515,8 @@ impl MeshFixerApp {
             error: None,
             status: None,
             warnings: Vec::new(),
+            notice: None,
+            show_warnings: false,
             replay_report: None,
             selection: None,
             inspected: None,
@@ -533,6 +550,9 @@ impl MeshFixerApp {
             hole_list: None,
             hole_list_requested: None,
             show_hole_overview: false,
+            show_hole_markers: true,
+            show_tree: true,
+            show_properties: true,
             marker_worker,
             marker_query: None,
             markers: None,
@@ -570,8 +590,12 @@ impl MeshFixerApp {
     pub fn import_model(&mut self, model: ImportedModel) {
         let (ids, warnings) = self.session.import_model(model);
         self.warnings = warnings;
+        self.show_warnings = false;
         if !self.warnings.is_empty() {
-            self.status = Some(format!("{} import warning(s)", self.warnings.len()));
+            self.status = Some(format!(
+                "Imported with {}",
+                count(self.warnings.len(), "warning")
+            ));
         }
         match ids.first() {
             Some(&id) => {
@@ -870,18 +894,19 @@ impl MeshFixerApp {
     }
 
     /// True when the target is a defect with no operation yet (a crack, a
-    /// hole over the fill limit): Properties says what it needs instead of
-    /// offering whole-object tools that wouldn't fix it.
+    /// hole over the fill limit, a pinched hole): Properties says why and
+    /// what to do instead of offering whole-object tools that wouldn't fix
+    /// it.
     fn target_blocks_whole_object(&self) -> bool {
         let Some((sel, analysis)) = self.current_selection().zip(self.current_analysis()) else {
             return false;
         };
         sel.kind == SelectionKind::BoundaryLoop
             && sel.ids.iter().any(|&id| {
-                !matches!(
-                    analysis.defects.find(sel.kind, id),
-                    Some(Defect::Hole { .. })
-                )
+                !analysis
+                    .defects
+                    .find(sel.kind, id)
+                    .is_some_and(|d| analysis.defects.fillable(d))
             })
     }
 
@@ -913,10 +938,12 @@ impl MeshFixerApp {
             selection: Some(sel.clone()),
             fixed,
         };
+        // Only holes fill_holes would fill: a pinched one is refused, so it
+        // isn't offered (M4 final UX review I7).
         let holes: Option<Vec<usize>> = defects
             .iter()
             .map(|d| match d {
-                Defect::Hole { edges, .. } => Some(*edges),
+                Defect::Hole { edges, .. } if analysis.defects.fillable(d) => Some(*edges),
                 _ => None,
             })
             .collect();
@@ -970,7 +997,7 @@ impl MeshFixerApp {
             self.confirm = Some(Confirm {
                 tool: tool.clone(),
                 message: format!(
-                    "This would delete {} of {} parts of '{name}' ({share:.1}% of its \
+                    "This would delete {} of {} pieces of '{name}' ({share:.1}% of its \
                      triangles). These may be part of the design, not debris.",
                     thousands(p.pieces),
                     thousands(p.of_pieces),
@@ -1092,34 +1119,40 @@ impl MeshFixerApp {
 
     fn after_history_move(&mut self) {
         self.sync_active();
-        self.retarget_selection();
+        if let Some(note) = self.retarget_selection() {
+            self.status = Some(note);
+        }
     }
 
     /// Translate the selection to the current revision (MF-SEL-003). A loop
     /// that was filled clears it with a message; anything not mappable clears
-    /// it with the reason. Never applied to a revision it wasn't translated to.
-    fn retarget_selection(&mut self) {
-        let Some(sel) = self.selection.take() else {
-            return;
-        };
+    /// it with the reason. Never applied to a revision it wasn't translated
+    /// to. Returns the message, for the caller to show: after a command it
+    /// must not replace the command's own result (M4 final UX I1).
+    fn retarget_selection(&mut self) -> Option<String> {
+        let sel = self.selection.take()?;
         let current = self.session.current();
         if sel.revision == current {
             self.selection = Some(sel);
-            return;
+            return None;
         }
         match self.session.translate(&sel, current) {
-            Translation::Mapped(m) => self.selection = Some(m),
-            Translation::Partial { mapped, lost } => {
-                self.status = Some(format!("Selection partly lost ({} element(s))", lost.len()));
-                self.selection = Some(mapped);
+            Translation::Mapped(m) => {
+                self.selection = Some(m);
+                None
             }
-            Translation::Failed(e) => self.status = Some(selection_cleared(&e)),
-            Translation::Ambiguous { candidates } => {
-                self.status = Some(format!(
-                    "Selection cleared: it could now be any of {} parts",
-                    candidates.len()
+            Translation::Partial { mapped, lost } => {
+                self.selection = Some(mapped);
+                Some(format!(
+                    "Selection partly lost ({} no longer at this step)",
+                    count(lost.len(), "element")
                 ))
             }
+            Translation::Failed(e) => Some(selection_cleared(&e)),
+            Translation::Ambiguous { candidates } => Some(format!(
+                "Selection cleared: it could now be any of {} pieces",
+                candidates.len()
+            )),
         }
     }
 
@@ -1212,7 +1245,15 @@ impl MeshFixerApp {
     /// meanwhile depends on the machine; tests wait for this to clear
     /// rather than count frames (M4 final review I4).
     pub fn background_work_in_flight(&self) -> bool {
-        self.workers.in_flight() > 0
+        self.workers.in_flight() > 0 || self.markers_pending()
+    }
+
+    /// True while the hole markers asked for haven't come back.
+    fn markers_pending(&self) -> bool {
+        self.markers_shown()
+            && self
+                .marker_query
+                .is_some_and(|(_, k)| self.markers.as_ref().map(|(m, _)| *m) != Some(k))
     }
 
     /// True once object `id`'s current revision has its picking BVH (tests
@@ -1532,10 +1573,30 @@ impl MeshFixerApp {
                         r
                     }
                 };
-                match (*result).and_then(|c| self.session.commit(c)) {
+                let committed = (*result).and_then(|c| self.session.commit(c));
+                // A warning in the result is kept in full until dismissed
+                // or the next command finishes (I1).
+                self.notice = match &committed {
+                    Ok(
+                        CommitOutcome::NewRevision { report: r }
+                        | CommitOutcome::Report(r)
+                        | CommitOutcome::NoChange { report: r },
+                    ) if r["warnings"].as_array().is_some_and(|w| !w.is_empty()) => Some(report(r)),
+                    _ => None,
+                };
+                match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(report(&r));
-                        self.retarget_selection();
+                        // The command's result stays: a filled hole's
+                        // "selection cleared" would only repeat it.
+                        if let Some(note) = self.retarget_selection()
+                            && !note.starts_with("Hole filled")
+                        {
+                            self.status = Some(match self.status.take() {
+                                Some(text) => format!("{text}. {note}"),
+                                None => note,
+                            });
+                        }
                     }
                     Ok(CommitOutcome::Report(r)) => {
                         self.status = Some(report(&r));
@@ -1598,7 +1659,7 @@ impl MeshFixerApp {
                     self.hover_picks.sent = None;
                 }
                 self.error = Some(format!(
-                    "Internal error in {what}: {message}. Save the command log (File ▸ Save \
+                    "Internal error in {what}: {message}. Save the command log (File > Save \
                      Command Log) and report it."
                 ));
             }
@@ -2626,9 +2687,19 @@ impl MeshFixerApp {
         let hover = self
             .hover_request(&selection)
             .filter(|(_, _, t)| matches!(t, OverlayTarget::Loops(_) | OverlayTarget::Edges(_)));
+        // Intentional openings keep their loops (the mesh didn't change),
+        // so they're drawn over the hole outline in their own colour.
+        let openings = self
+            .active
+            .zip(self.active_mesh().cloned())
+            .and_then(|(o, mesh)| {
+                let ids = self.active_openings();
+                (!ids.is_empty()).then_some((o, mesh, OverlayTarget::Loops(ids)))
+            });
         for (purpose, want) in [
             (OverlayPurpose::Selection, selection),
             (OverlayPurpose::Hover, hover),
+            (OverlayPurpose::Openings, openings),
         ] {
             // Its lines share the shown render mesh's origin, so they draw
             // exactly over its own outlines (fix round 1, I1); until that
@@ -2700,6 +2771,13 @@ impl MeshFixerApp {
                     theme::NON_MANIFOLD,
                 ));
             }
+        }
+        // Over the hole outline and a marked crack's line: one colour, one
+        // meaning (I3).
+        if self.defect_shown(self.shown.holes)
+            && let Some((object, o)) = ready(OverlayPurpose::Openings)
+        {
+            layers.push(lines(object, o.origin, &o.lines, theme::OPENING));
         }
         if self.shown.selection
             && let Some((object, o)) = ready(OverlayPurpose::Selection)
@@ -3069,9 +3147,21 @@ impl MeshFixerApp {
         }
     }
 
+    /// Hide both side panels, or show both if both are hidden.
+    pub fn toggle_side_panels(&mut self) {
+        let show = !(self.show_tree || self.show_properties);
+        self.show_tree = show;
+        self.show_properties = show;
+    }
+
+    /// True if the view draws hole markers (they're on by default).
+    pub fn markers_shown(&self) -> bool {
+        (self.show_hole_markers || self.show_hole_overview) && self.defect_shown(self.shown.holes)
+    }
+
     /// The overview's markers (window points), while it's shown.
     pub fn hole_markers(&self) -> Option<&[egui::Pos2]> {
-        if !self.show_hole_overview {
+        if !self.markers_shown() {
             return None;
         }
         self.markers.as_ref().map(|(_, m)| m.positions.as_slice())
@@ -3079,7 +3169,7 @@ impl MeshFixerApp {
 
     /// Ask for the overview's markers when what they depend on changed.
     fn refresh_markers(&mut self) {
-        if !self.show_hole_overview {
+        if !self.markers_shown() {
             self.marker_query = None;
             return;
         }
@@ -3246,6 +3336,11 @@ impl MeshFixerApp {
         if boxed {
             self.viewport.box_once = true;
         }
+        if !typing
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Backslash))
+        {
+            self.toggle_side_panels();
+        }
         let (undo, redo, frame, home, escape, zoom) = ctx.input_mut(|i| {
             if typing {
                 return (false, false, false, false, false, 0);
@@ -3314,6 +3409,7 @@ impl MeshFixerApp {
         crate::panels::controls_window(self, &ctx);
         self.unit_dialog(&ctx);
         crate::panels::confirm_window(self, &ctx);
+        crate::panels::warnings_window(self, &ctx);
         self.refresh_metrics();
         crate::panels::metrics_window(self, &ctx);
         self.refresh_hole_list();
@@ -3326,7 +3422,7 @@ impl MeshFixerApp {
         let placeholder = match self.active_mesh() {
             Some(m) if m.is_empty() => "Empty mesh (0 triangles)",
             Some(_) if self.analysis_failed_for_active() => "Couldn't analyse this object",
-            Some(_) => "Analyzing…",
+            Some(_) => "Analysing…",
             None => empty.as_str(),
         };
         let show_boundaries = self.defect_shown(self.shown.holes);
@@ -3342,6 +3438,10 @@ impl MeshFixerApp {
             emphasis: self.emphasis,
             xray_faces,
         };
+        let markers = self
+            .markers_shown()
+            .then(|| self.markers.as_ref().map(|(_, m)| m.mesh.clone()))
+            .flatten();
         let out = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
                 self.viewport.show(
@@ -3355,10 +3455,7 @@ impl MeshFixerApp {
                         placeholder,
                         frame: frame_index,
                         cue,
-                        markers: self
-                            .show_hole_overview
-                            .then(|| self.markers.as_ref().map(|(_, m)| m.mesh.clone()))
-                            .flatten(),
+                        markers,
                     },
                 )
             })
@@ -3420,13 +3517,17 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
             let (filled, skipped) = (len("filled_loops") as u64, len("skipped_loops") as u64);
             let faces = num("created_faces");
             let mut text = format!(
-                "Filled {filled} hole{} with {faces} new face{}",
+                "Filled {} hole{} with {} new triangle{}",
+                thousands(filled),
                 s(filled),
+                thousands(faces),
                 s(faces)
             );
             if skipped > 0 {
                 text.push_str(&format!(
-                    "; {skipped} left open (too large or can't be filled)"
+                    "; {} left open: {}",
+                    thousands(skipped),
+                    skip_reasons(&report["skipped_loops"])
                 ));
             }
             // MF-ISSUE-055: curvature matching on large holes, in the
@@ -3442,15 +3543,17 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
         "mesh.remove_small_components" => {
             let (pieces, tris) = (num("removed_components"), num("removed_triangles"));
             format!(
-                "Removed {pieces} piece{} ({tris} triangle{})",
+                "Removed {} piece{} ({} triangle{})",
+                thousands(pieces),
                 s(pieces),
+                thousands(tris),
                 s(tris)
             )
         }
         "mesh.compact" => {
             let (faces, vertices) = (num("reclaimed_faces"), num("reclaimed_vertices"));
             format!(
-                "Reclaimed unused space: {faces} face slot{} and {vertices} vertex slot{}",
+                "Reclaimed unused space: {faces} triangle slot{} and {vertices} vertex slot{}",
                 s(faces),
                 s(vertices)
             )
@@ -3463,6 +3566,34 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
             }
         }
     }
+}
+
+/// Why a batch fill left holes open, grouped by reason in plain words:
+/// "2 pinched (pass through one point twice), 1 over this fill method's
+/// 1,000-edge limit" (M4 final UX review I7).
+fn skip_reasons(skipped: &serde_json::Value) -> String {
+    let mut groups: Vec<(&str, u64)> = Vec::new();
+    for l in skipped.as_array().into_iter().flatten() {
+        let why = match l["reason"].as_str() {
+            Some("too_large") => "over this fill method's 1,000-edge limit",
+            Some("self_touching") => "pinched (pass through one point twice)",
+            Some("fairing_did_not_converge") => "couldn't be shaped to the surface",
+            Some("chord_used_by_another_hole") => {
+                "blocked by another hole's fill (fill them one at a time)"
+            }
+            Some("untriangulable") => "flat or folded onto the mesh",
+            _ => "couldn't be filled",
+        };
+        match groups.iter_mut().find(|(w, _)| *w == why) {
+            Some((_, n)) => *n += 1,
+            None => groups.push((why, 1)),
+        }
+    }
+    groups
+        .iter()
+        .map(|(why, n)| format!("{} {why}", thousands(*n)))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Why an import failed, and what to do about it.
@@ -3542,7 +3673,7 @@ fn selection_cleared(e: &TranslateError) -> String {
         TranslateError::LoopClosed { faces } => {
             let plural = if faces.len() == 1 { "" } else { "s" };
             format!(
-                "Hole filled ({} face{plural}); selection cleared",
+                "Hole filled ({} new triangle{plural}); selection cleared",
                 faces.len()
             )
         }
@@ -3630,7 +3761,7 @@ mod tests {
         });
         assert_eq!(
             plain_report("mesh.fill_holes", &fill),
-            "Filled 2 holes with 10 new faces; 1 left open (too large or can't be filled)"
+            "Filled 2 holes with 10 new triangles; 1 left open: 1 couldn't be filled"
         );
         // MF-ISSUE-055: the curvature-limit warning reaches the status line.
         let warned = serde_json::json!({
@@ -3642,9 +3773,24 @@ mod tests {
         assert_eq!(
             plain_report("mesh.fill_holes", &warned),
             format!(
-                "Filled 1 hole with 10 new faces. {}",
+                "Filled 1 hole with 10 new triangles. {}",
                 mf_operations::curvature_limit_warning(1)
             )
+        );
+        // Skips are grouped by reason, in plain words (I7).
+        let skipped = serde_json::json!({
+            "created_faces": 1200,
+            "filled_loops": [{"id": 1}],
+            "skipped_loops": [
+                {"id": 2, "reason": "self_touching"},
+                {"id": 3, "reason": "too_large"},
+                {"id": 4, "reason": "self_touching"},
+            ],
+        });
+        assert_eq!(
+            plain_report("mesh.fill_holes", &skipped),
+            "Filled 1 hole with 1,200 new triangles; 3 left open: 2 pinched (pass through one \
+             point twice), 1 over this fill method's 1,000-edge limit"
         );
         let removed = serde_json::json!({"removed_components": 1, "removed_triangles": 12});
         assert_eq!(
@@ -3684,7 +3830,7 @@ mod tests {
         let closed = selection_cleared(&TranslateError::LoopClosed {
             faces: vec![mf_geometry::FaceId(1), mf_geometry::FaceId(2)],
         });
-        assert_eq!(closed, "Hole filled (2 faces); selection cleared");
+        assert_eq!(closed, "Hole filled (2 new triangles); selection cleared");
         let removed = selection_cleared(&TranslateError::LoopRemoved);
         assert_eq!(
             removed,

@@ -115,7 +115,7 @@ fn layout_has_viewport_tree_properties_and_history() {
         "Holes (3)",
         "Narrow cracks (0)",
         "Loose pieces (0)",
-        "Non-manifold edges (0)",
+        "Tangled edges (0)",
     ] {
         h.get_by_label(row);
     }
@@ -270,7 +270,7 @@ fn selecting_a_target_clears_a_stale_status() {
     require_gpu!("selecting_a_target_clears_a_stale_status");
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(two_hole_grid(dir.path()));
-    h.state_mut().status = Some("Hole filled (10 faces); selection cleared".into());
+    h.state_mut().status = Some("Hole filled (10 new triangles); selection cleared".into());
     click_small_hole_row(&mut h);
     assert!(h.state().selection.is_some());
     assert_eq!(h.state().status, None);
@@ -547,6 +547,6 @@ fn lots_of_unused_space_suggests_compacting() {
     assert!(h.state().active_mesh().unwrap().is_compact());
     assert_eq!(
         h.state().status.as_deref(),
-        Some("Reclaimed unused space: 40 face slots and 40 vertex slots")
+        Some("Reclaimed unused space: 40 triangle slots and 40 vertex slots")
     );
 }

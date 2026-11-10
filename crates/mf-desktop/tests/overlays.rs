@@ -145,7 +145,7 @@ fn clicking_a_non_manifold_edge_selects_its_faces() {
             .all(|&f| state(a, f) & FaceStates::SELECTED != 0)
     });
     // Properties names what's selected.
-    h.get_by_label("3 faces selected");
+    h.get_by_label("3 triangles selected");
 }
 
 #[test]

@@ -290,9 +290,9 @@ fn checkpoint_a_walkthrough() {
     click_label(&mut h, &row(&defects.cracks[0]));
     rec.still(&mut h, "07-crack-properties", 2.0);
     click_label(&mut h, &row(&defects.tangled[0]));
-    h.get_by_label("Select the faces involved");
+    h.get_by_label("Select its faces");
     rec.still(&mut h, "08-tangled-edge-properties", 2.0);
-    click_label(&mut h, "Select the faces involved");
+    click_label(&mut h, "Select its faces");
     wait_until(&mut h, "faces selected", |a| {
         a.selection
             .as_ref()

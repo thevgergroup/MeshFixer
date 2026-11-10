@@ -9,8 +9,12 @@ use eframe::egui::{self, Color32};
 pub const SELECTED: Color32 = Color32::from_rgb(40, 210, 255);
 /// What the pointer is over (a light outline).
 pub const HOVER: Color32 = Color32::from_rgb(232, 238, 245);
-/// Holes: every open boundary's outline.
+/// Holes: every open boundary's outline (except intentional openings).
 pub const HOLE: Color32 = Color32::from_rgb(255, 128, 32);
+/// Intentional openings: a boundary the user said is meant to be open (a
+/// scan's base, a socket). A neutral slate, drawn over the hole outline so
+/// a marked opening never reads as a hole to fix.
+pub const OPENING: Color32 = Color32::from_rgb(132, 146, 160);
 /// Narrow cracks: boundaries whose edges almost touch.
 pub const CRACK: Color32 = Color32::from_rgb(230, 70, 210);
 /// Loose pieces: parts not connected to the model.

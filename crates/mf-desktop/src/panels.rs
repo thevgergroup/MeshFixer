@@ -114,10 +114,30 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui.menu_button("View", |ui| {
                 ui.checkbox(&mut app.show_boundaries, "Show defects");
                 ui.checkbox(&mut app.shown.recent_repairs, "Highlight recent repairs");
+                ui.checkbox(&mut app.show_hole_markers, "Show hole markers")
+                    .on_hover_text("A dot on each hole too small to see at this zoom");
                 ui.checkbox(&mut app.show_hole_overview, "Show hole overview")
                     .on_hover_text(
                         "Tint around every hole, and a dot on each one too small to see",
                     );
+                let both = app.show_tree || app.show_properties;
+                if ui
+                    .add(
+                        egui::Button::new(if both {
+                            "Hide side panels"
+                        } else {
+                            "Show side panels"
+                        })
+                        .shortcut_text(shortcut_text(
+                            egui::Modifiers::COMMAND,
+                            egui::Key::Backslash,
+                        )),
+                    )
+                    .clicked()
+                {
+                    app.toggle_side_panels();
+                    ui.close();
+                }
                 ui.checkbox(&mut app.show_metrics, "Metrics")
                     .on_hover_text("Frame times, memory, GPU buffers and threads");
                 ui.separator();
@@ -261,8 +281,19 @@ fn status(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         job_status(app, ui, &busy);
         return;
     }
+    // The last import's warnings, readable whatever the status says (I2).
+    if !app.warnings.is_empty() {
+        let text = count(app.warnings.len(), "import warning");
+        if ui
+            .small_button(&text)
+            .on_hover_text("Show what the import warned about")
+            .clicked()
+        {
+            app.show_warnings = !app.show_warnings;
+        }
+    }
     let (text, spinning) = if app.is_analyzing() {
-        ("Analyzing…".to_owned(), true)
+        ("Analysing…".to_owned(), true)
     } else if let Some(status) = &app.status {
         (status.clone(), false)
     } else {
@@ -425,6 +456,55 @@ pub fn replay_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
 }
 
 /// Help > Controls.
+/// Identical warnings once each, with how many times they came, in the
+/// order they first came: "528 × degenerate face skipped" (I2).
+pub fn grouped_warnings(warnings: &[String]) -> Vec<String> {
+    let mut groups: Vec<(&str, usize)> = Vec::new();
+    let mut at: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for w in warnings {
+        match at.get(w.as_str()) {
+            Some(&i) => groups[i].1 += 1,
+            None => {
+                at.insert(w, groups.len());
+                groups.push((w, 1));
+            }
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(w, n)| {
+            if n == 1 {
+                w.to_owned()
+            } else {
+                format!("{} × {w}", thousands(n as u64))
+            }
+        })
+        .collect()
+}
+
+/// The last import's warnings, grouped (the status bar's "N import
+/// warnings" opens it).
+pub fn warnings_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    if !app.show_warnings || app.warnings.is_empty() {
+        return;
+    }
+    let mut open = true;
+    egui::Window::new("Import warnings")
+        .open(&mut open)
+        .collapsible(false)
+        .default_width(420.0)
+        .show(ctx, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(320.0)
+                .show(ui, |ui| {
+                    for w in grouped_warnings(&app.warnings) {
+                        ui.add(egui::Label::new(w).wrap());
+                    }
+                });
+        });
+    app.show_warnings = open;
+}
+
 /// The tooltip beside the pointer when it rests on a defect in the 3D
 /// view (MF-RENDER-004): what it is and its size, in the same words as
 /// its tree row (a hole's boundary edges and perimeter, a loose piece's
@@ -433,7 +513,11 @@ pub fn view_hover_tooltip(app: &MeshFixerApp, ctx: &egui::Context) {
     let (Some(hover), Some(at)) = (app.view_hover(), app.view_pointer()) else {
         return;
     };
-    let copy = defect_copy(&hover.defect, app.session.document().units());
+    let units = app.session.document().units();
+    let copy = match app.current_analysis() {
+        Some(a) => a.defects.copy(&hover.defect, units),
+        None => defect_copy(&hover.defect, units),
+    };
     egui::Area::new(egui::Id::unique("view hover tooltip"))
         .order(egui::Order::Tooltip)
         .interactable(false)
@@ -695,22 +779,73 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
 /// the target; hovering outlines it in the view. The legend below says
 /// what each colour in the view means and switches each overlay.
 pub fn tree_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    egui::Panel::left("tree")
+    let narrow = ui.ctx().content_rect().width() < NARROW_WINDOW;
+    let collapsed = egui::Panel::left("tree collapsed")
+        .resizable(false)
+        .exact_size(COLLAPSED_WIDTH);
+    let expanded = egui::Panel::left("tree")
         .resizable(true)
-        .default_size(TREE_WIDTH)
-        .min_size(170.0)
-        .show(ui, |ui| {
+        .default_size(if narrow {
+            TREE_WIDTH_NARROW
+        } else {
+            TREE_WIDTH
+        })
+        .size_range(150.0..=TREE_WIDTH_MAX);
+    let was = app.show_tree;
+    let mut open = was;
+    egui::Panel::show_switched(ui, &mut open, collapsed, expanded, |ui, expanded| {
+        if !expanded {
+            if ui
+                .button("»")
+                .on_hover_text("Show Objects & Defects (Cmd/Ctrl+\\ shows both panels)")
+                .labelled("Show Objects & Defects")
+                .clicked()
+            {
+                app.show_tree = true;
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
             ui.heading("Objects & Defects");
-            ui.separator();
-            egui::Panel::bottom("legend")
-                .show_separator_line(true)
-                .show(ui, |ui| legend(app, ui));
-            egui::ScrollArea::vertical()
-                .id_salt("tree")
-                .auto_shrink([false, false])
-                .show(ui, |ui| tree(app, ui));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .small_button("«")
+                    .on_hover_text("Hide this panel (Cmd/Ctrl+\\ hides both)")
+                    .labelled("Hide Objects & Defects")
+                    .clicked()
+                {
+                    app.show_tree = false;
+                }
+            });
         });
+        ui.separator();
+        egui::Panel::bottom("legend")
+            .show_separator_line(true)
+            .show(ui, |ui| legend(app, ui));
+        egui::ScrollArea::vertical()
+            .id_salt("tree")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                // Long rows are cut short ("…"), never widening the panel
+                // (and so shrinking the view, I5): tooltips have them all.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                tree(app, ui)
+            });
+    });
+    // Dragging the edge past the minimum collapses it too.
+    if was && !open {
+        app.show_tree = false;
+    }
 }
+
+/// Below this window width (points), the side panels open narrower.
+const NARROW_WINDOW: f32 = 1100.0;
+/// A collapsed side panel: just its "show" button.
+const COLLAPSED_WIDTH: f32 = 28.0;
+const TREE_WIDTH_NARROW: f32 = 180.0;
+const TREE_WIDTH_MAX: f32 = 420.0;
+const PROPERTIES_WIDTH_NARROW: f32 = 240.0;
+const PROPERTIES_WIDTH_MAX: f32 = 480.0;
 
 /// The view's colours, each with its switch (View > Show defects hides
 /// every defect overlay at once).
@@ -719,7 +854,8 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.label(RichText::new("Legend").strong());
     let defects = app.show_boundaries;
     let shown = &mut app.shown;
-    let rows: [(&mut bool, &str, egui::Color32, &str, bool); 7] = [
+    let markers = &mut app.show_hole_markers;
+    let rows: [(&mut bool, &str, egui::Color32, &str, bool); 8] = [
         (
             &mut shown.selection,
             "Selection",
@@ -731,7 +867,7 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             &mut shown.hover,
             "Hover",
             theme::HOVER,
-            "What the pointer is over in the tree",
+            "What the pointer is over, in the view or the tree",
             true,
         ),
         (
@@ -739,6 +875,13 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             "Holes",
             theme::HOLE,
             "Open boundaries, outlined",
+            defects,
+        ),
+        (
+            markers,
+            "Hole markers",
+            theme::HOLE,
+            "A dot on each hole too small to see at this zoom (behind the model: none)",
             defects,
         ),
         (
@@ -757,9 +900,9 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         ),
         (
             &mut shown.non_manifold,
-            "Non-manifold edges",
+            "Tangled edges",
             theme::NON_MANIFOLD,
-            "Edges shared by more than two faces, and the faces at them; click one to select its faces",
+            "Tangled (non-manifold) edges: more than two triangles share each one. The triangles at them are tinted; click one to select its faces",
             defects,
         ),
         (
@@ -779,6 +922,15 @@ fn legend(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .on_disabled_hover_text("Hidden: View > Show defects is off");
         });
     }
+    // Shown with the holes (never hidden alone: the hole colour is under it).
+    ui.horizontal(|ui| {
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 2.0, theme::OPENING);
+        ui.add_space(ui.spacing().icon_width + ui.spacing().icon_spacing);
+        ui.label("Intentional openings").on_hover_text(
+            "Openings you marked as meant to be open, outlined; shown and hidden with Holes",
+        );
+    });
 }
 
 fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
@@ -841,7 +993,7 @@ struct Row<'a> {
     label: &'a str,
 }
 
-/// A one-click action at a row's right ("Fill", "Remove island",
+/// A one-click action at a row's right ("Fill", "Remove",
 /// "Unmark"): its text and accessible label ("Fill Hole 3").
 struct RowAction {
     text: &'static str,
@@ -1044,7 +1196,7 @@ fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui, object: mf_command::O
         } else {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.weak("Analyzing…");
+                ui.weak("Analysing…");
             });
         }
         return;
@@ -1066,26 +1218,55 @@ fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui, object: mf_command::O
         },
     );
     holes_tree(app, ui, object, &defects, units);
-    let categories = [
-        ("Narrow cracks", &defects.cracks, theme::CRACK),
-        ("Loose pieces", &defects.loose, theme::LOOSE_PIECE),
-        ("Non-manifold edges", &defects.tangled, theme::NON_MANIFOLD),
+    // Cracks marked intentional are listed with the openings instead.
+    let all_cracks: Vec<usize> = (0..defects.cracks.len()).collect();
+    let cracks: Vec<usize> = match app.hole_view_of(object) {
+        Some(view) => view.cracks.clone(),
+        None => all_cracks,
+    };
+    let every = |n: usize| (0..n).collect::<Vec<usize>>();
+    // (name, tooltip, its defects, the rows listed, colour)
+    type Category<'a> = (&'a str, &'a str, &'a [Defect], Vec<usize>, egui::Color32);
+    let categories: [Category<'_>; 3] = [
+        (
+            "Narrow cracks",
+            "Edges that almost touch, like a hairline seam",
+            &defects.cracks,
+            cracks,
+            theme::CRACK,
+        ),
+        (
+            "Loose pieces",
+            "Pieces not connected to the model",
+            &defects.loose,
+            every(defects.loose.len()),
+            theme::LOOSE_PIECE,
+        ),
+        (
+            "Tangled edges",
+            "Tangled (non-manifold) edges: more than two triangles share each one",
+            &defects.tangled,
+            every(defects.tangled.len()),
+            theme::NON_MANIFOLD,
+        ),
     ];
-    for (name, list, color) in categories {
-        let label = format!("{name} ({})", list.len());
-        let text = if list.is_empty() {
+    for (name, tip, list, rows, color) in categories {
+        let label = format!("{name} ({})", rows.len());
+        let text = if rows.is_empty() {
             RichText::new(label).color(theme::TEXT_MUTED)
         } else {
             RichText::new(label).color(color)
         };
         egui::CollapsingHeader::new(text)
             .id_salt((object.0, name))
-            .default_open(!list.is_empty())
+            .default_open(!rows.is_empty())
             .show(ui, |ui| {
-                virtual_rows(ui, list.len(), |ui, i| {
-                    defect_row(app, ui, object, &list[i], units);
+                virtual_rows(ui, rows.len(), |ui, i| {
+                    defect_row(app, ui, object, &defects, &list[rows[i]], units);
                 });
-            });
+            })
+            .header_response
+            .on_hover_text(tip);
     }
 }
 
@@ -1146,29 +1327,44 @@ fn holes_tree(
                 }
                 let n = range.len();
                 let plural = if n == 1 { "hole" } else { "holes" };
-                ui.label(RichText::new(format!("{} · {n}", group.title())).strong());
+                ui.add(
+                    egui::Label::new(RichText::new(format!("{} · {n}", group.title())).strong())
+                        .truncate(),
+                );
                 ui.horizontal_wrapped(|ui| {
                     if group == HoleGroup::TooLarge {
-                        ui.weak("Needs a large-hole method (not yet available)");
-                        return;
-                    }
-                    // N is what Apply fills: pinched holes are left out.
-                    let k = view.group_fillable(group).len();
-                    let fill = format!(
-                        "Fill all {k} {} {}",
-                        group.adjective(),
-                        if k == 1 { "hole" } else { "holes" }
-                    );
-                    if ui
-                        .add_enabled(
-                            app.busy.is_none() && k > 0,
-                            egui::Button::new(&fill).small(),
-                        )
-                        .on_hover_text("One step: one Undo brings them all back")
-                        .clicked()
-                    {
-                        let ids = app.group_fillable(group);
-                        app.fill_loops(ids);
+                        // Over the fill method's limit (MF-ISSUE-043): say
+                        // so, and offer what works today.
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(format!(
+                                    "Over this fill method's {}-edge limit. Often a scan's \
+                                     open base: mark it if it's meant to be open.",
+                                    thousands(crate::defects::FILL_CAP_EDGES as u64)
+                                ))
+                                .color(theme::TEXT_MUTED),
+                            )
+                            .wrap(),
+                        );
+                    } else {
+                        // N is what Apply fills: pinched holes are left out.
+                        let k = view.group_fillable(group).len();
+                        let fill = format!(
+                            "Fill all {k} {} {}",
+                            group.adjective(),
+                            if k == 1 { "hole" } else { "holes" }
+                        );
+                        if ui
+                            .add_enabled(
+                                app.busy.is_none() && k > 0,
+                                egui::Button::new(&fill).small(),
+                            )
+                            .on_hover_text("One step: one Undo brings them all back")
+                            .clicked()
+                        {
+                            let ids = app.group_fillable(group);
+                            app.fill_loops(ids);
+                        }
                     }
                     let mark = format!(
                         "Mark all {n} {} {plural} as intentional openings",
@@ -1204,32 +1400,36 @@ fn holes_tree(
                     .and_then(|id| view.position(id))
                     .filter(|p| range.contains(p))
                     .map(|p| p - range.start);
-                egui::CollapsingHeader::new(format!("{} ({})", group.title(), rows.len()))
+                // Short: a collapsing header never cuts its text, so a long
+                // one would widen the panel (I5).
+                egui::CollapsingHeader::new(format!("{} ({})", group.short_title(), rows.len()))
                     .id_salt((object.0, "hole group", group.title()))
                     .default_open(true)
                     .open(reveal.map(|_| true))
                     .show(ui, |ui| {
                         virtual_rows_to(ui, rows.len(), reveal, |ui, k| {
                             let d = &defects.holes[rows[k]];
-                            let pinched = d
-                                .selection()
-                                .is_some_and(|(_, id)| defects.pinched.binary_search(&id).is_ok());
-                            hole_row(app, ui, object, d, units, !pinched, false);
+                            hole_row(app, ui, object, defects, d, units, false);
                         });
-                    });
+                    })
+                    .header_response
+                    .on_hover_text(group.title());
             }
         });
-    if !view.marked.is_empty() {
+    let marked = view.marked.len() + view.marked_cracks.len();
+    if marked > 0 {
         egui::CollapsingHeader::new(
-            RichText::new(format!("Intentional openings ({})", view.marked.len()))
-                .color(theme::TEXT_MUTED),
+            RichText::new(format!("Intentional openings ({marked})")).color(theme::OPENING),
         )
         .id_salt((object.0, "Intentional openings"))
         .default_open(true)
         .show(ui, |ui| {
-            virtual_rows(ui, view.marked.len(), |ui, k| {
-                let d = &defects.holes[view.marked[k]];
-                hole_row(app, ui, object, d, units, false, true);
+            virtual_rows(ui, marked, |ui, k| {
+                let d = match view.marked.get(k) {
+                    Some(&i) => &defects.holes[i],
+                    None => &defects.cracks[view.marked_cracks[k - view.marked.len()]],
+                };
+                hole_row(app, ui, object, defects, d, units, true);
             });
         });
     }
@@ -1241,19 +1441,20 @@ fn hole_row(
     app: &mut MeshFixerApp,
     ui: &mut egui::Ui,
     object: mf_command::ObjectId,
+    defects: &crate::defects::Defects,
     d: &Defect,
     units: mf_io::threemf::Unit,
-    fillable: bool,
     marked: bool,
 ) {
-    let copy = defect_copy(d, units);
+    let copy = defects.copy(d, units);
+    let fillable = defects.fillable(d);
     let action = if marked {
         Some(RowAction {
             text: "Unmark",
             label: format!("Unmark {}", copy.name),
             tip: "List it as a hole again",
         })
-    } else if fillable && matches!(d, Defect::Hole { .. }) {
+    } else if fillable {
         Some(RowAction {
             text: "Fill",
             label: format!("Fill {}", copy.name),
@@ -1262,8 +1463,8 @@ fn hole_row(
     } else {
         None
     };
-    let next = if !fillable && !marked && matches!(d, Defect::Hole { .. }) {
-        "Passes through one point twice: can't be filled yet".to_owned()
+    let next = if marked {
+        "Unmark it to list it again".to_owned()
     } else {
         copy.next_action.clone()
     };
@@ -1280,6 +1481,12 @@ fn hole_row(
         |ui| {
             ui.strong(&copy.title);
             ui.label(&copy.detail);
+            if !marked {
+                ui.label(&copy.verdict);
+                if let Some(limit) = &copy.limit {
+                    ui.label(RichText::new(limit).color(theme::TEXT_MUTED));
+                }
+            }
             ui.label(RichText::new(format!("Next: {next}")).color(theme::TEXT_MUTED));
             ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
         },
@@ -1311,15 +1518,16 @@ fn defect_row(
     app: &mut MeshFixerApp,
     ui: &mut egui::Ui,
     object: mf_command::ObjectId,
+    defects: &crate::defects::Defects,
     d: &Defect,
     units: mf_io::threemf::Unit,
 ) {
-    let copy = defect_copy(d, units);
+    let copy = defects.copy(d, units);
     let action = match d {
         Defect::LoosePiece { .. } => Some(RowAction {
-            text: "Remove island",
-            label: format!("Remove island {}", copy.name),
-            tip: "Remove just this piece (one step)",
+            text: "Remove",
+            label: format!("Remove {}", copy.name),
+            tip: "Remove just this loose piece (one step)",
         }),
         _ => None,
     };
@@ -1336,6 +1544,10 @@ fn defect_row(
         |ui| {
             ui.strong(&copy.title);
             ui.label(&copy.detail);
+            ui.label(&copy.verdict);
+            if let Some(limit) = &copy.limit {
+                ui.label(RichText::new(limit).color(theme::TEXT_MUTED));
+            }
             ui.label(RichText::new(format!("Next: {}", copy.next_action)).color(theme::TEXT_MUTED));
             ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
         },
@@ -1354,28 +1566,83 @@ fn defect_row(
 /// Right: "Properties & Tools", contextual to the current target: what it
 /// is, the operations valid for it, their parameters, and Apply.
 pub fn properties_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    egui::Panel::right("properties")
+    let narrow = ui.ctx().content_rect().width() < NARROW_WINDOW;
+    let collapsed = egui::Panel::right("properties collapsed")
+        .resizable(false)
+        .exact_size(COLLAPSED_WIDTH);
+    let expanded = egui::Panel::right("properties")
         .resizable(true)
-        .default_size(PROPERTIES_WIDTH)
-        .min_size(220.0)
-        .show(ui, |ui| {
+        .default_size(if narrow {
+            PROPERTIES_WIDTH_NARROW
+        } else {
+            PROPERTIES_WIDTH
+        })
+        .size_range(200.0..=PROPERTIES_WIDTH_MAX);
+    let was = app.show_properties;
+    let mut open = was;
+    egui::Panel::show_switched(ui, &mut open, collapsed, expanded, |ui, expanded| {
+        if !expanded {
+            if ui
+                .button("«")
+                .on_hover_text("Show Properties & Tools (Cmd/Ctrl+\\ shows both panels)")
+                .labelled("Show Properties & Tools")
+                .clicked()
+            {
+                app.show_properties = true;
+            }
+            return;
+        }
+        ui.horizontal(|ui| {
+            if ui
+                .small_button("»")
+                .on_hover_text("Hide this panel (Cmd/Ctrl+\\ hides both)")
+                .labelled("Hide Properties & Tools")
+                .clicked()
+            {
+                app.show_properties = false;
+            }
             ui.heading("Properties & Tools");
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .id_salt("properties")
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if app.active_mesh().is_none() {
-                        ui.weak("Nothing open yet.");
-                        return;
-                    }
-                    target_section(app, ui);
-                    ui.add_space(8.0);
-                    tools_section(app, ui);
-                    ui.add_space(8.0);
-                    details_section(app, ui);
-                });
         });
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("properties")
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                notice(app, ui);
+                if app.active_mesh().is_none() {
+                    ui.weak("Nothing open yet.");
+                    return;
+                }
+                target_section(app, ui);
+                ui.add_space(8.0);
+                tools_section(app, ui);
+                ui.add_space(8.0);
+                details_section(app, ui);
+            });
+    });
+    if was && !open {
+        app.show_properties = false;
+    }
+}
+
+/// The last command's result when it carried a warning, in full (I1).
+fn notice(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(text) = app.notice.clone() else {
+        return;
+    };
+    egui::Frame::group(ui.style()).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.label(RichText::new("Last result").strong());
+        ui.add(egui::Label::new(&text).wrap());
+        if ui
+            .small_button("Dismiss")
+            .labelled("Dismiss note")
+            .clicked()
+        {
+            app.notice = None;
+        }
+    });
+    ui.add_space(8.0);
 }
 
 /// What the target is, in plain language.
@@ -1386,7 +1653,12 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         let copy = defect_copy(&inspected.defect, units);
         ui.label(RichText::new(&copy.title).strong().size(16.0));
         ui.label(&copy.detail);
-        if ui.button(&copy.next_action).clicked() {
+        verdict(ui, &copy);
+        if ui
+            .add(primary_button(ui, &copy.next_action))
+            .on_hover_text("Selects the triangles at this edge, so F frames them")
+            .clicked()
+        {
             app.select_tangled_faces();
         }
         return;
@@ -1400,21 +1672,25 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         });
         match (&found, sel.ids.len()) {
             (Some(defects), 1) => {
-                let copy = defect_copy(&defects[0], units);
+                let copy = match analysis {
+                    Some(a) => a.defects.copy(&defects[0], units),
+                    None => defect_copy(&defects[0], units),
+                };
                 ui.label(RichText::new(&copy.title).strong().size(16.0));
                 ui.label(&copy.detail);
-                if app.tools().is_empty() {
-                    ui.label(RichText::new(&copy.next_action).color(theme::TEXT_MUTED));
-                }
+                verdict(ui, &copy);
             }
             (Some(defects), n) => {
                 ui.label(RichText::new(selection_title(&sel, n)).strong().size(16.0));
                 let blocked: Vec<_> = defects
                     .iter()
-                    .filter(|d| !matches!(d, Defect::Hole { .. } | Defect::LoosePiece { .. }))
+                    .filter(|d| {
+                        !matches!(d, Defect::LoosePiece { .. })
+                            && !analysis.is_some_and(|a| a.defects.fillable(d))
+                    })
                     .collect();
-                if let Some(d) = blocked.first() {
-                    let copy = defect_copy(d, units);
+                if let (Some(d), Some(a)) = (blocked.first(), analysis) {
+                    let copy = a.defects.copy(d, units);
                     ui.label(
                         RichText::new(format!(
                             "Includes a {}: {}",
@@ -1427,6 +1703,12 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             }
             (None, n) => {
                 let main_body = sel.kind == SelectionKind::Component && sel.ids == [0];
+                let tangled = sel.kind == SelectionKind::Faces
+                    && analysis.is_some_and(|a| {
+                        sel.ids
+                            .iter()
+                            .all(|f| a.tangled_faces.binary_search(f).is_ok())
+                    });
                 if main_body {
                     ui.label(RichText::new("Main body").strong().size(16.0));
                     if let Some(a) = analysis {
@@ -1436,9 +1718,13 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     ui.label(RichText::new(selection_title(&sel, n)).strong().size(16.0));
                 }
                 ui.label(
-                    RichText::new(
-                        "No operation works on this selection yet; these act on the whole object.",
-                    )
+                    RichText::new(if tangled {
+                        "These triangles meet at a tangled edge. Press F to frame them and \
+                         look closer. MeshFixer can't untangle edges yet: repairing them is \
+                         planned. The tools below act on the whole object."
+                    } else {
+                        "No operation works on this selection yet; these act on the whole object."
+                    })
                     .color(theme::TEXT_MUTED),
                 );
             }
@@ -1446,22 +1732,29 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         let holes: Vec<u32> = match &found {
             Some(defects) if sel.kind == SelectionKind::BoundaryLoop => defects
                 .iter()
-                .filter(|d| matches!(d, Defect::Hole { .. } | Defect::OverCap { .. }))
                 .filter_map(|d| d.selection().map(|(_, id)| id))
                 .collect(),
             _ => Vec::new(),
         };
+        // Primary when nothing can fill the target (C1): it's the way on.
+        let refused = app.tools().is_empty();
         if !holes.is_empty() {
             let text = if holes.len() == 1 {
-                "Mark as intentional opening".to_owned()
+                crate::defects::MARK_INTENTIONAL.to_owned()
             } else {
                 format!("Mark {} as intentional openings", holes.len())
             };
+            let button = if refused {
+                primary_button(ui, &text)
+            } else {
+                egui::Button::new(text)
+            };
             if ui
-                .add_enabled(app.busy.is_none(), egui::Button::new(text))
+                .add_enabled(app.busy.is_none(), button)
                 .on_hover_text(
-                    "It's meant to be open (a mouth, a socket): leave it out of hole counts \
-                     and fills. Undo, or Unmark under Intentional openings, to list it again.",
+                    "It's meant to be open (a scan's base, a mouth, a socket): leave it out \
+                     of defect counts and fills. Undo, or Unmark under Intentional openings, \
+                     to list it again.",
                 )
                 .clicked()
             {
@@ -1486,7 +1779,7 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         ui.weak(if app.analysis_failed_for_active() {
             "Couldn't analyse this object"
         } else {
-            "Analyzing…"
+            "Analysing…"
         });
         return;
     };
@@ -1502,15 +1795,35 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             measure(size[2])
         ));
     }
-    let holes = app
-        .hole_view()
-        .map_or(a.defects.holes.len(), |v| v.listed.len());
-    let problems = holes + a.defects.cracks.len() + a.defects.loose.len() + a.defects.tangled.len();
+    let (holes, cracks, marked) =
+        app.hole_view()
+            .map_or((a.defects.holes.len(), a.defects.cracks.len(), 0), |v| {
+                (
+                    v.listed.len(),
+                    v.cracks.len(),
+                    v.marked.len() + v.marked_cracks.len(),
+                )
+            });
+    let problems = holes + cracks + a.defects.loose.len() + a.defects.tangled.len();
+    let verdict = print_verdict(
+        d,
+        holes + cracks,
+        marked,
+        a.defects.loose.len(),
+        a.defects.tangled.len(),
+    );
+    ui.label(RichText::new(verdict).strong());
     ui.label(if problems == 0 {
         RichText::new("No defects found").color(theme::TEXT_MUTED)
+    } else if holes > 0 {
+        RichText::new(format!(
+            "{} to look at, listed on the left. Press N to visit the holes one by one.",
+            count(problems, "defect")
+        ))
+        .color(theme::TEXT_MUTED)
     } else {
         RichText::new(format!(
-            "{} to look at (see the tree)",
+            "{} to look at, listed on the left",
             count(problems, "defect")
         ))
         .color(theme::TEXT_MUTED)
@@ -1526,6 +1839,58 @@ fn target_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 }
 
+/// Whether the object will print, in one line, from the analysis: closed
+/// and manifold, or what's left (M4 final UX review C1). `open` counts the
+/// listed holes and cracks, `marked` the intentional openings.
+pub fn print_verdict(
+    d: &mf_geometry::Diagnostics,
+    open: usize,
+    marked: usize,
+    loose: usize,
+    tangled: usize,
+) -> String {
+    let left = open + marked;
+    let mut parts = Vec::new();
+    if left > 0 {
+        let mut text = format!("Not watertight: {} left", count(left, "opening"));
+        if marked > 0 {
+            text.push_str(&format!(" ({marked} marked intentional)"));
+        }
+        parts.push(text);
+    } else if !d.is_closed {
+        parts.push("Not watertight".to_owned());
+    }
+    if tangled > 0 || !d.is_manifold {
+        parts.push("Has tangled edges: may print incorrectly".to_owned());
+    }
+    if !parts.is_empty() {
+        return parts.join(" · ");
+    }
+    if loose == 0 {
+        "Watertight: ready to print".to_owned()
+    } else {
+        format!(
+            "Watertight, but {} will print separately",
+            count(loose, "loose piece")
+        )
+    }
+}
+
+/// What it means for printing, and why MeshFixer can't repair it yet (if
+/// it can't), under a target's title.
+fn verdict(ui: &mut egui::Ui, copy: &crate::defects::DefectCopy) {
+    ui.label(&copy.verdict);
+    if let Some(limit) = &copy.limit {
+        ui.label(RichText::new(limit).color(theme::TEXT_MUTED));
+    }
+}
+
+/// A full-width button: the target's next action when no tool applies.
+fn primary_button(ui: &egui::Ui, text: &str) -> egui::Button<'static> {
+    egui::Button::new(RichText::new(text.to_owned()).strong())
+        .min_size(egui::vec2(ui.available_width(), 26.0))
+}
+
 /// Above this fraction of unused (tombstoned) slots, Properties suggests
 /// `mesh.compact` (MF-ISSUE-020).
 const SUGGEST_COMPACT_ABOVE: f64 = 0.5;
@@ -1534,7 +1899,7 @@ fn selection_title(sel: &Selection, n: usize) -> String {
     match sel.kind {
         SelectionKind::BoundaryLoop => format!("{} selected", count(n, "hole")),
         SelectionKind::Component => format!("{} selected", count(n, "piece")),
-        SelectionKind::Faces => format!("{} selected", count(n, "face")),
+        SelectionKind::Faces => format!("{} selected", count(n, "triangle")),
         SelectionKind::Object => "Whole object".to_owned(),
     }
 }
@@ -1661,16 +2026,12 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                     (ParamKind::Bool { .. }, ParamValue::Bool(_))
                         if refine_forced && p.name == "refine" =>
                     {
+                        // Why it's greyed out: once, below the grid (a grid cell never wraps, so a
+                        // line here would widen the panel and move the
+                        // view when the tool opens).
                         ui.label("");
                         ui.add_enabled(false, egui::Checkbox::new(&mut true, &name))
                             .on_disabled_hover_text(&p.description);
-                        ui.end_row();
-                        ui.label("");
-                        ui.label(
-                            RichText::new(REFINE_FORCED)
-                                .color(theme::TEXT_MUTED)
-                                .small(),
-                        );
                     }
                     (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
                         ui.label("");
@@ -1711,6 +2072,19 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
             }
         }
     }
+    if refine_forced {
+        ui.add(
+            egui::Label::new(
+                RichText::new(REFINE_FORCED)
+                    .color(theme::TEXT_MUTED)
+                    .small(),
+            )
+            .wrap(),
+        );
+    }
+    if let Some(warning) = curvature_warning(app, tool) {
+        ui.add(egui::Label::new(RichText::new(warning).color(theme::TEXT_MUTED)).wrap());
+    }
     if batch
         && let (Some(view), Some(ParamValue::Int(limit))) = (
             app.hole_view(),
@@ -1734,18 +2108,36 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
         let share = 100.0 * p.triangles as f64 / p.of_triangles.max(1) as f64;
         ui.label(
             RichText::new(format!(
-                "Removes {} of {} pieces ({share:.1}% of triangles)",
+                "Removes {} of {} ({share:.1}% of triangles)",
                 thousands(p.pieces),
-                thousands(p.of_pieces)
+                count(p.of_pieces as usize, "piece")
             ))
             .color(theme::TEXT_MUTED),
         )
         .on_hover_text("Tinted in the view: the pieces Apply would remove");
     }
+    // A batch fill that would fill nothing at this limit isn't offered.
+    let nothing_to_fill = batch
+        && match (
+            app.hole_view(),
+            app.op_params
+                .get("mesh.fill_holes")
+                .and_then(|p| p.get("max_loop_edges")),
+        ) {
+            (Some(view), Some(ParamValue::Int(limit))) => {
+                view.batch((*limit).max(0) as usize).0 == 0
+            }
+            _ => false,
+        };
     ui.horizontal(|ui| {
-        let can_apply = app.busy.is_none() && app.active.is_some();
+        let can_apply = app.busy.is_none() && app.active.is_some() && !nothing_to_fill;
         if ui
             .add_enabled(can_apply, egui::Button::new("Apply"))
+            .on_disabled_hover_text(if nothing_to_fill {
+                "Nothing to fill at this limit"
+            } else {
+                "Busy, or nothing open"
+            })
             .clicked()
         {
             app.apply(tool);
@@ -1758,6 +2150,71 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
             app.op_params.remove(&tool.op_id);
         }
     });
+}
+
+/// Before Apply: curvature matching is less accurate on holes over
+/// [`mf_operations::CURVATURE_ACCURATE_EDGES`] edges (MF-ISSUE-055), so a
+/// curvature fill of one says so, with Smooth as the way round (I1).
+fn curvature_warning(app: &MeshFixerApp, tool: &Tool) -> Option<String> {
+    use mf_operations::CURVATURE_ACCURATE_EDGES as LIMIT;
+    if tool.op_id != "mesh.fill_holes" {
+        return None;
+    }
+    let curvature = app
+        .op_params
+        .get("mesh.fill_holes")
+        .and_then(|p| p.get("fill_style"))
+        .is_some_and(|v| matches!(v, ParamValue::Text(s) if s == "curvature"));
+    if !curvature {
+        return None;
+    }
+    let advice = "Smooth is recommended";
+    match &tool.selection {
+        Some(sel) => {
+            let a = app.current_analysis()?;
+            let edges: Vec<usize> = sel
+                .ids
+                .iter()
+                .filter_map(|&id| match a.defects.find(sel.kind, id)? {
+                    Defect::Hole { edges, .. } => Some(*edges),
+                    _ => None,
+                })
+                .filter(|&e| e > LIMIT)
+                .collect();
+            match (edges.as_slice(), sel.ids.len()) {
+                ([], _) => None,
+                ([e], 1) => Some(format!(
+                    "Less accurate on holes over {LIMIT} edges (this one has {e}): {advice}."
+                )),
+                (big, _) => Some(format!(
+                    "Less accurate on holes over {LIMIT} edges ({} of these {}): {advice}.",
+                    big.len(),
+                    if big.len() == 1 { "is" } else { "are" }
+                )),
+            }
+        }
+        None => {
+            let view = app.hole_view()?;
+            let limit = match app
+                .op_params
+                .get("mesh.fill_holes")
+                .and_then(|p| p.get("max_loop_edges"))
+            {
+                Some(ParamValue::Int(v)) => (*v).max(0) as usize,
+                _ => return None,
+            };
+            let (upto_limit, _) = view.batch(limit);
+            let (accurate, _) = view.batch(LIMIT);
+            let big = upto_limit.saturating_sub(accurate);
+            (big > 0).then(|| {
+                format!(
+                    "Less accurate on holes over {LIMIT} edges ({} of these {}): {advice}.",
+                    thousands(big as u64),
+                    if big == 1 { "is" } else { "are" }
+                )
+            })
+        }
+    }
 }
 
 /// Every number `inspect` reports, folded away under "Details".
@@ -1790,8 +2247,14 @@ fn details_section(app: &MeshFixerApp, ui: &mut egui::Ui) {
                         "Untraced boundary edges",
                         d.untraced_boundary_edges.to_string(),
                     );
-                    row("Non-manifold edges", d.non_manifold_edges.to_string());
-                    row("Non-manifold vertices", d.non_manifold_vertices.to_string());
+                    row(
+                        "Tangled edges (non-manifold)",
+                        d.non_manifold_edges.to_string(),
+                    );
+                    row(
+                        "Pinched points (non-manifold vertices)",
+                        d.non_manifold_vertices.to_string(),
+                    );
                     row("Degenerate triangles", d.degenerate_triangles.to_string());
                     row("Duplicate vertices", d.duplicate_vertices_exact.to_string());
                     row(
@@ -1820,6 +2283,18 @@ fn details_section(app: &MeshFixerApp, ui: &mut egui::Ui) {
                             .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
                     );
                 });
+            if !app.warnings.is_empty() {
+                egui::CollapsingHeader::new(format!(
+                    "Import warnings ({})",
+                    thousands(app.warnings.len() as u64)
+                ))
+                .id_salt("import warnings")
+                .show(ui, |ui| {
+                    for w in grouped_warnings(&app.warnings) {
+                        ui.add(egui::Label::new(RichText::new(w).small()).wrap());
+                    }
+                });
+            }
         });
 }
 

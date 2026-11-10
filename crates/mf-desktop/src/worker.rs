@@ -378,6 +378,9 @@ pub enum OverlayTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OverlayPurpose {
     Selection,
+    /// The active object's intentional openings, drawn in `OPENING` over
+    /// their hole outlines (M4 final UX review I3).
+    Openings,
     Hover,
 }
 
@@ -1329,7 +1332,7 @@ fn build_overlay(
         // Which way the target faces, for framing it (F): only a selection
         // is framed, and finding a loop's faces is O(n).
         let normal = match (&target, purpose) {
-            (_, OverlayPurpose::Hover) => None,
+            (_, OverlayPurpose::Hover | OverlayPurpose::Openings) => None,
             (OverlayTarget::Loops(_) | OverlayTarget::Edges(_), _) => facing(
                 &mesh,
                 &faces_on_edges(&mesh, outline.iter().map(|e| (e[0], e[1])).collect()),

@@ -9,8 +9,22 @@ use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::threemf::Unit;
 use mf_selection::SelectionKind;
 
-/// Above this many edges a hole is a "large opening".
-pub const LARGE_HOLE_EDGES: usize = 200;
+/// The largest hole the fill operation closes today: bigger ones are
+/// [`Defect::OverCap`] (MF-ISSUE-043). The desktop reads the real cap from
+/// the operation's spec; this is only for the words.
+pub const FILL_CAP_EDGES: usize = 1000;
+
+/// The label every refusal's reason starts with: the limit is the fill
+/// method's, not the model's (owner rule: algorithm limits are not product
+/// limits).
+pub const METHOD_LIMIT: &str = "Limit of this fill method";
+
+/// The next action for a defect MeshFixer can't repair yet but that may be
+/// meant to be there (a scan's open base, a socket, a seam).
+pub const MARK_INTENTIONAL: &str = "Mark as intentional opening";
+
+/// The next action for a tangled edge: select the faces at it, to inspect.
+pub const SELECT_ITS_FACES: &str = "Select its faces";
 
 /// One defect of the active object, as listed in the tree.
 #[derive(Debug, Clone, PartialEq)]
@@ -107,6 +121,12 @@ pub struct DefectCopy {
     /// Both, as the row's accessible label: "Hole 3 · 42 edges · 12.4 mm".
     pub row: String,
     pub detail: String,
+    /// What it means for printing, in plain words.
+    pub verdict: String,
+    /// Why MeshFixer can't repair it today, starting "Limit of this fill
+    /// method" for a hole or crack ([`METHOD_LIMIT`]); `None` when it can.
+    pub limit: Option<String>,
+    /// What to do next, a button that exists today.
     pub next_action: String,
 }
 
@@ -125,6 +145,21 @@ impl Defect {
 }
 
 impl Defects {
+    /// [`defect_copy`], knowing which holes are pinched (fill_holes refuses
+    /// them, MF-ISSUE-051), so the tree and Properties say the same. O(log n).
+    pub fn copy(&self, defect: &Defect, units: Unit) -> DefectCopy {
+        let pinched = matches!(defect, Defect::Hole { loop_id, .. }
+            if self.pinched.binary_search(loop_id).is_ok());
+        defect_copy_with(defect, pinched, units)
+    }
+
+    /// True if `defect` is a hole fill_holes can close (not over the cap,
+    /// not pinched, not a crack). O(log n).
+    pub fn fillable(&self, defect: &Defect) -> bool {
+        matches!(defect, Defect::Hole { loop_id, .. }
+            if self.pinched.binary_search(loop_id).is_err())
+    }
+
     /// The defect a selected loop or component is, if any. O(log n).
     pub fn find(&self, kind: SelectionKind, id: u32) -> Option<&Defect> {
         match kind {
@@ -630,7 +665,7 @@ fn vector_area(mesh: &Mesh, loop_vertices: &[u32]) -> f64 {
 /// The size groups the browser sorts holes into (M4 Task 12).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HoleGroup {
-    /// Over 1000 edges: too large for the current fill (MF-ISSUE-043).
+    /// Over 1000 edges: over the fill method's limit (MF-ISSUE-043).
     TooLarge,
     /// 201–1000 edges.
     Large,
@@ -665,11 +700,23 @@ impl HoleGroup {
     /// Its tree header: "Tiny holes (up to 8 edges)".
     pub fn title(self) -> &'static str {
         match self {
-            HoleGroup::TooLarge => "Too large for the current method (over 1000 edges)",
+            HoleGroup::TooLarge => "Very large holes (over 1000 edges)",
             HoleGroup::Large => "Large holes (201–1000 edges)",
             HoleGroup::Medium => "Medium holes (31–200 edges)",
             HoleGroup::Small => "Small holes (9–30 edges)",
             HoleGroup::Tiny => "Tiny holes (up to 8 edges)",
+        }
+    }
+
+    /// Its title without the sizes: "Tiny holes" (where space is short;
+    /// the sizes go in its tooltip).
+    pub fn short_title(self) -> &'static str {
+        match self {
+            HoleGroup::TooLarge => "Very large holes",
+            HoleGroup::Large => "Large holes",
+            HoleGroup::Medium => "Medium holes",
+            HoleGroup::Small => "Small holes",
+            HoleGroup::Tiny => "Tiny holes",
         }
     }
 
@@ -696,6 +743,10 @@ pub struct HoleView {
     pub listed: Vec<usize>,
     /// Indices into [`Defects::holes`] of the marked openings.
     pub marked: Vec<usize>,
+    /// Indices into [`Defects::cracks`] of the cracks listed (not marked).
+    pub cracks: Vec<usize>,
+    /// Indices into [`Defects::cracks`] of the cracks marked intentional.
+    pub marked_cracks: Vec<usize>,
     /// Each [`HoleGroup`]'s range of `listed` (in `HoleGroup::ALL` order).
     groups: [std::ops::Range<usize>; 5],
     /// (edges, loop id) of every listed hole fill_holes can close, fewest
@@ -741,8 +792,8 @@ impl HoleView {
     }
 }
 
-/// How `defects`' holes are listed with `openings` (loop ids) marked as
-/// intentional. O(holes); run it on a worker.
+/// How `defects`' holes and cracks are listed with `openings` (loop ids)
+/// marked as intentional. O(holes + cracks); run it on a worker.
 pub fn hole_view(defects: &Defects, openings: &[u32]) -> HoleView {
     let mut openings = openings.to_vec();
     openings.sort_unstable();
@@ -770,6 +821,16 @@ pub fn hole_view(defects: &Defects, openings: &[u32]) -> HoleView {
                     .expect("ALL lists every group");
                 view.fillable_in[g].push(id);
             }
+        }
+    }
+    for (i, d) in defects.cracks.iter().enumerate() {
+        let marked = d
+            .selection()
+            .is_some_and(|(_, id)| view.openings.binary_search(&id).is_ok());
+        if marked {
+            view.marked_cracks.push(i);
+        } else {
+            view.cracks.push(i);
         }
     }
     view.fillable.sort_unstable();
@@ -840,16 +901,32 @@ pub fn tool_summary(op_id: &str) -> Option<&'static str> {
 
 /// The defect's words, in plain language: its title, its tree row (a short
 /// name and its size, so a speck is recognisable before you zoom to it),
-/// its measurements and next action. Measurements are in the document's
-/// `units`, after the object's transform.
+/// its measurements, what it means for printing, why MeshFixer can't fix
+/// it yet (if it can't) and the next action. Measurements are in the
+/// document's `units`, after the object's transform. A pinched hole needs
+/// the analysis: see [`Defects::copy`].
 pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
+    defect_copy_with(defect, false, units)
+}
+
+/// [`defect_copy`], for a hole that is `pinched` (passes through one point
+/// twice, so fill_holes refuses it) or not.
+pub fn defect_copy_with(defect: &Defect, pinched: bool, units: Unit) -> DefectCopy {
     let u = unit_symbol(units);
-    let copy = |title: String, name: String, size: String, detail: String, next: &str| DefectCopy {
+    let copy = |title: String,
+                name: String,
+                size: String,
+                detail: String,
+                verdict: &str,
+                limit: Option<String>,
+                next: &str| DefectCopy {
         row: format!("{name} · {size}"),
         title,
         name,
         size,
         detail,
+        verdict: verdict.to_owned(),
+        limit,
         next_action: next.to_owned(),
     };
     // "42 edges · 12.4 mm" (the perimeter).
@@ -863,35 +940,72 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
             edges,
             perimeter,
             ..
-        } => {
-            let size = if *edges > LARGE_HOLE_EDGES {
-                "large"
-            } else {
-                "small"
-            };
-            copy(
-                format!("Hole {number}: {size} opening"),
-                format!("Hole {number}"),
-                around(*edges, *perimeter),
-                hole_detail(*edges, *perimeter, units),
-                "Fill hole",
-            )
-        }
-        Defect::OverCap {
-            edges, perimeter, ..
-        } => copy(
-            "Very large opening".into(),
-            "Very large opening".into(),
+        } if pinched => copy(
+            format!(
+                "Hole {number}: {} opening",
+                HoleGroup::of(*edges).adjective()
+            ),
+            format!("Hole {number}"),
             around(*edges, *perimeter),
             hole_detail(*edges, *perimeter, units),
-            "Needs a large-hole method (not yet available)",
+            "An opening that pinches to a single point. The model isn't closed, so it won't \
+             print as a solid until it's closed.",
+            Some(format!(
+                "{METHOD_LIMIT}: this hole passes through one point twice, so it can't be \
+                 filled yet. Filling holes like this is planned."
+            )),
+            MARK_INTENTIONAL,
+        ),
+        Defect::Hole {
+            number,
+            edges,
+            perimeter,
+            ..
+        } => copy(
+            format!(
+                "Hole {number}: {} opening",
+                HoleGroup::of(*edges).adjective()
+            ),
+            format!("Hole {number}"),
+            around(*edges, *perimeter),
+            hole_detail(*edges, *perimeter, units),
+            "An opening in the surface. The model isn't closed, so it won't print as a solid \
+             until it's filled.",
+            None,
+            "Fill hole",
+        ),
+        Defect::OverCap {
+            number,
+            edges,
+            perimeter,
+            ..
+        } => copy(
+            format!("Hole {number}: very large opening"),
+            format!("Hole {number}"),
+            around(*edges, *perimeter),
+            hole_detail(*edges, *perimeter, units),
+            "A large opening, often the open base or cut edge of a scan. It won't print \
+             closed as it is. If it's meant to be open (a base, a socket), mark it so.",
+            Some(format!(
+                "{METHOD_LIMIT}: it fills holes of up to {} edges, and this one has {}. \
+                 Filling larger holes is planned.",
+                thousands(FILL_CAP_EDGES as u64),
+                thousands(*edges as u64)
+            )),
+            MARK_INTENTIONAL,
         ),
         Defect::Crack { edges, .. } => copy(
             "Narrow crack".into(),
             "Narrow crack".into(),
             count(*edges, "edge"),
             format!("Edges almost touch · {}", count(*edges, "edge")),
-            "Slit: needs welding (not yet available)",
+            "Two edges almost touch, like a hairline seam. Usually harmless for printing: \
+             slicers close a gap this thin.",
+            Some(format!(
+                "{METHOD_LIMIT}: a crack has no area to fill, so it needs its edges joined \
+                 instead. Joining them is planned."
+            )),
+            MARK_INTENTIONAL,
         ),
         Defect::LoosePiece {
             component,
@@ -918,18 +1032,26 @@ pub fn defect_copy(defect: &Defect, units: Unit) -> DefectCopy {
                 format!("Piece {component}"),
                 row_size,
                 detail,
+                "It prints as a separate bit, or not at all if it's tiny. Usually scan debris.",
+                None,
                 "Remove piece",
             )
         }
         Defect::Tangled { faces, .. } => copy(
             "Tangled edge".into(),
             "Tangled edge".into(),
-            count(faces.len(), "face"),
+            count(faces.len(), "triangle"),
             format!(
-                "More than two faces share this edge · {}",
-                count(faces.len(), "face")
+                "More than two triangles share this edge (a non-manifold edge) · {}",
+                count(faces.len(), "triangle")
             ),
-            "Select the faces involved",
+            "The surface folds onto itself here. Slicers may print this spot wrongly.",
+            Some(
+                "MeshFixer can't untangle edges yet: repairing them is planned. Select its \
+                 faces to see where they are."
+                    .into(),
+            ),
+            SELECT_ITS_FACES,
         ),
     }
 }
@@ -955,12 +1077,12 @@ pub fn thousands(n: u64) -> String {
     out
 }
 
-/// "1 triangle", "12 triangles".
+/// "1 triangle", "12 triangles", "1,050 triangles".
 pub fn count(n: usize, noun: &str) -> String {
     if n == 1 {
         format!("1 {noun}")
     } else {
-        format!("{n} {noun}s")
+        format!("{} {noun}s", thousands(n as u64))
     }
 }
 
@@ -1128,7 +1250,7 @@ mod tests {
                 edges: 1500,
                 perimeter: None,
             }),
-            "Very large opening · 1500 edges"
+            "Hole 2 · 1,500 edges"
         );
         assert_eq!(
             row(Defect::Crack {
@@ -1150,7 +1272,7 @@ mod tests {
                 edge: [1, 2],
                 faces: vec![0, 1, 2]
             }),
-            "Tangled edge · 3 faces"
+            "Tangled edge · 3 triangles"
         );
         let c = defect_copy(
             &Defect::Hole {
@@ -1251,6 +1373,21 @@ mod tests {
         assert_eq!(view.batch(3), (1, 1));
     }
 
+    /// M4 final UX review C1: a narrow crack can be marked intentional too,
+    /// so the defect count can reach zero.
+    #[test]
+    fn a_crack_marked_intentional_is_not_listed() {
+        let plate = mf_fixtures::plate_with_defects();
+        let d = classify(&plate, &mf_geometry::inspect(&plate), &IDENTITY, 1000);
+        assert_eq!(d.cracks.len(), 1);
+        assert_eq!(hole_view(&d, &[]).cracks, vec![0]);
+        let (_, id) = d.cracks[0].selection().unwrap();
+        let view = hole_view(&d, &[id]);
+        assert!(view.cracks.is_empty());
+        assert_eq!(view.marked_cracks, vec![0]);
+        assert_eq!(view.listed.len(), d.holes.len(), "holes are unaffected");
+    }
+
     /// A group's "Fill all N" counts only the holes Apply fills: a pinched
     /// hole is listed but left out (fix round 1, P3).
     #[test]
@@ -1279,31 +1416,10 @@ mod tests {
                 perimeter: Some(12.4),
             }),
             s(
-                "Hole 3: small opening",
+                "Hole 3: medium opening",
                 "42 boundary edges · 12.4 mm perimeter",
                 "Fill hole"
             )
-        );
-        // Above 200 edges it's a large opening.
-        assert_eq!(
-            copy(Defect::Hole {
-                number: 1,
-                loop_id: 0,
-                edges: 201,
-                perimeter: Some(1234.5),
-            })
-            .0,
-            "Hole 1: large opening"
-        );
-        assert_eq!(
-            copy(Defect::Hole {
-                number: 1,
-                loop_id: 0,
-                edges: 200,
-                perimeter: Some(1.0),
-            })
-            .0,
-            "Hole 1: small opening"
         );
         assert_eq!(
             copy(Defect::Crack {
@@ -1313,7 +1429,7 @@ mod tests {
             s(
                 "Narrow crack",
                 "Edges almost touch · 8 edges",
-                "Slit: needs welding (not yet available)"
+                "Mark as intentional opening"
             )
         );
         assert_eq!(
@@ -1335,8 +1451,8 @@ mod tests {
             }),
             s(
                 "Tangled edge",
-                "More than two faces share this edge · 3 faces",
-                "Select the faces involved"
+                "More than two triangles share this edge (a non-manifold edge) · 3 triangles",
+                "Select its faces"
             )
         );
         assert_eq!(
@@ -1347,9 +1463,9 @@ mod tests {
                 perimeter: Some(88.0),
             }),
             s(
-                "Very large opening",
-                "1500 boundary edges · 88.0 mm perimeter",
-                "Needs a large-hole method (not yet available)"
+                "Hole 2: very large opening",
+                "1,500 boundary edges · 88.0 mm perimeter",
+                "Mark as intentional opening"
             )
         );
         // Measurements use the document's units.
@@ -1366,5 +1482,133 @@ mod tests {
             .detail,
             "3 boundary edges · 0.500 in perimeter"
         );
+    }
+
+    fn one_of_each() -> Vec<Defect> {
+        vec![
+            Defect::Hole {
+                number: 1,
+                loop_id: 0,
+                edges: 12,
+                perimeter: Some(3.0),
+            },
+            Defect::OverCap {
+                number: 2,
+                loop_id: 1,
+                edges: 1525,
+                perimeter: Some(300.0),
+            },
+            Defect::Crack {
+                loop_id: 2,
+                edges: 6,
+            },
+            Defect::LoosePiece {
+                component: 1,
+                triangles: 4,
+                size: Some(0.5),
+            },
+            Defect::Tangled {
+                edge: [1, 2],
+                faces: vec![0, 1, 2],
+            },
+        ]
+    }
+
+    /// M4 final UX review C1: every defect says what it means for
+    /// printing; the ones MeshFixer can't repair yet say why, as a limit of
+    /// the method (never "the current method" or "not yet available"), and
+    /// name a next action that exists today.
+    #[test]
+    fn every_defect_has_a_verdict_and_refusals_say_why_and_what_next() {
+        for d in one_of_each() {
+            for pinched in [false, true] {
+                let c = defect_copy_with(&d, pinched, Unit::Millimeter);
+                let all = format!("{} {} {:?} {}", c.title, c.verdict, c.limit, c.next_action);
+                assert!(!c.verdict.is_empty(), "{d:?}");
+                for banned in ["current method", "not yet available", "Slit", "welding"] {
+                    assert!(!all.contains(banned), "{banned:?} in {all}");
+                }
+                let refused = match d {
+                    Defect::Hole { .. } => pinched,
+                    Defect::OverCap { .. } | Defect::Crack { .. } | Defect::Tangled { .. } => true,
+                    Defect::LoosePiece { .. } => false,
+                };
+                assert_eq!(c.limit.is_some(), refused, "{d:?} pinched {pinched}");
+                if refused && !matches!(d, Defect::Tangled { .. }) {
+                    assert!(
+                        c.limit.as_deref().unwrap().starts_with(METHOD_LIMIT),
+                        "{:?}",
+                        c.limit
+                    );
+                    assert_eq!(c.next_action, MARK_INTENTIONAL, "{d:?}");
+                }
+            }
+        }
+        let over = defect_copy(&one_of_each()[1], Unit::Millimeter);
+        assert!(over.verdict.contains("base"), "{}", over.verdict);
+        assert!(
+            over.limit.as_deref().unwrap().contains("1,000")
+                && over.limit.unwrap().contains("1,525")
+        );
+        let tangled = defect_copy(&one_of_each()[4], Unit::Millimeter);
+        assert_eq!(tangled.next_action, SELECT_ITS_FACES);
+        assert!(tangled.verdict.contains("print"));
+    }
+
+    /// M4 final UX review I4: a hole's title uses its size group's word,
+    /// so the tree's "Medium holes" lists "medium" openings.
+    #[test]
+    fn hole_titles_agree_with_their_size_groups() {
+        for edges in [3, 8, 9, 30, 31, 200, 201, 1000, 1001, 5000] {
+            let group = HoleGroup::of(edges);
+            let d = if edges > FILL_CAP_EDGES {
+                Defect::OverCap {
+                    number: 1,
+                    loop_id: 0,
+                    edges,
+                    perimeter: None,
+                }
+            } else {
+                Defect::Hole {
+                    number: 1,
+                    loop_id: 0,
+                    edges,
+                    perimeter: None,
+                }
+            };
+            let title = defect_copy(&d, Unit::Millimeter).title;
+            assert!(
+                title.ends_with(&format!(": {} opening", group.adjective())),
+                "{edges} edges: {title}"
+            );
+            assert!(
+                group.title().to_lowercase().starts_with(group.adjective()),
+                "{}",
+                group.title()
+            );
+        }
+    }
+
+    /// M4 final UX review I7: a pinched hole isn't fillable, and its words
+    /// (through the analysis) say why and what to do instead.
+    #[test]
+    fn a_pinched_hole_says_it_cant_be_filled() {
+        let mesh = holed_grid();
+        let mut d = classify(&mesh, &mf_geometry::inspect(&mesh), &IDENTITY, 1000);
+        // (Real pinched loops come from scans; marked as the analysis would.)
+        let (_, small) = d.holes[1].selection().unwrap();
+        d.pinched = vec![small];
+        let hole = d
+            .holes
+            .iter()
+            .find(|h| h.selection().is_some_and(|(_, id)| id == d.pinched[0]))
+            .unwrap();
+        assert!(!d.fillable(hole));
+        let c = d.copy(hole, Unit::Millimeter);
+        assert_eq!(c.next_action, MARK_INTENTIONAL);
+        assert!(c.limit.unwrap().contains("passes through one point twice"));
+        let rim = d.holes.iter().find(|h| *h != hole).unwrap();
+        assert!(d.fillable(rim));
+        assert_eq!(d.copy(rim, Unit::Millimeter).next_action, "Fill hole");
     }
 }
