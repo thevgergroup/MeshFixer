@@ -179,11 +179,19 @@ fn vs_surface(
     return out;
 }
 
-// A hovered face (unless selected) glows: strongly tinted and barely
-// shaded, so it reads as near-white against the shaded model at any angle.
+// A hovered face (unless selected): a light tint (its colour comes from
+// `base_color`) kept shaded, so the model's own shape stays visible (UI
+// plan §11: overlays never repaint large areas).
 fn glow(rgb: vec3<f32>, n_in: vec3<f32>) -> vec3<f32> {
-    let light = abs(dot(normalize(n_in), normalize(scene.eye_dir.xyz)));
-    return rgb * (0.85 + 0.15 * light);
+    return lit(rgb, n_in) * 1.08;
+}
+
+// A rim in `color` where the surface turns edge-on: with the outline,
+// how a selected or hovered object reads without a solid fill.
+fn rim(rgb: vec3<f32>, n_in: vec3<f32>, color: vec3<f32>, strength: f32) -> vec3<f32> {
+    let v = normalize(scene.eye_dir.xyz);
+    let r = pow(1.0 - abs(dot(normalize(n_in), v)), 2.0);
+    return mix(rgb, color, clamp(r * strength, 0.0, 1.0));
 }
 
 @fragment
@@ -195,6 +203,11 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
     // While the selection pulses, it's lit evenly too (brighter).
     if (selected) {
         rgb = mix(rgb, glow(base, in.normal), scene.cue.x);
+    }
+    if (selected) {
+        rgb = rim(rgb, in.normal, scene.tint_selected.rgb, 0.9);
+    } else if (glowing) {
+        rgb = rim(rgb, in.normal, scene.tint_hover.rgb, 0.7);
     }
     rgb = mix(rgb, rgb * 0.45, wire(in.bary));
     // Split's preview: the top part a little lighter, the bottom a little
@@ -247,18 +260,33 @@ fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
 
 // One line segment (a..b) as a screen-space quad `draw.params.y` pixels
 // wide: six vertices per instance.
+struct LineOut {
+    @builtin(position) clip: vec4<f32>,
+    // -1..1 across the line: its outer edge is darkened (a halo), so a
+    // line reads on light and dark surfaces alike (UI plan §11).
+    @location(0) across: f32,
+};
+
+// The halo: the line's colour in its core, darkened at its edges.
+fn halo(rgb: vec3<f32>, across: f32) -> vec3<f32> {
+    return mix(rgb, rgb * 0.22, smoothstep(0.55, 0.95, abs(across)));
+}
+
 @vertex
 fn vs_line(
     @builtin(vertex_index) corner: u32,
     @location(0) a: vec3<f32>,
     @location(1) b: vec3<f32>,
-) -> @builtin(position) vec4<f32> {
+) -> LineOut {
+    var out: LineOut;
+    out.across = 0.0;
     var ca = scene.view_proj * draw.model * vec4<f32>(a, 1.0);
     var cb = scene.view_proj * draw.model * vec4<f32>(b, 1.0);
     // Keep both ends in front of the camera before dividing by w.
     let near = 1e-5;
     if (ca.w < near && cb.w < near) {
-        return vec4<f32>(0.0, 0.0, 2.0, 1.0); // fully behind: clipped
+        out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0); // fully behind: clipped
+        return out;
     }
     if (ca.w < near) {
         ca = mix(ca, cb, (near - ca.w) / (cb.w - ca.w));
@@ -286,20 +314,22 @@ fn vs_line(
     // faces; overlay layers a little further, so they win over the
     // (narrower, so differently sloped) outlines they're drawn on.
     clip.z = clip.z - (0.0005 + draw.params.z) * clip.w;
-    return clip;
+    out.clip = clip;
+    out.across = side[corner];
+    return out;
 }
 
 // Every boundary loop's outline (the hole colour).
 @fragment
-fn fs_line() -> @location(0) vec4<f32> {
-    let rgb = scene.boundary.rgb;
+fn fs_line(in: LineOut) -> @location(0) vec4<f32> {
+    let rgb = halo(scene.boundary.rgb, in.across);
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
 }
 
 // Overlay lines: selected loops, cracks, tangled edges, hover.
 @fragment
-fn fs_overlay_line() -> @location(0) vec4<f32> {
-    return vec4<f32>(draw.color.rgb, 1.0);
+fn fs_overlay_line(in: LineOut) -> @location(0) vec4<f32> {
+    return vec4<f32>(halo(draw.color.rgb, in.across), 1.0);
 }
 
 // The selection where nearer surfaces hide it (the x-ray pass: drawn only

@@ -1367,9 +1367,13 @@ fn build_overlay(
                     .flatten()
                     .copied()
                     .collect();
-                (face_corners(&mesh, &faces).collect(), Vec::new())
+                let outline = face_set_outline(&mesh, &faces);
+                (face_corners(&mesh, &faces).collect(), outline)
             }
-            OverlayTarget::Faces(ids) => (face_corners(&mesh, ids).collect(), Vec::new()),
+            OverlayTarget::Faces(ids) => (
+                face_corners(&mesh, ids).collect(),
+                face_set_outline(&mesh, ids),
+            ),
             OverlayTarget::Object => (mesh.faces().flat_map(|(_, t)| t).collect(), Vec::new()),
             OverlayTarget::Edges(edges) => {
                 (edges.iter().flatten().copied().collect(), edges.clone())
@@ -1378,9 +1382,12 @@ fn build_overlay(
         let lines = match &target {
             OverlayTarget::Loops(ids) => loop_line_vertices(&mesh, origin, ids),
             OverlayTarget::Edges(edges) => edge_line_vertices(&mesh, origin, edges),
-            OverlayTarget::Components(_) | OverlayTarget::Faces(_) | OverlayTarget::Object => {
-                Vec::new()
+            // A face set's outline (UI plan §11: an outline and a light
+            // tint, never a solid fill).
+            OverlayTarget::Components(_) | OverlayTarget::Faces(_) => {
+                edge_line_vertices(&mesh, origin, &outline)
             }
+            OverlayTarget::Object => Vec::new(),
         };
         // Which way the target faces, for framing it (F): only a selection
         // is framed, and finding a loop's faces is O(n).
@@ -1470,6 +1477,51 @@ fn facing(mesh: &Mesh, faces: &[u32]) -> Option<glam::DVec3> {
 }
 
 /// The corner vertices of the live faces among `faces`.
+/// Above this many faces a face set gets no outline (its tint alone):
+/// finding one hashes every edge, too much for a whole 30M body.
+const OUTLINE_MAX_FACES: usize = 2_000_000;
+
+/// The outline of a face set, as vertex pairs: its open edges (used by
+/// one face of the set) and its sharp edges (two faces of the set meeting
+/// at more than 40°), so a selected block reads by its edges and a patch
+/// by its border. O(faces).
+fn face_set_outline(mesh: &Mesh, faces: &[u32]) -> Vec<[u32; 2]> {
+    if faces.len() > OUTLINE_MAX_FACES {
+        return Vec::new();
+    }
+    let normal = |t: [u32; 3]| {
+        let p = t.map(|v| glam::DVec3::from(mesh.corner_position(v)));
+        (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero()
+    };
+    let mut edges: std::collections::HashMap<(u32, u32), (u32, glam::DVec3, bool)> =
+        std::collections::HashMap::with_capacity(faces.len() * 2);
+    let cos_sharp = 40f64.to_radians().cos();
+    for &f in faces {
+        let Some(t) = mesh.face(mf_geometry::FaceId(f)) else {
+            continue;
+        };
+        let n = normal(t);
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            edges
+                .entry(key)
+                .and_modify(|e| {
+                    e.0 += 1;
+                    e.2 |= e.1.dot(n) < cos_sharp;
+                })
+                .or_insert((1, n, false));
+        }
+    }
+    let mut out: Vec<[u32; 2]> = edges
+        .into_iter()
+        .filter(|(_, (count, _, sharp))| *count == 1 || (*count == 2 && *sharp))
+        .map(|((a, b), _)| [a, b])
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 fn face_corners<'a>(mesh: &'a Mesh, faces: &'a [u32]) -> impl Iterator<Item = u32> + 'a {
     faces
         .iter()

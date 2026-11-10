@@ -348,3 +348,65 @@ fn selection_wins_over_hover() {
         "hover alone is its own colour: {h:?}"
     );
 }
+
+/// UI plan §11 (owner report): a selection is an outline and a light
+/// tint, never a solid fill, so a selected object's own shading shows. With
+/// the app's light tint (18%), the centre of a selected surface stays close
+/// to its unselected shaded colour, and is not the selection's cyan.
+#[test]
+fn a_selected_surface_keeps_its_own_shading() {
+    let Some((device, queue)) = gpu("a_selected_surface_keeps_its_own_shading") else {
+        return;
+    };
+    let mesh = grid(40);
+    let (all, centre) = patch(40, 0..40, 0..40);
+    let mut palette = Palette::HEADLESS;
+    palette.tints.selected[3] = 0.18;
+    let gpu = GpuMesh::from_vertices(&device, &MeshVertices::build(&mesh));
+    let mut cam = OrbitCamera::fit(&mesh.bounding_box().unwrap());
+    cam.pitch = 60f64.to_radians();
+    let draw_with = |states: &FaceStates| {
+        gpu.set_face_states(&queue, states);
+        let target = RenderTarget::new(&device, 400, 400, 4).unwrap();
+        let mut renderer = MeshRenderer::new(&device, RenderTarget::format(4), palette);
+        let items = [DrawItem {
+            mesh: &gpu,
+            model: DMat4::IDENTITY,
+            inactive: false,
+            shown_states: u32::from(FaceStates::ALL),
+        }];
+        target.draw(
+            &device,
+            &queue,
+            &mut renderer,
+            Some(&cam),
+            &items,
+            false,
+            &[],
+        );
+        offscreen::read_back(&device, &queue, &target).unwrap()
+    };
+    let plain = pixel(
+        &draw_with(&FaceStates::from_face_flags(&mesh, &flags(&mesh, [], 0))),
+        &cam,
+        centre,
+    );
+    let selected = pixel(
+        &draw_with(&FaceStates::from_face_flags(
+            &mesh,
+            &flags(&mesh, all, FaceStates::SELECTED),
+        )),
+        &cam,
+        centre,
+    );
+    let diff = (0..3)
+        .map(|k| (plain[k] - selected[k]).abs())
+        .max()
+        .unwrap();
+    assert!(
+        diff <= 40,
+        "the selected centre {selected:?} stays near its shading {plain:?} ({diff})"
+    );
+    assert!(diff > 3, "but is visibly tinted: {selected:?} vs {plain:?}");
+    assert!(!cyan(selected), "not a solid cyan fill: {selected:?}");
+}
