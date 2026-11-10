@@ -29,6 +29,7 @@ const BIG: usize = 5_000_000;
 fn big_model() -> ImportedModel {
     ImportedModel {
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: "big".into(),
             mesh: damaged_sphere(&DamageSpec::for_triangles(BIG, 11)),
             transform: mf_io::threemf::IDENTITY,

@@ -159,6 +159,7 @@ fn truncated_inputs_never_panic() {
     let model = threemf::Model {
         unit: threemf::Unit::Millimeter,
         objects: vec![threemf::ModelObject {
+            metadata: Default::default(),
             name: "o".into(),
             mesh: mf_fixtures::cube(1.0),
             transform: threemf::IDENTITY,

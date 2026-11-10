@@ -32,6 +32,7 @@ fn session_with(dir: &Path) -> (Session, ObjectId) {
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "block".into(),
             mesh: mf_fixtures::cube(10.0),
             transform: IDENTITY,

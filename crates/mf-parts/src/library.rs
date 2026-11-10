@@ -234,6 +234,7 @@ pub fn save_object_as_part(
     let model = mf_io::threemf::Model {
         unit: mf_io::threemf::Unit::Millimeter,
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: m.name.clone(),
             mesh: mesh.clone(),
             transform: mf_io::threemf::IDENTITY,

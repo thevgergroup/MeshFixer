@@ -963,6 +963,7 @@ impl MeshFixerApp {
                     .mesh()
                     .ok_or_else(|| format!("object '{}' is not a mesh", o.name))?;
                 Ok(mf_io::threemf::ModelObject {
+                    metadata: o.metadata(),
                     name: o.name.clone(),
                     mesh: mesh.clone(),
                     transform: o.transform,

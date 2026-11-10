@@ -17,16 +17,19 @@ fn three_part(dir: &std::path::Path) -> std::path::PathBuf {
         unit: Unit::Inch,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "base".into(),
                 mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "lid".into(),
                 mesh: cube(0.5),
                 transform: shifted,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "pin".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,

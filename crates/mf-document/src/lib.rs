@@ -6,6 +6,8 @@
 
 mod geometry;
 
+use std::collections::BTreeMap;
+
 use mf_io::SourceInfo;
 pub use mf_io::threemf::{IDENTITY as IDENTITY_TRANSFORM, Unit};
 
@@ -50,9 +52,45 @@ pub struct Object {
     /// ids of this revision's mesh, sorted. Commands that change the mesh
     /// translate them to the new revision's ids.
     pub openings: Vec<u32>,
+    /// Object properties (key to value), such as its Solid/Hole role
+    /// ([`ROLE`]). Saved in 3MF as `meshfixer:<key>` object metadata
+    /// ([`Object::metadata`]) and read back on import; changed only by an
+    /// undoable history step (`Session::set_property`). Geometry commands
+    /// keep an object's properties; objects they create have none.
+    pub properties: BTreeMap<String, String>,
+}
+
+/// The property naming an object's role in a combine: [`HOLE`], or absent
+/// for a solid (the default).
+pub const ROLE: &str = "role";
+/// The [`ROLE`] value of a hole: subtracted when combined.
+pub const HOLE: &str = "hole";
+/// The 3MF metadata prefix of an object property.
+const METADATA_PREFIX: &str = "meshfixer:";
+
+/// The object properties in 3MF object metadata (the `meshfixer:` entries,
+/// prefix removed); other entries are left alone.
+pub fn properties_from_metadata(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix(METADATA_PREFIX)?.to_owned(), v.clone())))
+        .collect()
 }
 
 impl Object {
+    /// True if the object's role is [`HOLE`].
+    pub fn is_hole(&self) -> bool {
+        self.properties.get(ROLE).is_some_and(|r| r == HOLE)
+    }
+
+    /// The object's properties as 3MF object metadata (`meshfixer:<key>`).
+    pub fn metadata(&self) -> BTreeMap<String, String> {
+        self.properties
+            .iter()
+            .map(|(k, v)| (format!("{METADATA_PREFIX}{k}"), v.clone()))
+            .collect()
+    }
+
     /// The mesh, if this object's geometry is a mesh.
     pub fn mesh(&self) -> Option<&mf_geometry::Mesh> {
         self.geometry.as_mesh()
@@ -101,6 +139,23 @@ impl Document {
         openings.dedup();
         let mut d = self.clone();
         d.objects.iter_mut().find(|o| o.id == id)?.openings = openings;
+        Some(d)
+    }
+
+    /// A new document with one object's property `key` set to `value`
+    /// (`None` removes it), or `None` if the object doesn't exist.
+    pub fn with_property(
+        &self,
+        id: ObjectId,
+        key: &str,
+        value: Option<String>,
+    ) -> Option<Document> {
+        let mut d = self.clone();
+        let props = &mut d.objects.iter_mut().find(|o| o.id == id)?.properties;
+        match value {
+            Some(v) => props.insert(key.to_owned(), v),
+            None => props.remove(key),
+        };
         Some(d)
     }
 
@@ -169,6 +224,7 @@ mod tests {
             source: None,
             transform: IDENTITY_TRANSFORM,
             openings: Vec::new(),
+            properties: BTreeMap::new(),
         }
     }
 

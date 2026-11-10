@@ -163,6 +163,7 @@ fn opened(model: ImportedModel, timeout: Duration) -> Harness<'static, MeshFixer
 fn model_of(name: &str, mesh: Mesh) -> ImportedModel {
     ImportedModel {
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: name.into(),
             mesh,
             transform: mf_io::threemf::IDENTITY,

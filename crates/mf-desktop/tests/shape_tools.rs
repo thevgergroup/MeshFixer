@@ -85,6 +85,7 @@ fn opened(
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh,
                 transform,

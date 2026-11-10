@@ -94,6 +94,7 @@ fn three_holes() -> Mesh {
 fn model(mesh: Mesh) -> ImportedModel {
     ImportedModel {
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "plate".into(),
             mesh,
             transform: IDENTITY,

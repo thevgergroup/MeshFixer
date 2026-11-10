@@ -60,7 +60,15 @@ pub struct ModelObject {
     pub name: String,
     pub mesh: Mesh,
     pub transform: [f64; 12],
+    /// The object's `<metadata>` (in its `<metadatagroup>`): name to
+    /// value. MeshFixer's own entries are named `meshfixer:<key>` (see
+    /// [`MESHFIXER_NS`]), such as `meshfixer:role` = `hole`.
+    pub metadata: BTreeMap<String, String>,
 }
+
+/// The namespace of MeshFixer's own object metadata names
+/// (`meshfixer:<key>`), declared on `<model>` when an object has any.
+pub const MESHFIXER_NS: &str = "https://thevgergroup.com/meshfixer/3mf/2026";
 
 #[derive(Debug, Clone)]
 pub struct Model {
@@ -313,7 +321,11 @@ pub fn read_with_limits(
         property: Option<(u32, u32)>,
         /// Per triangle: its own (pid, p1), if it names one.
         triangle_properties: Vec<Option<(u32, u32)>>,
+        /// Its `<metadatagroup>`'s entries.
+        metadata: BTreeMap<String, String>,
     }
+    // The object metadata entry being read: its name and text so far.
+    let mut open_metadata: Option<(String, String)> = None;
     let mut unit = Unit::Millimeter;
     let mut objects: Vec<Obj> = Vec::new();
     let mut current: Option<Obj> = None;
@@ -372,9 +384,31 @@ pub fn read_with_limits(
         let (e, is_empty) = match event {
             Event::Start(e) => (Some(e), false),
             Event::Empty(e) => (Some(e), true),
+            Event::Text(t) => {
+                if let Some((_, value)) = open_metadata.as_mut() {
+                    value.push_str(&t.xml10_content());
+                }
+                (None, false)
+            }
+            Event::GeneralRef(r) => {
+                if let Some((_, value)) = open_metadata.as_mut() {
+                    let name = r.xml10_content();
+                    let raw = format!("&{name};");
+                    let text = quick_xml::escape::unescape(&raw)
+                        .map_err(|e| parse_err(format!("<metadata> text: {e}")))?;
+                    value.push_str(&text);
+                }
+                (None, false)
+            }
             Event::End(end) => {
                 if matches!(end.local_name().as_ref(), "basematerials" | "colorgroup") {
                     open_group = None;
+                }
+                if end.local_name().as_ref() == "metadata"
+                    && let Some((name, value)) = open_metadata.take()
+                    && let Some(o) = current.as_mut()
+                {
+                    o.metadata.insert(name, value);
                 }
                 if end.local_name().as_ref() == "object"
                     && let Some(o) = current.take()
@@ -537,6 +571,18 @@ pub fn read_with_limits(
                     o.triangles.push(t);
                     o.triangle_properties.push(own);
                 }
+                "metadata" if current.is_some() => {
+                    let name = attr(&e, "name")
+                        .map_err(parse_err)?
+                        .ok_or_else(|| parse_err("<metadata> is missing name".into()))?;
+                    if is_empty {
+                        if let Some(o) = current.as_mut() {
+                            o.metadata.insert(name, String::new());
+                        }
+                    } else {
+                        open_metadata = Some((name, String::new()));
+                    }
+                }
                 "components" => {
                     if let Some(o) = current.as_mut() {
                         o.has_components = true;
@@ -662,6 +708,7 @@ pub fn read_with_limits(
             mesh.with_materials(palette, default, own.then_some(faces))
         };
         Ok(ModelObject {
+            metadata: o.metadata.clone(),
             name: o.name.clone().unwrap_or_else(|| format!("object {}", o.id)),
             mesh,
             transform,
@@ -750,6 +797,13 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"",
     );
+    if kept
+        .iter()
+        .any(|o| o.metadata.keys().any(|k| k.starts_with("meshfixer:")))
+    {
+        // allow-swallow: writing to a String can't fail
+        let _ = write!(xml, " xmlns:meshfixer=\"{MESHFIXER_NS}\"");
+    }
     // allow-swallow: writing to a String can't fail
     let _ = write!(xml, " unit=\"{}\">\n <resources>\n", model.unit.as_attr());
     for (k, o) in kept.iter().enumerate() {
@@ -797,12 +851,26 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
             _ => String::new(),
         };
         // allow-swallow: writing to a String can't fail
-        let _ = write!(
+        let _ = writeln!(
             xml,
-            "  <object id=\"{}\" type=\"model\" name=\"{}\"{properties}>\n   <mesh>\n    <vertices>\n",
+            "  <object id=\"{}\" type=\"model\" name=\"{}\"{properties}>",
             k + 1,
             escape(&o.name)
         );
+        if !o.metadata.is_empty() {
+            xml.push_str("   <metadatagroup>\n");
+            for (name, value) in &o.metadata {
+                // allow-swallow: writing to a String can't fail
+                let _ = writeln!(
+                    xml,
+                    "    <metadata name=\"{}\">{}</metadata>",
+                    escape(name),
+                    escape(value)
+                );
+            }
+            xml.push_str("   </metadatagroup>\n");
+        }
+        xml.push_str("   <mesh>\n    <vertices>\n");
         let mut index = vec![0u32; o.mesh.vertex_slots() as usize];
         for (n, (id, p)) in o.mesh.vertices().enumerate() {
             index[id.0 as usize] = n as u32;

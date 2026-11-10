@@ -680,6 +680,7 @@ fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Fa
                 .mesh()
                 .ok_or_else(|| Failure::Runtime(format!("object '{}' is not a mesh", o.name)))?;
             Ok(mf_io::threemf::ModelObject {
+                metadata: o.metadata(),
                 name: o.name.clone(),
                 mesh: mesh.clone(),
                 transform: o.transform,
@@ -820,6 +821,7 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             objects: scene
                 .into_iter()
                 .map(|(name, mesh, transform)| mf_io::threemf::ModelObject {
+                    metadata: Default::default(),
                     name,
                     mesh,
                     transform,

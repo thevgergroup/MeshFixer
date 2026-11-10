@@ -163,6 +163,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
         .to_owned();
     let single = |mesh: Mesh| {
         vec![threemf::ModelObject {
+            metadata: Default::default(),
             name: stem.clone(),
             mesh,
             transform: threemf::IDENTITY,
@@ -411,6 +412,7 @@ pub fn write_path_with(
             let model = threemf::Model {
                 unit,
                 objects: vec![threemf::ModelObject {
+                    metadata: Default::default(),
                     name: "object".into(),
                     mesh: mesh.clone(),
                     transform: threemf::IDENTITY,

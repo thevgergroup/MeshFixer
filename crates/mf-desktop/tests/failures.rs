@@ -23,6 +23,7 @@ fn panicking(
 fn cube_model() -> ImportedModel {
     ImportedModel {
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: "cube".into(),
             mesh: mf_fixtures::cube(1.0),
             transform: mf_io::threemf::IDENTITY,

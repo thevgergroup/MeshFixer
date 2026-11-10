@@ -20,6 +20,7 @@ fn session_with(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, 
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh,
                 transform,

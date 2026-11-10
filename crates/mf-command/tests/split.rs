@@ -30,6 +30,7 @@ fn session_in(
     let model = Model {
         unit,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: name.into(),
             mesh,
             transform,
@@ -254,6 +255,7 @@ fn split_several_targets_in_one_command() {
         objects: [("a", 0.0, 0.0), ("b", 5.0, 0.0), ("high", 10.0, 20.0)]
             .into_iter()
             .map(|(name, x, z)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh: uv_sphere(11, 24),
                 transform: placed(x, z),

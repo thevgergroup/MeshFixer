@@ -89,6 +89,7 @@ fn model(objects: Vec<(&str, Mesh)>) -> ImportedModel {
         objects: objects
             .into_iter()
             .map(|(name, mesh)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh,
                 transform: IDENTITY,

@@ -16,11 +16,14 @@ use crate::session::{CommandError, Session};
 
 /// The format this build writes. Version 2 (Phase 1, D6) adds each
 /// command's `operands` and `outputs`; both default to empty, so a
-/// version 1 log reads as single-object commands.
-pub const LOG_FORMAT: &str = "mfx-log/2";
+/// version 1 log reads as single-object commands. Version 2.1 adds the
+/// `set_property` event (an object's Solid/Hole role); a 2.0 log has
+/// none, so it reads unchanged. (A `many` operand is the same flat
+/// operand list, so it needed no new version.)
+pub const LOG_FORMAT: &str = "mfx-log/2.1";
 
 /// Every format this build replays.
-pub const READABLE_LOG_FORMATS: &[&str] = &["mfx-log/1", LOG_FORMAT];
+pub const READABLE_LOG_FORMATS: &[&str] = &["mfx-log/1", "mfx-log/2", LOG_FORMAT];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -57,6 +60,14 @@ pub(crate) enum Event {
         ids: Vec<u32>,
         label: String,
     },
+    /// An object property set (`value`) or removed (`None`), such as its
+    /// Solid/Hole role; changes no geometry (`mfx-log/2.1`).
+    SetProperty {
+        object: ObjectId,
+        key: String,
+        value: Option<String>,
+        label: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -69,7 +80,7 @@ pub enum LogError {
         line: usize,
         message: String,
     },
-    #[error("unsupported log format '{0}' (expected mfx-log/1 or {LOG_FORMAT})")]
+    #[error("unsupported log format '{0}' (expected mfx-log/1, mfx-log/2 or {LOG_FORMAT})")]
     UnsupportedFormat(String),
     #[error("object {object} has no source file, so the session can't be replayed")]
     NoSource { object: ObjectId },
@@ -178,6 +189,14 @@ impl Session {
                 events.push(Event::SetOpenings {
                     object: *object,
                     ids: ids.clone(),
+                    label: node.label.clone(),
+                });
+            }
+            if let Some((object, key, value)) = &node.property {
+                events.push(Event::SetProperty {
+                    object: *object,
+                    key: key.clone(),
+                    value: value.clone(),
                     label: node.label.clone(),
                 });
             }

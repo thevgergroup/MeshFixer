@@ -22,6 +22,7 @@ fn session_at(dir: &std::path::Path, unit: Unit) -> (Session, mf_command::Object
     let model = Model {
         unit,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "part".into(),
             mesh: tetrahedron(),
             transform: IDENTITY,

@@ -193,6 +193,7 @@ fn add_part_replays_exact_and_verifies_part_hash() {
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "base".into(),
             mesh: mf_fixtures::cube(20.0),
             transform: IDENTITY,

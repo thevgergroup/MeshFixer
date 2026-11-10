@@ -543,6 +543,10 @@ pub struct RevisionNode {
     /// A "mark intentional openings" step: the object and the loop ids it
     /// set (logged, so replay reaches the same marks).
     pub openings: Option<(ObjectId, Vec<u32>)>,
+    /// A "set an object property" step (a Solid/Hole role): the object,
+    /// the key and the value it set (`None` removed it); logged, so
+    /// replay reaches the same properties.
+    pub property: Option<(ObjectId, String, Option<String>)>,
 }
 
 /// History as a DAG of immutable document states. Undo and redo move a
@@ -574,6 +578,7 @@ impl Session {
                 document: Document::default(),
                 provenance: BTreeMap::new(),
                 openings: None,
+                property: None,
             }],
             cursor: RevisionId(0),
             next_object: 1,
@@ -645,6 +650,7 @@ impl Session {
             0,
             IDENTITY_TRANSFORM,
             None,
+            BTreeMap::new(),
         )
     }
 
@@ -675,6 +681,7 @@ impl Session {
                     part,
                     o.transform,
                     units,
+                    mf_document::properties_from_metadata(&o.metadata),
                 )
             })
             .collect();
@@ -697,6 +704,7 @@ impl Session {
             part,
             object.transform,
             units,
+            mf_document::properties_from_metadata(&object.metadata),
         )
     }
 
@@ -722,6 +730,7 @@ impl Session {
             part,
             object.transform,
             units,
+            mf_document::properties_from_metadata(&object.metadata),
         ))
     }
 
@@ -748,9 +757,18 @@ impl Session {
         name: String,
         source: Option<SourceInfo>,
     ) -> ObjectId {
-        self.add_object(geometry, name, source, 0, IDENTITY_TRANSFORM, None)
+        self.add_object(
+            geometry,
+            name,
+            source,
+            0,
+            IDENTITY_TRANSFORM,
+            None,
+            BTreeMap::new(),
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_object(
         &mut self,
         geometry: Geometry,
@@ -759,10 +777,13 @@ impl Session {
         part: usize,
         transform: [f64; 12],
         units: Option<Unit>,
+        properties: BTreeMap<String, String>,
     ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
-        self.add_object_as(id, geometry, name, source, part, transform, units)
+        self.add_object_as(
+            id, geometry, name, source, part, transform, units, properties,
+        )
     }
 
     /// As `add_object`, with the id already chosen.
@@ -776,6 +797,7 @@ impl Session {
         part: usize,
         transform: [f64; 12],
         units: Option<Unit>,
+        properties: BTreeMap<String, String>,
     ) -> ObjectId {
         let mut document = self.document().with_object(Object {
             id,
@@ -784,6 +806,7 @@ impl Session {
             source: source.clone(),
             transform,
             openings: Vec::new(),
+            properties,
         });
         if let Some(u) = units {
             document = document.with_units(u);
@@ -803,6 +826,7 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: None,
+            property: None,
         });
         id
     }
@@ -1166,6 +1190,7 @@ impl Session {
                             source: None,
                             transform,
                             openings: Vec::new(),
+                            properties: BTreeMap::new(),
                         })
                         .ok_or(CommandError::InvalidChanges {
                             op: c.op_id.to_owned(),
@@ -1278,6 +1303,7 @@ impl Session {
             document,
             provenance,
             openings: None,
+            property: None,
         });
         Ok(CommitOutcome::NewRevision { report })
     }
@@ -1424,6 +1450,42 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: Some((object, marks)),
+            property: None,
+        });
+        true
+    }
+
+    /// Set `object`'s property `key` to `value` (`None` removes it), such
+    /// as its role ([`mf_document::ROLE`]): a document step that changes
+    /// no geometry, undone like any other. `label` names the history
+    /// step. False if the object doesn't exist or already has that value.
+    pub fn set_property(
+        &mut self,
+        object: ObjectId,
+        key: &str,
+        value: Option<String>,
+        label: String,
+    ) -> bool {
+        let Some(current) = self.document().object(object) else {
+            return false;
+        };
+        if current.properties.get(key) == value.as_ref() {
+            return false;
+        }
+        let Some(document) = self.document().with_property(object, key, value.clone()) else {
+            return false;
+        };
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: None,
+            property: Some((object, key.to_owned(), value)),
         });
         true
     }

@@ -53,6 +53,7 @@ fn session_with(dir: &Path, objects: Vec<(&str, Mesh)>) -> (Session, Vec<ObjectI
         objects: objects
             .into_iter()
             .map(|(name, mesh)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh,
                 transform: IDENTITY,

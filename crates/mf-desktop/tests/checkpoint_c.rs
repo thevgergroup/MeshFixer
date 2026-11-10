@@ -532,6 +532,7 @@ fn sphere_with_large_hole() -> Mesh {
 fn model_of(name: &str, mesh: Mesh) -> mf_io::ImportedModel {
     mf_io::ImportedModel {
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: name.into(),
             mesh,
             transform: mf_io::threemf::IDENTITY,

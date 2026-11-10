@@ -63,6 +63,7 @@ fn the_pseudo_locale_brackets_catalogued_strings() {
         ]);
         h.state_mut().import_model(ImportedModel {
             objects: vec![ModelObject {
+                metadata: Default::default(),
                 name: "plate".into(),
                 mesh,
                 transform: IDENTITY,

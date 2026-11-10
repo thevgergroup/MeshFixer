@@ -30,6 +30,7 @@ fn session_with(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, 
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {
+                metadata: Default::default(),
                 name: name.into(),
                 mesh,
                 transform,
@@ -107,7 +108,7 @@ fn save_and_replay(s: &Session, dir: &Path) -> mf_command::ReplayReport {
 
 #[test]
 fn log_format_is_version_2() {
-    assert_eq!(LOG_FORMAT, "mfx-log/2");
+    assert_eq!(LOG_FORMAT, "mfx-log/2.1");
 }
 
 #[test]
@@ -372,6 +373,7 @@ fn undo_boolean_restores_the_tool_with_its_id() {
             .objects()
             .iter()
             .map(|o| ModelObject {
+                metadata: Default::default(),
                 name: o.name.clone(),
                 mesh: o.mesh().unwrap().clone(),
                 transform: o.transform,
@@ -468,7 +470,7 @@ fn mfx_log_1_still_replays() {
     let manifest_path = log.join("manifest.json");
     let manifest = std::fs::read_to_string(&manifest_path)
         .unwrap()
-        .replace("mfx-log/2", "mfx-log/1");
+        .replace("mfx-log/2.1", "mfx-log/1");
     std::fs::write(&manifest_path, manifest).unwrap();
     let path = log.join("commands.jsonl");
     let lines: Vec<String> = std::fs::read_to_string(&path)
@@ -519,6 +521,7 @@ fn edited_transforms_round_trip_through_3mf() {
             .objects()
             .iter()
             .map(|o| ModelObject {
+                metadata: Default::default(),
                 name: o.name.clone(),
                 mesh: o.mesh().unwrap().clone(),
                 transform: o.transform,
@@ -973,6 +976,7 @@ fn an_import_after_an_abandoned_branch_keeps_its_id() {
         &Model {
             unit: Unit::Millimeter,
             objects: vec![ModelObject {
+                metadata: Default::default(),
                 name: "c".into(),
                 mesh: uv_sphere(6, 8),
                 transform: IDENTITY,

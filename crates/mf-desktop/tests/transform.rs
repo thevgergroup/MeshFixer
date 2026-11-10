@@ -65,6 +65,7 @@ fn model_file(
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: name.into(),
             mesh,
             transform,
@@ -816,6 +817,7 @@ fn big_model(transform: [f64; 12]) -> mf_io::ImportedModel {
     let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(BIG, 3));
     mf_io::ImportedModel {
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "big".into(),
             mesh,
             transform,

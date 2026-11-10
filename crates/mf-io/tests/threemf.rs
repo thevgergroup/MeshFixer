@@ -11,6 +11,7 @@ const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0
 
 fn obj(name: &str, mesh: mf_geometry::Mesh, transform: [f64; 12]) -> ModelObject {
     ModelObject {
+        metadata: Default::default(),
         name: name.into(),
         mesh,
         transform,
@@ -423,4 +424,23 @@ fn only_a_missing_rels_falls_back_a_corrupt_one_is_a_named_error() {
             other.map(|(m, _)| m.unit)
         ),
     }
+}
+
+/// Object metadata (MeshFixer's `meshfixer:role`, and any other entry)
+/// round-trips through `<metadatagroup>`, escaped, with no warning.
+#[test]
+fn object_metadata_round_trips() {
+    let mut hole = obj("hole", cube(1.0), IDENTITY);
+    hole.metadata.insert("meshfixer:role".into(), "hole".into());
+    hole.metadata
+        .insert("meshfixer:note".into(), "a < b & \"c\"".into());
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![obj("solid", tetrahedron(), IDENTITY), hole],
+    };
+    let bytes = threemf::write(&model).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(back.objects[0].metadata.is_empty());
+    assert_eq!(back.objects[1].metadata, model.objects[1].metadata);
 }

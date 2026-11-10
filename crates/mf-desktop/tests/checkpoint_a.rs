@@ -158,6 +158,7 @@ fn scene(dir: &std::path::Path) -> PathBuf {
         objects: mf_fixtures::demo_scene()
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {
+                metadata: Default::default(),
                 name,
                 mesh,
                 transform,

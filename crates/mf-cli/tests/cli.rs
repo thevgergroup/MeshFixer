@@ -384,11 +384,13 @@ fn run_on_3mf_keeps_every_object() {
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "a".into(),
                 mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "b".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,
@@ -489,6 +491,7 @@ fn run_applies_a_mirrored_transform_and_keeps_normals_outward() {
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "box".into(),
             mesh: cube(1.0),
             transform: mirror,
@@ -531,6 +534,7 @@ fn translated_cube_log(dir: &Path) -> std::path::PathBuf {
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "box".into(),
             mesh: cube(1.0),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0],
@@ -611,11 +615,13 @@ fn replay_refuses_to_write_several_objects_to_one_stl() {
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "left".into(),
                 mesh: cube(1.0),
                 transform: at(0.0),
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "right".into(),
                 mesh: cube(1.0),
                 transform: at(10.0),
@@ -968,6 +974,7 @@ fn units_flag_on_a_3mf_is_a_usage_error() {
         &mf_io::threemf::Model {
             unit: mf_io::threemf::Unit::Millimeter,
             objects: vec![mf_io::threemf::ModelObject {
+                metadata: Default::default(),
                 name: "a".into(),
                 mesh: cube(1.0),
                 transform: mf_io::threemf::IDENTITY,
@@ -994,11 +1001,13 @@ fn two_objects(dir: &Path) -> std::path::PathBuf {
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "a".into(),
                 mesh: cube(1.0),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "b".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,

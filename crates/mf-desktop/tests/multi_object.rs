@@ -41,11 +41,13 @@ fn two_translated_cubes(dir: &std::path::Path) -> std::path::PathBuf {
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "left".into(),
                 mesh: cube(1.0),
                 transform: translate(-3.0),
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "right".into(),
                 mesh: cube(1.0),
                 transform: translate(3.0),
@@ -178,11 +180,13 @@ fn cube_and_tetrahedron(dir: &std::path::Path) -> std::path::PathBuf {
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "cube".into(),
                 mesh: cube(1.0),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "tetrahedron".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,
@@ -279,6 +283,7 @@ fn single_translated_cube(dir: &std::path::Path, name: &str, d: [f64; 3]) -> std
     let model = Model {
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "cube".into(),
             mesh: cube(1.0),
             transform: t,
