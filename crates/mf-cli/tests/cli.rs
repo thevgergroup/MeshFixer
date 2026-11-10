@@ -1170,6 +1170,76 @@ fn delete_chooses_its_object_and_never_writes_an_empty_document() {
     assert!(!out.exists());
 }
 
+/// The boolean demo path (Phase 1 Tasks 8, 8a, 9): union and subtract a
+/// part, find intersections, the `operand_overlaps_itself` refusal with
+/// its next action, Make solid, then the boolean that was refused.
+#[test]
+fn boolean_make_solid_and_intersections_demo() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let ok = |o: Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o
+    };
+    ok(meshfixer(&["gen-fixture", "boolean-demo", &p("demo.3mf")]));
+    for op in ["union", "subtract", "intersect"] {
+        ok(meshfixer(&[
+            "boolean",
+            &p("demo.3mf"),
+            "--tool",
+            "1",
+            "--operation",
+            op,
+            "-o",
+            &p("out.3mf"),
+        ]));
+    }
+    let found = ok(meshfixer(&[
+        "intersections",
+        &p("demo.3mf"),
+        "--other",
+        "1",
+    ]));
+    let report: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert!(report["pair_count"].as_u64().unwrap() > 0);
+    let refused = meshfixer(&[
+        "boolean",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("x.3mf"),
+    ]);
+    assert!(!refused.status.success());
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("operand_overlaps_itself") && err.contains("Run Make solid"),
+        "{err}"
+    );
+    ok(meshfixer(&[
+        "make-solid",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--cell-size",
+        "0.5",
+        "-o",
+        &p("solid.3mf"),
+    ]));
+    ok(meshfixer(&[
+        "boolean",
+        &p("solid.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("joined.3mf"),
+    ]));
+}
+
 /// D20: `--fit-profile` fills the parameters the user didn't set from a
 /// saved profile, and the log records those values.
 #[test]

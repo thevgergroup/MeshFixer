@@ -25,9 +25,8 @@
 //! Faces away from the plane keep their ids, indices and positions, bit for
 //! bit, in both parts: each part is a [`MeshEdit`] of the input (MF-OP-003).
 //!
-//! `cap_triangles` is this module's own CDT. Task 8 (`section.rs`,
-//! `triangulate_section`) builds the same thing for the boolean window; the
-//! two should merge into one function when both streams land.
+//! Caps use the same section triangulation as the boolean window
+//! (`section.rs`, `triangulate_section`).
 
 use std::collections::{HashMap, HashSet};
 
@@ -35,7 +34,6 @@ use mf_geometry::{CHUNK, FaceId, GeometryError, Mesh, Provenance, Sources, Verte
 use mf_runtime::{Cancelled, RunContext};
 use rayon::prelude::*;
 use robust::{Coord, Coord3D, orient2d, orient3d};
-use spade::{ConstrainedDelaunayTriangulation, Point2, Triangulation};
 
 /// Progress stages of [`cut_half`] and [`plane_cut`].
 pub const CHECKING: &str = "checking the model";
@@ -654,102 +652,13 @@ fn boundary_loops(
     Ok(loops)
 }
 
-/// A constrained Delaunay triangulation (D3) of the region the loops
-/// enclose: outer loops counter-clockwise, holes clockwise, nested to any
-/// depth. Triangles are counter-clockwise, as indices into the loops'
-/// concatenated points. A point repeated, two loop edges crossing or
-/// touching, a loop through another's point, or winding other than 0 or 1
-/// anywhere is refused with the index of a point near the fault.
+/// The cap's triangles (D3), from the one section triangulation shared
+/// with the boolean window ([`crate::triangulate_section`]), or the index
+/// of a point near the fault.
 fn cap_triangles(loops: &[Vec<[f64; 2]>]) -> Result<Vec<[usize; 3]>, usize> {
-    let total: usize = loops.iter().map(Vec::len).sum();
-    let mut cdt: ConstrainedDelaunayTriangulation<Point2<f64>> =
-        ConstrainedDelaunayTriangulation::new();
-    // spade vertex index → our point index.
-    let mut ours: Vec<usize> = Vec::with_capacity(total);
-    let mut handles = Vec::with_capacity(total);
-    for (k, p) in loops.iter().flatten().enumerate() {
-        let before = cdt.num_vertices();
-        let h = cdt.insert(Point2::new(p[0], p[1])).map_err(|_| k)?;
-        if cdt.num_vertices() == before {
-            return Err(k);
-        }
-        debug_assert_eq!(h.index(), ours.len());
-        ours.push(k);
-        handles.push(h);
-    }
-    let mut direction: HashMap<(usize, usize), i32> = HashMap::with_capacity(total);
-    let mut start = 0;
-    for l in loops {
-        for i in 0..l.len() {
-            let (p, q) = (start + i, start + (i + 1) % l.len());
-            let (hp, hq) = (handles[p], handles[q]);
-            if !cdt.can_add_constraint(hp, hq) {
-                return Err(p);
-            }
-            cdt.add_constraint(hp, hq);
-            direction.insert((hp.index(), hq.index()), 1);
-        }
-        start += l.len();
-    }
-    // A loop edge through another loop point is split by spade: more
-    // constraints than edges.
-    if cdt.num_constraints() != total {
-        return Err(0);
-    }
-    // Winding numbers by flood fill from outside: crossing a loop edge
-    // from its left to its right leaves its loop's inside.
-    let along = |from: usize, to: usize| i32::from(direction.contains_key(&(from, to)));
-    let crossing = |from: usize, to: usize| -> i32 { along(to, from) - along(from, to) };
-    let mut wind: Vec<Option<i32>> = vec![None; cdt.num_all_faces()];
-    let mut stack = Vec::new();
-    for e in cdt.convex_hull() {
-        // Hull edges run clockwise round the inside: the outer face (0) is
-        // on their left.
-        let inner = e.rev().face();
-        let w = crossing(e.from().fix().index(), e.to().fix().index());
-        let i = inner.fix().index();
-        match wind[i] {
-            Some(old) if old != w => return Err(ours[e.from().fix().index()]),
-            Some(_) => {}
-            None => {
-                wind[i] = Some(w);
-                stack.push(i);
-            }
-        }
-    }
-    while let Some(i) = stack.pop() {
-        let w = wind[i].expect("a face is pushed with its winding");
-        let face = cdt
-            .all_faces()
-            .nth(i)
-            .and_then(|f| f.as_inner())
-            .expect("only inner faces are pushed");
-        for e in face.adjacent_edges() {
-            let other = e.rev().face();
-            if other.is_outer() {
-                continue;
-            }
-            let j = other.fix().index();
-            let wj = w + crossing(e.from().fix().index(), e.to().fix().index());
-            match wind[j] {
-                Some(old) if old != wj => return Err(ours[e.from().fix().index()]),
-                Some(_) => {}
-                None => {
-                    wind[j] = Some(wj);
-                    stack.push(j);
-                }
-            }
-        }
-    }
-    let mut out = Vec::new();
-    for f in cdt.inner_faces() {
-        match wind[f.fix().index()] {
-            Some(0) => {}
-            Some(1) => out.push(f.vertices().map(|v| ours[v.fix().index()])),
-            _ => return Err(ours[f.vertices()[0].fix().index()]),
-        }
-    }
-    Ok(out)
+    crate::section::triangulate_section_at(loops)
+        .map(|t| t.into_iter().map(|t| t.map(|i| i as usize)).collect())
+        .map_err(|(_, k)| k)
 }
 
 fn signed_area(l: &[[f64; 2]]) -> f64 {

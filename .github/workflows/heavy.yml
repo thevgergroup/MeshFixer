@@ -244,7 +244,7 @@ jobs:
           set -o pipefail
           status=0
           for t in qualify_windows qualify_corpus qualify_1m_union; do
-            MF_ARTIFACTS=$PWD/qualify cargo test -p mf-boolean --features manifold-cpp --test qualify -- --test-threads=1 --nocapture --exact "$t" 2>&1 | tee -a qualify-output.txt || status=1
+            MF_ARTIFACTS=$PWD/qualify cargo test -p mf-boolean --features manifold-rust --test qualify -- --test-threads=1 --nocapture --exact "$t" 2>&1 | tee -a qualify-output.txt || status=1
           done
           exit $status
       - uses: actions/upload-artifact@v7

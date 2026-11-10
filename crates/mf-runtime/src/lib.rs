@@ -140,6 +140,16 @@ impl RunContext {
         }
     }
 
+    /// A context that cancels itself the moment `stage` is reported on its
+    /// progress, synchronously, for tests that cancel deterministically at
+    /// each stage of an operation (Phase 1 Review Focus 3).
+    pub fn cancelling_at(stage: &'static str) -> RunContext {
+        let cancel = CancelToken::new();
+        let mut progress = Progress::new();
+        progress.trip = Some(Arc::new((stage, cancel.clone())));
+        RunContext { cancel, progress }
+    }
+
     /// A context that cancels itself at its `n + 1`th cancellation check
     /// (the first `n` pass), counted over every clone and thread. With the
     /// number of checks a whole run makes (from
@@ -555,6 +565,9 @@ pub struct Progress {
     // best-effort: a report must never fail just because no reader is
     // attached, or a reader was dropped.
     sink: ProgressSink,
+    /// Test instrumentation (see [`RunContext::cancelling_at`]): reporting
+    /// this stage cancels this token. `None` in production.
+    trip: Option<Arc<(&'static str, CancelToken)>>,
 }
 
 /// A receiver for every `(stage, fraction)` update sent to a [`Progress`],
@@ -592,6 +605,7 @@ impl Progress {
             state: Arc::new(AtomicU64::new(pack(empty_index, 0.0))),
             stages: Arc::new(stages),
             sink: Arc::new(std::sync::Mutex::new(None)),
+            trip: None,
         }
     }
 
@@ -608,6 +622,11 @@ impl Progress {
     /// and retries — it can never clobber a fresh stage's reset fraction
     /// with a stale value computed against the old stage.
     pub fn report(&self, stage: &'static str, fraction: f64) {
+        if let Some(trip) = &self.trip
+            && trip.0 == stage
+        {
+            trip.1.cancel();
+        }
         let clamped = fraction.clamp(0.0, 1.0);
         let stage_index = self.stages.index_of(stage);
 

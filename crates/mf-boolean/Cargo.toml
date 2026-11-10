@@ -11,21 +11,25 @@ workspace = true
 [dependencies]
 mf-runtime.workspace = true
 mf-geometry.workspace = true
-spade.workspace = true
-manifold-rust.workspace = true
+manifold-rust = { workspace = true, optional = true }
 robust.workspace = true
+spade.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
 mf-manifold-sys = { workspace = true, optional = true }
 
 [features]
+# The shipping kernel is C++ Manifold (ADR-0002 option B, Task 8).
+default = ["manifold-cpp"]
 # The C++ Manifold kernel (`ManifoldCpp`, Task 7b). Needs CMake, a C++17
 # compiler, git and network access at build time (see mf-manifold-sys).
 manifold-cpp = ["dep:mf-manifold-sys"]
+# `ManifoldRobust` (manifold-rust's exact engine): kept for comparison and
+# the qualification suite only, never shipped (ADR-0002).
+manifold-rust = ["dep:manifold-rust"]
 
 [dev-dependencies]
 mf-fixtures.workspace = true
-mf-geometry.workspace = true
 mf-io.workspace = true
 mf-metrics.workspace = true
 serde_json.workspace = true

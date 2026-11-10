@@ -2745,6 +2745,7 @@ name = "mf-command"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
@@ -2806,10 +2807,14 @@ name = "mf-geometry"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
+ "mf-boolean",
  "mf-fixtures",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "rayon",
+ "robust",
  "serde",
  "serde_json",
  "thiserror 2.0.21",

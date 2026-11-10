@@ -1,6 +1,8 @@
-//! A bounding volume hierarchy over a mesh revision's live faces, for
-//! picking at interactive rates (MF-RENDER-004: a face pick at 5M
-//! triangles in < 16 ms).
+//! A bounding volume hierarchy over a mesh revision's live faces (or a
+//! subset of them), for picking at interactive rates (MF-RENDER-004: a
+//! face pick at 5M triangles in < 16 ms), and for box queries: intersection
+//! detection and validation (Phase 1 D17: moved here from `mf-render`,
+//! which re-exports it unchanged).
 //!
 //! Binned-SAH build (16 bins on each axis), leaves of at most
 //! [`LEAF_MAX`] faces, nodes in depth-first order (a node's left child
@@ -19,10 +21,71 @@
 //! partitions are in place, so it needs no sort.
 
 use glam::{DMat4, DVec3, DVec4};
-use mf_geometry::{FaceId, Mesh};
 use mf_runtime::{Cancelled, RunContext, TICK_INTERVAL};
 
-use crate::pick::{HIT_MIN, intersect};
+use crate::{FaceId, Mesh};
+
+/// Ray helpers shared with `mf-render`'s brute-force picking, so the BVH
+/// and the brute-force casts agree exactly.
+pub mod ray {
+    use glam::DVec3;
+
+    use crate::Mesh;
+
+    /// Hits nearer than this (along the ray) don't count: the ray's own start.
+    pub const HIT_MIN: f64 = 1e-12;
+
+    /// Möller–Trumbore, both sides: the distance along `o + t·d` at which it
+    /// crosses triangle `abc` (in `d`'s units), if it does. The one triangle
+    /// test the brute-force and BVH casts share, so they agree exactly.
+    #[inline]
+    pub fn intersect(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
+        let (e1, e2) = (b - a, c - a);
+        let p = d.cross(e2);
+        let det = e1.dot(p);
+        if det.abs() < 1e-18 {
+            return None;
+        }
+        let inv_det = 1.0 / det;
+        let s = o - a;
+        let u = s.dot(p) * inv_det;
+        if !(0.0..=1.0).contains(&u) {
+            return None;
+        }
+        let q = s.cross(e1);
+        let v = d.dot(q) * inv_det;
+        if v < 0.0 || u + v > 1.0 {
+            return None;
+        }
+        Some(e2.dot(q) * inv_det)
+    }
+
+    /// The unit direction and length from `from` to `to`, unless they coincide.
+    pub fn segment(from: DVec3, to: DVec3) -> Option<(DVec3, f64)> {
+        let v = to - from;
+        let len = v.length();
+        (len > 0.0).then(|| (v / len, len))
+    }
+
+    /// True if face `t` (unless `skip`ped) lies strictly between `from` and
+    /// the point `len` along unit direction `d`.
+    pub fn blocks(
+        mesh: &Mesh,
+        t: &[u32; 3],
+        from: DVec3,
+        d: DVec3,
+        len: f64,
+        skip: &impl Fn(&[u32; 3]) -> bool,
+    ) -> bool {
+        if skip(t) {
+            return false;
+        }
+        let [a, b, c] = t.map(|v| DVec3::from(mesh.corner_position(v)));
+        intersect(from, d, a, b, c).is_some_and(|t| t > HIT_MIN && t < len * (1.0 - 1e-9))
+    }
+}
+
+use ray::{HIT_MIN, intersect};
 
 /// Leaves hold at most this many faces.
 pub const LEAF_MAX: usize = 8;
@@ -435,13 +498,55 @@ impl Bvh {
     pub fn build(mesh: &Mesh, ctx: &RunContext) -> Result<Bvh, Cancelled> {
         ctx.checkpoint()?;
         let Some(bb) = mesh.bounding_box_with(ctx)? else {
-            return Ok(Bvh {
-                origin: DVec3::ZERO,
-                nodes: Vec::new(),
-                faces: Vec::new(),
-                pad: 0.0,
-            });
+            return Ok(Bvh::empty());
         };
+        Bvh::build_from(mesh, bb, mesh.faces().map(|(id, _)| id), ctx)
+    }
+
+    /// Build over just `faces` (live faces of `mesh`): for queries that only
+    /// ever concern part of a large mesh, such as the faces near a
+    /// boolean's window. Same guarantees as [`Bvh::build`].
+    pub fn build_subset(mesh: &Mesh, faces: &[FaceId], ctx: &RunContext) -> Result<Bvh, Cancelled> {
+        ctx.checkpoint()?;
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for &f in faces {
+            let Some(t) = mesh.face(f) else { continue };
+            for v in t {
+                let p = mesh.corner_position(v);
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+            }
+        }
+        if lo[0] > hi[0] {
+            return Ok(Bvh::empty());
+        }
+        let bb = crate::Aabb { min: lo, max: hi };
+        Bvh::build_from(
+            mesh,
+            bb,
+            faces.iter().copied().filter(|&f| mesh.is_face_live(f)),
+            ctx,
+        )
+    }
+
+    fn empty() -> Bvh {
+        Bvh {
+            origin: DVec3::ZERO,
+            nodes: Vec::new(),
+            faces: Vec::new(),
+            pad: 0.0,
+        }
+    }
+
+    fn build_from(
+        mesh: &Mesh,
+        bb: crate::Aabb,
+        faces: impl Iterator<Item = FaceId>,
+        ctx: &RunContext,
+    ) -> Result<Bvh, Cancelled> {
         let origin = DVec3::from(bb.center());
         let reach = DVec3::from(bb.max)
             .abs()
@@ -450,10 +555,11 @@ impl Bvh {
         // Covers f64 rounding of positions relative to the origin (and of
         // the ray's), many times over; far below anything visible.
         let pad = (bb.diagonal() + reach) * 1e-9;
-        let mut items = Vec::with_capacity(mesh.face_count());
+        let mut items = Vec::with_capacity(faces.size_hint().0);
         let mut ticker = ctx.ticker();
-        for (id, t) in mesh.faces() {
+        for id in faces {
             ticker.tick()?;
+            let Some(t) = mesh.face(id) else { continue };
             let p = t.map(|v| DVec3::from(mesh.corner_position(v)) - origin);
             let (lo, hi) = (
                 p[0].min(p[1]).min(p[2]) - pad,
@@ -464,6 +570,9 @@ impl Bvh {
                 max: [up(hi.x), up(hi.y), up(hi.z)],
                 face: id.0,
             });
+        }
+        if items.is_empty() {
+            return Ok(Bvh::empty());
         }
         let nodes = build_subtree(&mut items, 0, 0, ctx)?;
         let mut faces = Vec::with_capacity(items.len());
@@ -555,10 +664,53 @@ impl Bvh {
         }
     }
 
+    /// Calls `f` with every face whose bounds overlap the closed box
+    /// `lo..hi` (object space). Conservative: node and face bounds are
+    /// rounded outward, so a face that touches the box is always visited,
+    /// and some that only come close are too; callers decide exactly.
+    pub fn for_each_overlapping(&self, lo: [f64; 3], hi: [f64; 3], mut f: impl FnMut(FaceId)) {
+        if self.nodes.is_empty() {
+            return;
+        }
+        let o = self.origin;
+        let (rlo, rhi) = (
+            [
+                lo[0] - o.x - self.pad,
+                lo[1] - o.y - self.pad,
+                lo[2] - o.z - self.pad,
+            ],
+            [
+                hi[0] - o.x + self.pad,
+                hi[1] - o.y + self.pad,
+                hi[2] - o.z + self.pad,
+            ],
+        );
+        let overlaps = |n: &Node| {
+            (0..3).all(|k| f64::from(n.min[k]) <= rhi[k] && rlo[k] <= f64::from(n.max[k]))
+        };
+        let mut stack: Vec<u32> = Vec::with_capacity(64);
+        stack.push(0);
+        while let Some(i) = stack.pop() {
+            let n = &self.nodes[i as usize];
+            if !overlaps(n) {
+                continue;
+            }
+            if n.count > 0 {
+                let first = n.first_or_right as usize;
+                for &face in &self.faces[first..first + n.count as usize] {
+                    f(FaceId(face));
+                }
+                continue;
+            }
+            stack.push(n.first_or_right);
+            stack.push(i + 1);
+        }
+    }
+
     /// Nearest live face hit by the world-space ray `origin` + t·`dir`
     /// (`dir` a unit vector) on `mesh` placed by `model`, and the
     /// world-space distance: exactly what the brute-force
-    /// [`crate::ray_pick`] returns, ties to the lower face ID. `mesh` must
+    /// `mf_render::ray_pick` returns, ties to the lower face ID. `mesh` must
     /// be the revision this was built for.
     pub fn ray_pick(
         &self,
@@ -613,7 +765,7 @@ impl Bvh {
 
     /// True if a face of `mesh` for which `skip` is false lies strictly
     /// between the object-space points `from` and `to` (see
-    /// [`crate::edge_occluded`], which does this in world space). Stops at
+    /// `mf_render::edge_occluded`, which does this in world space). Stops at
     /// the first such face.
     pub fn occluded(
         &self,
@@ -622,7 +774,7 @@ impl Bvh {
         to: DVec3,
         skip: impl Fn(&[u32; 3]) -> bool,
     ) -> bool {
-        let Some((d, len)) = crate::pick::segment(from, to) else {
+        let Some((d, len)) = ray::segment(from, to) else {
             return false;
         };
         let ray = self.ray(from, d);
@@ -634,7 +786,7 @@ impl Bvh {
             |faces| {
                 hidden = faces.iter().any(|&f| {
                     mesh.face(FaceId(f))
-                        .is_some_and(|t| crate::pick::blocks(mesh, &t, from, d, len, &skip))
+                        .is_some_and(|t| ray::blocks(mesh, &t, from, d, len, &skip))
                 });
                 hidden
             },

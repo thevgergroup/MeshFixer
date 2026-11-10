@@ -5,7 +5,6 @@
 //! are never read back as geometry.
 
 pub mod bench;
-mod bvh;
 mod camera;
 mod gizmo;
 mod gpu_mesh;
@@ -17,7 +16,6 @@ mod target;
 mod timer;
 mod transform;
 
-pub use bvh::{Bvh, LEAF_MAX};
 pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
 pub use gizmo::{
     Decomposed, Drag, Gizmo, GizmoMode, Handle, HandleGeometry, HandleShape,
@@ -29,6 +27,7 @@ pub use gpu_mesh::{
     chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
     wait_for_submitted,
 };
+pub use mf_geometry::{Bvh, LEAF_MAX};
 pub use overlay::{
     GIZMO_LINE_WIDTH_PT, GizmoFillVertex, GizmoLineVertex, GizmoPalette, Plate, PlateVertex,
     gizmo_fill_vertices, gizmo_line_vertices, plate_vertices,

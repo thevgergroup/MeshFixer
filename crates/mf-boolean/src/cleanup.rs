@@ -142,6 +142,19 @@ pub fn remove_created_degenerates(
                 let (Some(o1), Some(o2)) = (opposite(f), opposite(g)) else {
                     continue;
                 };
+                // The link condition below reads each endpoint's full one
+                // ring from `vfaces`. That is complete only because `vfaces`
+                // holds every live face of every vertex in `involved`, and
+                // `u` and `v` are corners of a `todo` face, so they are in
+                // it (Task 7b review I3). Checked, not assumed: a future
+                // narrowing of `involved` must not let a collapse through
+                // on a partial ring.
+                if !(ring_is_complete(&vfaces, &involved, u, [f, g])
+                    && ring_is_complete(&vfaces, &involved, v, [f, g]))
+                {
+                    debug_assert!(false, "one ring of {u} or {v} is incomplete");
+                    continue;
+                }
                 let around = |x: u32| -> HashSet<u32> {
                     vfaces
                         .get(&x)
@@ -246,6 +259,21 @@ pub fn remove_created_degenerates(
     Ok(stats)
 }
 
+/// Whether `vfaces` holds vertex `x`'s one ring as the link condition
+/// needs it: `x` was gathered (it is in `involved`), and its list holds the
+/// two faces on the edge being collapsed.
+fn ring_is_complete(
+    vfaces: &HashMap<u32, Vec<usize>>,
+    involved: &HashSet<u32>,
+    x: u32,
+    on_edge: [usize; 2],
+) -> bool {
+    involved.contains(&x)
+        && vfaces
+            .get(&x)
+            .is_some_and(|faces| on_edge.iter().all(|f| faces.contains(f)))
+}
+
 /// Drops dead triangles and unreferenced vertices, keeping order.
 fn compact(result: &mut KernelResult, alive: &[bool]) {
     let mut triangles = Vec::with_capacity(result.triangles.len());
@@ -278,4 +306,20 @@ fn compact(result: &mut KernelResult, alive: &[bool]) {
         triangles,
         origin,
     };
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_ring_missing_a_vertex_or_a_face_is_incomplete() {
+        let involved: HashSet<u32> = [1, 2].into();
+        let vfaces: HashMap<u32, Vec<usize>> = [(1, vec![0, 1, 2]), (2, vec![0, 2])].into();
+        assert!(ring_is_complete(&vfaces, &involved, 1, [0, 1]));
+        // Face 1 isn't in vertex 2's list: its ring was gathered partially.
+        assert!(!ring_is_complete(&vfaces, &involved, 2, [0, 1]));
+        // Vertex 3 was never gathered.
+        assert!(!ring_is_complete(&vfaces, &involved, 3, [0, 1]));
+    }
 }

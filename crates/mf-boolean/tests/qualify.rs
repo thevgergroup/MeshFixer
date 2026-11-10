@@ -1,3 +1,4 @@
+#![cfg(feature = "manifold-rust")]
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
 //! Phase 1 Tasks 7 and 7b: the kernel qualification gate for D1 (ADR-0002),

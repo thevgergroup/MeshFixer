@@ -10,7 +10,9 @@ pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
 mod affine;
+mod boolean;
 mod compact;
+pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
 pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 
@@ -19,6 +21,13 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 /// tables fit (one hole bigger than this runs alone).
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
+mod intersections;
+mod make_solid;
+pub use make_solid::{
+    MAX_GRID_POINTS as MAKE_SOLID_MAX_GRID_POINTS, STAGES as MAKE_SOLID_STAGES,
+    TRADE_OFF as MAKE_SOLID_TRADE_OFF,
+};
+pub mod layout;
 mod remove_small;
 pub mod sculpt;
 mod split;
@@ -28,6 +37,9 @@ mod test_consume_tool;
 mod test_unit_conversion;
 mod transform;
 
+pub use split::pegs::{
+    HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
+};
 pub use split::{SPLIT_STAGES, split_names};
 pub use transform::{world_min_z, world_min_z_with};
 
@@ -201,9 +213,12 @@ pub(crate) fn needs_document(op: &str) -> OpError {
 }
 
 static REGISTRY: &[&dyn Operation] = &[
+    &boolean::Boolean,
     &compact::Compact,
     &fill_holes::FillHoles,
     &inspect::Inspect,
+    &intersections::Intersections,
+    &make_solid::MakeSolid,
     &remove_small::RemoveSmallComponents,
     &transform::SetTransform,
     &transform::DropToPlate,
