@@ -14,7 +14,7 @@
 //!
 //! The **pseudo-locale** (View ▸ Pseudo-locale, or `MF_PSEUDO_LOCALE=1`)
 //! accents every looked-up string, lengthens it by about 40% and brackets
-//! it in ⟦…⟧, so a literal that bypasses the catalogue, or a layout that
+//! it in [[…]] (the plan's ⟦…⟧ isn't in the bundled fonts), so a literal that bypasses the catalogue, or a layout that
 //! breaks with longer text, shows in the frames.
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +72,7 @@ pub fn tr_plural(id: &str, n: u64, args: &[(&str, String)]) -> String {
 }
 
 /// The pseudo-locale's version of `text`: vowels accented, about 40%
-/// longer, in ⟦…⟧. Placeholders are already filled.
+/// longer, in [[…]]. Placeholders are already filled.
 fn pseudo_text(text: &str) -> String {
     let accented: String = text
         .chars()
@@ -92,7 +92,7 @@ fn pseudo_text(text: &str) -> String {
         .collect();
     let extra = (text.chars().count() * 2).div_ceil(5);
     let pad: String = "·~".chars().cycle().take(extra).collect();
-    format!("⟦{accented}{pad}⟧")
+    format!("[[{accented}{pad}]]")
 }
 
 /// A message by id: `t!("tool.transform.name")`, or with placeholders,
@@ -294,7 +294,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("settings.dev.pseudo", "Pseudo-locale"),
     (
         "settings.dev.pseudo.tip",
-        "Shows every catalogued string accented, 40% longer and in ⟦…⟧, so untranslated text and tight layouts stand out",
+        "Shows every catalogued string accented, 40% longer and in [[…]], so untranslated text and tight layouts stand out",
     ),
     ("settings.title", "Settings"),
     ("status.ready", "Ready"),
@@ -381,7 +381,7 @@ mod tests {
     #[test]
     fn pseudo_text_is_bracketed_accented_and_longer() {
         let p = pseudo_text("Fill all holes");
-        assert!(p.starts_with('⟦') && p.ends_with('⟧'), "{p}");
+        assert!(p.starts_with("[[") && p.ends_with("]]"), "{p}");
         assert!(p.contains("Fíll áll hólés"), "{p}");
         assert!(p.chars().count() >= "Fill all holes".len() * 14 / 10, "{p}");
     }

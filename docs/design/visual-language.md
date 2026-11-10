@@ -68,7 +68,7 @@ Built-ins register through the same calls a plugin makes: `register_tool` (id, n
 
 ## Internationalisation (UI plan §10)
 
-Every string the shell added or moved goes through `t!("id")` / `tp!("id", n)` over a sorted static English catalogue (`i18n.rs`); a missing id panics (a bug, found by any test that draws it). Plurals are `.one` / `.other` entries. View > Pseudo-locale (or `MF_PSEUDO_LOCALE=1`, or Settings > Developer) accents every catalogued string, lengthens it ~40% and brackets it in ⟦…⟧, so literals not yet converted (MF-ISSUE-090) and layouts that break with longer text show in frames.
+Every string the shell added or moved goes through `t!("id")` / `tp!("id", n)` over a sorted static English catalogue (`i18n.rs`); a missing id panics (a bug, found by any test that draws it). Plurals are `.one` / `.other` entries. View > Pseudo-locale (or `MF_PSEUDO_LOCALE=1`, or Settings > Developer) accents every catalogued string, lengthens it ~40% and brackets it in [[…]], so literals not yet converted (MF-ISSUE-090) and layouts that break with longer text show in frames.
 
 Someone who has used Meshmixer or Fusion should understand the screen without an engineer. Three rules follow from that:
 
