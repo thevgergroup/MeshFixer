@@ -153,6 +153,7 @@ fn boolean_after_make_solid_succeeds_where_it_was_refused() {
         op.execute_doc(
             &[
                 OperandInput {
+                    slot: "target",
                     object: ObjectId(1),
                     name: "object",
                     mesh: target,
@@ -160,6 +161,7 @@ fn boolean_after_make_solid_succeeds_where_it_was_refused() {
                     target: Target::WholeObject,
                 },
                 OperandInput {
+                    slot: "tool",
                     object: ObjectId(2),
                     name: "object",
                     mesh: &cube(1.0),

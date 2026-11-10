@@ -34,6 +34,7 @@ fn timed_split(rings: u32, budget: Duration) {
         .unwrap()
         .execute_doc(
             &[OperandInput {
+                slot: "target",
                 object: ObjectId(1),
                 name: "scan",
                 mesh: &mesh,

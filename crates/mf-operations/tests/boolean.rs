@@ -39,6 +39,7 @@ fn run(
     op.execute_doc(
         &[
             OperandInput {
+                slot: "target",
                 object: ObjectId(1),
                 name: "object",
                 mesh: target,
@@ -46,6 +47,7 @@ fn run(
                 target: Target::WholeObject,
             },
             OperandInput {
+                slot: "tool",
                 object: ObjectId(2),
                 name: "object",
                 mesh: tool,

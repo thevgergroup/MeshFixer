@@ -246,6 +246,7 @@ impl Prepared {
             .operands
             .iter()
             .map(|o| OperandInput {
+                slot: &o.name,
                 object: o.object,
                 name: &o.object_name,
                 mesh: &o.mesh,

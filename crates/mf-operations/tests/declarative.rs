@@ -203,6 +203,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         )),
     };
     let mut inputs = vec![OperandInput {
+        slot: "target",
         object: mf_document::ObjectId(1),
         name: "object",
         mesh: &before,
@@ -211,6 +212,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
     }];
     if let Some((mesh, transform)) = &tool {
         inputs.push(OperandInput {
+            slot: "tool",
             object: mf_document::ObjectId(2),
             name: "tool",
             mesh,

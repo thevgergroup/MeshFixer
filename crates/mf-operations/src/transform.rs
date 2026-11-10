@@ -367,6 +367,7 @@ impl Operation for ArrangeOnPlate {
         // Then rest it on the plate, exactly as drop_to_plate does.
         let dropped = DropToPlate.execute_doc(
             &[OperandInput {
+                slot: "target",
                 transform: moved,
                 ..target.clone()
             }],
@@ -411,6 +412,7 @@ mod tests {
     fn drop(mesh: &Mesh, transform: [f64; 12]) -> Result<DocOutput, OpError> {
         DropToPlate.execute_doc(
             &[OperandInput {
+                slot: "target",
                 object: ObjectId(1),
                 name: "object",
                 mesh,

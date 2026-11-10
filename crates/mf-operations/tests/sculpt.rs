@@ -205,6 +205,7 @@ fn sculpt_command(mesh: &Mesh, samples: &[DabSample], extra: &[(&str, &str)]) ->
         .unwrap()
         .execute_doc(
             &[OperandInput {
+                slot: "target",
                 object: ObjectId(1),
                 name: "scan",
                 mesh,

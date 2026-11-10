@@ -14,6 +14,7 @@ const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0
 
 fn input(mesh: &Mesh, id: u64, transform: [f64; 12]) -> OperandInput<'_> {
     OperandInput {
+        slot: "target",
         object: ObjectId(id),
         name: "object",
         mesh,

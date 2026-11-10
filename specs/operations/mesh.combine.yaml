@@ -1,0 +1,40 @@
+id: mesh.combine
+version: 1
+summary: Join every solid and cut every hole (Tinkercad-style grouping), as one command with an exact check of each step.
+geometry_kinds: [mesh]
+# The first solid: it keeps its id, name and transform, and receives the
+# result. The other solids and the holes are brought into its frame (D10).
+target:
+  whole_object: true
+  kinds: []
+operands:
+  # The other solids, unioned onto the target in order, then removed.
+  - name: solids
+    role: consumed
+    kinds: [object]
+    required: false
+    many: true
+  # The holes, each subtracted from the joined solids in order, then
+  # removed unless keep_holes is set.
+  - name: holes
+    role: consumed
+    kinds: [object]
+    required: false
+    many: true
+parameters:
+  - name: keep_holes
+    type: bool
+    default: false
+    description: Keep the hole objects instead of removing them
+preconditions:
+  - every solid and hole is a closed mesh
+  - at least one other solid or one hole is given (otherwise nothing_to_combine)
+  - each solid and hole touches what it joins or cuts (otherwise no_overlap, naming it)
+postconditions:
+  - the result is checked exactly after every step (D4); a refused step names the object at fault and nothing commits
+  - every created face names its source, a face of the first solid (operand 0), another solid or a hole
+  - one command, one undo step; undo restores every removed object with its id
+effects: [geometry_changes, topology_changes, removes_objects]
+runtime:
+  cancellable: true
+  progress: true

@@ -23,6 +23,7 @@ fn split(mesh: &Mesh, params: &[(&str, &str)]) -> Result<DocOutput, OpError> {
         .collect();
     find("mesh.split_plane").unwrap().execute_doc(
         &[OperandInput {
+            slot: "target",
             object: ObjectId(1),
             name: "scan",
             mesh,

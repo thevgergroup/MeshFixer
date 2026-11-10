@@ -13,6 +13,7 @@ mod add_part;
 mod affine;
 pub mod blend;
 mod boolean;
+mod combine;
 mod compact;
 pub mod materials;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
@@ -73,6 +74,10 @@ pub struct OpOutput {
 /// operand is skipped).
 #[derive(Debug, Clone)]
 pub struct OperandInput<'a> {
+    /// The operand slot this object fills: `target` for the target (and a
+    /// `many` target's extra targets), otherwise the spec's operand name.
+    /// A `many` slot's objects are consecutive inputs with one slot name.
+    pub slot: &'a str,
     pub object: ObjectId,
     /// The object's name, for naming what the operation makes from it
     /// ("scan (top)").
@@ -298,6 +303,7 @@ pub(crate) fn needs_document(op: &str) -> OpError {
 
 static REGISTRY: &[&dyn Operation] = &[
     &boolean::Boolean,
+    &combine::Combine,
     &compact::Compact,
     &fill_holes::FillHoles,
     &inspect::Inspect,

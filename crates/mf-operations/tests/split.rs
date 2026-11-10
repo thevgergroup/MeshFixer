@@ -26,6 +26,7 @@ fn split_with(
     let params = spec.validate(&raw).unwrap();
     find("mesh.split_plane").unwrap().execute_doc(
         &[OperandInput {
+            slot: "target",
             object: ObjectId(1),
             name: "scan",
             mesh,
