@@ -1,6 +1,6 @@
 # ADR-0002: Boolean kernel
 
-Status: **No kernel qualifies (re-qualified in Task 7b, 2026-11-10).** `manifold-rust` 0.19.2 fails gates 1, 3 and 5. C++ Manifold 3.5.3 passes gates 1–4 but fails gate 5: its exact operand check refuses a gated window. The outline plan for our own kernel is ADR-0002b (`0002b-home-grown-kernel.md`), with two cheaper alternatives for the owner to rule on. Booleans don't ship until one of them passes these gates.
+Status: **Accepted: option B, C++ Manifold 3.5.3 with the operand check scoped to the D5 window, welding, and Make solid as the next action** (controller ruling 2026-11-10, after the Task 7b re-qualification). The home-grown kernel (ADR-0002b) is the long-term direction.
 
 ## Context
 
@@ -83,7 +83,26 @@ On every window, every kernel's result was valid with exact provenance and ident
 
 ## Decision
 
-**Neither kernel passes every gate, so neither is accepted.** ADR-0002b gives the outline plan for our own exact local-window kernel. The ruling is D1's own rule, applied to corrected gates:
+**Option B is accepted.** This is a controller ruling under the owner's delegation of 2026-11-10. The owner asked for "good enough vs perfect" and a modern Meshmixer.
+
+C++ Manifold 3.5.3, through `mf-manifold-sys`, is the shipping kernel behind the `Kernel` trait, together with the exact operand check and D4 validation. Every result is valid or refused by name; nothing invalid is ever emitted.
+
+Three refinements make B useful on real models:
+1. **Check only the window.** The operand self-intersection check runs only on the D5 window, so the tool's neighbourhood is checked, not the whole scan. A scan that crosses itself somewhere else no longer blocks a boolean.
+2. **Weld first.** Coincident vertices are welded before the check, so unwelded models aren't treated as touching themselves (Task 7b concern 3).
+3. **Plain refusal with a real next action.** "This part of the scan overlaps itself near the tool. Run Make solid on it first, or move the tool." Make solid is a new user-invoked voxel remesh (plan Task 8a). It is the Meshmixer-equivalent route for messy scans, chosen explicitly by the user, never applied silently.
+
+The home-grown exact kernel (ADR-0002b) stays the long-term direction. It is tracked as an issue and is triggered if scan booleans are refused too often in practice.
+
+Cost if wrong:
+- C++ build complexity on Windows CI.
+- Some scan booleans are refused until Make solid is run.
+
+Both are visible and recoverable; neither produces bad geometry.
+
+The analysis that led to the ruling follows.
+
+**Neither kernel passes every gate as measured.** ADR-0002b gives the outline plan for our own exact local-window kernel. The ruling is D1's own rule, applied to corrected gates:
 - **`manifold-rust`** is the only kernel that handles self-intersecting scans, but it still emits new self-intersections on three of the four closed scans. It is also 1.4–3.4× too slow on gated windows, even at D5 sizes.
 - **C++ Manifold** is fast (unchecked, 10–300× inside the limits; with its exact operand check, 2–6×), cancellable, deterministic and exact in its provenance, but only on operands that don't intersect themselves. Unchecked, it produces garbage on scans that do. Checked, it is safe, but it refuses booleans wherever a scan crosses itself near the tool, and the one open scan in the window gates does.
 
