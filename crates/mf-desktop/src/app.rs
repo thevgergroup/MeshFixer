@@ -1879,6 +1879,19 @@ impl MeshFixerApp {
             .map(|o| o.object);
         if let Some(id) = created {
             self.set_active(id);
+            // A command that creates an object (Split's two parts, a
+            // boolean's result) can take the document from one object to
+            // several. The Browser's visibility is decided once and kept
+            // sticky after that (so repairing everything doesn't fold it
+            // away); on a single-object document that decision is often
+            // "closed", which would hide the very parts the owner needs
+            // to pick between to target one of them. Reopen it whenever a
+            // created object means there's now more than one (matching
+            // `browser_default`'s own rule), rather than leaving the
+            // owner to guess that it's there but closed.
+            if self.session.document().objects().len() > 1 {
+                self.browser_open = Some(true);
+            }
         }
         self.sync_active();
     }
@@ -2664,6 +2677,11 @@ impl MeshFixerApp {
                     self.tree_hold = Some((self.active, self.now + TREE_HOLD_SECONDS));
                 }
                 self.set_active(*id);
+                // The object's own row is a whole-object pick (like
+                // "Model"): any sub-selection left over, on this object or
+                // another, would silently block Delete and whole-object
+                // tools, with nothing in the row to say why.
+                self.clear_selection();
             }
             TreeItem::Model(id) => {
                 self.set_active(*id);

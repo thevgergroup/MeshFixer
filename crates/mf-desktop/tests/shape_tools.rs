@@ -18,6 +18,7 @@ use mf_desktop::{MeshFixerApp, Settings};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::threemf::{ModelObject, Unit};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
+use mf_selection::{Selection, SelectionKind};
 
 const WINDOW: (f32, f32) = (1440.0, 900.0);
 
@@ -211,6 +212,75 @@ fn combine_subtracts_the_tool_and_shows_where_they_overlap() {
     still(&mut h, "combine-after");
 }
 
+/// Owner report: the tool stays even with "Keep tool" unchecked. Checked,
+/// the tool must survive the union (as the checkbox promises); unchecked
+/// again right after, on the next combine, it must actually be removed --
+/// not stuck `true` from the previous run, and not merely reported
+/// removed while the object lingers in the document.
+#[test]
+fn unchecking_keep_tool_after_checking_it_removes_the_tool_object() {
+    require_gpu!("unchecking_keep_tool_after_checking_it_removes_the_tool_object");
+    // "block" and "peg" overlap (as in the test above); combine them
+    // twice in a row, same pair both times.
+    let mut h = opened(
+        WINDOW,
+        vec![
+            ("block", mf_fixtures::cube(20.0), at([0.0; 3])),
+            ("peg", ball(), at([20.0, 10.0, 20.0])),
+        ],
+    );
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "combine");
+    wait_until(&mut h, "the overlap", |a| a.combine.tool.is_some());
+    settle(&mut h);
+    // Check "Keep the tool object" and union: the tool must survive.
+    h.get_by_label("Keep the tool object").click();
+    settle(&mut h);
+    assert!(h.state().combine.keep_tool, "the checkbox is now checked");
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Combine objects").click();
+    wait_until(&mut h, "the first combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(
+        objects(&h),
+        ["block", "peg"],
+        "kept: the tool is still in the document"
+    );
+
+    // Open Combine again on the same pair and uncheck "Keep the tool
+    // object" before applying.
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    wait_until(&mut h, "the overlap", |a| a.combine.tool.is_some());
+    settle(&mut h);
+    assert!(
+        h.state().combine.keep_tool,
+        "keep_tool carries over from the last time Combine was open"
+    );
+    h.get_by_label("Keep the tool object").click();
+    settle(&mut h);
+    assert!(
+        !h.state().combine.keep_tool,
+        "the checkbox is now unchecked"
+    );
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Combine objects").click();
+    wait_until(&mut h, "the second combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(
+        objects(&h),
+        ["block"],
+        "unchecked: the consumed tool object is actually removed"
+    );
+}
+
 #[test]
 fn a_self_overlapping_target_is_refused_with_make_solid_as_the_way_on() {
     require_gpu!("a_self_overlapping_target_is_refused_with_make_solid_as_the_way_on");
@@ -276,8 +346,16 @@ fn after_a_split_delete_removes_only_the_picked_part() {
     settle(&mut h);
     h.key_press(egui::Key::Escape);
     settle(&mut h);
-    // The Browser row of the bottom part.
-    h.get_by_label("ball (bottom)").click();
+    // The Browser row of the bottom part (Split just took the document
+    // from one object to two, so the Browser is shown now even though it
+    // defaulted to closed on the single-object document a moment ago).
+    assert_eq!(
+        h.state().browser_open,
+        Some(true),
+        "the Browser reopens once there's more than one object to pick between"
+    );
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "ball (bottom)")
+        .click();
     settle(&mut h);
     let bottom = h
         .state()
@@ -331,6 +409,144 @@ fn after_a_split_delete_removes_only_the_picked_part() {
     }
     wait_until(&mut h, "the pick", |a| a.active == Some(bottom));
     settle(&mut h);
+    h.key_press(egui::Key::Delete);
+    wait_until(&mut h, "the delete", |a| {
+        a.busy.is_none() && a.session.document().objects().len() == 1
+    });
+    assert_eq!(objects(&h), ["ball (top)"]);
+}
+
+/// A second object in the scene, the Split tool left open (no Escape),
+/// and a view click landing on the part the split *didn't* auto-activate
+/// ("top" keeps the original id; "bottom" is the new, auto-activated
+/// part; see `mf_operations::split`): Delete right after that click must
+/// still act on the part the click picked, not a stale target.
+#[test]
+fn delete_after_a_view_click_targets_the_clicked_part_not_a_stale_one() {
+    require_gpu!("delete_after_a_view_click_targets_the_clicked_part_not_a_stale_one");
+    let mut h = opened(
+        WINDOW,
+        vec![
+            ("cube", mf_fixtures::cube(5.0), at([20.0, 0.0, 2.5])),
+            ("ball", ball(), at([0.0, 0.0, 10.0])),
+        ],
+    );
+    let ball_id = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == "ball")
+        .unwrap()
+        .id;
+    h.state_mut().set_active(ball_id);
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut in two").click();
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    // No Escape this time: click in the view, on the top half, with the
+    // Split tool still open, then Delete, all in quick succession.
+    let at_top = h.state().screen_point([0.0, 0.0, 17.0]).unwrap();
+    h.event(egui::Event::PointerMoved(at_top));
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton {
+            pos: at_top,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+    h.event(egui::Event::Key {
+        key: egui::Key::Delete,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::Key {
+        key: egui::Key::Delete,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    wait_until(&mut h, "the delete", |a| {
+        a.busy.is_none() && a.session.document().objects().len() == 2
+    });
+    settle(&mut h);
+    assert_eq!(
+        objects(&h),
+        ["cube", "ball (bottom)"],
+        "the clicked part (top) is removed, not a stale target"
+    );
+}
+
+/// Owner report, root cause: clicking an object's own row in the Browser
+/// only called `set_active`, which leaves a sub-selection alone when it
+/// already belongs to that object (only a *different* object's selection
+/// is cleared). After a split, re-picking the already-active part with a
+/// leftover sub-selection (e.g. a boundary loop picked earlier) silently
+/// blocked Delete, with nothing in the row to say why. The object row is
+/// a whole-object pick, so it must clear any selection, like "Model"
+/// does.
+#[test]
+fn clicking_an_objects_own_row_clears_a_leftover_sub_selection_so_delete_works() {
+    require_gpu!("clicking_an_objects_own_row_clears_a_leftover_sub_selection_so_delete_works");
+    let mut h = opened(WINDOW, vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut in two").click();
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    h.key_press(egui::Key::Escape);
+    settle(&mut h);
+    let bottom = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == "ball (bottom)")
+        .unwrap()
+        .id;
+    h.state_mut().set_active(bottom);
+    // A leftover sub-selection on the already-active part (as a boundary
+    // loop pick, or any other "smaller than the object" selection, would
+    // leave behind): `current_selection()` must be `None` after clicking
+    // the object's own row again, or Delete silently refuses.
+    h.state_mut().selection = Some(Selection {
+        object: bottom,
+        revision: h.state().session.current(),
+        kind: SelectionKind::BoundaryLoop,
+        ids: vec![0],
+    });
+    settle(&mut h);
+    assert!(
+        h.state().current_selection().is_some(),
+        "the sub-selection is in place before the row click"
+    );
+    h.get_by_role_and_label(egui::accesskit::Role::Button, "ball (bottom)")
+        .click();
+    settle(&mut h);
+    assert_eq!(h.state().active, Some(bottom));
+    assert!(
+        h.state().current_selection().is_none(),
+        "the object row's click clears a leftover sub-selection"
+    );
     h.key_press(egui::Key::Delete);
     wait_until(&mut h, "the delete", |a| {
         a.busy.is_none() && a.session.document().objects().len() == 1
