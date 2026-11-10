@@ -321,6 +321,8 @@ pub struct MeshFixerApp {
     /// The first-use hint ("Pick a tool on the left…"): shown with a
     /// model open until a tool is used or it is dismissed.
     pub first_use_hint: bool,
+    /// How the model is shaded (View > Clay / Studio / X-ray, Wireframe).
+    pub shading: mf_render::Shading,
     /// A placement committed from the Transform tool, drawn until its
     /// command finishes (so the object doesn't jump back meanwhile).
     preview: Option<(ObjectId, [f64; 12])>,
@@ -606,6 +608,7 @@ impl MeshFixerApp {
             show_overlays: false,
             show_settings: false,
             first_use_hint: true,
+            shading: mf_render::Shading::default(),
             preview: None,
             pending_status: None,
             lowest: None,
@@ -4421,6 +4424,7 @@ impl MeshFixerApp {
                         gizmo,
                         plate,
                         tool_hint: hint,
+                        shading: self.shading,
                     },
                 )
             })
@@ -4429,6 +4433,7 @@ impl MeshFixerApp {
             Some(NavAction::FrameSelection) => self.frame_target(),
             Some(NavAction::ResetView) => self.fit_camera(),
             Some(NavAction::Overlays) => self.show_overlays = !self.show_overlays,
+            Some(NavAction::Wireframe) => self.shading.wireframe = !self.shading.wireframe,
             None => {}
         }
         crate::tool_panels::inspector_card(self, &ctx);

@@ -251,6 +251,7 @@ impl RenderTarget {
                 multiview_mask: None,
             });
             if let Some(camera) = camera {
+                renderer.draw_background(&mut pass);
                 if let Some(plate) = extras.plate {
                     renderer.draw_plate(device, queue, &mut pass, plate, camera.target);
                 }

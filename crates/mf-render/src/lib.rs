@@ -39,7 +39,8 @@ pub use pick::{
     loop_edge_candidates, pick_loop, ray_pick, ray_pick_with, screen_position,
 };
 pub use renderer::{
-    DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue,
+    DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue, Shading,
+    ShadingPreset,
 };
 pub use target::{GizmoDraw, RenderTarget, SceneExtras};
 pub use timer::GpuTimer;

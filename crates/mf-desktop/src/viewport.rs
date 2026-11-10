@@ -93,6 +93,8 @@ pub struct ViewOptions<'a> {
     pub plate: Option<mf_render::Plate>,
     /// The open interactive tool's line at the view's top-left.
     pub tool_hint: Option<&'a str>,
+    /// How the surface is shaded (the View menu's presets and wireframe).
+    pub shading: mf_render::Shading,
 }
 
 /// What [`Viewport::input`] found, for [`Viewport::paint`].
@@ -157,6 +159,8 @@ pub enum NavAction {
     ResetView,
     /// The Overlays popover (what each colour means).
     Overlays,
+    /// The wireframe on or off.
+    Wireframe,
 }
 
 /// What happened in the viewport this frame.
@@ -208,6 +212,8 @@ pub struct Viewport {
     tool_drag: bool,
     /// Where the navigation bar was last drawn (it is dim until hovered).
     nav_rect: Option<egui::Rect>,
+    /// The wireframe is on (the navigation bar's toggle shows it).
+    wireframe_on: bool,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
     /// The last frame that redrew the 3D view, and whether it was timed.
@@ -240,6 +246,7 @@ impl Viewport {
             box_from: None,
             tool_drag: false,
             nav_rect: None,
+            wireframe_on: false,
         }
     }
 
@@ -408,6 +415,7 @@ impl Viewport {
             gizmo,
             plate,
             tool_hint,
+            shading,
         } = options;
         let rect = input.rect;
         let (Some(cam), true) = (camera.as_mut(), input.drawn && !objects.is_empty()) else {
@@ -440,6 +448,8 @@ impl Viewport {
             .set_pixels_per_point(ui.ctx().pixels_per_point());
         let size = self.target_size(ui, rect);
         self.renderer.set_selection_cue(cue);
+        self.renderer.set_shading(shading);
+        self.wireframe_on = shading.wireframe;
         let ppp = f64::from(ui.ctx().pixels_per_point());
         let view = (rect.width() as f64, rect.height() as f64);
         // The gizmo is laid out in points (its size is in points); the
@@ -633,6 +643,18 @@ impl Viewport {
                                 action = Some(NavAction::ResetView);
                             }
                             divider(ui);
+                            if widgets::icon_button(
+                                ui,
+                                icons::WIREFRAME,
+                                &t!("nav.wireframe"),
+                                Some(self.wireframe_on),
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.wireframe.tip"))
+                            .clicked()
+                            {
+                                action = Some(NavAction::Wireframe);
+                            }
                             if widgets::icon_button(
                                 ui,
                                 icons::OVERLAYS,

@@ -37,10 +37,10 @@ pub const AXIS_Z: Color32 = Color32::from_rgb(62, 139, 240);
 pub const GIZMO_FREE: Color32 = Color32::from_gray(180);
 /// The build-plate grid: a neutral, so it never competes with a defect or
 /// selection colour. Light enough to read on `VIEWPORT_BACKGROUND`.
-pub const PLATE: Color32 = Color32::from_gray(100);
+pub const PLATE: Color32 = Color32::from_gray(66);
 /// The plate's major lines (every 50 mm): the same neutral, a step
 /// brighter, so the scale reads at any zoom.
-pub const PLATE_MAJOR: Color32 = Color32::from_gray(140);
+pub const PLATE_MAJOR: Color32 = Color32::from_gray(78);
 
 /// An inactive object keeps this much of its saturation…
 pub const INACTIVE_SATURATION: f32 = 0.0;
@@ -70,10 +70,13 @@ pub const OVERLAY_WIDTH: f32 = 3.0;
 
 // Neutrals: no meaning beyond "the model" and "the room it sits in".
 /// Front faces of the model.
-pub const SURFACE: Color32 = Color32::from_rgb(200, 194, 184);
+pub const SURFACE: Color32 = Color32::from_rgb(0xC9, 0xCC, 0xD1);
 /// Back faces, seen through holes or flipped (a dark slate, not a defect colour).
 pub const BACK_FACE: Color32 = Color32::from_rgb(78, 84, 100);
-pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(38, 41, 46);
+pub const VIEWPORT_BACKGROUND: Color32 = Color32::from_rgb(0x2B, 0x2F, 0x35);
+/// The top of the stage's soft vertical gradient (UI plan §4); the bottom
+/// is `VIEWPORT_BACKGROUND`.
+pub const VIEWPORT_BACKGROUND_TOP: Color32 = Color32::from_rgb(0x3A, 0x3F, 0x46);
 /// Primary text drawn over the 3D view (the open tool's line): a neutral,
 /// never a geometry colour.
 pub const TEXT: Color32 = Color32::from_rgb(0xE6, 0xE8, 0xEB);
@@ -95,6 +98,7 @@ pub fn rgba(c: Color32) -> [f32; 4] {
 pub fn palette() -> mf_render::Palette {
     mf_render::Palette {
         background: rgba(VIEWPORT_BACKGROUND),
+        background_top: rgba(VIEWPORT_BACKGROUND_TOP),
         surface: rgba(SURFACE),
         back_face: rgba(BACK_FACE),
         boundary: rgba(HOLE),
