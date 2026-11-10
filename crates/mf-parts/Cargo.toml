@@ -10,6 +10,10 @@ workspace = true
 
 [dependencies]
 mf-spec.workspace = true
+mf-geometry.workspace = true
+mf-io.workspace = true
+mf-runtime.workspace = true
+blake3.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true

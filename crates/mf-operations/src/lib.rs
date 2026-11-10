@@ -9,6 +9,7 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod add_part;
 mod affine;
 mod boolean;
 mod compact;
@@ -226,6 +227,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::Delete,
     &split::SplitPlane,
     &sculpt::SculptStroke,
+    &add_part::AddPart,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

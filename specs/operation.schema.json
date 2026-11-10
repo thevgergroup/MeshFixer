@@ -45,7 +45,7 @@
         "required": ["name", "type", "default", "description"],
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "type": { "enum": ["integer", "float", "bool", "choice", "vec3", "affine", "samples", "faces"] },
+          "type": { "enum": ["integer", "float", "bool", "choice", "vec3", "affine", "samples", "faces", "text"] },
           "default": {
             "$comment": "A vec3 default has 3 numbers and an affine default has 12 (row-major 3x4: the 3x3 linear part, then translation). The schema only checks that array elements are numbers; the exact element count per type is enforced in Rust deserialization (mf-spec::model::Scalar::as_f64_array, TryFrom<RawParam> for ParamSpec), which rejects a wrong count by name.",
             "type": ["number", "boolean", "string", "array"],

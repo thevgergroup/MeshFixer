@@ -24,6 +24,7 @@ pub fn to_command(spec: &OperationSpec) -> Command {
             ParamKind::Choice { default, values } => (values.join("|"), default.clone()),
             ParamKind::Vec3 { default } => ("X,Y,Z".into(), csv(default)),
             ParamKind::Affine { default } => ("M00,...,M32 (12 values)".into(), csv(default)),
+            ParamKind::Text { default } => ("TEXT".into(), default.clone()),
             ParamKind::Samples => ("FACE,B0,B1,B2,PRESSURE;...".into(), String::new()),
             ParamKind::Faces => ("FACE,...".into(), String::new()),
         };

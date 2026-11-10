@@ -34,6 +34,11 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                         ("cut_gap".to_string(), "0.05".to_string()),
                     ]),
                 )
+            } else if op.id() == "object.add_part" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
+                )
             } else {
                 (mesh.clone(), BTreeMap::new())
             };

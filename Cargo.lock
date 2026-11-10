@@ -2866,6 +2866,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-spec",
@@ -2880,10 +2881,12 @@ dependencies = [
 name = "mf-parts"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
+ "mf-runtime",
  "mf-spec",
  "serde",
  "serde-saphyr",
