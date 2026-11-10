@@ -8,6 +8,13 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only: registers `test.unit_conversion`, matching mf-spec's
+# `test-kinds`-gated spec of the same id, so mf-command's tests can
+# exercise real unit-conversion wiring end to end. Off in every normal
+# build; only mf-command's dev-dependency enables it.
+test-kinds = ["mf-spec/test-kinds"]
+
 [dependencies]
 faer.workspace = true
 rayon.workspace = true

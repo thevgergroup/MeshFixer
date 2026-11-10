@@ -21,6 +21,11 @@ const SOURCES: &[(&str, &str)] = &[
         "mesh.compact.yaml",
         include_str!("../../../specs/operations/mesh.compact.yaml"),
     ),
+    #[cfg(feature = "test-kinds")]
+    (
+        "test.unit_conversion.yaml",
+        include_str!("../../../specs/test-operations/test.unit_conversion.yaml"),
+    ),
 ];
 
 /// Raw YAML sources, for schema validation tests.

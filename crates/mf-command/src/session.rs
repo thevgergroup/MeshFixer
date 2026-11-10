@@ -156,6 +156,15 @@ impl Prepared {
         self.op.id()
     }
 
+    /// The validated, already-converted parameters this will run with
+    /// (D20: a length is in document units by the time anything sees
+    /// `Prepared`). Exposed so callers — and tests proving `prepare`'s
+    /// conversion is idempotent — can inspect what was actually recorded
+    /// without re-deriving it.
+    pub fn params(&self) -> &Params {
+        &self.params
+    }
+
     /// Run the operation. Safe on any thread. Hashing happens here too, so
     /// the UI thread never does O(n) work on commit (MF-RT-001).
     ///
@@ -482,10 +491,18 @@ impl Session {
         id
     }
 
+    /// Validate a fresh invocation's raw (string) parameters and convert
+    /// every length (`unit: mm`) parameter to the document's units (D20;
+    /// Global Constraints: "converted at prepare time. The converted
+    /// value is what's recorded"). This runs exactly once, here: replay
+    /// (`replay::run_and_classify`) and [`Session::reexecute`] both carry
+    /// already-converted [`Params`] forward through [`Self::prepare_validated`]
+    /// directly, never back through this conversion.
     pub fn prepare(&self, inv: Invocation) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(&inv.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
-        let params = spec.validate(&inv.raw_params)?;
+        let mut params = spec.validate(&inv.raw_params)?;
+        spec.to_document_units(&mut params, self.document().units());
         self.prepare_validated(&inv.op_id, inv.target, inv.selection, params)
     }
 
@@ -661,6 +678,25 @@ impl Session {
         self.commit(completed)
     }
 
+    /// Run already-converted, already-validated [`Params`] (a recorded
+    /// command's own `params`, as replay and [`Self::reexecute`] both
+    /// have them): no unit conversion, since a recorded length is
+    /// already in document units (D20) and converting it again would
+    /// corrupt it. This is the one path both replay and re-execution
+    /// use, so conversion happens exactly once, in [`Self::prepare`].
+    pub fn execute_recorded(
+        &mut self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        params: Params,
+    ) -> Result<CommitOutcome, CommandError> {
+        let completed = self
+            .prepare_validated(op_id, target, selection, params)?
+            .run(&RunContext::none())?;
+        self.commit(completed)
+    }
+
     /// Run a recorded command again on another revision (MF-HIST-002): the
     /// same operation and parameters, with its selection translated to
     /// `onto` (MF-SEL-003). A translation that keeps some or all of the
@@ -699,10 +735,7 @@ impl Session {
         };
         let back = self.cursor;
         self.checkout(onto);
-        let result = self
-            .prepare_validated(&record.op_id, record.target, selection, params)
-            .and_then(|p| p.run(&RunContext::none()))
-            .and_then(|c| self.commit(c));
+        let result = self.execute_recorded(&record.op_id, record.target, selection, params);
         if result.is_err() {
             self.checkout(back);
         }

@@ -31,6 +31,7 @@ thiserror.workspace = true
 [dev-dependencies]
 mf-fixtures.workspace = true
 mf-document = { workspace = true, features = ["test-kinds"] }
+mf-operations = { workspace = true, features = ["test-kinds"] }
 mf-selection.workspace = true
 tempfile.workspace = true
 rayon.workspace = true

@@ -18,6 +18,8 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
 mod remove_small;
+#[cfg(feature = "test-kinds")]
+mod test_unit_conversion;
 
 pub use remove_small::{ComponentSizes, RemovalPreview, removal_preview};
 
@@ -95,6 +97,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &fill_holes::FillHoles,
     &inspect::Inspect,
     &remove_small::RemoveSmallComponents,
+    #[cfg(feature = "test-kinds")]
+    &test_unit_conversion::TestUnitConversion,
 ];
 
 pub fn registry() -> &'static [&'static dyn Operation] {

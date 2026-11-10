@@ -5,7 +5,7 @@ use std::path::Path;
 
 use crate::log::{Event, LOG_FORMAT, LogError, Manifest};
 use crate::record::{CommandId, GeometrySummary};
-use crate::session::{CommitOutcome, Invocation, Session};
+use crate::session::{CommitOutcome, Session};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
@@ -208,56 +208,58 @@ fn run_and_classify(
         sel.revision = session.current();
         sel
     });
-    let inv = Invocation {
-        selection,
-        op_id: record.op_id.clone(),
-        target: record.target,
-        raw_params: record
-            .params
-            .0
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect(),
-    };
-    Ok(match session.execute(inv) {
-        Ok(CommitOutcome::NewRevision { .. }) => {
-            let mesh = session
-                .document()
-                .object(record.target)
-                .and_then(|o| o.mesh())
-                .ok_or(LogError::TargetMissing(record.target))?;
-            let actual_hash = mesh.content_hash().to_hex();
-            let mismatch = |actual_hash: String| Verdict::Mismatch {
-                expected_hash: record.output_hash.clone(),
-                actual_hash,
-            };
-            if actual_hash == record.output_hash {
-                Verdict::Exact
-            } else if mesh.structure_hash().to_hex() != record.output_structure_hash {
-                mismatch(actual_hash)
-            } else {
-                match &record.output_summary {
-                    None => mismatch(actual_hash),
-                    Some(expected) => {
-                        let tolerance = 1e-9 * expected.diagonal().max(1.0);
-                        match GeometrySummary::of(mesh).deviation(expected) {
-                            Some((bbox, area)) if bbox <= tolerance && area <= 1e-9 => {
-                                Verdict::Equivalent {
-                                    max_deviation: bbox,
+    // `execute_recorded`, not `execute`/`Invocation`: `record.params` are
+    // already in document units (converted once, at the original
+    // `prepare`, D20). Round-tripping them through `Invocation`'s raw
+    // string params would re-validate through `Session::prepare`, which
+    // converts again — corrupting a replayed length, including when
+    // replaying onto a document in another unit.
+    Ok(
+        match session.execute_recorded(
+            &record.op_id,
+            record.target,
+            selection,
+            record.params.clone(),
+        ) {
+            Ok(CommitOutcome::NewRevision { .. }) => {
+                let mesh = session
+                    .document()
+                    .object(record.target)
+                    .and_then(|o| o.mesh())
+                    .ok_or(LogError::TargetMissing(record.target))?;
+                let actual_hash = mesh.content_hash().to_hex();
+                let mismatch = |actual_hash: String| Verdict::Mismatch {
+                    expected_hash: record.output_hash.clone(),
+                    actual_hash,
+                };
+                if actual_hash == record.output_hash {
+                    Verdict::Exact
+                } else if mesh.structure_hash().to_hex() != record.output_structure_hash {
+                    mismatch(actual_hash)
+                } else {
+                    match &record.output_summary {
+                        None => mismatch(actual_hash),
+                        Some(expected) => {
+                            let tolerance = 1e-9 * expected.diagonal().max(1.0);
+                            match GeometrySummary::of(mesh).deviation(expected) {
+                                Some((bbox, area)) if bbox <= tolerance && area <= 1e-9 => {
+                                    Verdict::Equivalent {
+                                        max_deviation: bbox,
+                                    }
                                 }
+                                _ => mismatch(actual_hash),
                             }
-                            _ => mismatch(actual_hash),
                         }
                     }
                 }
             }
-        }
-        Ok(_) => Verdict::Mismatch {
-            expected_hash: record.output_hash.clone(),
-            actual_hash: "no change".into(),
+            Ok(_) => Verdict::Mismatch {
+                expected_hash: record.output_hash.clone(),
+                actual_hash: "no change".into(),
+            },
+            Err(e) => Verdict::Failed {
+                error: e.to_string(),
+            },
         },
-        Err(e) => Verdict::Failed {
-            error: e.to_string(),
-        },
-    })
+    )
 }
