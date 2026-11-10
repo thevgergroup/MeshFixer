@@ -9,6 +9,7 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod affine;
 mod compact;
 mod fill_holes;
 pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
@@ -19,6 +20,7 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
 mod inspect;
 mod remove_small;
+pub mod sculpt;
 mod split;
 #[cfg(feature = "test-kinds")]
 mod test_consume_tool;
@@ -207,6 +209,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::DropToPlate,
     &transform::Delete,
     &split::SplitPlane,
+    &sculpt::SculptStroke,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

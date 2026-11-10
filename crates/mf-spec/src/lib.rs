@@ -13,4 +13,4 @@ pub use model::{
     FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec, RuntimeSpec,
     TargetSpec,
 };
-pub use params::{ParamValue, Params, SpecError};
+pub use params::{FaceList, ParamValue, Params, SpecError};

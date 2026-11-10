@@ -113,6 +113,12 @@ pub enum ParamKind {
     Affine {
         default: [f64; 12],
     },
+    /// A sculpt stroke's dabs (`type: samples`, default `[]`); see
+    /// [`ParamValue::Samples`].
+    Samples,
+    /// A list of face ids (`type: faces`, default `[]`); see
+    /// [`ParamValue::Faces`].
+    Faces,
 }
 
 impl ParamKind {
@@ -124,6 +130,8 @@ impl ParamKind {
             ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
             ParamKind::Vec3 { default } => ParamValue::Vec3(*default),
             ParamKind::Affine { default } => ParamValue::Affine(*default),
+            ParamKind::Samples => ParamValue::Samples(Vec::new()),
+            ParamKind::Faces => ParamValue::Faces(Default::default()),
         }
     }
 }
@@ -230,6 +238,16 @@ impl TryFrom<RawParam> for ParamSpec {
             "affine" => ParamKind::Affine {
                 default: r.default.as_f64_array::<12>("default")?,
             },
+            "samples" | "faces" => {
+                if !matches!(&r.default, Scalar::Array(a) if a.is_empty()) {
+                    return Err(format!("a {} parameter's default must be []", r.ty));
+                }
+                if r.ty == "samples" {
+                    ParamKind::Samples
+                } else {
+                    ParamKind::Faces
+                }
+            }
             other => return Err(format!("unknown parameter type '{other}'")),
         };
         if let Some(from) = &r.default_from
@@ -282,6 +300,8 @@ impl From<ParamSpec> for RawParam {
                 None,
                 None,
             ),
+            ParamKind::Samples => ("samples", Scalar::Array(Vec::new()), None, None),
+            ParamKind::Faces => ("faces", Scalar::Array(Vec::new()), None, None),
         };
         RawParam {
             name: p.name,
@@ -459,6 +479,12 @@ impl ParamSpec {
             ParamKind::Vec3 { .. } => parse_f64_csv::<3>(text)
                 .map(ParamValue::Vec3)
                 .ok_or_else(|| invalid("expected x,y,z")),
+            ParamKind::Samples => parse_samples(text).map(ParamValue::Samples).ok_or_else(|| {
+                invalid("expected face,b0,b1,b2,pressure per dab, dabs separated by ;")
+            }),
+            ParamKind::Faces => parse_faces(text)
+                .map(|faces| ParamValue::Faces(crate::params::FaceList { faces }))
+                .ok_or_else(|| invalid("expected comma-separated face ids")),
             ParamKind::Affine { .. } => parse_f64_csv::<12>(text)
                 .map(ParamValue::Affine)
                 .ok_or_else(|| invalid("expected 12 comma-separated numbers")),
@@ -492,6 +518,31 @@ pub(crate) fn one_of(values: &[String]) -> String {
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
     }
+}
+
+/// Sculpt samples: `face,b0,b1,b2,pressure` per dab, dabs separated by
+/// `;` (empty text: no dabs). The face must be a whole number.
+fn parse_samples(text: &str) -> Option<Vec<[f64; 5]>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    text.split(';')
+        .map(|d| {
+            let s = parse_f64_csv::<5>(d)?;
+            (s[0] >= 0.0 && s[0] <= u32::MAX as f64 && s[0].fract() == 0.0).then_some(s)
+        })
+        .collect()
+}
+
+/// Comma-separated face ids (empty text: none).
+fn parse_faces(text: &str) -> Option<Vec<u32>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    // allow-swallow: any unparsable id makes the whole value invalid; the caller reports it by name
+    text.split(',').map(|f| f.trim().parse().ok()).collect()
 }
 
 /// Parse exactly `N` comma-separated finite `f64`s (the CLI and

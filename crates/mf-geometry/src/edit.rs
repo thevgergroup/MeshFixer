@@ -52,6 +52,42 @@ impl MeshEdit {
         self.vertex_live.get(id.0 as usize)
     }
 
+    /// A live vertex's current position in the edit.
+    pub fn position(&self, id: VertexId) -> Option<[f64; 3]> {
+        self.is_vertex_live(id)
+            .then(|| self.positions.get(id.0 as usize))
+    }
+
+    /// A live face's current corners in the edit.
+    pub fn face(&self, id: FaceId) -> Option<[u32; 3]> {
+        self.is_face_live(id).then(|| self.faces.get(id.0 as usize))
+    }
+
+    /// Vertex slots so far (the next added vertex gets this id).
+    pub fn vertex_slots(&self) -> u32 {
+        self.positions.len() as u32
+    }
+
+    /// Face slots so far (the next added face gets this id).
+    pub fn face_slots(&self) -> u32 {
+        self.faces.len() as u32
+    }
+
+    /// The mesh as edited so far, without ending the edit: it shares every
+    /// chunk with the edit, so it costs the chunk indexes, not the
+    /// geometry (a live sculpt preview). Not checked like
+    /// [`MeshEdit::finish`]; the edit's own `finish` is.
+    pub fn snapshot(&self) -> Mesh {
+        Mesh::from_parts(
+            self.positions.clone(),
+            self.faces.clone(),
+            self.face_live.clone(),
+            self.vertex_live.clone(),
+            self.face_count,
+            self.vertex_count,
+        )
+    }
+
     pub fn remove_face(&mut self, id: FaceId) -> Result<(), GeometryError> {
         if !self.is_face_live(id) {
             return Err(GeometryError::NoSuchFace(id.0));
