@@ -1,0 +1,22 @@
+[package]
+name = "mf-parts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+mf-spec.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+mf-command.workspace = true
+mf-fixtures.workspace = true
+mf-geometry.workspace = true
+mf-io.workspace = true
+tempfile.workspace = true

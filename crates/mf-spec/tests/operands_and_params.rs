@@ -135,10 +135,10 @@ runtime:
     assert_eq!(spec.operands[0].kinds, vec!["object", "component"]);
     assert!(spec.operands[0].required);
 
-    // Every built-in spec validates. Those written before Phase 1 (the
-    // `mesh.*` operations, none of which declare `operands:`) parse
-    // unchanged with an empty operands list; later specs (the test-only
-    // `test.consume_tool`, Phase 1 Task 3) may declare operands.
+    // Every built-in spec validates. Those written before Phase 1 (none of
+    // which declare `operands:`) parse unchanged with an empty operands
+    // list; later specs (the test-only `test.consume_tool`, Phase 1 Task 3;
+    // `mesh.boolean`, Task 8) may declare operands.
     for (name, text) in builtin::sources() {
         let value: serde_json::Value = serde_saphyr::from_str(text).unwrap();
         let errors: Vec<String> = validator
@@ -147,7 +147,13 @@ runtime:
             .collect();
         assert!(errors.is_empty(), "{name}: {errors:?}");
         let spec: mf_spec::OperationSpec = serde_saphyr::from_str(text).unwrap();
-        if spec.id.starts_with("mesh.") {
+        const PHASE_0: [&str; 4] = [
+            "mesh.inspect",
+            "mesh.fill_holes",
+            "mesh.remove_small_components",
+            "mesh.compact",
+        ];
+        if PHASE_0.contains(&spec.id.as_str()) {
             assert!(spec.operands.is_empty(), "{name} should have no operands");
         }
     }

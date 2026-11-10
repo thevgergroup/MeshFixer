@@ -1,0 +1,46 @@
+# mesh.split_plane (MF-MODEL-003, D11, D23). Plane point and gap are in mm
+# (identity units here); the target becomes the top part.
+- name: horizontal cut of a cube gives two closed parts with exact volumes
+  given: { fixture: cube_2 }
+  when: { op: mesh.split_plane, params: { plane_point: "0,0,0.75", plane_normal: "0,0,1" } }
+  expect:
+    is_closed: true
+    is_manifold: true
+    inconsistent_orientation_edges: 0
+    signed_volume: 5.0
+    name: "object (top)"
+    created_objects: 1
+    created_is_closed: true
+    created_signed_volume: 3.0
+    provenance_total: true
+
+- name: a vertical cut with a gap removes the slab
+  given: { fixture: cube_2 }
+  when: { op: mesh.split_plane, params: { plane_point: "1,0,0", plane_normal: "1,0,0", cut_gap: 0.5 } }
+  expect:
+    is_closed: true
+    signed_volume: 3.0
+    created_signed_volume: 3.0
+
+- name: keep above discards the bottom part
+  given: { fixture: cube_2 }
+  when: { op: mesh.split_plane, params: { plane_point: "0,0,0.5", keep: above } }
+  expect:
+    is_closed: true
+    signed_volume: 6.0
+    created_objects: 0
+
+- name: an open model is refused
+  given: { fixture: cube_with_missing_face }
+  when: { op: mesh.split_plane, params: { plane_point: "0,0,0.5" } }
+  expect: { error: operand_not_closed }
+
+- name: a plane beside the object is refused
+  given: { fixture: cube }
+  when: { op: mesh.split_plane, params: { plane_point: "0,0,3" } }
+  expect: { error: plane_misses_object }
+
+- name: a gap wider than the object is refused
+  given: { fixture: cube }
+  when: { op: mesh.split_plane, params: { plane_point: "0,0,0.5", cut_gap: 2 } }
+  expect: { error: plane_misses_object }

@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex, Weak};
 
 use bytemuck::{Pod, Zeroable};
 use glam::DVec3;
-use mf_geometry::{Aabb, CHUNK, FaceId, Mesh};
+use mf_geometry::{Aabb, CHUNK, FaceId, Mesh, STORAGE_CHUNK};
 use wgpu::util::DeviceExt;
 
 use crate::RenderError;
@@ -92,9 +92,13 @@ pub fn boundary_line_vertices_skipping(
 pub struct ChunkVertices {
     /// Flat-shaded triangles of the chunk's live faces, in ID order.
     pub surface: Vec<SurfaceVertex>,
-    /// The vertex chunks its faces reference, ascending: the chunk is only
-    /// valid for another revision if all of them are shared with it.
+    /// The vertex chunks (groups of [`CHUNK`] vertices) its faces
+    /// reference, ascending.
     pub vertex_chunks: Vec<u32>,
+    /// The vertex *storage* chunks ([`STORAGE_CHUNK`] vertices) its faces
+    /// reference, ascending: a quick filter for whether a moved vertex can
+    /// be one of its faces' corners (Task 16b).
+    pub storage_chunks: Vec<u32>,
 }
 
 impl ChunkVertices {
@@ -102,51 +106,89 @@ impl ChunkVertices {
     pub fn build(mesh: &Mesh, i: usize, origin: DVec3) -> ChunkVertices {
         let slots = (mesh.face_slots() as usize).saturating_sub(i * CHUNK);
         let mut surface = Vec::with_capacity(3 * slots.min(CHUNK));
-        let mut referenced = vec![false; mesh.position_chunk_count()];
+        let mut storage = vec![false; (mesh.vertex_slots() as usize).div_ceil(STORAGE_CHUNK)];
         for (_, t) in mesh.faces_in_chunk(i) {
             push_face(&mut surface, mesh, t, origin);
             for v in t {
-                referenced[v as usize / CHUNK] = true;
+                storage[v as usize / STORAGE_CHUNK] = true;
             }
         }
+        let storage_chunks: Vec<u32> = (0..storage.len() as u32)
+            .filter(|&k| storage[k as usize])
+            .collect();
+        let mut vertex_chunks: Vec<u32> = storage_chunks
+            .iter()
+            .map(|&k| (k as usize * STORAGE_CHUNK / CHUNK) as u32)
+            .collect();
+        vertex_chunks.dedup();
         ChunkVertices {
             surface,
-            vertex_chunks: (0..referenced.len() as u32)
-                .filter(|&j| referenced[j as usize])
-                .collect(),
+            vertex_chunks,
+            storage_chunks,
         }
     }
 }
 
 /// Which face chunks built for `prev` are still right for `next`.
+///
+/// A face chunk is rebuilt only if its faces changed or one of its faces
+/// has a corner that moved (Phase 1 Task 16b, M4 review I1): a sculpt dab
+/// re-uploads the face chunks it touches, not every chunk that happens to
+/// reference the same vertex storage.
 struct Reuse<'a> {
     prev: &'a Mesh,
     next: &'a Mesh,
-    /// Per vertex chunk of `prev`: are all its positions kept in `next`?
-    kept: Vec<bool>,
+    /// Per vertex storage chunk of `prev`: does it hold a moved vertex?
+    moved_chunks: Vec<bool>,
+    /// Per vertex slot of `prev`, one bit: has it moved? Empty if nothing
+    /// moved.
+    moved: Vec<u64>,
 }
 
 impl<'a> Reuse<'a> {
     fn new(prev: &'a Mesh, next: &'a Mesh) -> Reuse<'a> {
+        let moved_list = next.moved_vertices(prev);
+        let slots = prev.vertex_slots() as usize;
+        let mut moved_chunks = vec![false; slots.div_ceil(STORAGE_CHUNK)];
+        let mut moved = Vec::new();
+        if !moved_list.is_empty() {
+            moved = vec![0u64; slots.div_ceil(64)];
+            for &v in &moved_list {
+                moved_chunks[v as usize / STORAGE_CHUNK] = true;
+                moved[v as usize / 64] |= 1 << (v % 64);
+            }
+        }
         Reuse {
             prev,
             next,
-            kept: (0..prev.position_chunk_count())
-                .map(|j| next.vertex_chunk_kept(prev, j))
-                .collect(),
+            moved_chunks,
+            moved,
         }
     }
 
+    fn has_moved(&self, v: u32) -> bool {
+        self.moved
+            .get(v as usize / 64)
+            .is_some_and(|w| (w >> (v % 64)) & 1 == 1)
+    }
+
     /// True if face chunk `i` built for `prev` is also face chunk `i` of
-    /// `next`: its faces (with their liveness) are shared, and every vertex
-    /// chunk they reference still holds the same positions (shared, or
-    /// only appended to). Decided by storage identity and content, so it
-    /// holds whatever the revisions' history (undo, redo, another branch).
-    fn chunk(&self, i: usize, vertex_chunks: &[u32]) -> bool {
-        self.next.face_chunk_shared(self.prev, i)
-            && vertex_chunks
-                .iter()
-                .all(|&j| self.kept.get(j as usize).copied().unwrap_or(false))
+    /// `next`: its faces (with their liveness) are shared, and none of
+    /// their corners moved (vertices only appended don't count). Decided
+    /// by storage identity and content, so it holds whatever the
+    /// revisions' history (undo, redo, another branch).
+    fn chunk(&self, i: usize, storage_chunks: &[u32]) -> bool {
+        if !self.next.face_chunk_shared(self.prev, i) {
+            return false;
+        }
+        let candidate = storage_chunks
+            .iter()
+            .any(|&k| self.moved_chunks.get(k as usize).copied().unwrap_or(false));
+        !candidate
+            || !self
+                .next
+                .faces_in_chunk(i)
+                .any(|(_, t)| t.iter().any(|&v| self.has_moved(v)))
     }
 }
 
@@ -234,7 +276,7 @@ impl MeshVertices {
                 Some((reuse, v))
                     if v.chunks
                         .get(i)
-                        .is_some_and(|c| reuse.chunk(i, &c.vertex_chunks)) =>
+                        .is_some_and(|c| reuse.chunk(i, &c.storage_chunks)) =>
                 {
                     v.chunks[i].clone()
                 }
@@ -530,7 +572,7 @@ struct GpuChunk {
     /// What it was uploaded from, for identity only: a `Weak` keeps the
     /// address from being reused without keeping the vertices in memory.
     source: Weak<ChunkVertices>,
-    vertex_chunks: Arc<[u32]>,
+    storage_chunks: Arc<[u32]>,
     buffers: Arc<[(wgpu::Buffer, u32)]>,
 }
 
@@ -872,7 +914,11 @@ impl GpuMesh {
         gpu.refresh(
             &mut up,
             next.face_chunk_count(),
-            |i, c| reuse.as_ref().is_some_and(|r| r.chunk(i, &c.vertex_chunks)),
+            |i, c| {
+                reuse
+                    .as_ref()
+                    .is_some_and(|r| r.chunk(i, &c.storage_chunks))
+            },
             |i| Arc::new(ChunkVertices::build(next, i, origin)),
         );
         let lines = boundary_line_vertices_skipping(next, origin, skip);
@@ -1039,7 +1085,7 @@ impl<'a> Uploader<'a> {
         self.stats.surface_bytes += std::mem::size_of_val(&v.surface[..]) as u64;
         GpuChunk {
             source: Arc::downgrade(v),
-            vertex_chunks: v.vertex_chunks.clone().into(),
+            storage_chunks: v.storage_chunks.clone().into(),
             buffers: buffers.into(),
         }
     }

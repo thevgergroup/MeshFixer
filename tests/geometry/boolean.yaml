@@ -1,0 +1,36 @@
+# mesh.boolean (MF-MODEL-001, Phase 1 Task 8). `tool` is operand 1; the
+# `cube_2` fixture spans [0, 2], `cube` [0, 1].
+- name: union of offset cubes has the exact volume and keeps faces outside the window
+  given: { fixture: cube_2, tool: { fixture: cube, transform: "1,0,0,0,1,0,0,0,1,1.5,0.5,0.5" } }
+  when: { op: mesh.boolean, params: { operation: union } }
+  expect:
+    signed_volume: 8.5
+    is_closed: true
+    untouched_outside_target: true
+    provenance_total: true
+    tool_removed: true
+
+- name: subtract of offset cubes
+  given: { fixture: cube_2, tool: { fixture: cube, transform: "1,0,0,0,1,0,0,0,1,1.5,0.5,0.5" } }
+  when: { op: mesh.boolean, params: { operation: subtract, keep_tool: true } }
+  expect: { signed_volume: 7.5, tool_removed: false, provenance_total: true }
+
+- name: intersect of offset cubes
+  given: { fixture: cube_2, tool: { fixture: cube, transform: "1,0,0,0,1,0,0,0,1,1.5,0.5,0.5" } }
+  when: { op: mesh.boolean, params: { operation: intersect } }
+  expect: { signed_volume: 0.5 }
+
+- name: a small part on a sphere keeps every face outside the window
+  given: { fixture: sphere, tool: { fixture: cube, transform: "0.2,0,0,0,0.2,0,0,0,0.2,0.9,-0.1,-0.1" } }
+  when: { op: mesh.boolean }
+  expect: { untouched_outside_target: true, provenance_total: true, is_closed: true }
+
+- name: subtract on an open target is refused by name
+  given: { fixture: cube_with_missing_face, tool: { fixture: cube, transform: "0.5,0,0,0,0.5,0,0,0,0.5,0.25,0.25,-0.25" } }
+  when: { op: mesh.boolean, params: { operation: subtract } }
+  expect: { error: operand_not_closed }
+
+- name: objects that don't touch are refused by name
+  given: { fixture: cube, tool: { fixture: cube, transform: "1,0,0,0,1,0,0,0,1,3,0,0" } }
+  when: { op: mesh.boolean }
+  expect: { error: no_overlap }

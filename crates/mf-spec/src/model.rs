@@ -69,7 +69,18 @@ pub struct ParamSpec {
     pub name: String,
     pub kind: ParamKind,
     pub unit: Option<String>,
+    /// Where a frontend takes this parameter's default from instead of
+    /// `default`, when the caller didn't set it (D20): `fit.<field>` of
+    /// the active print fit profile. See [`OperationSpec::fill_defaults`].
+    pub default_from: Option<String>,
     pub description: String,
+}
+
+/// A source of print-fit values for [`OperationSpec::fill_defaults`]
+/// (D20), implemented by `mf_parts::FitProfile`. `field` is the part
+/// after `fit.` in a parameter's `default_from`, in mm.
+pub trait FitDefaults {
+    fn fit_value(&self, field: &str) -> Option<f64>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -102,6 +113,12 @@ pub enum ParamKind {
     Affine {
         default: [f64; 12],
     },
+    /// A sculpt stroke's dabs (`type: samples`, default `[]`); see
+    /// [`ParamValue::Samples`].
+    Samples,
+    /// A list of face ids (`type: faces`, default `[]`); see
+    /// [`ParamValue::Faces`].
+    Faces,
 }
 
 impl ParamKind {
@@ -113,6 +130,8 @@ impl ParamKind {
             ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
             ParamKind::Vec3 { default } => ParamValue::Vec3(*default),
             ParamKind::Affine { default } => ParamValue::Affine(*default),
+            ParamKind::Samples => ParamValue::Samples(Vec::new()),
+            ParamKind::Faces => ParamValue::Faces(Default::default()),
         }
     }
 }
@@ -132,6 +151,8 @@ struct RawParam {
     values: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_from: Option<String>,
     description: String,
 }
 
@@ -217,12 +238,30 @@ impl TryFrom<RawParam> for ParamSpec {
             "affine" => ParamKind::Affine {
                 default: r.default.as_f64_array::<12>("default")?,
             },
+            "samples" | "faces" => {
+                if !matches!(&r.default, Scalar::Array(a) if a.is_empty()) {
+                    return Err(format!("a {} parameter's default must be []", r.ty));
+                }
+                if r.ty == "samples" {
+                    ParamKind::Samples
+                } else {
+                    ParamKind::Faces
+                }
+            }
             other => return Err(format!("unknown parameter type '{other}'")),
         };
+        if let Some(from) = &r.default_from
+            && !(from.starts_with("fit.") && from.len() > 4)
+        {
+            return Err(format!(
+                "default_from '{from}' must name a print fit field (fit.<field>)"
+            ));
+        }
         Ok(ParamSpec {
             name: r.name,
             kind,
             unit: r.unit,
+            default_from: r.default_from,
             description: r.description,
         })
     }
@@ -261,6 +300,8 @@ impl From<ParamSpec> for RawParam {
                 None,
                 None,
             ),
+            ParamKind::Samples => ("samples", Scalar::Array(Vec::new()), None, None),
+            ParamKind::Faces => ("faces", Scalar::Array(Vec::new()), None, None),
         };
         RawParam {
             name: p.name,
@@ -270,6 +311,7 @@ impl From<ParamSpec> for RawParam {
             max,
             values,
             unit: p.unit,
+            default_from: p.default_from,
             description: p.description,
         }
     }
@@ -296,6 +338,37 @@ impl OperationSpec {
 
     pub fn parameter(&self, name: &str) -> Option<&ParamSpec> {
         self.parameters.iter().find(|p| p.name == name)
+    }
+
+    /// Fill every parameter the caller didn't set whose spec says
+    /// `default_from: fit.<field>` from `fit` (D20), as text in mm, before
+    /// [`Self::validate`]. A frontend calls this at prepare time with the
+    /// active print fit profile, so the recorded parameters hold the values
+    /// used and replay never reads a profile. A parameter the caller set
+    /// is left alone. A field `fit` doesn't have is an error by name.
+    pub fn fill_defaults(
+        &self,
+        raw: &mut BTreeMap<String, String>,
+        fit: &dyn FitDefaults,
+    ) -> Result<(), SpecError> {
+        for p in &self.parameters {
+            let Some(from) = &p.default_from else {
+                continue;
+            };
+            if raw.contains_key(&p.name) {
+                continue;
+            }
+            let field = from.strip_prefix("fit.").unwrap_or(from);
+            let value = fit
+                .fit_value(field)
+                .ok_or_else(|| SpecError::InvalidValue {
+                    name: p.name.clone(),
+                    value: from.clone(),
+                    reason: "the print fit profile has no such field".into(),
+                })?;
+            raw.insert(p.name.clone(), value.to_string());
+        }
+        Ok(())
     }
 
     /// Parse and validate string parameters, filling defaults.
@@ -406,6 +479,12 @@ impl ParamSpec {
             ParamKind::Vec3 { .. } => parse_f64_csv::<3>(text)
                 .map(ParamValue::Vec3)
                 .ok_or_else(|| invalid("expected x,y,z")),
+            ParamKind::Samples => parse_samples(text).map(ParamValue::Samples).ok_or_else(|| {
+                invalid("expected face,b0,b1,b2,pressure per dab, dabs separated by ;")
+            }),
+            ParamKind::Faces => parse_faces(text)
+                .map(|faces| ParamValue::Faces(crate::params::FaceList { faces }))
+                .ok_or_else(|| invalid("expected comma-separated face ids")),
             ParamKind::Affine { .. } => parse_f64_csv::<12>(text)
                 .map(ParamValue::Affine)
                 .ok_or_else(|| invalid("expected 12 comma-separated numbers")),
@@ -439,6 +518,31 @@ pub(crate) fn one_of(values: &[String]) -> String {
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
     }
+}
+
+/// Sculpt samples: `face,b0,b1,b2,pressure` per dab, dabs separated by
+/// `;` (empty text: no dabs). The face must be a whole number.
+fn parse_samples(text: &str) -> Option<Vec<[f64; 5]>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    text.split(';')
+        .map(|d| {
+            let s = parse_f64_csv::<5>(d)?;
+            (s[0] >= 0.0 && s[0] <= u32::MAX as f64 && s[0].fract() == 0.0).then_some(s)
+        })
+        .collect()
+}
+
+/// Comma-separated face ids (empty text: none).
+fn parse_faces(text: &str) -> Option<Vec<u32>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    // allow-swallow: any unparsable id makes the whole value invalid; the caller reports it by name
+    text.split(',').map(|f| f.trim().parse().ok()).collect()
 }
 
 /// Parse exactly `N` comma-separated finite `f64`s (the CLI and

@@ -2713,6 +2713,7 @@ dependencies = [
  "rayon",
  "robust",
  "serde_json",
+ "spade",
  "thiserror 2.0.21",
 ]
 
@@ -2728,6 +2729,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2743,6 +2745,7 @@ name = "mf-command"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
@@ -2804,10 +2807,14 @@ name = "mf-geometry"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
+ "mf-boolean",
  "mf-fixtures",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "rayon",
+ "robust",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2853,6 +2860,7 @@ version = "0.0.1"
 dependencies = [
  "faer",
  "jsonschema",
+ "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
@@ -2869,6 +2877,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mf-parts"
+version = "0.0.1"
+dependencies = [
+ "mf-command",
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-spec",
+ "serde",
+ "serde-saphyr",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mf-render"
 version = "0.0.1"
 dependencies = [
@@ -2877,6 +2900,7 @@ dependencies = [
  "image",
  "mf-fixtures",
  "mf-geometry",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "pollster 0.4.0",
@@ -4681,6 +4705,18 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spade"
+version = "2.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9699399fd9349b00b184f5635b074f9ec93afffef30c853f8c875b32c0f8c7fa"
+dependencies = [
+ "hashbrown 0.16.1",
+ "num-traits",
+ "robust",
+ "smallvec",
 ]
 
 [[package]]

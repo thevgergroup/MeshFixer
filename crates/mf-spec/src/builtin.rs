@@ -30,8 +30,28 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/object.drop_to_plate.yaml"),
     ),
     (
+        "mesh.boolean.yaml",
+        include_str!("../../../specs/operations/mesh.boolean.yaml"),
+    ),
+    (
+        "mesh.intersections.yaml",
+        include_str!("../../../specs/operations/mesh.intersections.yaml"),
+    ),
+    (
+        "mesh.make_solid.yaml",
+        include_str!("../../../specs/operations/mesh.make_solid.yaml"),
+    ),
+    (
         "object.delete.yaml",
         include_str!("../../../specs/operations/object.delete.yaml"),
+    ),
+    (
+        "mesh.sculpt_stroke.yaml",
+        include_str!("../../../specs/operations/mesh.sculpt_stroke.yaml"),
+    ),
+    (
+        "mesh.split_plane.yaml",
+        include_str!("../../../specs/operations/mesh.split_plane.yaml"),
     ),
     #[cfg(feature = "test-kinds")]
     (

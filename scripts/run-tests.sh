@@ -50,6 +50,8 @@ timing=(
   # Fairing the largest holes (MF-ISSUE-053): seconds of single-threaded
   # solve, timed, with a 100 ms checkpoint gate.
   "mf-operations fill_holes large_holes_fair_quickly"
+  # mesh.split_plane on 5M and 30M (Phase 1 Task 12): each alone.
+  "mf-operations split_timing split_5m_under_2s split_30m_under_10s"
   # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"
@@ -58,15 +60,25 @@ timing=(
   # The messy-model collection (15 real files, one of 5.7M triangles):
   # alone, so its recorded times and peak heap are its own.
   "mf-operations messy_corpus every_messy_model_imports_and_analyses every_messy_model_fills_or_refuses_by_name targeted_fill_on_messy_models_is_untouched_outside messy_results_are_recorded"
+  # mesh.boolean (Phase 1 Task 8): the messy corpus, and the D5 window's
+  # timing gates (30M scan ∪ 50k part ≤ 3 s, 1M ∪ 1M ≤ 10 s, cancel inside
+  # the kernel ≤ 250 ms). The 30M sphere in memory: alone.
+  "mf-operations boolean messy_corpus_booleans_are_valid_or_named union_30m_scan_with_50k_part_under_3s union_1m_by_1m_under_10s cancel_within_250ms_in_kernel"
+  # Intersection analysis (Phase 1 Task 9): 30M vs 50k ≤ 1 s, and a
+  # cancellable 5M self-intersection pass. The 30M sphere in memory: alone.
+  "mf-geometry intersect intersections_30m_vs_50k_under_1s self_intersections_5m_cancellable"
+  # mesh.make_solid on real self-intersecting scans (winged victory, 5.7M).
+  "mf-operations make_solid make_solid_on_real_self_intersecting_scans"
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,
   # so its frames don't compete with other GPU tests.
   "mf-cli bench_orbit bench_orbit_json_has_device_info_and_percentiles"
 )
 
 # Skipped here and run by nobody in this script: the boolean kernel
-# qualification (Phase 1 Tasks 7 and 7b, ADR-0002) has its own on-demand job
-# (heavy.yml `kernel-qualification`, label `run-qualify`), so a kernel's
-# verdict doesn't turn a milestone's heavy run red.
+# qualification (Phase 1 Tasks 7 and 7b, ADR-0002) is run by hand (heavy.yml
+# `kernel-qualification`, manual dispatch only; or locally with
+# `cargo test -p mf-boolean --features manifold-rust --test qualify`), so a
+# kernel's verdict doesn't turn a milestone's heavy run red.
 not_here=(qualify_corpus qualify_windows qualify_1m_union)
 
 skips=()
