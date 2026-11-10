@@ -21,7 +21,7 @@ mod validate;
 
 pub use bvh::ray as bvh_ray;
 pub use bvh::{Bvh, LEAF_MAX};
-pub use chunked::{CHUNK, chunk_hashes_computed};
+pub use chunked::{CHUNK, STORAGE_CHUNK, chunk_hashes_computed};
 pub use compare::{Equivalence, equivalent};
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect, inspect_with};
 pub use edit::MeshEdit;

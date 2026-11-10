@@ -31,11 +31,20 @@ pub enum SectionError {
 /// counter-clockwise, holes clockwise). Triangles are counter-clockwise and
 /// index the loops' points in order (loop 0's first, then loop 1's...).
 pub fn triangulate_section(loops: &[Vec<[f64; 2]>]) -> Result<Vec<[u32; 3]>, SectionError> {
+    triangulate_section_at(loops).map_err(|(e, _)| e)
+}
+
+/// [`triangulate_section`], with the index of a point near the fault (in
+/// the loops' concatenated points) on failure. Used by the plane cut to
+/// say where to move the plane.
+pub(crate) fn triangulate_section_at(
+    loops: &[Vec<[f64; 2]>],
+) -> Result<Vec<[u32; 3]>, (SectionError, usize)> {
     let mut points = Vec::new();
     let mut edges = Vec::new();
     for l in loops {
         if l.len() < 3 {
-            return Err(SectionError::Degenerate);
+            return Err((SectionError::Degenerate, points.len()));
         }
         let base = points.len();
         points.extend_from_slice(l);
@@ -50,14 +59,17 @@ pub fn triangulate_section(loops: &[Vec<[f64; 2]>]) -> Result<Vec<[u32; 3]>, Sec
             1 => out.push(t.map(|i| i as u32)),
             // Nested loops of one orientation, or a hole outside every
             // outer loop: the outline overlaps itself.
-            _ => return Err(SectionError::SelfIntersects),
+            _ => return Err((SectionError::SelfIntersects, t[0])),
         }
     }
     if out.is_empty() {
-        return Err(SectionError::Degenerate);
+        return Err((SectionError::Degenerate, 0));
     }
     Ok(out)
 }
+
+/// A section error and the index of a point near it.
+pub(crate) type Fault = (SectionError, usize);
 
 /// The constrained Delaunay triangulation of `points` with the directed
 /// constraint `edges`, and each triangle's winding number: the signed count
@@ -68,17 +80,17 @@ pub fn triangulate_section(loops: &[Vec<[f64; 2]>]) -> Result<Vec<[u32; 3]>, Sec
 pub(crate) fn winding_faces(
     points: &[[f64; 2]],
     edges: &[(usize, usize)],
-) -> Result<Vec<([usize; 3], i32)>, SectionError> {
+) -> Result<Vec<([usize; 3], i32)>, Fault> {
     let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
     let mut handles: Vec<FixedVertexHandle> = Vec::with_capacity(points.len());
     let mut owner: HashMap<usize, usize> = HashMap::with_capacity(points.len());
     for (i, p) in points.iter().enumerate() {
         let h = cdt
             .insert(Point2::new(p[0], p[1]))
-            .map_err(|_| SectionError::Degenerate)?;
+            .map_err(|_| (SectionError::Degenerate, i))?;
         if owner.insert(h.index(), i).is_some() {
             // Two points at one place.
-            return Err(SectionError::SelfIntersects);
+            return Err((SectionError::SelfIntersects, i));
         }
         handles.push(h);
     }
@@ -87,18 +99,18 @@ pub(crate) fn winding_faces(
     for &(a, b) in edges {
         let (ha, hb) = (handles[a], handles[b]);
         if ha == hb {
-            return Err(SectionError::SelfIntersects);
+            return Err((SectionError::SelfIntersects, a));
         }
         let key = (ha.index().min(hb.index()), ha.index().max(hb.index()));
         if !net.contains_key(&key) {
             if !cdt.can_add_constraint(ha, hb) {
-                return Err(SectionError::SelfIntersects);
+                return Err((SectionError::SelfIntersects, a));
             }
             cdt.add_constraint(ha, hb);
             // A point exactly on the edge splits it: the outline touches
             // itself there.
             if cdt.get_edge_from_neighbors(ha, hb).is_none() {
-                return Err(SectionError::SelfIntersects);
+                return Err((SectionError::SelfIntersects, a));
             }
         }
         *net.entry(key).or_insert(0) += if ha.index() < hb.index() { 1 } else { -1 };
@@ -119,7 +131,9 @@ pub(crate) fn winding_faces(
                 let w = along(e.from().fix().index(), e.to().fix().index());
                 let id = face.fix().index();
                 match winding.insert(id, w) {
-                    Some(old) if old != w => return Err(SectionError::SelfIntersects),
+                    Some(old) if old != w => {
+                        return Err((SectionError::SelfIntersects, owner[&e.from().fix().index()]));
+                    }
                     Some(_) => {}
                     None => queue.push(id),
                 }
@@ -138,7 +152,9 @@ pub(crate) fn winding_faces(
             let wo = w - along(e.from().fix().index(), e.to().fix().index());
             let oid = other.fix().index();
             match winding.insert(oid, wo) {
-                Some(old) if old != wo => return Err(SectionError::SelfIntersects),
+                Some(old) if old != wo => {
+                    return Err((SectionError::SelfIntersects, owner[&e.from().fix().index()]));
+                }
                 Some(_) => {}
                 None => queue.push(oid),
             }
@@ -147,7 +163,7 @@ pub(crate) fn winding_faces(
     let mut out = Vec::with_capacity(faces.len());
     for face in cdt.inner_faces() {
         let Some(&w) = winding.get(&face.fix().index()) else {
-            return Err(SectionError::Degenerate);
+            return Err((SectionError::Degenerate, 0));
         };
         let t = face.vertices().map(|v| owner[&v.fix().index()]);
         out.push((t, w));

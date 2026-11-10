@@ -516,7 +516,7 @@ fn clip_once(
         for i in 0..q.len() {
             edges.push((index(q[i].0, &local), index(q[(i + 1) % q.len()].0, &local)));
         }
-        for (tri, w) in winding_faces(&coords, &edges)? {
+        for (tri, w) in winding_faces(&coords, &edges).map_err(|(e, _)| e)? {
             let tri = tri.map(|i| local[i]);
             match w {
                 2 => inside_tris.push((tri, f)),

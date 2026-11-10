@@ -154,12 +154,14 @@ fn boolean_after_make_solid_succeeds_where_it_was_refused() {
             &[
                 OperandInput {
                     object: ObjectId(1),
+                    name: "object",
                     mesh: target,
                     transform: IDENTITY,
                     target: Target::WholeObject,
                 },
                 OperandInput {
                     object: ObjectId(2),
+                    name: "object",
                     mesh: &cube(1.0),
                     transform: at,
                     target: Target::WholeObject,

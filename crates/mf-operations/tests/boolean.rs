@@ -40,12 +40,14 @@ fn run(
         &[
             OperandInput {
                 object: ObjectId(1),
+                name: "object",
                 mesh: target,
                 transform: target_t,
                 target: Target::WholeObject,
             },
             OperandInput {
                 object: ObjectId(2),
+                name: "object",
                 mesh: tool,
                 transform: tool_t,
                 target: Target::WholeObject,

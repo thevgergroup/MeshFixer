@@ -45,6 +45,14 @@ const SOURCES: &[(&str, &str)] = &[
         "object.delete.yaml",
         include_str!("../../../specs/operations/object.delete.yaml"),
     ),
+    (
+        "mesh.sculpt_stroke.yaml",
+        include_str!("../../../specs/operations/mesh.sculpt_stroke.yaml"),
+    ),
+    (
+        "mesh.split_plane.yaml",
+        include_str!("../../../specs/operations/mesh.split_plane.yaml"),
+    ),
     #[cfg(feature = "test-kinds")]
     (
         "test.consume_tool.yaml",

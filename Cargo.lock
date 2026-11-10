@@ -2729,6 +2729,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2876,6 +2877,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mf-parts"
+version = "0.0.1"
+dependencies = [
+ "mf-command",
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-spec",
+ "serde",
+ "serde-saphyr",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mf-render"
 version = "0.0.1"
 dependencies = [
@@ -2884,6 +2900,7 @@ dependencies = [
  "image",
  "mf-fixtures",
  "mf-geometry",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "pollster 0.4.0",

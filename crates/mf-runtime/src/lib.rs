@@ -34,6 +34,9 @@ pub struct CancelToken {
     /// Test instrumentation (see [`RunContext::instrumented`]); `None` in
     /// production, so checking costs one predictable branch.
     probe: Option<Arc<ProbeState>>,
+    /// Test instrumentation (see [`RunContext::cancelled_after`]): checks
+    /// left before the token cancels itself. `None` in production.
+    countdown: Option<Arc<AtomicU64>>,
 }
 
 impl CancelToken {
@@ -42,6 +45,7 @@ impl CancelToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             probe: None,
+            countdown: None,
         }
     }
 
@@ -59,6 +63,13 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         if let Some(probe) = &self.probe {
             probe.hit(std::panic::Location::caller());
+        }
+        if let Some(left) = &self.countdown
+            && left
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_err()
+        {
+            self.cancelled.store(true, Ordering::Relaxed);
         }
         self.cancelled.load(Ordering::Relaxed)
     }
@@ -137,6 +148,21 @@ impl RunContext {
         let mut progress = Progress::new();
         progress.trip = Some(Arc::new((stage, cancel.clone())));
         RunContext { cancel, progress }
+    }
+
+    /// A context that cancels itself at its `n + 1`th cancellation check
+    /// (the first `n` pass), counted over every clone and thread. With the
+    /// number of checks a whole run makes (from
+    /// [`RunContext::instrumented`]'s [`CheckpointProbe::checkpoints`]),
+    /// a test can cancel a run at every checkpoint in turn (Review Focus
+    /// 3: cancel at any stage changes nothing).
+    pub fn cancelled_after(n: u64) -> RunContext {
+        let mut cancel = CancelToken::new();
+        cancel.countdown = Some(Arc::new(AtomicU64::new(n)));
+        RunContext {
+            cancel,
+            progress: Progress::new(),
+        }
     }
 
     /// A context whose checkpoints are timed, for tests that check work

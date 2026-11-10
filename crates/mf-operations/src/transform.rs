@@ -304,6 +304,7 @@ mod tests {
         DropToPlate.execute_doc(
             &[OperandInput {
                 object: ObjectId(1),
+                name: "object",
                 mesh,
                 transform,
                 target: Target::WholeObject,

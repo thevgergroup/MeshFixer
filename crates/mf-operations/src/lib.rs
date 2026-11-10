@@ -9,6 +9,7 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod affine;
 mod boolean;
 mod compact;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
@@ -27,12 +28,15 @@ pub use make_solid::{
     TRADE_OFF as MAKE_SOLID_TRADE_OFF,
 };
 mod remove_small;
+pub mod sculpt;
+mod split;
 #[cfg(feature = "test-kinds")]
 mod test_consume_tool;
 #[cfg(feature = "test-kinds")]
 mod test_unit_conversion;
 mod transform;
 
+pub use split::{SPLIT_STAGES, split_names};
 pub use transform::{world_min_z, world_min_z_with};
 
 pub use remove_small::{ComponentSizes, RemovalPreview, removal_preview};
@@ -62,6 +66,9 @@ pub struct OpOutput {
 #[derive(Debug, Clone)]
 pub struct OperandInput<'a> {
     pub object: ObjectId,
+    /// The object's name, for naming what the operation makes from it
+    /// ("scan (top)").
+    pub name: &'a str,
     /// The object's geometry, in its own (object) space.
     pub mesh: &'a Mesh,
     /// The object's placement: absolute 3MF row-major 3×4 affine (D7).
@@ -90,6 +97,8 @@ pub enum ObjectChange {
     /// The operand's object is removed from the document (undo restores
     /// it with the same id).
     Remove { operand: usize },
+    /// The operand's object gets a new name (a split's "scan (top)").
+    Rename { operand: usize, name: String },
     /// A new object. Its provenance lists every face as created, with
     /// its sources in [`mf_geometry::Sources::operands`] (MF-P1-SEL-001).
     Create {
@@ -210,6 +219,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::SetTransform,
     &transform::DropToPlate,
     &transform::Delete,
+    &split::SplitPlane,
+    &sculpt::SculptStroke,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

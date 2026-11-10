@@ -24,6 +24,7 @@ mf-document = { path = "crates/mf-document" }
 mf-selection = { path = "crates/mf-selection" }
 mf-runtime = { path = "crates/mf-runtime" }
 mf-boolean = { path = "crates/mf-boolean" }
+mf-parts = { path = "crates/mf-parts" }
 mf-manifold-sys = { path = "crates/mf-manifold-sys" }
 
 blake3 = "1.8"
