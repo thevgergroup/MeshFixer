@@ -29,9 +29,14 @@ parameters:
     default: 0.0
     min: 0.0
     unit: mm
-    # Used by P1-M5's blend (D14); 0 is a plain boolean, the only value
-    # this version accepts.
-    description: Width of the blended seam (0 for none)
+    # P1-M5's blend (D13, D14, Task 22): union only.
+    description: "Width of the blended seam, along the surface (0 for a sharp seam); union only"
+  - name: embed_depth
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "How far an open part (a stamp) is sunk into the surface before the union; 0 means half the blend width"
 preconditions:
   - the target and the tool are meshes; the tool is closed
   - for subtract and intersect, the target is closed (D15)

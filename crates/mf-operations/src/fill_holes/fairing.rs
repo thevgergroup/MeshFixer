@@ -27,7 +27,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
-use mf_geometry::Mesh;
+use std::collections::HashSet;
+
+use mf_geometry::{Mesh, Provenance, VertexId};
 use mf_runtime::{Cancelled, RunContext};
 
 use super::refine::Patch;
@@ -254,6 +256,90 @@ pub fn fair(
         vertices: interior,
         factor_nonzeros,
     }))
+}
+
+/// Fairs any set of vertices (Task 22, generalising [`fair`] from a
+/// patch's interior): the `free` vertices solve Δ^m x = 0 (m from
+/// `style`), and every other vertex stays put. The two rings of vertices
+/// around the free set are read (Δ² needs them) and never move. Finds the
+/// faces around the set with two passes over the mesh.
+pub fn fair_region(
+    mesh: &Mesh,
+    free: &[VertexId],
+    style: Style,
+    ctx: &RunContext,
+) -> Result<Result<(Mesh, Provenance), Failed>, Cancelled> {
+    let power = style.power();
+    let free_set: HashSet<u32> = free.iter().map(|v| v.0).collect();
+    if power == 0 || free_set.is_empty() {
+        return Ok(Ok((mesh.clone(), Provenance::default())));
+    }
+    // Faces touching the free set, then faces touching their vertices: the
+    // first ring's Laplacian needs all of its neighbours.
+    let mut tick = ctx.ticker();
+    let mut ring1: HashSet<u32> = HashSet::new();
+    for (_, t) in mesh.faces() {
+        tick.tick()?;
+        if t.iter().any(|v| free_set.contains(v)) {
+            ring1.extend(t.iter().filter(|v| !free_set.contains(v)));
+        }
+    }
+    let mut faces: Vec<[u32; 3]> = Vec::new();
+    for (_, t) in mesh.faces() {
+        tick.tick()?;
+        if t.iter().any(|v| free_set.contains(v) || ring1.contains(v)) {
+            faces.push(t);
+        }
+    }
+    // Local numbering: the free vertices (ascending), then the rest in
+    // order of first use.
+    let mut order: Vec<u32> = free_set.iter().copied().collect();
+    order.sort_unstable();
+    let np = order.len();
+    let mut local: BTreeMap<u32, usize> = order.iter().enumerate().map(|(k, &v)| (v, k)).collect();
+    let mut positions: Vec<[f64; 3]> = order.iter().map(|&v| mesh.corner_position(v)).collect();
+    let mut edges = BTreeSet::new();
+    for t in &faces {
+        let ids = t.map(|v| {
+            *local.entry(v).or_insert_with(|| {
+                positions.push(mesh.corner_position(v));
+                positions.len() - 1
+            })
+        });
+        for k in 0..3 {
+            let (a, b) = (ids[k], ids[(k + 1) % 3]);
+            if a != b {
+                edges.insert((a.min(b), a.max(b)));
+            }
+        }
+    }
+    ctx.checkpoint()?;
+    let graph = Graph::new(&positions, &edges);
+    let mut centre = [0.0; 3];
+    for p in &positions[..np] {
+        for c in 0..3 {
+            centre[c] += p[c] / np as f64;
+        }
+    }
+    let mut x: [Vec<f64>; 3] =
+        [0, 1, 2].map(|c| positions[..np].iter().map(|p| p[c] - centre[c]).collect());
+    if let Err(e) = solve(&graph, power, &positions, &centre, 0, &mut x, ctx)? {
+        return Ok(Err(e));
+    }
+    let mut edit = mesh.edit();
+    for (k, &v) in order.iter().enumerate() {
+        let p = [
+            x[0][k] + centre[0],
+            x[1][k] + centre[1],
+            x[2][k] + centre[2],
+        ];
+        edit.move_vertex(VertexId(v), p)
+            .expect("a free vertex is a live vertex of the mesh");
+    }
+    let (out, prov) = edit
+        .finish()
+        .expect("moving live vertices to finite positions keeps the mesh valid");
+    Ok(Ok((out, prov)))
 }
 
 impl Graph {

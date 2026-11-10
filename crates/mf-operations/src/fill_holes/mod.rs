@@ -6,7 +6,7 @@
 //! goes through `MeshEdit`, so kept geometry is untouched and provenance
 //! names the loop of every new face.
 
-mod fairing;
+pub(crate) mod fairing;
 mod refine;
 mod triangulate;
 
