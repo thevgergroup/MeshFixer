@@ -468,6 +468,14 @@ pub enum Message {
         ids: Vec<u32>,
         add: bool,
     },
+    /// The lowest world z of `object`'s revision `mesh` at `transform`
+    /// (the Transform tool's plate snap; `None`: no vertices).
+    LowestPoint {
+        object: ObjectId,
+        mesh: Mesh,
+        transform: [f64; 12],
+        z: Option<f64>,
+    },
     /// The hole overview's screen markers for request `key`.
     Markers {
         key: u64,

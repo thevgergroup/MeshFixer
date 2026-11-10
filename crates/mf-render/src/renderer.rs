@@ -747,19 +747,23 @@ impl MeshRenderer {
     /// colour is [`Palette::plate`] (the renderer has no colours of its
     /// own). Call after [`Self::prepare`]; draw it before the model's
     /// surfaces (`paint`) so a resting object's opaque pixels overdraw it.
+    /// `world_origin` is the frame `prepare` set up (`camera.target`, as
+    /// `paint` takes it): the grid is shifted into it, so it lies at world
+    /// z = 0 wherever the camera looks.
     pub fn draw_plate(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         pass: &mut wgpu::RenderPass<'_>,
         plate: &crate::Plate,
+        world_origin: DVec3,
     ) {
         let vertices = crate::plate_vertices(plate);
         if vertices.is_empty() {
             return;
         }
         let u = DrawUniforms {
-            model: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            model: shifted_model(DMat4::IDENTITY, DVec3::ZERO, world_origin).to_cols_array_2d(),
             normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
             color: [0.0; 4],
             params: [

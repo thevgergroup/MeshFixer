@@ -760,7 +760,13 @@ pub fn controls_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
                     (&reset, "Reset the view"),
                     (
                         "Esc",
-                        "Cancel the running job; otherwise clear the selection",
+                        "Cancel the running job; else a gizmo drag; else leave the tool; else \
+                         clear the selection",
+                    ),
+                    (
+                        "T, then W / E / R",
+                        "Transform the object: Move / Rotate / Scale (Cmd/Ctrl while dragging \
+                         turns snapping off)",
                     ),
                     (&undo, "Undo / Redo"),
                     ("N / Shift+N", "Select and frame the next / previous hole"),
@@ -1928,9 +1934,193 @@ fn tools_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 /// The open interactive tool's panel.
-fn interactive_body(app: &mut MeshFixerApp, _ui: &mut egui::Ui) {
-    if let Some(t) = &app.interactive {
-        match *t {}
+fn interactive_body(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    match &app.interactive {
+        Some(crate::tools::Interactive::Transform(_)) => transform_body(app, ui),
+        None => {}
+    }
+}
+
+/// The Transform tool's panel: the gizmo's mode, Position, Rotation and
+/// Scale fields (Enter commits one move), the snap switch, Drop to plate
+/// and Reset.
+fn transform_body(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    use crate::transform_tool::{Field, MIRRORED_NOTE, SHEARED_NOTE};
+    use mf_render::GizmoMode;
+    ui.label("Drag the handles in the view, or type exact values (Enter applies them).");
+    let Some(p) = app.active_placement() else {
+        ui.weak("Measuring the object…");
+        return;
+    };
+    let sheared = p.rotation_deg.is_none();
+    let idle = app.busy.is_none();
+    let mode = app.transform_tool().map_or(GizmoMode::Move, |t| t.mode);
+    ui.horizontal(|ui| {
+        for (m, text, key) in [
+            (GizmoMode::Move, "Move", "W"),
+            (GizmoMode::Rotate, "Rotate", "E"),
+            (GizmoMode::Scale, "Scale", "R"),
+        ] {
+            let enabled = m == GizmoMode::Move || !sheared;
+            let r = ui
+                .add_enabled(
+                    enabled,
+                    egui::Button::new(format!("{text} ({key})")).selected(mode == m && enabled),
+                )
+                .on_hover_text(format!(
+                    "The gizmo {}s the object ({key})",
+                    text.to_lowercase()
+                ))
+                .on_disabled_hover_text(SHEARED_NOTE)
+                .labelled(text);
+            if r.clicked() {
+                app.set_transform_mode(m);
+            }
+        }
+    });
+    let units = unit_symbol(app.session.document().units());
+    type Row<'a> = (
+        &'a str,
+        String,
+        Option<glam::DVec3>,
+        fn(usize) -> Field,
+        f64,
+    );
+    let rows: [Row<'_>; 3] = [
+        (
+            "Position",
+            units.to_owned(),
+            Some(p.position),
+            Field::Position,
+            1.0,
+        ),
+        (
+            "Rotation",
+            "°".to_owned(),
+            p.rotation_deg,
+            Field::Rotation,
+            1.0,
+        ),
+        ("Scale", "%".to_owned(), p.scale, Field::Scale, 100.0),
+    ];
+    egui::Grid::new("transform fields")
+        .num_columns(4)
+        .spacing([4.0, 4.0])
+        .show(ui, |ui| {
+            for (name, unit, value, field, factor) in rows {
+                ui.label(format!("{name} ({unit})"));
+                for axis in 0..3 {
+                    let f = field(axis);
+                    let v = value.map(|v| v[axis] * factor);
+                    transform_field(app, ui, f, v, idle && value.is_some());
+                }
+                ui.end_row();
+            }
+        });
+    if sheared {
+        ui.label(RichText::new(SHEARED_NOTE).color(theme::TEXT_MUTED))
+            .on_hover_text(
+                "The file's placement slants the object, so it has no single rotation and \
+                 scale: those fields stay read-only. Move still works.",
+            );
+    }
+    if p.mirrored {
+        ui.label(RichText::new(MIRRORED_NOTE).color(theme::TEXT_MUTED))
+            .on_hover_text("The placement flips the object, as in a mirror image");
+    }
+    if let Some(t) = app.transform_tool_mut() {
+        ui.add_enabled(
+            !sheared,
+            egui::Checkbox::new(&mut t.uniform, "Uniform scale"),
+        )
+        .on_hover_text("Scale fields change together");
+        ui.checkbox(&mut t.snap, "Snap").on_hover_text(
+            "To the 1 mm grid, 15° steps, 10% steps and the plate. Hold Cmd/Ctrl while \
+                 dragging to invert.",
+        );
+    }
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled(idle, egui::Button::new("Drop to plate"))
+            .on_hover_text(
+                "Move it straight down (or up) until its lowest point rests on the plate",
+            )
+            .clicked()
+        {
+            app.drop_to_plate();
+        }
+        if ui
+            .add_enabled(idle && !sheared, egui::Button::new("Reset"))
+            .on_hover_text("No rotation, 100% scale; it stays where it is")
+            .on_disabled_hover_text(SHEARED_NOTE)
+            .clicked()
+        {
+            app.reset_transform();
+        }
+        if ui
+            .button("Done")
+            .on_hover_text("Close the Transform tool (Esc)")
+            .clicked()
+        {
+            app.close_tool();
+        }
+    });
+}
+
+/// One numeric field: shows `value` (`None`: read-only, blank), edits
+/// as text, and commits with Enter (leaving it without Enter puts the
+/// value back).
+fn transform_field(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    field: crate::transform_tool::Field,
+    value: Option<f64>,
+    enabled: bool,
+) {
+    let id = egui::Id::unique(("transform field", field));
+    let editing = app
+        .transform_tool()
+        .and_then(|t| t.editing.clone())
+        .filter(|(f, _)| *f == field)
+        .map(|(_, text)| text);
+    let mut text = editing
+        .unwrap_or_else(|| value.map_or_else(|| "—".to_owned(), crate::transform_tool::field_text));
+    let label = field.label();
+    let r = ui.add_enabled(
+        enabled,
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .desired_width(56.0),
+    );
+    r.widget_info(|| {
+        let mut info = egui::WidgetInfo::text_edit(enabled, "", &text, "");
+        info.label = Some(label.clone());
+        info
+    });
+    let r = r.on_disabled_hover_text(crate::transform_tool::SHEARED_NOTE);
+    let entered = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let Some(tool) = app.transform_tool_mut() else {
+        return;
+    };
+    if r.has_focus() {
+        tool.editing = Some((field, text.clone()));
+    } else if tool.editing.as_ref().is_some_and(|(f, _)| *f == field) {
+        tool.editing = None;
+    }
+    if entered {
+        match text
+            .trim()
+            .trim_end_matches(['%', '°'])
+            .trim()
+            .parse::<f64>()
+        {
+            Ok(v) if v.is_finite() => app.set_transform_field(field, v),
+            _ => {
+                app.status = Some(format!(
+                    "{label}: \"{text}\" isn't a number; nothing changed"
+                ))
+            }
+        }
     }
 }
 

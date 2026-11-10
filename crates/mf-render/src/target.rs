@@ -180,6 +180,34 @@ impl RenderTarget {
         items: &[DrawItem<'_>],
         show_boundaries: bool,
         layers: &[Layer<'_>],
+        timer: Option<(&mut GpuTimer, u64)>,
+    ) -> bool {
+        self.draw_with(
+            device,
+            queue,
+            renderer,
+            camera,
+            items,
+            show_boundaries,
+            layers,
+            &SceneExtras::default(),
+            timer,
+        )
+    }
+
+    /// As [`RenderTarget::draw_timed`], with the build plate under the
+    /// model and the transform gizmo over everything ([`SceneExtras`]).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_with(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        camera: Option<&OrbitCamera>,
+        items: &[DrawItem<'_>],
+        show_boundaries: bool,
+        layers: &[Layer<'_>],
+        extras: &SceneExtras<'_>,
         mut timer: Option<(&mut GpuTimer, u64)>,
     ) -> bool {
         if let Some(camera) = camera {
@@ -223,6 +251,9 @@ impl RenderTarget {
                 multiview_mask: None,
             });
             if let Some(camera) = camera {
+                if let Some(plate) = extras.plate {
+                    renderer.draw_plate(device, queue, &mut pass, plate, camera.target);
+                }
                 renderer.paint(
                     device,
                     queue,
@@ -232,6 +263,9 @@ impl RenderTarget {
                     show_boundaries,
                     layers,
                 );
+                if let Some(g) = &extras.gizmo {
+                    renderer.draw_gizmo(device, &mut pass, g.shapes, g.highlight, g.palette);
+                }
             }
         }
         if let Some((t, _)) = timer.as_mut() {
@@ -243,4 +277,21 @@ impl RenderTarget {
         }
         timed
     }
+}
+
+/// What [`RenderTarget::draw_with`] draws besides the model and its
+/// overlay lines: the build plate (under the model, depth-tested) and the
+/// transform gizmo (last, never hidden). Both are a few hundred vertices,
+/// uploaded as they're drawn.
+#[derive(Default)]
+pub struct SceneExtras<'a> {
+    pub plate: Option<&'a crate::Plate>,
+    pub gizmo: Option<GizmoDraw<'a>>,
+}
+
+/// The gizmo's handles in target pixels, the one to highlight, and its colours.
+pub struct GizmoDraw<'a> {
+    pub shapes: &'a [crate::HandleShape],
+    pub highlight: Option<crate::Handle>,
+    pub palette: &'a crate::GizmoPalette,
 }

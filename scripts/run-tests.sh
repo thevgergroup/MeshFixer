@@ -39,6 +39,10 @@ timing=(
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
+  # The Transform tool on 30M triangles (Phase 1 Task 5): a gizmo drag
+  # costs no more than an orbit (+1 ms), and Drop to plate keeps UI frames
+  # under 50 ms. A 30M sphere in memory: alone.
+  "mf-desktop transform dragging_a_30m_object_keeps_frames_under_orbit_plus_1ms ui_frames_stay_under_50ms_while_dropping_30m_to_plate"
   # GUI timing under parallel load: the framing animation after
   # select_defect sometimes outlasts Harness::run's step budget when the
   # whole browser file runs in parallel (passes alone; seen in Task 12a).

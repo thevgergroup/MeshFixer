@@ -11,6 +11,7 @@ pub mod metrics;
 mod panels;
 pub mod theme;
 pub mod tools;
+pub mod transform_tool;
 pub mod viewport;
 pub mod worker;
 

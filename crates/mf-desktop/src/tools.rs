@@ -63,6 +63,11 @@ pub struct Entry {
 /// isn't here isn't offered.
 pub const CATALOGUE: &[Entry] = &[
     Entry {
+        id: crate::transform_tool::ID,
+        group: ToolGroup::Modify,
+        kind: ToolKind::Interactive,
+    },
+    Entry {
         id: "mesh.fill_holes",
         group: ToolGroup::Repair,
         kind: ToolKind::OneShot,
@@ -91,19 +96,71 @@ pub fn entry(id: &str) -> Option<&'static Entry> {
 ///
 /// Phase 1 adds its tools here (Transform, then Split, Sculpt).
 #[derive(Debug)]
-pub enum Interactive {}
+pub enum Interactive {
+    Transform(crate::transform_tool::TransformTool),
+}
 
 impl Interactive {
     /// The interactive tool `id` names, opened on `app`'s target (`None`:
     /// `id` is a one-shot tool).
-    pub fn open(_app: &crate::MeshFixerApp, _id: &str) -> Option<Interactive> {
-        None
+    pub fn open(_app: &crate::MeshFixerApp, id: &str) -> Option<Interactive> {
+        (id == crate::transform_tool::ID)
+            .then(|| Interactive::Transform(crate::transform_tool::TransformTool::default()))
     }
 
     /// Its catalogue id.
     pub fn id(&self) -> &'static str {
-        match *self {}
+        match self {
+            Interactive::Transform(_) => crate::transform_tool::ID,
+        }
     }
+
+    /// Its legend rows.
+    pub fn legend(&self) -> Vec<LegendRow> {
+        match self {
+            Interactive::Transform(_) => transform_legend(),
+        }
+    }
+}
+
+/// The legend while Transform is open (D8): the gizmo's axis colours, in
+/// place of the defect colours it hides.
+pub fn transform_legend() -> Vec<LegendRow> {
+    let row = |name, color, meaning| LegendRow {
+        name,
+        color,
+        meaning,
+        switch: None,
+    };
+    vec![
+        row(
+            "X axis",
+            theme::AXIS_X,
+            "The gizmo's X handles: drag the arrow to move along X, the ring to turn about X",
+        ),
+        row(
+            "Y axis",
+            theme::AXIS_Y,
+            "The gizmo's Y handles: drag the arrow to move along Y, the ring to turn about Y",
+        ),
+        row(
+            "Z axis",
+            theme::AXIS_Z,
+            "The gizmo's Z handles: drag the arrow to move along Z, the ring to turn about Z",
+        ),
+        row(
+            "Free handles",
+            Color32::WHITE,
+            "The centre (move in the view's plane), the outer ring (turn about the view \
+             direction) and the centre of the scale handles (scale evenly)",
+        ),
+        LegendRow {
+            name: "Hover",
+            color: theme::HOVER,
+            meaning: "What the pointer is over, in the view or the tree",
+            switch: Some(Switch::Hover),
+        },
+    ]
 }
 
 /// Which overlay switch a legend row toggles.

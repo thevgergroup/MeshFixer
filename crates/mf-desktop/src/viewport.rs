@@ -34,6 +34,11 @@ struct FrameKey {
     layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
     /// The selection cue: emphasis (bits) and x-ray.
     cue: (u32, bool),
+    /// Each object's transform (bits): a gizmo drag redraws.
+    transforms: Vec<[u64; 12]>,
+    /// The gizmo's handles (target pixels) and the highlighted one.
+    gizmo: Option<(Vec<mf_render::HandleShape>, Option<mf_render::Handle>)>,
+    plate: Option<mf_render::Plate>,
 }
 
 /// One line overlay to draw on an object (built by a worker; see app.rs).
@@ -81,11 +86,22 @@ pub struct ViewOptions<'a> {
     pub cue: SelectionCue,
     /// The hole overview's markers (window points), drawn over the view.
     pub markers: Option<Arc<egui::Mesh>>,
-    /// The open interactive tool's claim on the primary drag (I8): true
-    /// if a press at this point (points from the view's top-left) starts
-    /// the tool's drag rather than the camera's or a click. `None`: no
-    /// interactive tool is open.
-    pub tool_grabs: Option<&'a dyn Fn((f64, f64)) -> bool>,
+    /// The transform gizmo to draw over everything, and its highlighted
+    /// handle (the one hovered or dragged).
+    pub gizmo: Option<(mf_render::Gizmo, Option<mf_render::Handle>)>,
+    /// The build plate to draw under the model.
+    pub plate: Option<mf_render::Plate>,
+    /// The open interactive tool's line at the view's top-left.
+    pub tool_hint: Option<&'a str>,
+}
+
+/// What [`Viewport::input`] found, for [`Viewport::paint`].
+pub struct ViewInput {
+    rect: egui::Rect,
+    /// Something can be drawn (a camera, and objects to draw).
+    drawn: bool,
+    /// The input part of this frame's output.
+    pub out: ViewOutput,
 }
 
 /// The pointer, for the open interactive tool (points from the view's
@@ -219,49 +235,32 @@ impl Viewport {
         }
     }
 
-    /// Draw the viewport into the remaining space and handle camera input.
-    /// Every object of `objects` is drawn at its own transform
-    /// (MF-ISSUE-042): the active one full colour, the rest dimmed.
-    pub fn show(
+    /// Take the viewport's space and handle its input this frame: the
+    /// camera moves, and clicks, boxes and the open interactive tool's
+    /// pointer are reported (`drawable`: there is something to draw). Then
+    /// [`Self::paint`] draws it, so a tool's drag moves what is drawn in
+    /// the same frame.
+    pub fn input(
         &mut self,
         ui: &mut egui::Ui,
         camera: &mut Option<OrbitCamera>,
-        objects: &[ObjectView],
-        options: ViewOptions<'_>,
-    ) -> ViewOutput {
-        let ViewOptions {
-            show_boundaries,
-            layers,
-            updating,
-            placeholder,
-            frame,
-            cue,
-            markers,
-            tool_grabs,
-        } = options;
+        drawable: bool,
+        tool_grabs: Option<&dyn Fn((f64, f64)) -> bool>,
+    ) -> ViewInput {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        let (Some(cam), false) = (camera.as_mut(), objects.is_empty()) else {
+        let (Some(cam), true) = (camera.as_mut(), drawable) else {
             // Nothing ready to draw yet (no camera, or no object's vertices
             // are in hand): release GPU buffers for a vanished document
             // (MF-ISSUE-009).
             self.last_frame = None;
             self.last_rect = None;
-            let size = self.target_size(ui, rect);
-            self.ensure_target(size);
-            // Laid out, not painted, so the first frame that draws a model
-            // doesn't also rasterize this text's glyphs (MF-RT-001).
-            let _warm = (controls_hint(ui), updating_text(ui));
-            ui.painter()
-                .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                placeholder,
-                egui::FontId::proportional(16.0),
-                theme::TEXT_MUTED,
-            );
-            return ViewOutput::default();
+            self.tool_drag = false;
+            return ViewInput {
+                rect,
+                drawn: false,
+                out: ViewOutput::default(),
+            };
         };
         self.last_rect = Some(rect);
         let local = |p: egui::Pos2| ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64);
@@ -355,24 +354,121 @@ impl Viewport {
         }
         let owned = self.tool_drag || tool.is_some();
         handle_input(ui, &response, rect, cam, self.nav_mode, selecting || owned);
+        ViewInput {
+            rect,
+            drawn: true,
+            out: ViewOutput {
+                click,
+                action: None,
+                pointer,
+                box_select,
+                tool,
+                tool_hover,
+            },
+        }
+    }
+
+    /// Draw the view [`Self::input`] laid out: every object of `objects`
+    /// at its own transform (MF-ISSUE-042), the active one full colour and
+    /// the rest dimmed, then the overlays, the gizmo and the navigation
+    /// bar. Returns what happened this frame.
+    pub fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        input: ViewInput,
+        camera: &mut Option<OrbitCamera>,
+        objects: &[ObjectView],
+        options: ViewOptions<'_>,
+    ) -> ViewOutput {
+        let ViewOptions {
+            show_boundaries,
+            layers,
+            updating,
+            placeholder,
+            frame,
+            cue,
+            markers,
+            gizmo,
+            plate,
+            tool_hint,
+        } = options;
+        let rect = input.rect;
+        let (Some(cam), true) = (camera.as_mut(), input.drawn && !objects.is_empty()) else {
+            let size = self.target_size(ui, rect);
+            self.ensure_target(size);
+            // Laid out, not painted, so the first frame that draws a model
+            // doesn't also rasterize this text's glyphs (MF-RT-001).
+            let _warm = (controls_hint(ui), updating_text(ui));
+            ui.painter()
+                .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                placeholder,
+                egui::FontId::proportional(16.0),
+                theme::TEXT_MUTED,
+            );
+            return ViewOutput::default();
+        };
+        let ViewOutput {
+            click,
+            pointer,
+            box_select,
+            tool,
+            tool_hover,
+            ..
+        } = input.out;
 
         self.renderer
             .set_pixels_per_point(ui.ctx().pixels_per_point());
         let size = self.target_size(ui, rect);
         self.renderer.set_selection_cue(cue);
-        let texture = self.render(*cam, objects, show_boundaries, &layers, size, frame);
+        let ppp = f64::from(ui.ctx().pixels_per_point());
+        let view = (rect.width() as f64, rect.height() as f64);
+        // The gizmo is laid out in points (its size is in points); the
+        // renderer draws in target pixels.
+        let gizmo = gizmo.map(|(g, highlight)| {
+            let shapes: Vec<mf_render::HandleShape> = g
+                .handles(cam, view)
+                .into_iter()
+                .map(|s| scaled_shape(s, ppp))
+                .collect();
+            (shapes, highlight)
+        });
+        let texture = self.render(
+            *cam,
+            objects,
+            show_boundaries,
+            &layers,
+            size,
+            frame,
+            gizmo.as_ref().map(|(s, h)| (s.as_slice(), *h)),
+            plate,
+        );
         ui.painter().image(
             texture,
             rect,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
+        let mut top = rect.left_top() + egui::vec2(8.0, 8.0);
         if updating {
-            ui.painter().galley(
-                rect.left_top() + egui::vec2(8.0, 8.0),
-                updating_text(ui),
-                theme::TEXT_MUTED,
+            let text = updating_text(ui);
+            let h = text.size().y;
+            ui.painter().galley(top, text, theme::TEXT_MUTED);
+            top.y += h + 4.0;
+        }
+        // The open interactive tool says so, and how to leave it (I8).
+        if let Some(hint) = tool_hint {
+            let text = ui.painter().layout_no_wrap(
+                hint.to_owned(),
+                egui::FontId::proportional(13.0),
+                theme::HOVER,
             );
+            let area = egui::Rect::from_min_size(top, text.size()).expand(4.0);
+            ui.painter()
+                .rect_filled(area, 4.0, theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85));
+            ui.painter().galley(top, text, theme::HOVER);
         }
         // The controls hint, on a backdrop so it reads over the model. Kept
         // short so it clears the navigation bar at the bottom-right; Help >
@@ -531,6 +627,7 @@ impl Viewport {
         (action, bar)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         camera: OrbitCamera,
@@ -539,6 +636,8 @@ impl Viewport {
         layers: &[ViewLayer],
         size: (u32, u32),
         frame: u64,
+        gizmo: Option<(&[mf_render::HandleShape], Option<mf_render::Handle>)>,
+        plate: Option<mf_render::Plate>,
     ) -> egui::TextureId {
         let mut dirty = self.ensure_target(size);
         let cue = self.renderer.selection_cue();
@@ -582,6 +681,12 @@ impl Viewport {
                 })
                 .collect(),
             cue: (cue.emphasis.to_bits(), cue.xray_faces),
+            transforms: objects
+                .iter()
+                .map(|o| o.transform.map(f64::to_bits))
+                .collect(),
+            gizmo: gizmo.map(|(shapes, h)| (shapes.to_vec(), h)),
+            plate,
         };
         dirty |= self.last_frame.as_ref() != Some(&key);
 
@@ -609,7 +714,16 @@ impl Viewport {
                     })
                 })
                 .collect();
-            let timed = target.draw_timed(
+            let palette = theme::gizmo_palette();
+            let extras = mf_render::SceneExtras {
+                plate: plate.as_ref(),
+                gizmo: gizmo.map(|(shapes, highlight)| mf_render::GizmoDraw {
+                    shapes,
+                    highlight,
+                    palette: &palette,
+                }),
+            };
+            let timed = target.draw_with(
                 device,
                 &self.render_state.queue,
                 &mut self.renderer,
@@ -617,6 +731,7 @@ impl Viewport {
                 &items,
                 show_boundaries,
                 &gpu_layers,
+                &extras,
                 self.timer.as_mut().map(|t| (t, frame)),
             );
             self.redrawn = Some((frame, timed));
@@ -891,4 +1006,42 @@ fn labelled(response: egui::Response, label: &str) -> egui::Response {
     let enabled = response.enabled();
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
     response
+}
+
+/// `shape` laid out in points, in target pixels (`ppp` pixels per point).
+fn scaled_shape(shape: mf_render::HandleShape, ppp: f64) -> mf_render::HandleShape {
+    use mf_render::HandleGeometry as G;
+    let p = |(x, y): (f64, f64)| (x * ppp, y * ppp);
+    let geometry = match shape.geometry {
+        G::Arrow {
+            shaft_start,
+            shaft_end,
+            tip,
+            head,
+        } => G::Arrow {
+            shaft_start: p(shaft_start),
+            shaft_end: p(shaft_end),
+            tip: p(tip),
+            head: head.into_iter().map(p).collect(),
+        },
+        G::Ring { points, front } => G::Ring {
+            points: points.into_iter().map(p).collect(),
+            front,
+        },
+        G::Circle { center, radius_px } => G::Circle {
+            center: p(center),
+            radius_px: radius_px * ppp,
+        },
+        G::Plane { corners } => G::Plane {
+            corners: corners.map(p),
+        },
+        G::Point { center, radius_px } => G::Point {
+            center: p(center),
+            radius_px: radius_px * ppp,
+        },
+    };
+    mf_render::HandleShape {
+        handle: shape.handle,
+        geometry,
+    }
 }

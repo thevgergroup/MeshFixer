@@ -10,8 +10,8 @@ use mf_geometry::{Aabb, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
 use mf_metrics::FrameTimes;
 use mf_render::{
-    Bvh, CameraMove, FaceStates, OrbitCamera, SelectionCue, clip_radius, model_matrix,
-    screen_position,
+    Bvh, CameraMove, FaceStates, Gizmo, GizmoMode, Handle, OrbitCamera, PlateSnap, SelectionCue,
+    Snap, clip_radius, model_matrix, screen_position,
 };
 use mf_runtime::RunContext;
 use mf_spec::ParamValue;
@@ -22,7 +22,10 @@ use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::theme;
 use crate::tools::{Interactive, LeftTab, LegendRow, ToolGroup, ToolKind};
-use crate::viewport::{Click, NavAction, ObjectView, ViewLayer, ViewOptions, Viewport, ZOOM_STEP};
+use crate::transform_tool::{self, Dragging, Field, Placement, TransformTool};
+use crate::viewport::{
+    Click, NavAction, ObjectView, ToolPointer, ViewLayer, ViewOptions, Viewport, ZOOM_STEP,
+};
 use crate::worker::{
     self, Analysis, Message, Overlay, OverlayPurpose, OverlayTarget, PickTarget, PoolSizes,
     RenderMesh, StateInputs, ViewHover, Workers,
@@ -284,6 +287,16 @@ pub struct MeshFixerApp {
     pub interactive: Option<Interactive>,
     /// The left panel's section shown (`tools::LeftTab`).
     pub left_tab: LeftTab,
+    /// A placement committed from the Transform tool, drawn until its
+    /// command finishes (so the object doesn't jump back meanwhile).
+    preview: Option<(ObjectId, [f64; 12])>,
+    /// What the status line says once that command commits.
+    pending_status: Option<String>,
+    /// The lowest world z of an object at a transform (the plate snap),
+    /// found on a worker; and what was last asked for.
+    lowest: Option<(ObjectId, Mesh, [f64; 12], Option<f64>)>,
+    lowest_asked: Option<(ObjectId, Mesh, [f64; 12])>,
+    lowest_worker: LatestWorker<(ObjectId, Mesh, [f64; 12])>,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
     pub show_boundaries: bool,
     pub error: Option<String>,
@@ -464,6 +477,26 @@ impl MeshFixerApp {
                 },
             )
         };
+        let lowest_worker = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            LatestWorker::new(
+                workers.background(),
+                |(object, mesh, transform): (ObjectId, Mesh, [f64; 12]), run: &RunContext| {
+                    let z = mf_operations::world_min_z_with(&mesh, &transform, run)?;
+                    Ok(Message::LowestPoint {
+                        object,
+                        mesh,
+                        transform,
+                        z,
+                    })
+                },
+                move |msg| {
+                    // allow-swallow: the receiver only disappears while the app is closing
+                    let _ = tx.send(msg);
+                    ctx.request_repaint();
+                },
+            )
+        };
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -523,6 +556,11 @@ impl MeshFixerApp {
             tool: None,
             interactive: None,
             left_tab: LeftTab::default(),
+            preview: None,
+            pending_status: None,
+            lowest: None,
+            lowest_asked: None,
+            lowest_worker,
             op_params: BTreeMap::new(),
             show_boundaries: true,
             error: None,
@@ -1537,7 +1575,7 @@ impl MeshFixerApp {
     pub fn cancel_tool_drag(&mut self) -> bool {
         match self.interactive.as_mut() {
             None => false,
-            Some(t) => match *t {},
+            Some(Interactive::Transform(t)) => t.dragging.take().is_some(),
         }
     }
 
@@ -1569,7 +1607,7 @@ impl MeshFixerApp {
     /// each overlay colour means.
     pub fn legend_rows(&self) -> Vec<LegendRow> {
         match &self.interactive {
-            Some(t) => match *t {},
+            Some(t) => t.legend(),
             None => crate::tools::default_legend(),
         }
     }
@@ -1702,6 +1740,10 @@ impl MeshFixerApp {
                     }
                 };
                 let committed = (*result).and_then(|c| self.session.commit(c));
+                // The Transform tool's placement is the document's now (or
+                // wasn't committed): stop drawing it over the document's.
+                self.preview = None;
+                let placed = self.pending_status.take();
                 // A warning in the result is kept in full until dismissed
                 // or the next command finishes (I1).
                 self.notice = match &committed {
@@ -1714,7 +1756,10 @@ impl MeshFixerApp {
                 };
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
-                        self.status = Some(report(&r));
+                        self.status = Some(match placed {
+                            Some(text) if !too_late => text,
+                            _ => self.object_report(op, &r).unwrap_or_else(|| report(&r)),
+                        });
                         // A command can remove, place or create objects
                         // (D6): keep `active` on an object that exists,
                         // and make a newly created one active.
@@ -1814,7 +1859,19 @@ impl MeshFixerApp {
                     _ => false,
                 };
                 if is_current {
+                    // With Transform open, or on the main body with no
+                    // defect targeted, a click makes the object the target
+                    // (it gets the whole-object tools, Transform first).
+                    let whole = self.tool_hides_defects()
+                        || (!add
+                            && self.current_selection().is_none()
+                            && self.current_inspected().is_none()
+                            && matches!(&picked, Some((SelectionKind::Component, ids)) if ids == &[0]));
                     match picked {
+                        Some(_) if whole => {
+                            self.set_active(object);
+                            self.clear_selection();
+                        }
                         Some((kind, ids)) => {
                             // A hit on another object makes it active
                             // (MF-ISSUE-042); `set_active` clears a
@@ -1822,6 +1879,7 @@ impl MeshFixerApp {
                             self.set_active(object);
                             self.select(object, kind, ids, add);
                         }
+                        None if self.tool_hides_defects() => {}
                         None if !add => self.selection = None,
                         None => {}
                     }
@@ -1905,6 +1963,16 @@ impl MeshFixerApp {
                         self.set_active(object);
                         self.select(object, SelectionKind::BoundaryLoop, ids, add);
                     }
+                }
+            }
+            Message::LowestPoint {
+                object,
+                mesh,
+                transform,
+                z,
+            } => {
+                if let Some(old) = self.lowest.replace((object, mesh, transform, z)) {
+                    self.workers.discard(old);
                 }
             }
             Message::Markers { key, markers } => {
@@ -2136,7 +2204,7 @@ impl MeshFixerApp {
                 Some(ObjectView {
                     id: o.id,
                     render,
-                    transform: o.transform,
+                    transform: self.shown_transform(o.id).unwrap_or(o.transform),
                     active,
                     hovered,
                     // Only the active object's current revision has its
@@ -2159,7 +2227,10 @@ impl MeshFixerApp {
     fn object_bounds(&self, o: &mf_command::Object) -> Option<Option<Aabb>> {
         let mesh = o.mesh()?;
         let vertices = if Some(o.id) == self.active {
-            &self.analysis_for(mesh, &o.transform)?.render
+            // Bounds are in object space: any analysis of this revision
+            // has them, whatever transform it measured at (after a move,
+            // the new one is still being analysed).
+            &self.analyses.get(mesh)?.render
         } else {
             let (for_mesh, v) = self.object_vertices.get(&o.id)?;
             if !Mesh::ptr_eq(for_mesh, mesh) {
@@ -2645,8 +2716,7 @@ impl MeshFixerApp {
                 .get(mesh)
                 .map_or_else(|| Arc::from([]), |a| a.tangled_faces.clone()),
             loose_limit: self.loose_limit(),
-            hole_ring: self
-                .show_hole_overview
+            hole_ring: (self.show_hole_overview && !self.tool_hides_defects())
                 .then(|| self.analyses.get(mesh).map(|a| a.hole_ring.clone()))
                 .flatten(),
         }
@@ -2708,7 +2778,18 @@ impl MeshFixerApp {
     /// True if a defect overlay switched on by `on` is drawn (View ▸ Show
     /// defects hides them all).
     fn defect_shown(&self, on: bool) -> bool {
-        self.show_boundaries && on
+        self.show_boundaries && on && !self.tool_hides_defects()
+    }
+
+    /// True while an open tool hides the defect and recent-repair
+    /// overlays (Transform: D8, so the axis colours mean one thing).
+    pub fn tool_hides_defects(&self) -> bool {
+        matches!(self.interactive, Some(Interactive::Transform(_)))
+    }
+
+    /// True if the view outlines the holes this frame.
+    pub fn holes_drawn(&self) -> bool {
+        self.defect_shown(self.shown.holes)
     }
 
     /// The face-state flags the 3D view shows (the overlays switched on).
@@ -2722,7 +2803,10 @@ impl MeshFixerApp {
                 self.defect_shown(s.non_manifold),
                 FaceStates::NON_MANIFOLD_ADJ,
             ),
-            (s.recent_repairs, FaceStates::RECENT_REPAIR),
+            (
+                s.recent_repairs && !self.tool_hides_defects(),
+                FaceStates::RECENT_REPAIR,
+            ),
         ]
         .into_iter()
         .filter(|(on, _)| *on)
@@ -3389,6 +3473,458 @@ impl MeshFixerApp {
     }
 }
 
+/// The Transform tool (MF-OBJ-001, Phase 1 Task 5): its gizmo, its keys
+/// and its commands. Placement arithmetic is in `transform_tool.rs`.
+impl MeshFixerApp {
+    /// The open Transform tool, if it is.
+    pub fn transform_tool(&self) -> Option<&TransformTool> {
+        match &self.interactive {
+            Some(Interactive::Transform(t)) => Some(t),
+            None => None,
+        }
+    }
+
+    pub fn transform_tool_mut(&mut self) -> Option<&mut TransformTool> {
+        match &mut self.interactive {
+            Some(Interactive::Transform(t)) => Some(t),
+            None => None,
+        }
+    }
+
+    /// Open the Transform tool on the active object (T): the whole object
+    /// becomes the target.
+    pub fn open_transform(&mut self) {
+        if self.active_mesh().is_none() {
+            return;
+        }
+        self.clear_selection();
+        if self.transform_tool().is_none() {
+            self.open_tool(transform_tool::ID);
+        }
+    }
+
+    /// T opens Transform; while it's open, W, E and R pick Move, Rotate
+    /// and Scale (Meshmixer's keys). Its keys come before the app's.
+    fn transform_keys(&mut self, ctx: &egui::Context) {
+        let (t, w, e, r) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::T),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::W),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::E),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::R),
+            )
+        });
+        if t {
+            self.open_transform();
+        }
+        let mode = match (w, e, r) {
+            (true, ..) => Some(GizmoMode::Move),
+            (_, true, _) => Some(GizmoMode::Rotate),
+            (.., true) => Some(GizmoMode::Scale),
+            _ => None,
+        };
+        if let Some(mode) = mode {
+            self.set_transform_mode(mode);
+        }
+    }
+
+    /// Switch the gizmo's mode. A sheared transform only moves: its
+    /// rotation and scale can't be told apart from the shear.
+    pub fn set_transform_mode(&mut self, mode: GizmoMode) {
+        let sheared = self
+            .active_placement()
+            .is_some_and(|p| p.rotation_deg.is_none());
+        if let Some(t) = self.transform_tool_mut() {
+            if sheared && mode != GizmoMode::Move {
+                self.status = Some(format!(
+                    "{}: only Move works on it. Rotate and Scale would mix with the shear.",
+                    transform_tool::SHEARED_NOTE
+                ));
+                return;
+            }
+            t.mode = mode;
+            t.dragging = None;
+        }
+    }
+
+    /// Transform works on a whole object: a defect targeted (from the
+    /// tree) or the object gone closes it.
+    fn keep_transform_target(&mut self) {
+        if self.transform_tool().is_some()
+            && (self.active_mesh().is_none()
+                || self.current_selection().is_some()
+                || self.current_inspected().is_some())
+        {
+            self.leave_interactive();
+        }
+    }
+
+    /// The bounding-box centre of object `id` in object space, once its
+    /// bounds are known.
+    fn object_centre(&self, id: ObjectId) -> Option<glam::DVec3> {
+        let o = self.session.document().object(id)?;
+        let bb = self.object_bounds(o)??;
+        Some(glam::DVec3::from(bb.center()))
+    }
+
+    /// The transform object `id` is drawn at: a drag's, then a committed
+    /// placement still being applied, else `None` (the document's).
+    pub fn shown_transform(&self, id: ObjectId) -> Option<[f64; 12]> {
+        if let Some(d) = self.transform_tool().and_then(|t| t.dragging)
+            && d.object == id
+        {
+            return Some(d.current);
+        }
+        self.preview.filter(|(o, _)| *o == id).map(|(_, t)| t)
+    }
+
+    /// The active object's placement as the Transform fields show it.
+    pub fn active_placement(&self) -> Option<Placement> {
+        let id = self.active?;
+        let t = self
+            .shown_transform(id)
+            .or_else(|| Some(self.session.document().object(id)?.transform))?;
+        Some(transform_tool::placement(&t, self.object_centre(id)?))
+    }
+
+    /// The gizmo drawn over the active object while Transform is open.
+    pub fn transform_gizmo(&self) -> Option<Gizmo> {
+        let tool = self.transform_tool()?;
+        let p = self.active_placement()?;
+        let mode = if p.rotation_deg.is_none() {
+            GizmoMode::Move
+        } else {
+            tool.mode
+        };
+        Some(transform_tool::gizmo(p.position, mode))
+    }
+
+    /// The handle to draw highlighted: the one dragged, else hovered.
+    fn gizmo_highlight(&self) -> Option<Handle> {
+        let t = self.transform_tool()?;
+        t.dragging.map(|d| d.drag.handle()).or(t.hover)
+    }
+
+    /// What a press in the view hits: the gizmo, the camera it's seen
+    /// with and the view's size (points). `None` while a job runs (no
+    /// command could commit) or nothing is shown.
+    fn transform_grab(&self) -> Option<(Gizmo, OrbitCamera, (f64, f64))> {
+        if self.busy.is_some() {
+            return None;
+        }
+        let rect = self.viewport.last_rect?;
+        Some((
+            self.transform_gizmo()?,
+            self.camera?,
+            (rect.width() as f64, rect.height() as f64),
+        ))
+    }
+
+    /// The line at the view's top-left while Transform is open.
+    fn transform_hint(&self) -> Option<&'static str> {
+        self.transform_tool()?;
+        Some("Transform · W move · E rotate · R scale · Cmd/Ctrl: snap off · Esc: done")
+    }
+
+    /// The build plate, sized in the document's units.
+    fn plate(&self) -> mf_render::Plate {
+        let mm = transform_tool::mm_per(self.session.document().units());
+        let d = mf_render::Plate::default();
+        mf_render::Plate {
+            size_mm: d.size_mm.map(|v| v / mm),
+            grid_mm: d.grid_mm / mm,
+        }
+    }
+
+    /// The snapping a drag uses now: the tool's switch, inverted while
+    /// Cmd/Ctrl is held. The grid is 1 mm in document units; the plate
+    /// snap needs the object's lowest point, found on a worker.
+    fn transform_snap(&self, invert: bool, object: ObjectId, start: &[f64; 12]) -> Snap {
+        let on = self.transform_tool().is_some_and(|t| t.snap) != invert;
+        if !on {
+            return Snap {
+                grid: None,
+                angle_deg: None,
+                scale_step: None,
+                plate: None,
+            };
+        }
+        let mm = transform_tool::mm_per(self.session.document().units());
+        let mesh = self
+            .session
+            .document()
+            .object(object)
+            .and_then(|o| o.mesh());
+        let lowest = self
+            .lowest
+            .as_ref()
+            .filter(|(o, m, t, _)| {
+                *o == object && mesh.is_some_and(|c| Mesh::ptr_eq(c, m)) && t == start
+            })
+            .and_then(|(.., z)| *z);
+        Snap {
+            grid: Some(1.0 / mm),
+            plate: lowest.map(|world_min_z| PlateSnap {
+                world_min_z,
+                within_pt: 8.0,
+            }),
+            ..Snap::default()
+        }
+    }
+
+    /// Ask for the active object's lowest point at its placement (for
+    /// the plate snap) while Transform is open. O(1) here; the search
+    /// runs on the background pool.
+    fn refresh_lowest(&mut self) {
+        if self.transform_tool().is_none() {
+            return;
+        }
+        let Some(o) = self
+            .active
+            .and_then(|id| self.session.document().object(id))
+        else {
+            return;
+        };
+        let Some(mesh) = o.mesh().cloned() else {
+            return;
+        };
+        let want = (o.id, mesh, o.transform);
+        let same = |a: &(ObjectId, Mesh, [f64; 12])| {
+            a.0 == want.0 && Mesh::ptr_eq(&a.1, &want.1) && a.2 == want.2
+        };
+        if self.lowest_asked.as_ref().is_some_and(same) {
+            return;
+        }
+        if let Some(old) = self.lowest_asked.replace(want.clone()) {
+            self.workers.discard(old);
+        }
+        self.lowest_worker.submit(want);
+    }
+
+    /// The view's pointer for the Transform tool: a drag on a handle
+    /// moves the object's drawn placement only (its model matrix); the
+    /// release commits one `object.set_transform`.
+    fn transform_pointer(
+        &mut self,
+        pointer: Option<ToolPointer>,
+        hover: Option<(f64, f64)>,
+        modifiers: egui::Modifiers,
+    ) {
+        let Some(grab) = self.transform_grab() else {
+            if let Some(t) = self.transform_tool_mut() {
+                t.hover = None;
+            }
+            return;
+        };
+        let (gizmo, cam, view) = grab;
+        let invert = modifiers.command;
+        match pointer {
+            Some(ToolPointer::Start { from, at }) => {
+                let (Some(object), Some(handle)) = (self.active, gizmo.hit(&cam, view, from))
+                else {
+                    return;
+                };
+                let Some(start) = self.session.document().object(object).map(|o| o.transform)
+                else {
+                    return;
+                };
+                let drag = gizmo.begin(handle, from, &cam, view, start);
+                let snap = self.transform_snap(invert, object, &start);
+                let current = drag.update(at, &snap);
+                if let Some(t) = self.transform_tool_mut() {
+                    t.dragging = Some(Dragging {
+                        object,
+                        drag,
+                        start,
+                        current,
+                    });
+                }
+            }
+            Some(ToolPointer::Move(px)) => self.drag_to(px, invert),
+            Some(ToolPointer::End(px)) => {
+                self.drag_to(px, invert);
+                let Some(d) = self.transform_tool_mut().and_then(|t| t.dragging.take()) else {
+                    return;
+                };
+                // The gizmo was drawn, so the centre is known.
+                if d.current != d.start
+                    && let Some(centre) = self.object_centre(d.object)
+                {
+                    let status = self.placement_words(d.object, centre, &d.start, &d.current);
+                    self.commit_transform(d.object, d.current, status);
+                }
+            }
+            None => {}
+        }
+        let hovered = if self.transform_tool().is_some_and(|t| t.dragging.is_some()) {
+            None
+        } else {
+            hover.and_then(|px| gizmo.hit(&cam, view, px))
+        };
+        if let Some(t) = self.transform_tool_mut() {
+            t.hover = hovered;
+        }
+    }
+
+    fn drag_to(&mut self, px: (f64, f64), invert: bool) {
+        let Some(d) = self.transform_tool().and_then(|t| t.dragging) else {
+            return;
+        };
+        let snap = self.transform_snap(invert, d.object, &d.start);
+        let current = d.drag.update(px, &snap);
+        if let Some(Dragging { current: c, .. }) =
+            self.transform_tool_mut().and_then(|t| t.dragging.as_mut())
+        {
+            *c = current;
+        }
+    }
+
+    /// The status words for a placement change of `object`, whose
+    /// bounding-box centre is `centre` (object space).
+    fn placement_words(
+        &self,
+        object: ObjectId,
+        centre: glam::DVec3,
+        from: &[f64; 12],
+        to: &[f64; 12],
+    ) -> String {
+        let doc = self.session.document();
+        let name = doc.object(object).map_or("the object", |o| o.name.as_str());
+        transform_tool::describe(name, doc.units(), from, to, centre)
+    }
+
+    /// Commit `transform` as object `object`'s placement: one
+    /// `object.set_transform` (one undo step), run like any command. The
+    /// object is drawn there meanwhile; `status` says what changed.
+    pub fn commit_transform(&mut self, object: ObjectId, transform: [f64; 12], status: String) {
+        if self.busy.is_some() || self.active != Some(object) {
+            return;
+        }
+        self.preview = Some((object, transform));
+        self.pending_status = Some(status);
+        self.run_tool(&Tool {
+            op_id: "object.set_transform".into(),
+            label: "Transform".into(),
+            selection: None,
+            fixed: BTreeMap::from([("transform".into(), ParamValue::Affine(transform))]),
+            kind: ToolKind::OneShot,
+            group: None,
+        });
+        if self.busy.is_none() {
+            // It didn't start (the error banner says why).
+            self.preview = None;
+            self.pending_status = None;
+        }
+    }
+
+    /// Drop to plate: the active object straight down (or up) until its
+    /// lowest point rests on the plate, on the worker, with progress.
+    pub fn drop_to_plate(&mut self) {
+        if self.busy.is_some() || self.active.is_none() {
+            return;
+        }
+        self.run_tool(&Tool {
+            op_id: "object.drop_to_plate".into(),
+            label: "Drop to plate".into(),
+            selection: None,
+            fixed: BTreeMap::new(),
+            kind: ToolKind::OneShot,
+            group: None,
+        });
+    }
+
+    /// Reset: the active object back to no rotation and 100% scale (a
+    /// mirror kept), its bounding-box centre where it is.
+    pub fn reset_transform(&mut self) {
+        let Some(id) = self.active else { return };
+        let (Some(o), Some(centre)) = (self.session.document().object(id), self.object_centre(id))
+        else {
+            return;
+        };
+        let from = o.transform;
+        let Some(to) =
+            transform_tool::with_rotation_scale(&from, centre, glam::DVec3::ZERO, glam::DVec3::ONE)
+        else {
+            return;
+        };
+        if to != from {
+            let name = o.name.clone();
+            self.commit_transform(id, to, format!("Reset {name}: no rotation, 100% scale"));
+        }
+    }
+
+    /// A numeric field's new value, typed and committed with Enter.
+    pub fn set_transform_field(&mut self, field: Field, value: f64) {
+        let Some(id) = self.active else { return };
+        let (Some(o), Some(centre), Some(p)) = (
+            self.session.document().object(id),
+            self.object_centre(id),
+            self.active_placement(),
+        ) else {
+            return;
+        };
+        let from = o.transform;
+        let uniform = self.transform_tool().is_some_and(|t| t.uniform);
+        let to = match field {
+            Field::Position(a) => {
+                let mut pos = p.position;
+                pos[a] = value;
+                Some(transform_tool::with_position(&from, centre, pos))
+            }
+            Field::Rotation(a) => p.rotation_deg.zip(p.scale).and_then(|(mut r, s)| {
+                r[a] = value;
+                transform_tool::with_rotation_scale(&from, centre, r, s)
+            }),
+            Field::Scale(a) => p.rotation_deg.zip(p.scale).and_then(|(r, mut s)| {
+                let f = value / 100.0;
+                if !(f.is_finite() && f > 0.0) {
+                    return None;
+                }
+                if uniform {
+                    s *= f / s[a];
+                } else {
+                    s[a] = f;
+                }
+                transform_tool::with_rotation_scale(&from, centre, r, s)
+            }),
+        };
+        match to {
+            Some(to) if to != from => {
+                let status = self.placement_words(id, centre, &from, &to);
+                self.commit_transform(id, to, status);
+            }
+            Some(_) => {}
+            None => {
+                self.status = Some(format!(
+                    "{} can't be {value}: scale is a percentage above 0",
+                    field.label()
+                ))
+            }
+        }
+    }
+
+    /// An object command's result in words, with the object's name.
+    fn object_report(&self, op: &str, r: &serde_json::Value) -> Option<String> {
+        let rec = self.session.node(self.session.current())?.record.as_ref()?;
+        let doc = self.session.document();
+        let name = doc
+            .object(rec.target)
+            .map_or("the object", |o| o.name.as_str());
+        match op {
+            "object.drop_to_plate" => {
+                let dz = r["moved_z"].as_f64()?;
+                Some(format!(
+                    "Dropped {name} onto the plate: moved {} {} {}",
+                    crate::defects::measure(dz.abs()),
+                    crate::defects::unit_symbol(doc.units()),
+                    if dz < 0.0 { "down" } else { "up" }
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 impl eframe::App for MeshFixerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let started = Instant::now();
@@ -3415,6 +3951,7 @@ impl MeshFixerApp {
         self.refresh_analysis();
         self.refresh_object_vertices();
         self.refresh_bvhs();
+        self.refresh_lowest();
         self.resolve_view_request();
         self.now = ctx.input(|i| i.time);
 
@@ -3521,6 +4058,10 @@ impl MeshFixerApp {
         if delete {
             self.delete_active_object();
         }
+        if !typing && !ctx.egui_wants_keyboard_input() {
+            self.transform_keys(&ctx);
+        }
+        self.keep_transform_target();
         if !ctx.egui_wants_keyboard_input() {
             // + / = and − zoom toward the view centre, one step per press.
             if zoom != 0
@@ -3566,7 +4107,10 @@ impl MeshFixerApp {
             None => empty.as_str(),
         };
         let show_boundaries = self.defect_shown(self.shown.holes);
-        let updating = self.is_analyzing();
+        // Only while it draws an earlier revision's geometry: after a move
+        // the geometry shown is current while the new placement's
+        // measurements are worked out.
+        let updating = self.is_analyzing() && !self.shows_current_revision();
         let layers = self.view_layers();
         // Selected faces show through what hides them (x-ray); an outline
         // carries its own x-ray (`view_layers`).
@@ -3582,10 +4126,32 @@ impl MeshFixerApp {
             .markers_shown()
             .then(|| self.markers.as_ref().map(|(_, m)| m.mesh.clone()))
             .flatten();
+        let grab = self.transform_grab();
+        let grabs =
+            grab.map(|(g, cam, view)| move |px: (f64, f64)| g.hit(&cam, view, px).is_some());
         let out = egui::CentralPanel::no_frame()
             .show(ui, |ui| {
-                self.viewport.show(
+                let drawable = !objects.is_empty();
+                let input = self.viewport.input(
                     ui,
+                    &mut self.camera,
+                    drawable,
+                    grabs.as_ref().map(|f| f as &dyn Fn((f64, f64)) -> bool),
+                );
+                let modifiers = ui.input(|i| i.modifiers);
+                self.transform_pointer(input.out.tool, input.out.tool_hover, modifiers);
+                let mut objects = objects;
+                for o in &mut objects {
+                    if let Some(t) = self.shown_transform(o.id) {
+                        o.transform = t;
+                    }
+                }
+                let gizmo = self.transform_gizmo().map(|g| (g, self.gizmo_highlight()));
+                let plate = self.tool_hides_defects().then(|| self.plate());
+                let hint = self.transform_hint();
+                self.viewport.paint(
+                    ui,
+                    input,
                     &mut self.camera,
                     &objects,
                     ViewOptions {
@@ -3596,7 +4162,9 @@ impl MeshFixerApp {
                         frame: frame_index,
                         cue,
                         markers,
-                        tool_grabs: None,
+                        gizmo,
+                        plate,
+                        tool_hint: hint,
                     },
                 )
             })
@@ -3650,6 +4218,9 @@ fn is_current_revision(doc: &mf_command::Document, mesh: &Mesh) -> bool {
 /// frame, and it isn't for people anyway.
 /// A whole-object tool's name in Properties.
 fn tool_label(id: &str) -> String {
+    if id == transform_tool::ID {
+        return "Transform".into();
+    }
     operation_label(id, None).expect("every listed tool has plain words")
 }
 
@@ -3659,7 +4230,7 @@ fn object_step_label(op_id: &str) -> Option<String> {
     Some(
         match op_id {
             "object.delete" => "Delete object",
-            "object.set_transform" => "Move object",
+            "object.set_transform" => "Transform",
             "object.drop_to_plate" => "Drop to plate",
             _ => return None,
         }
@@ -3674,6 +4245,10 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
     let s = |n: u64| if n == 1 { "" } else { "s" };
     match op_id {
         "object.delete" => "Object deleted. Undo brings it back.".into(),
+        "object.drop_to_plate" if report["moved_z"].as_f64() == Some(0.0) => {
+            "it already rests on the plate".into()
+        }
+        "object.set_transform" => "the object is already placed there".into(),
         "mesh.fill_holes" => {
             let (filled, skipped) = (len("filled_loops") as u64, len("skipped_loops") as u64);
             let faces = num("created_faces");

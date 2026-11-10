@@ -211,7 +211,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
 
     renderer.prepare(&queue, &cam, (160, 160));
     render_pass_frame(&device, &queue, &target, |pass| {
-        renderer.draw_plate(&device, &queue, pass, &plate);
+        renderer.draw_plate(&device, &queue, pass, &plate, cam.target);
         renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
     });
     let img = offscreen::read_back(&device, &queue, &target).unwrap();
@@ -773,4 +773,44 @@ fn gizmo_fill_vertices_plane_square_is_filled() {
     for v in &fill {
         assert_eq!(v.color, GizmoPalette::HEADLESS.axis_z);
     }
+}
+
+/// The plate lies at world z = 0 wherever the camera looks (Task 5): the
+/// view-projection is relative to the camera's target, so the grid must be
+/// shifted into that frame like the model is. Before this, a camera
+/// looking at (5, 0, 0) drew the x = 0 grid line at x = 5.
+#[test]
+fn plate_stays_at_world_origin_when_the_camera_target_moves() {
+    let Some((device, queue, target, mut renderer)) = gpu_or_skip(
+        "plate_stays_at_world_origin_when_the_camera_target_moves",
+        setup(160, 160),
+    ) else {
+        return;
+    };
+    let plate = Plate {
+        size_mm: [256.0, 256.0],
+        grid_mm: 10.0,
+    };
+    let cam = top_down_camera(DVec3::new(5.0, 0.0, 0.0), 60.0, 128.0);
+    let view = (160.0, 160.0);
+    renderer.prepare(&queue, &cam, (160, 160));
+    render_pass_frame(&device, &queue, &target, |pass| {
+        renderer.draw_plate(&device, &queue, pass, &plate, cam.target);
+    });
+    let img = offscreen::read_back(&device, &queue, &target).unwrap();
+    // Anything but background within a pixel of where `world` projects.
+    let drawn = |world: [f64; 3]| {
+        let (x, y) = mf_render::screen_position(&cam, cam.target, view, world).unwrap();
+        (-1i32..=1).any(|dx| {
+            (-1i32..=1).any(|dy| {
+                let p = img.get_pixel(
+                    (x.round() as i32 + dx) as u32,
+                    (y.round() as i32 + dy) as u32,
+                );
+                p.0[..3] != offscreen::BACKGROUND_RGBA[..3]
+            })
+        })
+    };
+    assert!(drawn([0.0, 3.0, 0.0]), "the x = 0 line is at x = 0");
+    assert!(!drawn([5.0, 3.0, 0.0]), "nothing at x = 5, mid-cell");
 }

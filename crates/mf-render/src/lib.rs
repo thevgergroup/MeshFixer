@@ -40,7 +40,7 @@ pub use pick::{
 pub use renderer::{
     DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue,
 };
-pub use target::RenderTarget;
+pub use target::{GizmoDraw, RenderTarget, SceneExtras};
 pub use timer::GpuTimer;
 pub use transform::model_matrix;
 
