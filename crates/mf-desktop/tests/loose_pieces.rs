@@ -118,7 +118,7 @@ fn remove_loose_pieces_previews_tints_and_asks_before_a_large_removal() {
     h.run();
     // The share of the triangles is always given (fix round 1, I3).
     h.get_by_label(
-        "This would delete 5 of 7 parts of 'dress' (2.9% of its triangles). These may be \
+        "This would delete 5 of 7 pieces of 'dress' (2.9% of its triangles). These may be \
          part of the design, not debris.",
     );
     // The question is modal: the tree behind it doesn't answer (P4).

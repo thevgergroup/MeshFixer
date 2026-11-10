@@ -74,6 +74,13 @@ pub enum IoError {
     Geometry(#[from] GeometryError),
     #[error("export to {path} failed: {reason} (any existing file was left unchanged)")]
     Export { path: PathBuf, reason: String },
+    /// An object's transform puts a vertex out of range (a coordinate
+    /// that isn't a finite number) when applied for an STL/OBJ export.
+    #[error(
+        "the object's transform puts vertex {vertex} out of range (a coordinate overflows); \
+         check the object's scale"
+    )]
+    TransformOutOfRange { vertex: usize },
     #[error("unsupported file format: {0}")]
     UnsupportedFormat(PathBuf),
     /// The import was cancelled through its [`RunContext`]; nothing was
@@ -284,14 +291,35 @@ pub fn read_path(path: &Path) -> Result<Imported, IoError> {
     })
 }
 
+/// The progress stage of [`transform_mesh`].
+pub const TRANSFORMING: &str = "applying the position";
+
 /// Apply a 3MF row-major 3×4 affine (see [`threemf::IDENTITY`]) to `mesh`'s
 /// positions, in f64, for formats (STL, OBJ) that have no transform of
 /// their own to carry it (MF-ISSUE-035). A mirrored transform (negative
 /// determinant of the linear part) flips every triangle's winding so
 /// normals stay outward after the transform.
-pub fn transform_mesh(mesh: &Mesh, transform: &[f64; 12]) -> Mesh {
+///
+/// O(n): run it in the export job, not on the UI thread (M4 final review
+/// I3). Reports [`TRANSFORMING`] progress and stops when `ctx` is
+/// cancelled. A transform that puts a vertex out of range (an overflowing
+/// scale, as a corrupt or hostile 3MF can carry) fails with
+/// [`IoError::TransformOutOfRange`].
+pub fn transform_mesh(
+    mesh: &Mesh,
+    transform: &[f64; 12],
+    ctx: &RunContext,
+) -> Result<Mesh, IoError> {
+    let span = ctx.span(
+        TRANSFORMING,
+        0.0,
+        1.0,
+        mesh.vertex_count() + mesh.face_count(),
+    );
     if *transform == threemf::IDENTITY {
-        return mesh.clone();
+        ctx.checkpoint()?;
+        span.finish();
+        return Ok(mesh.clone());
     }
     let t = transform;
     let apply = |p: [f64; 3]| {
@@ -305,14 +333,35 @@ pub fn transform_mesh(mesh: &Mesh, transform: &[f64; 12]) -> Mesh {
     // matrix's columns, which doesn't change the determinant).
     let det = t[0] * (t[4] * t[8] - t[5] * t[7]) - t[1] * (t[3] * t[8] - t[5] * t[6])
         + t[2] * (t[3] * t[7] - t[4] * t[6]);
-    let (positions, mut triangles) = mesh.to_arrays();
-    let positions = positions.into_iter().map(apply).collect();
-    if det < 0.0 {
-        for tri in &mut triangles {
+    // Live vertices renumbered densely in slot order, as `Mesh::to_arrays`.
+    let mut slots = Vec::new();
+    let mut positions = Vec::with_capacity(mesh.vertex_count());
+    for (n, (id, p)) in mesh.vertices().enumerate() {
+        span.at(n)?;
+        let q = apply(p);
+        if !q.iter().all(|c| c.is_finite()) {
+            return Err(IoError::TransformOutOfRange { vertex: n });
+        }
+        let slot = id.0 as usize;
+        if slots.len() <= slot {
+            slots.resize(slot + 1, u32::MAX);
+        }
+        slots[slot] = n as u32;
+        positions.push(q);
+    }
+    let base = positions.len();
+    let mut triangles = Vec::with_capacity(mesh.face_count());
+    for (n, (_, tri)) in mesh.faces().enumerate() {
+        span.at(base + n)?;
+        let mut tri = tri.map(|v| slots[v as usize]);
+        if det < 0.0 {
             tri.swap(1, 2);
         }
+        triangles.push(tri);
     }
-    Mesh::new(positions, triangles).expect("a transformed valid mesh stays valid")
+    let mesh = Mesh::new_with(positions, triangles, ctx)??;
+    span.finish();
+    Ok(mesh)
 }
 
 /// Export `mesh`, never leaving a partial file behind. `unit` is the

@@ -278,6 +278,11 @@ pub struct GpuLines {
 }
 
 impl GpuLines {
+    /// Bytes of GPU buffers held.
+    pub fn resident_bytes(&self) -> u64 {
+        self.chunks.iter().map(|(b, _)| b.size()).sum()
+    }
+
     pub fn upload(device: &wgpu::Device, lines: &[LineVertex]) -> GpuLines {
         GpuLines {
             chunks: upload_chunks(device, None, "mf highlight lines", lines, u64::MAX, 2),
@@ -722,6 +727,24 @@ impl GpuMesh {
         }
     }
 
+    /// Every GPU allocation this mesh holds, as `(key, bytes)`: a surface
+    /// chunk shared with another revision's mesh (MF-RENDER-003) has the
+    /// same key in both, so a cache can count shared memory once. Keys are
+    /// addresses, valid while the meshes holding them live. O(chunks).
+    pub fn allocations(&self, out: &mut Vec<(usize, u64)>) {
+        for c in &self.chunks {
+            let bytes = c.buffers.iter().map(|(b, _)| b.size()).sum();
+            out.push((Arc::as_ptr(&c.buffers) as *const () as usize, bytes));
+        }
+        if let Some(s) = &self.state_buffer {
+            out.push((std::ptr::from_ref(s) as usize, s.buffer.size()));
+        }
+        if !self.lines.is_empty() {
+            let bytes = self.lines.iter().map(|(b, _)| b.size()).sum();
+            out.push((self.lines.as_ptr() as usize, bytes));
+        }
+    }
+
     /// Bytes uploaded for this mesh and every revision it was updated
     /// from, cumulatively (metrics and tests).
     pub fn total_uploaded(&self) -> u64 {
@@ -1082,11 +1105,33 @@ fn upload_chunks<T: Pod>(
 
 /// Submit the uploads made so far and wait until the GPU has them.
 fn flush(device: &wgpu::Device, queue: &wgpu::Queue) {
-    let submission = queue.submit([]);
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: Some(submission),
-            timeout: None,
-        })
-        .expect("the GPU device was lost while uploading a mesh");
+    queue.submit([]);
+    wait_for_submitted(device, queue).expect("the GPU device was lost while uploading a mesh");
+}
+
+/// Wait on a worker thread until the GPU has finished everything submitted
+/// on `queue` so far, without blocking other threads' GPU calls meanwhile.
+///
+/// `device.poll(Wait)` holds the device's resource lock (wgpu-core's
+/// snatch lock, read) for the whole GPU wait. Any thread that frees a GPU
+/// resource then waits to take it for writing, and its lock is fair: every
+/// later reader, such as the UI thread writing egui's vertex buffers or
+/// submitting a frame, queues behind that writer until the GPU is done.
+/// One worker priming a 5M-triangle mesh then stalled UI frames by tens of
+/// milliseconds (MF-RT-001, M4 final review I4). Polling without waiting
+/// holds the lock only for the check.
+pub fn wait_for_submitted(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> Result<(), wgpu::PollError> {
+    let done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&done);
+    queue.on_submitted_work_done(move || flag.store(true, Ordering::Release));
+    loop {
+        device.poll(wgpu::PollType::Poll)?;
+        if done.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_micros(250));
+    }
 }

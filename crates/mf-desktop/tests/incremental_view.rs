@@ -155,3 +155,69 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
     assert_eq!(harness.state().session.current(), b);
     assert_view_is_a_full_rebuild(harness.state(), &rs, "checked out the fill");
 }
+
+/// M4 final review I5: cached revisions' GPU meshes are bounded by bytes
+/// (the GPU memory they hold beyond the current revisions'), not by count.
+/// With no room at all the parent of a fill is let go as soon as the fill
+/// is shown, and undo rebuilds it from what's on screen; with the default
+/// budget (1 GiB) it stays cached.
+#[test]
+fn cached_revisions_are_bounded_by_gpu_bytes() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("cached_revisions_are_bounded_by_gpu_bytes");
+        return;
+    }
+    let spec = DamageSpec {
+        rings: 100,
+        segments: 200,
+        holes: 3,
+        islands: 0,
+        unwelded: 0,
+        seed: 5,
+    };
+    for (budget, parent_kept) in [(Some(0), false), (None, true)] {
+        let mut harness = Harness::builder()
+            .with_size((1440.0, 900.0))
+            .wgpu()
+            .build_eframe(move |cc| {
+                MeshFixerApp::with_settings(
+                    cc,
+                    None,
+                    Settings {
+                        gpu_cache_extra_bytes: budget,
+                        ..Settings::default()
+                    },
+                )
+                .unwrap()
+            });
+        harness
+            .state_mut()
+            .import_model(model(damaged_sphere(&spec)));
+        wait_shown(&mut harness, "import");
+        harness.get_by_label("Fill all holes").click();
+        harness.run_steps(2);
+        harness.get_by_label("Apply").click();
+        harness.step();
+        wait_shown(&mut harness, "fill");
+        let app = harness.state();
+        let what = format!("budget {budget:?}");
+        if parent_kept {
+            assert_eq!(app.cached_revisions(), 2, "{what}");
+            assert!(app.cache_extra_gpu_bytes() > 0, "{what}");
+            assert!(
+                app.cache_extra_gpu_bytes() <= mf_desktop::analysis::DEFAULT_EXTRA_GPU_BYTES,
+                "{what}"
+            );
+        } else {
+            assert_eq!(app.cached_revisions(), 1, "{what}: the parent was let go");
+            assert_eq!(app.cache_extra_gpu_bytes(), 0, "{what}");
+        }
+        harness.get_by_label("Undo").click();
+        wait_shown(&mut harness, "undo");
+        assert!(harness.state().error.is_none(), "{what}");
+        if !parent_kept {
+            // The fill (no longer current) went in turn.
+            assert_eq!(harness.state().cached_revisions(), 1, "{what}");
+        }
+    }
+}

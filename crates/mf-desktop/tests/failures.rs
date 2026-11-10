@@ -39,7 +39,7 @@ fn cube_model() -> ImportedModel {
 }
 
 /// A panic in the analysis says so in plain words, and the app stops
-/// saying "Analyzing…" (it never would have finished).
+/// saying "Analysing…" (it never would have finished).
 #[test]
 fn an_analysis_panic_is_reported_not_left_analysing() {
     if !mf_render::offscreen::gpu_available() {
@@ -77,8 +77,8 @@ fn an_analysis_panic_is_reported_not_left_analysing() {
         "still analysing after the analysis failed"
     );
     assert!(
-        harness.query_by_label("Analyzing…").is_none(),
-        "the status line still says Analyzing…"
+        harness.query_by_label("Analysing…").is_none(),
+        "the status line still says Analysing…"
     );
     // The panels say why there's nothing to show, as well as the banner.
     assert!(

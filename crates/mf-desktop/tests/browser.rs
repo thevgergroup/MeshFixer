@@ -598,7 +598,11 @@ fn box_select_picks_only_visible_holes_inside_the_box() {
 fn tiny_holes_get_screen_markers_when_zoomed_out() {
     require_gpu!("tiny_holes_get_screen_markers_when_zoomed_out");
     let mut h = opened(three_hundred_holes());
-    assert!(h.state().hole_markers().is_none(), "off until asked for");
+    // Markers are on by default (M4 final UX I6); switched off, the
+    // overview brings them back with its tint.
+    h.state_mut().show_hole_markers = false;
+    h.run_steps(2);
+    assert!(h.state().hole_markers().is_none(), "off when switched off");
     h.state_mut().show_hole_overview = true;
     h.state_mut().camera.as_mut().unwrap().distance *= 12.0;
     wait_until(&mut h, "markers", |a| {

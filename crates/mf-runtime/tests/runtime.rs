@@ -459,3 +459,30 @@ fn a_one_thread_pool_shows_the_gap_a_busy_pool_hides() {
     assert!(hidden < SILENT, "8 threads saw {hidden:?}");
     assert!(seen >= SILENT, "1 thread saw only {seen:?}");
 }
+
+/// A spawned task counts as in flight from `spawn` until it has returned
+/// (queued or running), so a caller can tell when everything it handed
+/// the pool is done: the desktop's GUI tests wait for that on wall time
+/// instead of counting frames (M4 final review I4).
+#[test]
+fn spawned_tasks_count_as_in_flight_until_they_return() {
+    let (pool, _) = JobPool::new(Some(1));
+    assert_eq!(pool.in_flight(), 0);
+    let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+    let (started_tx, started_rx) = std::sync::mpsc::channel::<()>();
+    pool.spawn(move || {
+        started_tx.send(()).unwrap();
+        release_rx.recv().unwrap();
+    });
+    // Queued behind the first on the one thread.
+    pool.spawn(|| {});
+    assert_eq!(pool.in_flight(), 2);
+    started_rx.recv().unwrap();
+    assert_eq!(pool.in_flight(), 2, "running and queued");
+    release_tx.send(()).unwrap();
+    let start = std::time::Instant::now();
+    while pool.in_flight() > 0 {
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        std::thread::sleep(std::time::Duration::from_millis(1));
+    }
+}

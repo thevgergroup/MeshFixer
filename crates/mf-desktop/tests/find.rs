@@ -139,9 +139,25 @@ fn now(h: &Harness<'_, MeshFixerApp>) -> f64 {
 /// Steps until the camera move finishes; returns every camera seen and
 /// the largest selection emphasis (the pulse) on the way, through a short
 /// settle after it (the pulse follows the move).
+///
+/// A framing first waits for what it needs (picking, built on the
+/// background pool): that wait is in wall time, like the work and the
+/// app's own give-up ([`mf_desktop::app::FIND_GIVE_UP_SECONDS`]). The move
+/// itself is in input time (200 ms, 12 steps at 60 Hz), so its steps are
+/// counted.
 fn finish_move(h: &mut Harness<'_, MeshFixerApp>) -> (Vec<OrbitCamera>, f32) {
     let mut cameras = vec![h.state().camera.unwrap()];
     let mut pulse = h.state().selection_emphasis();
+    let waiting = Instant::now();
+    while h.state().framing_pending() {
+        assert!(
+            waiting.elapsed() < Duration::from_secs(30),
+            "the framing never started"
+        );
+        h.step();
+        cameras.push(h.state().camera.unwrap());
+        std::thread::sleep(Duration::from_millis(5));
+    }
     let mut steps = 0;
     while h.state().camera_animating() || steps < 4 {
         steps += 1;
@@ -838,6 +854,60 @@ fn switching_objects_mid_analysis_still_lets_a_row_be_framed() {
     assert!(
         off_centre < 0.05 && size >= 0.25,
         "framed: {off_centre} {size}"
+    );
+}
+
+/// M4 final review I4 (the flaky `switching_objects_mid_analysis_…`): a
+/// framing that waits for picking (a topology still being computed on the
+/// background pool) waits on wall time, as that work does. Input time
+/// runs ahead of it whenever frames come faster than real time (the test
+/// harness steps 1/60 s per frame however fast it runs; a busy machine
+/// drops frames): it must not make the framing give up before the work
+/// had its chance.
+#[test]
+fn a_framing_waiting_for_picking_does_not_give_up_on_input_time_alone() {
+    require_gpu!("a_framing_waiting_for_picking_does_not_give_up_on_input_time_alone");
+    let open_box = mf_fixtures::scaled(&mf_fixtures::cube_with_missing_face(), 10.0);
+    let mut h = opened(model(vec![
+        ("box", open_box, IDENTITY),
+        (
+            "big",
+            mf_fixtures::grid(1000),
+            mf_fixtures::rotation_translation(2, 0.0, [100.0, 0.0, 0.0]),
+        ),
+    ]));
+    let big = h.state().session.document().objects()[1].id;
+    // The big object's topology is gone, and recomputing it (2M faces)
+    // takes far longer than the next few frames.
+    h.state()
+        .session
+        .document()
+        .object(big)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .release_topology();
+    assert!(!h.state().picking_ready());
+    let hole = h.state().current_analysis().unwrap().defects.holes[0].clone();
+    let label = row_of(h.state(), &hole);
+    double_click_row(&mut h, &label);
+    assert!(h.state().framing_pending(), "the framing waits for picking");
+    // Input time leaps past the give-up time; hardly any wall time passes.
+    let later = now(&h) + mf_desktop::app::FIND_GIVE_UP_SECONDS + 1.0;
+    h.input_mut().time = Some(later);
+    h.step();
+    h.input_mut().time = None;
+    assert!(
+        h.state().framing_pending() || h.state().camera_animating(),
+        "the framing gave up after {:?}",
+        h.state().status
+    );
+    finish_move(&mut h);
+    let (off_centre, size) = on_screen(h.state(), &defect_points(h.state(), &hole));
+    assert!(
+        off_centre < 0.05 && size >= 0.25,
+        "framed: {off_centre} {size} ({:?})",
+        h.state().status
     );
 }
 

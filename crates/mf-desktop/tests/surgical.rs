@@ -152,14 +152,12 @@ fn select_hole_fill_undo_refill() {
         h.state().selection.is_none(),
         "the filled loop's selection is cleared"
     );
+    // The fill's own result stays (M4 final UX I1): "selection cleared"
+    // would only repeat it.
+    let status = h.state().status.clone().unwrap_or_default();
     assert!(
-        h.state()
-            .status
-            .as_deref()
-            .unwrap_or("")
-            .contains("Hole filled"),
-        "{:?}",
-        h.state().status
+        status.starts_with("Filled 1 hole") && !status.contains("selection cleared"),
+        "{status:?}"
     );
     assert_eq!(
         hole_through(h.state(), 8),

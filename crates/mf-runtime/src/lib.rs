@@ -16,7 +16,7 @@
 //! deterministic parallel sorts); it does not change *what* is computed.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::mpsc;
 
 mod sort;
@@ -361,6 +361,8 @@ impl PoolChoice {
 /// identifiable in a debugger or profiler.
 pub struct JobPool {
     pool: rayon::ThreadPool,
+    /// Tasks spawned and not yet returned (see [`JobPool::in_flight`]).
+    in_flight: Arc<AtomicUsize>,
 }
 
 impl JobPool {
@@ -392,7 +394,13 @@ impl JobPool {
             .build()
             .expect("failed to build mf-runtime job pool");
 
-        (Self { pool }, choice)
+        (
+            Self {
+                pool,
+                in_flight: Arc::default(),
+            },
+            choice,
+        )
     }
 
     /// Runs `f` on one of this pool's threads without waiting for it.
@@ -401,7 +409,28 @@ impl JobPool {
     /// A panic in `f` aborts the process (rayon's default), so callers
     /// that must survive one catch it inside `f`.
     pub fn spawn(&self, f: impl FnOnce() + Send + 'static) {
-        self.pool.spawn(f)
+        let in_flight = Arc::clone(&self.in_flight);
+        in_flight.fetch_add(1, Ordering::AcqRel);
+        self.pool.spawn(move || {
+            // Counted down however `f` ends: a panic aborts anyway, but
+            // the count must never stay up for a task that is gone.
+            struct Done(Arc<AtomicUsize>);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, Ordering::AcqRel);
+                }
+            }
+            let _done = Done(in_flight);
+            f();
+        })
+    }
+
+    /// Tasks [`JobPool::spawn`]ed and not yet returned, queued or running.
+    /// Whatever a task did before returning (sent a message, asked for a
+    /// repaint) has happened once it no longer counts. For tests and
+    /// diagnostics: "is everything handed to the pool done?"
+    pub fn in_flight(&self) -> usize {
+        self.in_flight.load(Ordering::Acquire)
     }
 
     /// Runs `f` on this pool's threads and returns its result.

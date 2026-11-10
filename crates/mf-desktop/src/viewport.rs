@@ -151,6 +151,9 @@ pub struct Viewport {
     last_frame: Option<FrameKey>,
     /// Where the 3D view was last drawn (for picking and screen projections).
     pub last_rect: Option<egui::Rect>,
+    /// Where the controls hint was last drawn (`None`: not drawn, the view
+    /// is too small for it beside the navigation bar).
+    pub last_hint_rect: Option<egui::Rect>,
     /// Frames actually rendered (for tests and the debug readout).
     pub frames_rendered: u64,
     /// B: the next drag box-selects, whatever the mode.
@@ -183,6 +186,7 @@ impl Viewport {
             texture: None,
             last_frame: None,
             last_rect: None,
+            last_hint_rect: None,
             frames_rendered: 0,
             box_once: false,
             box_from: None,
@@ -306,15 +310,24 @@ impl Viewport {
         if let Some(m) = markers {
             ui.painter().add(egui::Shape::Mesh(m));
         }
+        let (action, bar) = self.navigation_bar(ui, rect, cam);
+        // The hint sits at the bottom-left; where the navigation bar would
+        // cover it (a narrow view), it goes above the bar, and if it's
+        // wider than the view it isn't drawn (Help > Controls has it all).
         let hint = controls_hint(ui);
-        let at = rect.left_bottom() + egui::vec2(8.0, -8.0 - hint.size().y);
-        ui.painter().rect_filled(
-            egui::Rect::from_min_size(at, hint.size()).expand(4.0),
-            4.0,
-            theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85),
-        );
-        ui.painter().galley(at, hint, theme::TEXT_MUTED);
-        let action = self.navigation_bar(ui, rect, cam);
+        let mut at = rect.left_bottom() + egui::vec2(8.0, -8.0 - hint.size().y);
+        let mut area = egui::Rect::from_min_size(at, hint.size()).expand(4.0);
+        if area.intersects(bar) {
+            at.y = bar.top() - 8.0 - hint.size().y;
+            area = egui::Rect::from_min_size(at, hint.size()).expand(4.0);
+        }
+        self.last_hint_rect = None;
+        if rect.contains_rect(area) && !area.intersects(bar) {
+            ui.painter()
+                .rect_filled(area, 4.0, theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85));
+            ui.painter().galley(at, hint, theme::TEXT_MUTED);
+            self.last_hint_rect = Some(area);
+        }
         ViewOutput {
             click,
             action,
@@ -326,16 +339,19 @@ impl Viewport {
     /// The on-screen navigation bar at the view's bottom-right, for people
     /// without a mouse wheel: drag mode (Orbit / Pan / Zoom), zoom out / in
     /// (hold to repeat), frame selection and reset view. Camera maths only.
+    /// In a narrow view (a laptop window with both panels open) it takes
+    /// two rows, so it fits. Returns the action and where the bar is.
     fn navigation_bar(
         &mut self,
         ui: &egui::Ui,
         rect: egui::Rect,
         cam: &mut OrbitCamera,
-    ) -> Option<NavAction> {
+    ) -> (Option<NavAction>, egui::Rect) {
         let mut action = None;
         let mut zoom_steps = 0i32;
         let mut held = None;
-        egui::Area::new(egui::Id::unique("navigation bar"))
+        let two_rows = rect.width() < NARROW_VIEW;
+        let bar = egui::Area::new(egui::Id::unique("navigation bar"))
             .order(egui::Order::Middle)
             .pivot(egui::Align2::RIGHT_BOTTOM)
             .fixed_pos(rect.right_bottom() - egui::vec2(10.0, 10.0))
@@ -350,7 +366,7 @@ impl Viewport {
                     .corner_radius(6.0)
                     .inner_margin(6.0)
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
+                        let modes = |ui: &mut egui::Ui, nav_mode: &mut NavMode| {
                             for (mode, label, tip) in [
                                 (NavMode::Orbit, "Orbit", "Drag orbits"),
                                 (NavMode::Pan, "Pan", "Drag pans (or Shift + drag)"),
@@ -366,14 +382,15 @@ impl Viewport {
                                 ),
                             ] {
                                 if ui
-                                    .selectable_label(self.nav_mode == mode, label)
+                                    .selectable_label(*nav_mode == mode, label)
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
-                                    self.nav_mode = mode;
+                                    *nav_mode = mode;
                                 }
                             }
-                            ui.separator();
+                        };
+                        let mut buttons = |ui: &mut egui::Ui| {
                             for (zoom_in, text, label, tip) in [
                                 (false, "−", "Zoom out", "Zoom out (−); hold to repeat"),
                                 (true, "+", "Zoom in", "Zoom in (+ or =); hold to repeat"),
@@ -399,9 +416,23 @@ impl Viewport {
                             {
                                 action = Some(NavAction::ResetView);
                             }
-                        });
+                        };
+                        if two_rows {
+                            ui.vertical(|ui| {
+                                ui.horizontal(|ui| modes(ui, &mut self.nav_mode));
+                                ui.horizontal(&mut buttons);
+                            });
+                        } else {
+                            ui.horizontal(|ui| {
+                                modes(ui, &mut self.nav_mode);
+                                ui.separator();
+                                buttons(ui);
+                            });
+                        }
                     });
-            });
+            })
+            .response
+            .rect;
         // Holding a zoom button repeats the step.
         let now = ui.input(|i| i.time);
         match (held, self.hold) {
@@ -425,7 +456,7 @@ impl Viewport {
         if zoom_steps != 0 {
             cam.zoom(ZOOM_STEP.powi(-zoom_steps));
         }
-        action
+        (action, bar)
     }
 
     fn render(
@@ -760,6 +791,9 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     );
     renderer.set_selection_cue(SelectionCue::default());
 }
+
+/// Below this width (points) the navigation bar takes two rows.
+const NARROW_VIEW: f32 = 640.0;
 
 /// The controls hint at the view's bottom-left.
 fn controls_hint(ui: &egui::Ui) -> Arc<egui::Galley> {

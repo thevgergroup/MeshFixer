@@ -825,6 +825,14 @@ The owner delegated technical decisions (2026-11-10). Each entry gives the choic
 - nothing outside the brush footprint changes (MF-OP-003 per stroke), and a test proves it;
 - the history of 1,000 strokes stays within 1.5× of one revision plus the footprints.
 
+### Task 16b: Sculpting enablers from the M4 final review (before Task 17)
+
+The M4 technical review found two problems, I1 and I2 in `.superpowers/sdd/2026-11-08-m4-scale-reliability-ux/final-review-technical.md`. Both block per-stroke editing.
+- **Fix 1: re-upload only touched chunks.** Today, moving vertices re-uploads every GPU chunk that shares a vertex chunk. It must re-upload only the face chunks that contain a face touching a moved vertex.
+  - Test `one_percent_dab_reuploads_only_touched_face_chunks`, on the real scan.
+- **Fix 2: decouple storage and GPU chunk sizes.** The copy-on-write storage chunk becomes small (≤ 4,096 elements), and the GPU face chunk stays large. That way a 1,000-stroke history fits the memory budget, and buffers and draw calls do not multiply.
+  - Test `thousand_small_strokes_history_within_budget`.
+
 ### Task 17: The stroke engine: brushes, falloff, symmetry
 
 **Files:**

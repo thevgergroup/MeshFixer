@@ -25,6 +25,7 @@ pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
     chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
+    wait_for_submitted,
 };
 pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,

@@ -28,6 +28,29 @@ fn wait_until(h: &mut Harness<'_, MeshFixerApp>, what: &str, cond: impl Fn(&Mesh
     h.run_steps(3);
 }
 
+/// Steps until the app is quiet, then lets `Harness::run` check the UI
+/// settles. Worker answers (a hover pick, then the face-state write it
+/// leads to) arrive on wall time from other threads and each asks for a
+/// frame, so how many frames pass while they come depends on the
+/// machine: `run`'s step budget alone failed on a loaded CI runner (M4
+/// final review I4). This waits them out on wall time; `run` still
+/// fails if the UI itself keeps repainting.
+fn settle(h: &mut Harness<'_, MeshFixerApp>) {
+    let start = Instant::now();
+    loop {
+        assert!(
+            start.elapsed() < Duration::from_secs(20),
+            "background work never finished"
+        );
+        h.step();
+        if !h.state().background_work_in_flight() && !h.ctx.has_requested_repaint() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.run();
+}
+
 /// A 6×6 grid with two one-cell holes (plus its open rim).
 fn two_hole_grid(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("two_holes.obj");
@@ -55,7 +78,7 @@ fn open(path: std::path::PathBuf) -> Harness<'static, MeshFixerApp> {
         a.current_analysis().is_some()
     });
     // Settle so the accessibility check runs.
-    h.run();
+    settle(&mut h);
     h
 }
 
@@ -92,7 +115,7 @@ fn layout_has_viewport_tree_properties_and_history() {
         "Holes (3)",
         "Narrow cracks (0)",
         "Loose pieces (0)",
-        "Non-manifold edges (0)",
+        "Tangled edges (0)",
     ] {
         h.get_by_label(row);
     }
@@ -247,7 +270,7 @@ fn selecting_a_target_clears_a_stale_status() {
     require_gpu!("selecting_a_target_clears_a_stale_status");
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(two_hole_grid(dir.path()));
-    h.state_mut().status = Some("Hole filled (10 faces); selection cleared".into());
+    h.state_mut().status = Some("Hole filled (10 new triangles); selection cleared".into());
     click_small_hole_row(&mut h);
     assert!(h.state().selection.is_some());
     assert_eq!(h.state().status, None);
@@ -360,12 +383,12 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
     let mut h = open(two_hole_grid(dir.path()));
     let view = h.state().viewport.last_rect.unwrap();
     h.event(egui::Event::PointerMoved(view.center()));
-    h.run();
+    settle(&mut h);
     let start = h.state().camera.unwrap();
 
     // Pinch (zoom gesture) zooms in.
     h.event(egui::Event::Zoom(1.25));
-    h.run();
+    settle(&mut h);
     let pinched = h.state().camera.unwrap();
     assert!(
         pinched.distance < start.distance * 0.9,
@@ -381,7 +404,7 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
         egui::vec2(40.0, 20.0),
         egui::Modifiers::NONE,
     ));
-    h.run();
+    settle(&mut h);
     let orbited = h.state().camera.unwrap();
     assert_ne!(orbited.yaw, pinched.yaw, "two-finger drag orbits");
     assert_ne!(orbited.pitch, pinched.pitch, "two-finger drag orbits");
@@ -394,7 +417,7 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
         egui::vec2(40.0, 0.0),
         egui::Modifiers::SHIFT,
     ));
-    h.run();
+    settle(&mut h);
     let panned = h.state().camera.unwrap();
     assert_ne!(
         panned.target, orbited.target,
@@ -412,7 +435,7 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
         egui::vec2(0.0, 2.0),
         egui::Modifiers::NONE,
     ));
-    h.run();
+    settle(&mut h);
     let wheeled = h.state().camera.unwrap();
     assert!(wheeled.distance < panned.distance, "wheel up zooms in");
     assert_eq!((wheeled.yaw, wheeled.pitch), (panned.yaw, panned.pitch));
@@ -427,7 +450,7 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     });
-    h.run();
+    settle(&mut h);
     let framed = h.state().camera.unwrap();
     assert_eq!((framed.yaw, framed.pitch), (wheeled.yaw, wheeled.pitch));
     let centre = h.state().screen_point([3.0, 3.0, 0.0]).unwrap();
@@ -446,7 +469,7 @@ fn pinch_zooms_and_two_finger_drag_orbits() {
         repeat: false,
         modifiers: egui::Modifiers::NONE,
     });
-    h.run();
+    settle(&mut h);
     let home = h.state().camera.unwrap();
     assert_eq!((home.yaw, home.pitch), (start.yaw, start.pitch));
     assert!((home.distance - start.distance).abs() < 1e-9 * start.distance);
@@ -524,6 +547,6 @@ fn lots_of_unused_space_suggests_compacting() {
     assert!(h.state().active_mesh().unwrap().is_compact());
     assert_eq!(
         h.state().status.as_deref(),
-        Some("Reclaimed unused space: 40 face slots and 40 vertex slots")
+        Some("Reclaimed unused space: 40 triangle slots and 40 vertex slots")
     );
 }
