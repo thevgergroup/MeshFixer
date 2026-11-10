@@ -6,6 +6,10 @@
 //! The 5M-triangle tests run on code built at opt-level 2 even in the dev
 //! profile (root `Cargo.toml`), so their timings mean something. They hold
 //! a lock so they never time each other.
+//!
+//! With `MF_ARTIFACTS` set, `cancel_to_stop_within_250ms_on_5m_import_and_fill`
+//! also writes its measured cancel-to-stop latencies there as
+//! `cancel-timing.json` (milestone evidence).
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -219,6 +223,21 @@ fn cancel_to_stop_within_250ms_on_5m_import_and_fill() {
         measured.push((what, took));
     }
     eprintln!("cancel-to-stop: {measured:?}");
+    if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
+        let json = serde_json::json!({
+            "triangles": BIG,
+            "budget_ms": CANCEL_BUDGET.as_millis(),
+            "measured": measured.iter().map(|(what, took)| serde_json::json!({
+                "what": what,
+                "took_ms": took.as_secs_f64() * 1000.0,
+            })).collect::<Vec<_>>(),
+        });
+        std::fs::write(
+            std::path::Path::new(&dir).join("cancel-timing.json"),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
     for (what, took) in &measured {
         assert!(
             *took <= CANCEL_BUDGET,

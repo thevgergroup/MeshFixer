@@ -3,15 +3,24 @@ name: Heavy tests
 # proven, e.g. before merging a milestone PR or at milestone close. It runs the
 # full test suite (incl. timing, cancellation, frame-gate and 5M-triangle
 # tests) on all three OSes, the 400 MB memory gate, the evidence bundle and
-# the cross-OS replay check. Never on push, PR or a schedule.
+# the cross-OS replay check. Never on push, a schedule, or an ordinary PR
+# event: only workflow_dispatch from the Actions tab, or a person adding the
+# `run-heavy` label to a PR (controller ruling, 2026-11-10: GitHub can only
+# dispatch a workflow once it's on the default branch, and this one isn't
+# yet, so the labeled trigger is how it's started from a PR branch until
+# then). Every job below is guarded to run only when the label just added
+# is `run-heavy`, so adding any other label never starts this workflow.
 on:
   workflow_dispatch:
+  pull_request:
+    types: [labeled]
 
 env:
   CARGO_TERM_COLOR: never
 
 jobs:
   full-tests:
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
     strategy:
       fail-fast: false
       matrix:
@@ -89,6 +98,7 @@ jobs:
     # fixture makes ≈4.8M) plus its cached topology stays within 400 MB,
     # counted by the allocator. Process RSS and GPU buffers of a
     # realistic session are reported (evidence job), not gated.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -109,6 +119,7 @@ jobs:
   evidence:
     # Durable milestone evidence: screenshots, sample repaired model,
     # diagnostics and benchmark numbers with machine info.
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
     runs-on: ubuntu-24.04
     env:
       MF_REQUIRE_GPU: "1"
@@ -125,6 +136,18 @@ jobs:
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
       - name: Realistic 5M-requested (≈4.8M actual) session memory (process RSS and GPU buffers, reported)
         run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test memory -- --nocapture
+      - name: 1M orbit smoke (evidence/orbit-1m.json)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-cli --test bench_orbit -- --test-threads=1 --nocapture
+      - name: Cancel-timing on 5M import and fill (evidence/cancel-timing.json)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-command --test cancel cancel_to_stop_within_250ms_on_5m_import_and_fill -- --test-threads=1 --nocapture
+      - name: Progress bar mid-run (evidence/progress-mid-run.png)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test progress cancel_button_stops_fill_and_document_is_unchanged -- --test-threads=1 --nocapture
+      - name: Metrics panel (evidence/metrics-panel.png)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test metrics -- --test-threads=1 --nocapture
+      - name: Defect browser (evidence/defect-browser.png)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test browser defect_list_click_selects_and_frames_the_hole -- --test-threads=1 --nocapture
+      - name: Two transformed objects (evidence/two-transformed-objects.png)
+        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test multi_object two_objects_both_visible_and_clicking_one_activates_it -- --test-threads=1 --nocapture
       - name: Real scan fixtures (hash-verified)
         uses: actions/cache@v6
         with:
@@ -163,6 +186,7 @@ jobs:
     # macOS and Windows as Exact or Equivalent (the summary says which). The
     # log includes a refined fill_holes, which computes new vertex positions
     # (MF-ISSUE-025).
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-heavy'
     needs: evidence
     strategy:
       fail-fast: false

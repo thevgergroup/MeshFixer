@@ -1,7 +1,13 @@
 name: Fuzz
 # MF-IO-002 fuzzing is on-demand only (owner ruling): no
-# push, pull-request or scheduled runs. Start it from the Actions tab and
-# choose the minutes per target.
+# push, scheduled or ordinary pull-request runs. Started either from the
+# Actions tab (choose the minutes per target), or by a person adding the
+# `run-fuzz` label to a PR (controller ruling, 2026-11-10: GitHub can only
+# dispatch a workflow once it's on the default branch, and this one isn't
+# yet, so the labeled trigger is how it's started from a PR branch until
+# then; label-triggered runs default to 10 minutes per target). The job is
+# guarded to run only when the label just added is `run-fuzz`, so adding
+# any other label never starts this workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -10,6 +16,8 @@ on:
         required: true
         default: "15"
         type: string
+  pull_request:
+    types: [labeled]
 
 env:
   CARGO_TERM_COLOR: never
@@ -21,7 +29,9 @@ jobs:
     # or hang. `fuzz/` is its own workspace (cargo-fuzz's standard layout,
     # excluded from the main workspace) so this nightly-only build never
     # touches the pinned stable toolchain used everywhere else.
-    # On demand only (owner ruling): run it from the Actions tab.
+    # On demand only (owner ruling): run it from the Actions tab, or by
+    # adding the `run-fuzz` label to a PR (10 minutes per target then).
+    if: github.event_name == 'workflow_dispatch' || github.event.label.name == 'run-fuzz'
     runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
@@ -42,10 +52,10 @@ jobs:
       - name: Install cargo-fuzz
         if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
         run: cargo install cargo-fuzz --locked --version 0.13.2
-      - name: Fuzz ${{ matrix.target }} (${{ inputs.minutes }} min)
+      - name: Fuzz ${{ matrix.target }} (${{ github.event_name == 'workflow_dispatch' && inputs.minutes || '10' }} min)
         working-directory: fuzz
         env:
-          MINUTES: ${{ inputs.minutes }}
+          MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.minutes || '10' }}
         run: |
           case "$MINUTES" in
             ''|*[!0-9]*) echo "::error::minutes must be a whole number, got '$MINUTES'"; exit 1 ;;

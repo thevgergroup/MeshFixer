@@ -6,6 +6,10 @@
 //! The 5M fixture is generated in memory, never written to disk. The tests
 //! hold a lock so they never run (or time) each other, and so only one 5M
 //! document is in memory at a time.
+//!
+//! With `MF_ARTIFACTS` set, `cancel_button_stops_fill_and_document_is_unchanged`
+//! also writes a mid-run frame (progress bar and percentage visible) there
+//! as `progress-mid-run.png` (milestone evidence).
 
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
@@ -253,6 +257,13 @@ fn cancel_button_stops_fill_and_document_is_unchanged() {
     let (stage, fraction) = harness.state().job_progress().unwrap();
     // The status bar shows the stage and a percentage while it runs.
     harness.get_by_label_contains("%");
+    if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
+        harness
+            .render()
+            .unwrap()
+            .save(std::path::Path::new(&dir).join("progress-mid-run.png"))
+            .unwrap();
+    }
     harness.get_by_label("Cancel").click();
     let cancelled = Instant::now();
     wait_until(&mut harness, "cancel", Duration::from_secs(10), |a| {

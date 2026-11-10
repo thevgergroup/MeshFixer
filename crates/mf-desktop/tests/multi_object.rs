@@ -2,6 +2,10 @@
 
 //! Transform-aware rendering and picking (MF-ISSUE-042): a document with
 //! several objects draws and picks every one at its own 3MF transform.
+//!
+//! With `MF_ARTIFACTS` set, `two_objects_both_visible_and_clicking_one_activates_it`
+//! also writes a frame (both transformed objects drawn) there as
+//! `two-transformed-objects.png` (milestone evidence).
 
 use std::time::{Duration, Instant};
 
@@ -108,6 +112,11 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
         mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
         "the gap between the cubes must stay background"
     );
+    if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
+        frame
+            .save(std::path::Path::new(&dir).join("two-transformed-objects.png"))
+            .unwrap();
+    }
 
     // Select something on the active (first) object, so we can observe it
     // getting cleared when another object becomes active.

@@ -8,6 +8,10 @@
 //! the visible ones; the hole overview tints their surroundings and marks
 //! the tiny ones; numbering never shifts after a fill; Esc in a popup
 //! leaves the selection; F frames with the animated move.
+//!
+//! With `MF_ARTIFACTS` set, `defect_list_click_selects_and_frames_the_hole`
+//! also writes a frame (list row selected, hole framed) there as
+//! `defect-browser.png` (milestone evidence).
 
 use std::time::{Duration, Instant};
 
@@ -284,6 +288,12 @@ fn defect_list_click_selects_and_frames_the_hole() {
     assert_eq!(selected_loops(h.state()), vec![loop_id(&hole)]);
     let c = centre(&loop_points(h.state(), loop_id(&hole)));
     assert!(off_centre(h.state(), c) < 0.05, "framed at the centre");
+    if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
+        h.render()
+            .unwrap()
+            .save(std::path::Path::new(&dir).join("defect-browser.png"))
+            .unwrap();
+    }
 }
 
 #[test]

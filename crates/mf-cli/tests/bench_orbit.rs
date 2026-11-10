@@ -5,6 +5,8 @@
 //! frame waited for on the GPU. A smoke test of the JSON's shape and
 //! device tagging, never a gate on fps: CI runs it on lavapipe (a software
 //! rasteriser). Heavy (1M triangles): run serially, see scripts/run-tests.sh.
+//! With `MF_ARTIFACTS` set, the JSON is also written there as
+//! `orbit-1m.json` (milestone evidence).
 
 use std::process::Command;
 
@@ -131,4 +133,12 @@ fn bench_orbit_json_has_device_info_and_percentiles() {
     // No operation ran, and the JSON says so rather than leaving a bare null.
     assert!(mem["scratch_peak_bytes"].is_null(), "{m}");
     assert_eq!(mem["scratch_peak_note"], "no operation run", "{m}");
+
+    if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
+        std::fs::write(
+            std::path::Path::new(&dir).join("orbit-1m.json"),
+            serde_json::to_string_pretty(&v).unwrap(),
+        )
+        .unwrap();
+    }
 }
