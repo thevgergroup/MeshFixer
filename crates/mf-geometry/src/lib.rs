@@ -4,16 +4,21 @@
 //! (cancellation and progress; spec §2). Working geometry uses `f64`
 //! positions and `u32` indices (MF-GEO-001).
 
+mod bvh;
 mod chunked;
 mod compare;
 mod diagnostics;
 mod edit;
+mod exact;
 mod grid;
 mod hash;
 mod ids;
 mod mesh;
 mod topology;
+mod validate;
 
+pub use bvh::ray as bvh_ray;
+pub use bvh::{Bvh, LEAF_MAX};
 pub use chunked::{CHUNK, chunk_hashes_computed};
 pub use compare::{Equivalence, equivalent};
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect, inspect_with};
@@ -22,3 +27,4 @@ pub use hash::ContentHash;
 pub use ids::{FaceId, Provenance, SlotRemap, Sources, VertexId};
 pub use mesh::{Aabb, Compaction, GeometryError, Mesh};
 pub use topology::{BoundaryLoop, Topology};
+pub use validate::{SolidDefect, signed_volume, validate_solid, validate_solid_with};

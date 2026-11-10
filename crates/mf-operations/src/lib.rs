@@ -9,7 +9,9 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod boolean;
 mod compact;
+pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
 pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 
@@ -192,6 +194,7 @@ pub(crate) fn needs_document(op: &str) -> OpError {
 }
 
 static REGISTRY: &[&dyn Operation] = &[
+    &boolean::Boolean,
     &compact::Compact,
     &fill_holes::FillHoles,
     &inspect::Inspect,

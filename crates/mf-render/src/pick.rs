@@ -12,57 +12,7 @@ use mf_runtime::{Cancelled, RunContext};
 
 use crate::{Bvh, OrbitCamera};
 
-/// Hits nearer than this (along the ray) don't count: the ray's own start.
-pub(crate) const HIT_MIN: f64 = 1e-12;
-
-/// Möller–Trumbore, both sides: the distance along `o + t·d` at which it
-/// crosses triangle `abc` (in `d`'s units), if it does. The one triangle
-/// test the brute-force and BVH casts share, so they agree exactly.
-#[inline]
-pub(crate) fn intersect(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
-    let (e1, e2) = (b - a, c - a);
-    let p = d.cross(e2);
-    let det = e1.dot(p);
-    if det.abs() < 1e-18 {
-        return None;
-    }
-    let inv_det = 1.0 / det;
-    let s = o - a;
-    let u = s.dot(p) * inv_det;
-    if !(0.0..=1.0).contains(&u) {
-        return None;
-    }
-    let q = s.cross(e1);
-    let v = d.dot(q) * inv_det;
-    if v < 0.0 || u + v > 1.0 {
-        return None;
-    }
-    Some(e2.dot(q) * inv_det)
-}
-
-/// The unit direction and length from `from` to `to`, unless they coincide.
-pub(crate) fn segment(from: DVec3, to: DVec3) -> Option<(DVec3, f64)> {
-    let v = to - from;
-    let len = v.length();
-    (len > 0.0).then(|| (v / len, len))
-}
-
-/// True if face `t` (unless `skip`ped) lies strictly between `from` and
-/// the point `len` along unit direction `d`.
-pub(crate) fn blocks(
-    mesh: &Mesh,
-    t: &[u32; 3],
-    from: DVec3,
-    d: DVec3,
-    len: f64,
-    skip: &impl Fn(&[u32; 3]) -> bool,
-) -> bool {
-    if skip(t) {
-        return false;
-    }
-    let [a, b, c] = t.map(|v| DVec3::from(mesh.corner_position(v)));
-    intersect(from, d, a, b, c).is_some_and(|t| t > HIT_MIN && t < len * (1.0 - 1e-9))
-}
+pub(crate) use mf_geometry::bvh_ray::{HIT_MIN, blocks, intersect, segment};
 
 /// Pixel position (y down) of a world point, or `None` if it is behind the camera.
 pub fn screen_position(

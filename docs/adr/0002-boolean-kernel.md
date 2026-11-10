@@ -125,7 +125,8 @@ ADR-0002b also gives the owner two cheaper options:
   - **Linux:** expected to work with the runner's GCC and CMake.
   - **Windows:** not tried. The `cmake` crate with MSVC multi-config needs the Release runtime to match Rust's, and static oneTBB on MSVC is "not recommended" by oneTBB.
   - Expect ~3–6 min per OS per cold cache, cached by `rust-cache` afterwards.
-  - Today the crate sits outside the workspace (`exclude`), and the feature is off by default, so `--workspace` builds and every existing CI job compile no C++. Only the on-demand `kernel-qualification` job builds it (macOS).
+  - **Since Task 8 (option B accepted):** `mf-manifold-sys` is a workspace member and `manifold-cpp` is `mf-boolean`'s default feature, so every build compiles C++ Manifold and oneTBB. `ManifoldRobust` (`manifold-rust`) moved behind its own off-by-default `manifold-rust` feature, for comparison and the qualification suite only.
+  - **Verification is local, on macOS only** (owner ruling 2026-11-11: no GitHub Actions). **Linux and Windows builds are an explicit, unverified risk**: nothing has built the C++ kernel on either. Windows is the larger risk (MSVC runtime matching, static oneTBB). Until a Linux and a Windows build are run by hand, MeshFixer's booleans are macOS-verified only.
 - **Cancel:** acceptable without a detached thread. Manifold 3.5's `ExecutionContext` is checked between phases, and stop-to-return was ≤ 25 ms on the largest gated window. The call returns, so nothing keeps running in the background.
 
 ## History: Task 7 (superseded gates)
@@ -149,4 +150,4 @@ Task 7's raw JSON was overwritten by the Task 7b layout. Its logs are kept in `a
 
 - MF-MODEL-001 and P1-M2 Tasks 8–10 stay blocked, pending the owner's choice between ADR-0002b, A and B.
 - The `Kernel` trait, both adapters, `validate_boolean`, the degenerate post-pass and the qualification suite stay. Any kernel, including our own, is qualified with the same `qualify.rs`.
-- The qualification no longer runs in the milestone heavy workflow's required jobs. It has its own on-demand job (`kernel-qualification` in heavy.yml), started by the `run-qualify` label or a dispatch with `qualify` ticked.
+- The qualification no longer runs in the milestone heavy workflow's required jobs. It has its own job (`kernel-qualification` in heavy.yml), manual dispatch only (a dispatch with `qualify` ticked); it is normally run locally (`cargo test -p mf-boolean --features manifold-rust --test qualify`).

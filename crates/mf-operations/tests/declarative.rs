@@ -31,6 +31,17 @@ struct Given {
     /// 3×4, D7); identity when absent.
     #[serde(default)]
     transform: Option<String>,
+    /// A second object (operand 1, e.g. a boolean's tool).
+    #[serde(default)]
+    tool: Option<Tool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Tool {
+    fixture: String,
+    #[serde(default)]
+    transform: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -67,6 +78,8 @@ fn fixture(name: &str) -> Result<Mesh, String> {
     Ok(match name {
         "cube" => cube(1.0),
         "cube_with_missing_face" => cube_with_missing_face(),
+        "cube_2" => cube(2.0),
+        "sphere" => uv_sphere(24, 48),
         "cube_and_two_tetrahedra" => merge(&[
             cube(1.0),
             translated(&tetrahedron(), [5.0, 0.0, 0.0]),
@@ -179,16 +192,31 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
     // Through `execute_doc`, as a command runs it: a mesh operation's
     // default wraps `execute`, an object operation changes the placement
     // or removes the object.
-    let result = op.execute_doc(
-        &[OperandInput {
-            object: mf_document::ObjectId(1),
-            mesh: &before,
-            transform: placement,
-            target,
-        }],
-        &params,
-        &mf_operations::RunContext::none(),
-    );
+    let tool = match &case.given.tool {
+        None => None,
+        Some(t) => Some((
+            fixture(&t.fixture)?,
+            match &t.transform {
+                None => mf_io::threemf::IDENTITY,
+                Some(x) => parse_affine(x)?,
+            },
+        )),
+    };
+    let mut inputs = vec![OperandInput {
+        object: mf_document::ObjectId(1),
+        mesh: &before,
+        transform: placement,
+        target,
+    }];
+    if let Some((mesh, transform)) = &tool {
+        inputs.push(OperandInput {
+            object: mf_document::ObjectId(2),
+            mesh,
+            transform: *transform,
+            target: Target::WholeObject,
+        });
+    }
+    let result = op.execute_doc(&inputs, &params, &mf_operations::RunContext::none());
 
     let mut problems = Vec::new();
     if let Some(Value::String(code)) = case.expect.get("error") {
@@ -205,6 +233,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
     let mut geometry = None;
     let mut transform = placement;
     let mut removed = false;
+    let mut tool_removed = false;
     for change in &output.changes {
         match change {
             ObjectChange::Geometry {
@@ -217,6 +246,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
                 transform: t,
             } => transform = *t,
             ObjectChange::Remove { operand: 0 } => removed = true,
+            ObjectChange::Remove { operand: 1 } => tool_removed = true,
             other => return Err(format!("unexpected change {other:?}")),
         }
     }
@@ -232,6 +262,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
             "changed" => Value::Bool(!output.changes.is_empty()),
             "geometry_changed" => Value::Bool(geometry_changed),
             "removed" => Value::Bool(removed),
+            "tool_removed" => Value::Bool(tool_removed),
             // Bit-for-bit (D7): true when equal, else the actual values.
             "transform" => {
                 let expected = parse_affine(want.as_str().ok_or("transform needs a string")?)?;

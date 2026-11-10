@@ -1,3 +1,4 @@
+#![cfg(feature = "manifold-rust")]
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
 //! The `manifold-rust` adapter (D1): results, refusals, provenance, cancel

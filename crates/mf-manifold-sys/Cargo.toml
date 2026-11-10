@@ -20,7 +20,3 @@ undocumented_unsafe_blocks = "deny"
 [build-dependencies]
 cmake = "0.1.58"
 cc = "1.2"
-
-# Its own workspace root: it is excluded from the MeshFixer workspace (see
-# the root Cargo.toml), and this stops cargo looking further up for one.
-[workspace]

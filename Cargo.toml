@@ -1,10 +1,9 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
-# The C++ Manifold binding (Phase 1 Task 7b) is outside the workspace so
-# `--workspace` builds and CI don't compile C++ Manifold and oneTBB. Only
-# mf-boolean's `manifold-cpp` feature (off by default) builds it.
-exclude = ["crates/mf-manifold-sys"]
+# The C++ Manifold binding (Phase 1 Task 7b) is a workspace member: it is
+# the shipping boolean kernel (ADR-0002 option B, Task 8), built by
+# mf-boolean's default `manifold-cpp` feature. Verified on macOS only.
 
 [workspace.package]
 version = "0.0.1"
@@ -60,6 +59,8 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 manifold-rust = { version = "=0.19.2", default-features = false, features = ["parallel"] }
 # D2: Shewchuk's adaptive exact predicates.
 robust = "1.2"
+# D3: cut-cap triangulation (constrained Delaunay, exact predicates).
+spade = "2.15"
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 
 [workspace.lints.rust]

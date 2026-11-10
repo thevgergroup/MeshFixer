@@ -51,6 +51,14 @@ impl Default for ManifoldCpp {
 }
 
 impl ManifoldCpp {
+    /// With the operand self-intersection check (the default; the shipping
+    /// kernel).
+    pub const fn checked() -> Self {
+        ManifoldCpp {
+            check_operands: true,
+        }
+    }
+
     /// Without the self-intersection check: Manifold computes whatever it
     /// computes, and only D4's validation stands between it and the user.
     /// For the Task 7b qualification (to measure what the check prevents,
@@ -98,6 +106,76 @@ fn wide(m: &KernelMesh) -> Vec<[u64; 3]> {
     m.triangles.iter().map(|t| t.map(u64::from)).collect()
 }
 
+/// The cancel watcher (see the module docs). Dropping it stops and joins
+/// the thread, so a panic anywhere between `start` and `finish` (unwinding
+/// through this frame) can't leave it running with the Manifold context
+/// (Task 7b review I1).
+pub(crate) struct Watcher {
+    stop: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watcher {
+    pub(crate) fn start(theirs: &Arc<sys::Context>, ctx: &RunContext) -> Watcher {
+        let stop = Arc::new(AtomicBool::new(false));
+        let thread = {
+            let (theirs, stop) = (Arc::clone(theirs), Arc::clone(&stop));
+            let ours = ctx.cancel.clone();
+            let progress = ctx.progress.clone();
+            std::thread::Builder::new()
+                .name("mf-boolean-cancel".into())
+                .spawn(move || {
+                    let mut best: f64 = 0.0;
+                    while !stop.load(Ordering::Relaxed) {
+                        if ours.is_cancelled() {
+                            theirs.cancel();
+                            return;
+                        }
+                        let p = theirs.progress();
+                        // Manifold reports 1.0 before any work is scheduled.
+                        if p < 1.0 && p > best {
+                            best = p;
+                            progress.report("boolean: manifold", 0.05 + 0.9 * p);
+                        }
+                        std::thread::park_timeout(POLL);
+                    }
+                })
+                .expect("could not start the boolean cancel watcher thread")
+        };
+        Watcher {
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// Whether the thread is still running (for tests).
+    #[cfg(test)]
+    fn handle(&self) -> Option<&std::thread::JoinHandle<()>> {
+        self.thread.as_ref()
+    }
+
+    /// Stops and joins the thread; a panic on it is re-raised here.
+    pub(crate) fn finish(mut self) {
+        if let Some(panic) = self.stop_and_join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    fn stop_and_join(&mut self) -> Option<Box<dyn std::any::Any + Send>> {
+        let thread = self.thread.take()?;
+        self.stop.store(true, Ordering::Relaxed);
+        thread.thread().unpark();
+        thread.join().err()
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        // Unwinding already, or finished: never panic again here.
+        let _ = self.stop_and_join(); // allow-swallow: a watcher panic during unwind can't be re-raised
+    }
+}
+
 impl Kernel for ManifoldCpp {
     fn boolean(
         &self,
@@ -132,31 +210,7 @@ impl Kernel for ManifoldCpp {
         }
         let (ta, tb) = (wide(a), wide(b));
         let theirs = Arc::new(sys::Context::new());
-        let stop = Arc::new(AtomicBool::new(false));
-        let watcher = {
-            let (theirs, stop) = (Arc::clone(&theirs), Arc::clone(&stop));
-            let ours = ctx.cancel.clone();
-            let progress = ctx.progress.clone();
-            std::thread::Builder::new()
-                .name("mf-boolean-cancel".into())
-                .spawn(move || {
-                    let mut best: f64 = 0.0;
-                    while !stop.load(Ordering::Relaxed) {
-                        if ours.is_cancelled() {
-                            theirs.cancel();
-                            return;
-                        }
-                        let p = theirs.progress();
-                        // Manifold reports 1.0 before any work is scheduled.
-                        if p < 1.0 && p > best {
-                            best = p;
-                            progress.report("boolean: manifold", 0.05 + 0.9 * p);
-                        }
-                        std::thread::park_timeout(POLL);
-                    }
-                })
-                .expect("could not start the boolean cancel watcher thread")
-        };
+        let watcher = Watcher::start(&theirs, ctx);
         ctx.progress.report("boolean: manifold", 0.0);
         let sop = match op {
             BoolOp::Union => sys::Op::Union,
@@ -176,11 +230,7 @@ impl Kernel for ManifoldCpp {
             Some(rayon::current_num_threads()),
             &theirs,
         );
-        stop.store(true, Ordering::Relaxed);
-        watcher.thread().unpark();
-        if let Err(panic) = watcher.join() {
-            std::panic::resume_unwind(panic);
-        }
+        watcher.finish();
         // A run the user cancelled reports Cancelled even if it finished.
         ctx.checkpoint().map_err(|_| KernelError::Cancelled)?;
         let out = match result {
@@ -249,5 +299,26 @@ impl Kernel for ManifoldCpp {
         } else {
             "manifold3d=3.5.3/c++ (unchecked operands)"
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_panic_while_the_watcher_runs_still_stops_and_joins_it() {
+        let theirs = Arc::new(sys::Context::new());
+        let ctx = RunContext::none();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let watcher = Watcher::start(&theirs, &ctx);
+            assert!(watcher.handle().is_some());
+            assert_eq!(Arc::strong_count(&theirs), 2);
+            panic!("a fallible step inside the kernel call");
+        }));
+        assert!(caught.is_err());
+        // The guard joined the thread while unwinding: only this test's
+        // reference to the Manifold context is left.
+        assert_eq!(Arc::strong_count(&theirs), 1);
     }
 }

@@ -12,15 +12,27 @@
 //!   zero-area triangles a kernel created (Task 7b).
 
 mod cleanup;
+mod clip;
 mod kernel;
+#[cfg(feature = "manifold-rust")]
 mod manifold;
 #[cfg(feature = "manifold-cpp")]
 mod manifold_cpp;
+mod section;
 mod validate;
+mod weld;
+mod window;
 
 pub use cleanup::{DegenerateCleanup, remove_created_degenerates};
+pub use clip::{ClipError, ClipOptions, Clipped, Point, WindowFace, clip_to_box};
 pub use kernel::{BoolOp, Kernel, KernelError, KernelMesh, KernelResult};
+#[cfg(feature = "manifold-rust")]
 pub use manifold::{BridgeGuard, ManifoldRobust, bridge};
 #[cfg(feature = "manifold-cpp")]
 pub use manifold_cpp::ManifoldCpp;
+pub use section::{SectionError, triangulate_section};
 pub use validate::{SolidError, self_intersecting_faces, validate_boolean, validate_solid};
+pub use weld::weld_exact;
+pub use window::{
+    BooleanError, BooleanOutput, STAGES, apply, boolean, compose, inverse, operand_in_frame,
+};
