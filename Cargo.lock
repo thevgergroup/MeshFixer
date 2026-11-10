@@ -2729,6 +2729,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2867,6 +2868,21 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mf-parts"
+version = "0.0.1"
+dependencies = [
+ "mf-command",
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-spec",
+ "serde",
+ "serde-saphyr",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 

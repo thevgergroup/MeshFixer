@@ -69,7 +69,18 @@ pub struct ParamSpec {
     pub name: String,
     pub kind: ParamKind,
     pub unit: Option<String>,
+    /// Where a frontend takes this parameter's default from instead of
+    /// `default`, when the caller didn't set it (D20): `fit.<field>` of
+    /// the active print fit profile. See [`OperationSpec::fill_defaults`].
+    pub default_from: Option<String>,
     pub description: String,
+}
+
+/// A source of print-fit values for [`OperationSpec::fill_defaults`]
+/// (D20), implemented by `mf_parts::FitProfile`. `field` is the part
+/// after `fit.` in a parameter's `default_from`, in mm.
+pub trait FitDefaults {
+    fn fit_value(&self, field: &str) -> Option<f64>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -132,6 +143,8 @@ struct RawParam {
     values: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_from: Option<String>,
     description: String,
 }
 
@@ -219,10 +232,18 @@ impl TryFrom<RawParam> for ParamSpec {
             },
             other => return Err(format!("unknown parameter type '{other}'")),
         };
+        if let Some(from) = &r.default_from
+            && !(from.starts_with("fit.") && from.len() > 4)
+        {
+            return Err(format!(
+                "default_from '{from}' must name a print fit field (fit.<field>)"
+            ));
+        }
         Ok(ParamSpec {
             name: r.name,
             kind,
             unit: r.unit,
+            default_from: r.default_from,
             description: r.description,
         })
     }
@@ -270,6 +291,7 @@ impl From<ParamSpec> for RawParam {
             max,
             values,
             unit: p.unit,
+            default_from: p.default_from,
             description: p.description,
         }
     }
@@ -296,6 +318,37 @@ impl OperationSpec {
 
     pub fn parameter(&self, name: &str) -> Option<&ParamSpec> {
         self.parameters.iter().find(|p| p.name == name)
+    }
+
+    /// Fill every parameter the caller didn't set whose spec says
+    /// `default_from: fit.<field>` from `fit` (D20), as text in mm, before
+    /// [`Self::validate`]. A frontend calls this at prepare time with the
+    /// active print fit profile, so the recorded parameters hold the values
+    /// used and replay never reads a profile. A parameter the caller set
+    /// is left alone. A field `fit` doesn't have is an error by name.
+    pub fn fill_defaults(
+        &self,
+        raw: &mut BTreeMap<String, String>,
+        fit: &dyn FitDefaults,
+    ) -> Result<(), SpecError> {
+        for p in &self.parameters {
+            let Some(from) = &p.default_from else {
+                continue;
+            };
+            if raw.contains_key(&p.name) {
+                continue;
+            }
+            let field = from.strip_prefix("fit.").unwrap_or(from);
+            let value = fit
+                .fit_value(field)
+                .ok_or_else(|| SpecError::InvalidValue {
+                    name: p.name.clone(),
+                    value: from.clone(),
+                    reason: "the print fit profile has no such field".into(),
+                })?;
+            raw.insert(p.name.clone(), value.to_string());
+        }
+        Ok(())
     }
 
     /// Parse and validate string parameters, filling defaults.

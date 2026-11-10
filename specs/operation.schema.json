@@ -55,6 +55,7 @@
           "min": { "type": "number" },
           "max": { "type": "number" },
           "unit": { "type": "string" },
+          "default_from": { "type": "string", "pattern": "^fit\\.[a-z_]+$" },
           "description": { "type": "string", "minLength": 1 }
         }
       }

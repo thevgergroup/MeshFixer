@@ -66,12 +66,14 @@ parameters:
     default: 0.2
     min: 0.0
     unit: mm
+    default_from: fit.peg_clearance
     description: "The dowel is this much thinner than its hole (from the print fit profile)"
   - name: length_allowance
     type: float
     default: 0.4
     min: 0.0
     unit: mm
+    default_from: fit.length_allowance
     description: "The dowel is this much shorter than the two holes together (from the print fit profile)"
   - name: min_wall
     type: float

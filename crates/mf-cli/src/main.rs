@@ -216,6 +216,16 @@ fn cli() -> Command {
                 ),
         )
         .arg(
+            Arg::new("fit-profile")
+                .long("fit-profile")
+                .global(true)
+                .value_name("NAME")
+                .help(
+                    "Print fit profile whose tolerances fill parameters you don't set (D20; saved \
+                     in Settings > Print fit). Default: the built-in 'Default FDM, 0.4 mm nozzle'",
+                ),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .global(true)
@@ -1247,6 +1257,25 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     Ok(seq)
 }
 
+/// The print fit profile `--fit-profile` names, from the settings folder
+/// (D20). Without the flag, the built-in profile, so a command line means
+/// the same on every machine unless it names a profile.
+fn fit_profile(m: &ArgMatches) -> Result<mf_parts::FitProfile, Failure> {
+    let Some(name) = m.get_one::<String>("fit-profile") else {
+        return Ok(mf_parts::FitProfile::builtin());
+    };
+    let dir = mf_parts::dirs::meshfixer_dir().map_err(|e| Failure::Runtime(e.to_string()))?;
+    let profiles =
+        mf_parts::FitProfiles::load(&dir).map_err(|e| Failure::Runtime(e.to_string()))?;
+    profiles.get(name).cloned().ok_or_else(|| {
+        let names: Vec<&str> = profiles.profiles.iter().map(|p| p.name.as_str()).collect();
+        Failure::Usage(format!(
+            "--fit-profile '{name}': no such profile (have: {})",
+            names.join(", ")
+        ))
+    })
+}
+
 fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
@@ -1258,14 +1287,17 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
     refuse_overwriting_input(input, output)?;
-    let seq = op_sequence(m)?;
+    let mut seq = op_sequence(m)?;
+    let fit = fit_profile(m)?;
     // Validate every step before touching files.
     for Step {
         op, raw, operands, ..
-    } in &seq
+    } in &mut seq
     {
         let spec = mf_spec::builtin::get(op)
             .ok_or_else(|| Failure::Usage(format!("unknown operation '{op}'")))?;
+        spec.fill_defaults(raw, &fit)
+            .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
         if let Some((name, _)) = operands
@@ -1422,7 +1454,9 @@ fn run_operation(
         .get_one::<String>("select")
         .map(|s| parse_select(s))
         .transpose()?;
-    let raw_params = mf_spec::cli::raw_params(spec, m);
+    let mut raw_params = mf_spec::cli::raw_params(spec, m);
+    spec.fill_defaults(&mut raw_params, &fit_profile(m)?)
+        .map_err(|e| Failure::Usage(e.to_string()))?;
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
