@@ -763,3 +763,89 @@ fn clicking_an_objects_own_row_clears_a_leftover_sub_selection_so_delete_works()
     });
     assert_eq!(objects(&h), ["ball (top)"]);
 }
+
+// ---------------------------------------------------------------------
+// Visible Solid/Hole controls (owner feedback: H and the right-click menu
+// alone are hard to discover). All three switches below go through
+// `MeshFixerApp::toggle_role`, so each is one undo step, same as H.
+// ---------------------------------------------------------------------
+
+/// The summary panel's segmented Solid/Hole control (no tool open, an
+/// object selected): clicking Hole switches the active object, one undo
+/// restores it, and the control's tooltip names the shortcut.
+#[test]
+fn the_selection_card_segmented_control_switches_the_role_in_one_undo_step() {
+    require_gpu!("the_selection_card_segmented_control_switches_the_role_in_one_undo_step");
+    let mut h = opened(WINDOW, block_post_peg());
+    row(&h, "peg").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "select");
+    h.get_by_label("Solid");
+    still(&mut h, "selection-card-solid");
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Hole").click();
+    settle(&mut h);
+    assert!(is_hole(&h, "peg"));
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    still(&mut h, "selection-card-hole");
+    h.get_by_label("Undo").click();
+    settle(&mut h);
+    assert!(!is_hole(&h, "peg"));
+    // Clicking the segment already current is a no-op (no extra undo step).
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Solid").click();
+    settle(&mut h);
+    assert_eq!(h.state().session.history_labels().len(), history);
+}
+
+/// Combine's per-object row has its own Solid/Hole toggle: clicking it
+/// switches just that object (one undo step), and the panel's role labels
+/// update to match.
+#[test]
+fn combines_row_toggle_switches_one_objects_role() {
+    require_gpu!("combines_row_toggle_switches_one_objects_role");
+    let mut h = opened(WINDOW, block_post_peg());
+    select_together(&mut h, &["block", "post"]);
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    h.get_by_label("block · Solid");
+    h.get_by_label("post · Solid");
+    still(&mut h, "combine-row-toggle-before");
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("post: Make it a hole").click();
+    settle(&mut h);
+    assert!(is_hole(&h, "post"));
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    h.get_by_label("block · Solid");
+    h.get_by_label("post · Hole");
+    still(&mut h, "combine-row-toggle-after");
+    h.get_by_label("Undo").click();
+    settle(&mut h);
+    assert!(!is_hole(&h, "post"));
+}
+
+/// A Browser row's Solid/Hole toggle only shows on hover, so rows stay
+/// clean otherwise; one click switches just that row's object, as one
+/// undo step.
+#[test]
+fn a_browser_rows_toggle_only_shows_on_hover_and_switches_its_role() {
+    require_gpu!("a_browser_rows_toggle_only_shows_on_hover_and_switches_its_role");
+    let mut h = opened(WINDOW, block_post_peg());
+    assert!(
+        h.query_by_label("peg: Make it a hole").is_none(),
+        "hidden until the row is hovered"
+    );
+    row(&h, "peg").hover();
+    settle(&mut h);
+    still(&mut h, "browser-row-hover");
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("peg: Make it a hole").click();
+    settle(&mut h);
+    assert!(is_hole(&h, "peg"));
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    row(&h, "peg (hole)").hover();
+    settle(&mut h);
+    h.get_by_label("peg: Make it a solid").click();
+    settle(&mut h);
+    assert!(!is_hole(&h, "peg"));
+}

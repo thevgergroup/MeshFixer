@@ -1033,9 +1033,10 @@ pub fn right_dock(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 /// The Browser: every object; under the active one, its model and what
-/// the analysis found, grouped with counts as badges. No buttons in rows:
-/// a row's actions are in its right-click menu (registered context
-/// actions) and in Repair.
+/// the analysis found, grouped with counts as badges. A row's actions are
+/// in its right-click menu (registered context actions) and in Repair;
+/// an object row also shows a Solid/Hole toggle at its right end, but
+/// only on hover, so rows stay clean otherwise.
 fn browser(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     egui::ScrollArea::vertical()
         .id_salt("tree")
@@ -1270,29 +1271,92 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 " · click to work on it"
             }
         );
-        tree_row(
-            app,
-            ui,
-            &TreeItem::Object(id),
-            Row {
-                // A Hole's row says so with its own icon.
-                icon: Some(if hole {
-                    (icons::HOLE_ROLE, theme::TEXT_MUTED)
-                } else {
-                    (icons::OBJECT, theme::TEXT_MUTED)
-                }),
-                text,
-                size: None,
-                label: &label,
-            },
-            |ui| {
-                ui.label(&tip);
-            },
-        );
+        object_row(app, ui, id, &name, text, &label, &tip);
         if app.tree_expanded() == Some(id) {
             ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
         }
     }
+}
+
+/// The width `object_row` reserves for its Solid/Hole toggle.
+const ROLE_TOGGLE_WIDTH: f32 = 26.0;
+
+/// An object row (the tree row plus, at its right end, a Solid/Hole
+/// toggle): the toggle only shows while the row (or the toggle itself) is
+/// hovered, so rows stay clean otherwise. One click is one undo step
+/// ([`MeshFixerApp::toggle_role`]), the same change H and the Browser's
+/// menu make.
+fn object_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    id: mf_command::ObjectId,
+    name: &str,
+    text: RichText,
+    label: &str,
+    tip: &str,
+) {
+    let hole = app.is_hole(id);
+    let full_width = ui.available_width();
+    let row_rect =
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
+    let row_hovered = ui.rect_contains_pointer(row_rect);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.scope(|ui| {
+            ui.set_width(full_width - ROLE_TOGGLE_WIDTH);
+            tree_row(
+                app,
+                ui,
+                &TreeItem::Object(id),
+                Row {
+                    // A Hole's row says so with its own icon.
+                    icon: Some(if hole {
+                        (icons::HOLE_ROLE, theme::TEXT_MUTED)
+                    } else {
+                        (icons::OBJECT, theme::TEXT_MUTED)
+                    }),
+                    text,
+                    size: None,
+                    label,
+                },
+                |ui| {
+                    ui.label(tip);
+                },
+            );
+        });
+        let action = if hole {
+            t!("role.make_solid")
+        } else {
+            t!("role.make_hole")
+        };
+        let toggle_label = format!("{name}: {action}");
+        ui.scope(|ui| {
+            ui.set_width(ROLE_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                if widgets::icon_button(
+                    ui,
+                    if hole {
+                        icons::OBJECT
+                    } else {
+                        icons::HOLE_ROLE
+                    },
+                    &toggle_label,
+                    None,
+                    22.0,
+                )
+                .on_hover_text(format!("{action} (H)"))
+                .clicked()
+                {
+                    app.toggle_role(&[id]);
+                }
+            } else {
+                // Reserve the space even when hidden, so the row's width
+                // (and the name column it truncates to) never shifts.
+                ui.allocate_space(egui::vec2(22.0, 22.0));
+            }
+        });
+    });
 }
 
 /// What a tree row shows: an icon, its text, its size at the right
@@ -1316,7 +1380,7 @@ fn tree_row(
     item: &TreeItem,
     row: Row<'_>,
     tooltip: impl FnOnce(&mut egui::Ui),
-) {
+) -> egui::Response {
     let width = ui.available_width();
     let selected = app.tree_selected(item);
     let mut text = egui::text::LayoutJob::default();
@@ -1401,6 +1465,7 @@ fn tree_row(
     } else if response.clicked() {
         app.tree_select(item);
     }
+    response
 }
 
 /// Rows `0..n` of a list, each `draw(ui, i)` one row high, laid out only

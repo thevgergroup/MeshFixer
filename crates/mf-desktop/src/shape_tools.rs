@@ -644,30 +644,54 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     } else {
         widgets::body(ui, combine_summary(solids.len(), holes.len()));
     }
-    // Each selected object with its role.
+    // Each selected object with its role, and a toggle to switch it (H,
+    // and the Browser's menu, do the same in one undo step).
     section(ui, &t!("combine.section.objects"));
     let doc = app.session.document();
-    let rows: Vec<(String, bool)> = selected
+    let rows: Vec<(ObjectId, String, bool)> = selected
         .iter()
-        .filter_map(|&id| doc.object(id).map(|o| (o.name.clone(), o.is_hole())))
+        .filter_map(|&id| doc.object(id).map(|o| (id, o.name.clone(), o.is_hole())))
         .collect();
-    for (name, hole) in rows {
+    for (id, name, hole) in rows {
         ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(if hole {
-                    icons::HOLE_ROLE
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let action = if hole {
+                    t!("role.make_solid")
                 } else {
-                    icons::OBJECT
-                })
-                .font(icons::font(theme::ICON_SIZE - 2.0))
-                .color(theme::TEXT_MUTED),
-            );
-            let role = if hole {
-                t!("combine.role.hole")
-            } else {
-                t!("combine.role.solid")
-            };
-            widgets::body(ui, format!("{name} · {role}"));
+                    t!("role.make_hole")
+                };
+                if widgets::icon_button(
+                    ui,
+                    if hole {
+                        icons::OBJECT
+                    } else {
+                        icons::HOLE_ROLE
+                    },
+                    &format!("{name}: {action}"),
+                    None,
+                    22.0,
+                )
+                .on_hover_text(format!("{action} (H)"))
+                .clicked()
+                {
+                    app.toggle_role(&[id]);
+                }
+                ui.label(
+                    RichText::new(if hole {
+                        icons::HOLE_ROLE
+                    } else {
+                        icons::OBJECT
+                    })
+                    .font(icons::font(theme::ICON_SIZE - 2.0))
+                    .color(theme::TEXT_MUTED),
+                );
+                let role = if hole {
+                    t!("combine.role.hole")
+                } else {
+                    t!("combine.role.solid")
+                };
+                widgets::body(ui, format!("{name} · {role}"));
+            });
         });
     }
     widgets::caption(ui, t!("combine.role_help"));

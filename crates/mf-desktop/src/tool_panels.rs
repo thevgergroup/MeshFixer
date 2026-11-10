@@ -753,6 +753,7 @@ fn inspector_summary(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         );
         widgets::title(ui, &name);
     });
+    role_segmented(app, ui);
     let units = app.session.document().units();
     let Some(a) = app.current_analysis() else {
         widgets::caption(
@@ -778,6 +779,43 @@ fn inspector_summary(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         );
     }
     widgets::caption(ui, count(a.diagnostics.triangle_count, "triangle"));
+}
+
+/// The Solid/Hole segmented control for the objects selected together (H,
+/// the Browser's menu, and this do the same thing, as one undo step): hard
+/// to discover from the shortcut alone, so the summary offers it directly.
+/// Its current segment is Hole only if every selected object is one (the
+/// same rule [`MeshFixerApp::toggle_role`] uses to decide which way to
+/// flip); clicking the other segment is what flips it.
+fn role_segmented(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let ids = app.selected_objects();
+    if ids.is_empty() {
+        return;
+    }
+    let all_hole = ids.iter().all(|&id| app.is_hole(id));
+    const SOLID: usize = 0;
+    const HOLE: usize = 1;
+    let options = [
+        (icons::OBJECT, t!("combine.role.solid"), true),
+        (icons::HOLE_ROLE, t!("combine.role.hole"), true),
+    ];
+    let labelled: Vec<(&str, &str, bool)> = options
+        .iter()
+        .map(|(icon, label, enabled)| (*icon, label.as_str(), *enabled))
+        .collect();
+    let current = if all_hole { HOLE } else { SOLID };
+    ui.add_space(theme::SPACE_XS);
+    ui.scope(|ui| {
+        ui.set_max_width(160.0);
+        let (clicked, responses) = widgets::segmented(ui, &labelled, current);
+        for (r, (_, label, _)) in responses.into_iter().zip(&options) {
+            // allow-swallow: the tooltip's response carries nothing more
+            let _ = r.on_hover_text(format!("{label} (H)"));
+        }
+        if clicked.is_some_and(|i| i != current) {
+            app.toggle_role(&ids);
+        }
+    });
 }
 
 /// The counts the summary and Repair show: (holes, cracks, marked, loose,
