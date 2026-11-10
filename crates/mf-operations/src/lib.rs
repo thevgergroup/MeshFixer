@@ -9,11 +9,15 @@ use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
 
+mod add_part;
 mod affine;
+pub mod blend;
 mod boolean;
 mod compact;
+pub mod materials;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
+pub use fill_holes::fairing::{Failed as FairFailed, Style as FairStyle, fair_region};
 pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 
 /// Most bytes `mesh.fill_holes` spends on triangulation tables at once:
@@ -306,6 +310,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::Delete,
     &split::SplitPlane,
     &sculpt::SculptStroke,
+    &add_part::AddPart,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

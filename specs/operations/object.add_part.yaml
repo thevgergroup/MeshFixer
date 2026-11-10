@@ -1,0 +1,29 @@
+id: object.add_part
+version: 1
+summary: Add a part from the parts library as a new object, placed on the target.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: part_id
+    type: text
+    default: ""
+    description: "The library part's id (a built-in such as sphere, or a user part)"
+  - name: part_hash
+    type: text
+    default: ""
+    description: "The part's content hash as recorded; replay refuses a part whose content changed (empty: don't check)"
+  - name: transform
+    type: affine
+    default: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    description: "Where the part goes: its absolute placement, 12 numbers (3x3 linear part row by row, then translation)"
+preconditions:
+  - the part is in the library, with the recorded hash
+postconditions:
+  - a new object holds the part's mesh at the given transform
+  - the target is unchanged
+effects: [creates_objects]
+runtime:
+  cancellable: true
+  progress: false

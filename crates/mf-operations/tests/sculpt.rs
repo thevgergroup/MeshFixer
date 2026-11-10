@@ -43,6 +43,7 @@ fn params(kind: BrushKind) -> BrushParams {
         limit_to: None,
         frozen: Vec::new(),
         view_dir: [-1.0, 0.0, 0.0],
+        detail: 0.0,
     }
 }
 

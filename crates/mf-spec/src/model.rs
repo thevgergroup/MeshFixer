@@ -113,6 +113,10 @@ pub enum ParamKind {
     Affine {
         default: [f64; 12],
     },
+    /// Free text (`type: text`): a name or an id, such as a library part's.
+    Text {
+        default: String,
+    },
     /// A sculpt stroke's dabs (`type: samples`, default `[]`); see
     /// [`ParamValue::Samples`].
     Samples,
@@ -130,6 +134,7 @@ impl ParamKind {
             ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
             ParamKind::Vec3 { default } => ParamValue::Vec3(*default),
             ParamKind::Affine { default } => ParamValue::Affine(*default),
+            ParamKind::Text { default } => ParamValue::Text(default.clone()),
             ParamKind::Samples => ParamValue::Samples(Vec::new()),
             ParamKind::Faces => ParamValue::Faces(Default::default()),
         }
@@ -238,6 +243,10 @@ impl TryFrom<RawParam> for ParamSpec {
             "affine" => ParamKind::Affine {
                 default: r.default.as_f64_array::<12>("default")?,
             },
+            "text" => match r.default {
+                Scalar::Text(default) => ParamKind::Text { default },
+                _ => return Err("a text default must be a string".into()),
+            },
             "samples" | "faces" => {
                 if !matches!(&r.default, Scalar::Array(a) if a.is_empty()) {
                     return Err(format!("a {} parameter's default must be []", r.ty));
@@ -300,6 +309,7 @@ impl From<ParamSpec> for RawParam {
                 None,
                 None,
             ),
+            ParamKind::Text { default } => ("text", Scalar::Text(default), None, None),
             ParamKind::Samples => ("samples", Scalar::Array(Vec::new()), None, None),
             ParamKind::Faces => ("faces", Scalar::Array(Vec::new()), None, None),
         };
@@ -479,6 +489,7 @@ impl ParamSpec {
             ParamKind::Vec3 { .. } => parse_f64_csv::<3>(text)
                 .map(ParamValue::Vec3)
                 .ok_or_else(|| invalid("expected x,y,z")),
+            ParamKind::Text { .. } => Ok(ParamValue::Text(text.to_owned())),
             ParamKind::Samples => parse_samples(text).map(ParamValue::Samples).ok_or_else(|| {
                 invalid("expected face,b0,b1,b2,pressure per dab, dabs separated by ;")
             }),

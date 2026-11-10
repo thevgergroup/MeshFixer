@@ -57,6 +57,16 @@ parameters:
     type: faces
     default: []
     description: "Faces that must not move (the freeze mask), comma-separated"
+  - name: detail_mode
+    type: choice
+    default: "off"
+    values: ["off", adaptive]
+    description: "Dynamic detail: off, or adaptive (split, collapse and flip under the brush toward the detail edge length)"
+  - name: detail
+    type: float
+    default: 0.25
+    min: 0.0
+    description: "With adaptive detail: the target edge length as a fraction of the radius (0 is off)"
 preconditions:
   - every sample names a live face of the target
 postconditions:

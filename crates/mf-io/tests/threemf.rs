@@ -268,8 +268,90 @@ fn threemf_extensions_and_properties_are_warned_never_silently_lost() {
         has("s:slicestack"),
         "non-core elements are named: {warnings:?}"
     );
-    assert!(has("material") && has("colour"), "{warnings:?}");
+    // Materials import now (MF-ISSUE-091): no "ignored" warning.
+    assert!(
+        !has("ignored; MeshFixer imports geometry only"),
+        "{warnings:?}"
+    );
+    assert_eq!(m.objects[0].mesh.materials()[0].name, "red");
+    assert_eq!(
+        m.objects[0].mesh.face_material(mf_geometry::FaceId(0)),
+        Some(0)
+    );
     assert!(has("object 2") && has("support"), "{warnings:?}");
+}
+
+/// MF-ISSUE-091: base materials and the Materials extension's colour
+/// groups import as per-face materials (object default plus per-triangle
+/// overrides), and survive an export and re-import.
+#[test]
+fn threemf_materials_and_colours_round_trip() {
+    let xml = r##"<?xml version="1.0"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+  <resources>
+    <basematerials id="5"><base name="PLA white" displaycolor="#FFFFFF"/><base name="PLA red" displaycolor="#FF0000"/></basematerials>
+    <m:colorgroup id="6"><m:color color="#00FF0080"/><m:color color="#0000FF"/></m:colorgroup>
+    <object id="1" type="model" pid="5" pindex="0"><mesh>
+      <vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/><vertex x="0" y="0" z="1"/></vertices>
+      <triangles>
+        <triangle v1="0" v2="2" v3="1"/>
+        <triangle v1="0" v2="1" v3="3" p1="1"/>
+        <triangle v1="1" v2="2" v3="3" pid="6" p1="0"/>
+        <triangle v1="0" v2="3" v3="2" pid="6" p1="1" p2="0"/>
+      </triangles></mesh></object>
+  </resources>
+  <build><item objectid="1"/></build>
+</model>"##;
+    let (m, warnings) = threemf::read(&zip_model(xml, true)).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("corner")),
+        "{warnings:?}"
+    );
+    let mesh = &m.objects[0].mesh;
+    let names: Vec<(String, [u8; 4])> = (0..4)
+        .map(|f| {
+            let mat =
+                &mesh.materials()[mesh.face_material(mf_geometry::FaceId(f)).unwrap() as usize];
+            (mat.name.clone(), mat.color)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("PLA white".into(), [255, 255, 255, 255]),
+            ("PLA red".into(), [255, 0, 0, 255]),
+            (String::new(), [0, 255, 0, 128]),
+            (String::new(), [0, 0, 255, 255]),
+        ]
+    );
+    assert_eq!(mesh.default_material(), Some(0));
+    // Export and read back: the same colour on every face.
+    let bytes = threemf::write(&m).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let b = &back.objects[0].mesh;
+    for f in 0..4 {
+        let f = mf_geometry::FaceId(f);
+        let color =
+            |x: &mf_geometry::Mesh| x.materials()[x.face_material(f).unwrap() as usize].color;
+        assert_eq!(color(b), color(mesh), "{f:?}");
+    }
+    // A colour-free model still writes no properties at all.
+    let plain = Model {
+        unit: Unit::Millimeter,
+        objects: vec![obj("plain", cube(1.0), IDENTITY)],
+    };
+    let (plain_back, _) = threemf::read(&threemf::write(&plain).unwrap()).unwrap();
+    assert!(!plain_back.objects[0].mesh.has_materials());
+    assert_eq!(
+        plain_back.objects[0].mesh.content_hash(),
+        cube(1.0).content_hash(),
+        "no materials: the same hash as before MF-ISSUE-091"
+    );
+    // A missing property group is a named error, not a silent default.
+    let bad = xml.replace(r#"pid="6" p1="0""#, r#"pid="9" p1="0""#);
+    assert!(threemf::read(&zip_model(&bad, true)).is_err());
 }
 
 /// MF-ISSUE-034: an empty mesh object (no vertices/triangles) is left out of

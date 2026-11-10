@@ -30,6 +30,7 @@ use mf_runtime::RunContext;
 
 use super::brush::{BrushKind, BrushParams, DabSample};
 use super::index::SculptIndex;
+use super::remesh::{RegionAdjacency, RemeshStats, remesh_region};
 use crate::OpError;
 
 /// What one dab changed: the GPU face chunks and vertex groups (of
@@ -100,6 +101,9 @@ pub struct StrokeState<'a> {
     created_faces: Vec<FaceId>,
     centres: Vec<V3>,
     base_faces: u32,
+    /// Created faces → the input faces they came from (remeshing).
+    origins: HashMap<FaceId, Vec<FaceId>>,
+    remesh: RemeshStats,
 }
 
 /// A vertex's surroundings for one dab evaluation.
@@ -130,6 +134,8 @@ impl<'a> StrokeState<'a> {
             created_faces: Vec::new(),
             centres: Vec::new(),
             base_faces: base.face_slots(),
+            origins: HashMap::new(),
+            remesh: RemeshStats::default(),
         }
     }
 
@@ -140,6 +146,11 @@ impl<'a> StrokeState<'a> {
     /// Every dab centre applied so far, mirrored ones included.
     pub fn centres(&self) -> &[V3] {
         &self.centres
+    }
+
+    /// What dynamic detail has done so far in this stroke.
+    pub fn remesh_stats(&self) -> RemeshStats {
+        self.remesh
     }
 
     /// The mesh as stroked so far. Cheap: it shares every chunk with the
@@ -402,11 +413,20 @@ impl<'a> StrokeState<'a> {
         }
         self.drift += moved_max;
         self.prev_centre = Some(c);
+        let mut remeshed: Vec<usize> = Vec::new();
+        if self.params.detail > 0.0 {
+            let n = masks.len();
+            let centres: Vec<V3> = self.centres[self.centres.len() - n..].to_vec();
+            for cm in centres {
+                remeshed.extend(self.remesh_at(cm, ctx)?);
+            }
+        }
         let mut face_chunks: Vec<usize> = evals
             .iter()
             .flat_map(|(_, l)| l.faces.iter())
             .filter(|(_, t)| t.iter().any(|v| moved.contains(v)))
             .map(|(f, _)| f.0 as usize / CHUNK)
+            .chain(remeshed)
             .collect();
         face_chunks.sort_unstable();
         face_chunks.dedup();
@@ -423,6 +443,62 @@ impl<'a> StrokeState<'a> {
         self.base
             .position(VertexId(v))
             .expect("a face of the input revision has live corners")
+    }
+
+    /// Remeshes the faces wholly within the radius of `c` (and movable)
+    /// toward `detail × radius`. Returns the face chunks it changed.
+    fn remesh_at(&mut self, c: V3, ctx: &RunContext) -> Result<Vec<usize>, OpError> {
+        let r = self.params.radius;
+        let local = self.gather(c, r);
+        let inside = |v: u32| {
+            let p = self.pos(v);
+            dot(sub(p, c), sub(p, c)) < r * r
+        };
+        let region: Vec<FaceId> = local
+            .faces
+            .iter()
+            .filter(|(f, t)| {
+                t.iter().all(|&v| inside(v))
+                    && !self.frozen.contains(&f.0)
+                    && self.limit.as_ref().is_none_or(|l| l.contains(&f.0))
+            })
+            .map(|(f, _)| *f)
+            .collect();
+        if region.is_empty() {
+            return Ok(Vec::new());
+        }
+        let around: Vec<FaceId> = local.faces.iter().map(|(f, _)| *f).collect();
+        let first_new = self.edit.face_slots();
+        let mut adj = RegionAdjacency::new(
+            &self.edit,
+            &region,
+            &around,
+            self.base_faces,
+            &std::mem::take(&mut self.origins),
+        );
+        let stats = remesh_region(&mut self.edit, &mut adj, self.params.detail * r, ctx)?;
+        self.origins = adj.into_origins();
+        self.remesh.splits += stats.splits;
+        self.remesh.collapses += stats.collapses;
+        self.remesh.flips += stats.flips;
+        self.remesh.capped |= stats.capped;
+        let created: Vec<FaceId> = (first_new..self.edit.face_slots())
+            .map(FaceId)
+            .filter(|&f| self.edit.face(f).is_some())
+            .collect();
+        if let Some(l) = &mut self.limit {
+            // Faces made from limited faces are limited too.
+            l.extend(created.iter().map(|f| f.0));
+        }
+        let mut chunks: Vec<usize> = region
+            .iter()
+            .chain(&created)
+            .map(|f| f.0 as usize / CHUNK)
+            .collect();
+        chunks.sort_unstable();
+        chunks.dedup();
+        self.created_faces.extend(created);
+        Ok(chunks)
     }
 
     /// Each vertex's total displacement from all mirror images of the dab,

@@ -118,6 +118,11 @@ impl Params {
         }
     }
 
+    /// A `text` parameter's value.
+    pub fn get_text(&self, name: &str) -> Result<&str, SpecError> {
+        self.get_choice(name)
+    }
+
     /// A `choice` parameter's word.
     pub fn get_choice(&self, name: &str) -> Result<&str, SpecError> {
         match self.0.get(name) {

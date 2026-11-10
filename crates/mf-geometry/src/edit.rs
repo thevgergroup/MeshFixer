@@ -20,6 +20,7 @@ pub struct MeshEdit {
     face_count: usize,
     vertex_count: usize,
     prov: Provenance,
+    materials: crate::materials::MaterialData,
     /// Any vertex removed in this edit, including one it created. Drives the
     /// referential-integrity check in `finish` (provenance alone misses
     /// created-then-removed vertices).
@@ -40,6 +41,7 @@ impl MeshEdit {
             face_count: inner.face_count,
             vertex_count: inner.vertex_count,
             prov: Provenance::default(),
+            materials: inner.materials.clone(),
             vertex_removed: false,
         }
     }
@@ -78,13 +80,14 @@ impl MeshEdit {
     /// geometry (a live sculpt preview). Not checked like
     /// [`MeshEdit::finish`]; the edit's own `finish` is.
     pub fn snapshot(&self) -> Mesh {
-        Mesh::from_parts(
+        Mesh::from_parts_with(
             self.positions.clone(),
             self.faces.clone(),
             self.face_live.clone(),
             self.vertex_live.clone(),
             self.face_count,
             self.vertex_count,
+            self.materials.clone(),
         )
     }
 
@@ -140,6 +143,10 @@ impl MeshEdit {
         }
         let id = FaceId(self.faces.len() as u32);
         self.faces.push(tri);
+        if let Some(m) = &mut self.materials.faces {
+            // Filled from the sources by the command layer (MF-ISSUE-091).
+            m.push(crate::materials::NO_MATERIAL);
+        }
         self.face_live.push(true);
         self.face_count += 1;
         self.prov.created_faces.push((id, sources));
@@ -231,13 +238,14 @@ impl MeshEdit {
             .retain(|v| vertex_live.get(v.0 as usize));
         self.prov.moved_vertices.sort_unstable();
         self.prov.moved_vertices.dedup();
-        let mesh = Mesh::from_parts(
+        let mesh = Mesh::from_parts_with(
             self.positions,
             self.faces,
             self.face_live,
             self.vertex_live,
             self.face_count,
             self.vertex_count,
+            self.materials,
         );
         Ok((mesh, self.prov))
     }

@@ -25,6 +25,7 @@ mf-document.workspace = true
 serde.workspace = true
 mf-geometry.workspace = true
 mf-boolean.workspace = true
+mf-parts.workspace = true
 mf-spec.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
