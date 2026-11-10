@@ -52,6 +52,10 @@ timing=(
   # The messy-model collection (15 real files, one of 5.7M triangles):
   # alone, so its recorded times and peak heap are its own.
   "mf-operations messy_corpus every_messy_model_imports_and_analyses every_messy_model_fills_or_refuses_by_name targeted_fill_on_messy_models_is_untouched_outside messy_results_are_recorded"
+  # The boolean kernel qualification (Phase 1 Task 7, ADR-0002): the messy
+  # collection through the kernel, and 1M × 1M unions timed and cancelled.
+  # Alone, so their times and peak heap are their own.
+  "mf-boolean qualify qualify_corpus qualify_1m_union qualify_cancel"
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,
   # so its frames don't compete with other GPU tests.
   "mf-cli bench_orbit bench_orbit_json_has_device_info_and_percentiles"

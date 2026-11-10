@@ -20,6 +20,7 @@ mf-metrics = { path = "crates/mf-metrics" }
 mf-document = { path = "crates/mf-document" }
 mf-selection = { path = "crates/mf-selection" }
 mf-runtime = { path = "crates/mf-runtime" }
+mf-boolean = { path = "crates/mf-boolean" }
 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
@@ -48,6 +49,12 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 # MF-ISSUE-053; owner-approved 2026-11-09). Integer-only; the numeric
 # factorisation is our own scalar code, so results stay bit-identical
 # across CPUs (faer's SIMD kernels pick a width per machine).
+# D1: the boolean kernel, exact (rational) engine only, behind
+# mf-boolean::Kernel. Pinned: its qualification (Phase 1 Task 7, ADR-0002)
+# is for this exact version.
+manifold-rust = { version = "=0.19.2", default-features = false, features = ["parallel"] }
+# D2: Shewchuk's adaptive exact predicates.
+robust = "1.2"
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 
 [workspace.lints.rust]
@@ -100,4 +107,35 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.egui-wgpu]
+opt-level = 2
+
+# The boolean kernel (D1) and its rational arithmetic run at release speed
+# in tests: the Task 7 qualification times 1M-triangle booleans in the test
+# harness, and unoptimised exact arithmetic would measure the build, not
+# the kernel. Their debug assertions and overflow checks are off (they are
+# third-party crates); ours stay on.
+[profile.dev.package.manifold-rust]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.dashu-int]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.dashu-ratio]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.dashu-base]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+[profile.dev.package.robust]
+opt-level = 3
+
+[profile.dev.package.mf-boolean]
 opt-level = 2
