@@ -53,6 +53,10 @@ pub enum KernelError {
     /// so it doesn't bound a solid.
     #[error("operand {operand} is not closed, so it does not bound a solid")]
     NotClosed { operand: u8 },
+    /// The operand (0 = `a`, 1 = `b`) intersects itself (`faces` of its
+    /// faces do), and this kernel needs operands that don't.
+    #[error("operand {operand} intersects itself ({faces} faces), which this kernel can't take")]
+    SelfIntersecting { operand: u8, faces: usize },
     #[error("cancelled by the user")]
     Cancelled,
     /// Anything else the kernel reported, verbatim.
@@ -65,6 +69,7 @@ impl KernelError {
     pub fn code(&self) -> &'static str {
         match self {
             KernelError::NotClosed { .. } => "not_closed",
+            KernelError::SelfIntersecting { .. } => "self_intersecting_operand",
             KernelError::Cancelled => "cancelled",
             KernelError::Internal(_) => "kernel_internal",
         }

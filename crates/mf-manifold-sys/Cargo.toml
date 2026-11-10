@@ -1,0 +1,26 @@
+[package]
+name = "mf-manifold-sys"
+version = "0.0.1"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/thevgergroup/MeshFixer"
+description = "A minimal safe binding to the C++ Manifold library (Phase 1 Task 7b kernel qualification)"
+build = "build.rs"
+links = "mf_manifold"
+
+# The FFI needs `unsafe`, which the workspace forbids; this crate is the
+# one place it is allowed, every block with a SAFETY comment.
+[lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[lints.clippy]
+unwrap_used = "warn"
+undocumented_unsafe_blocks = "deny"
+
+[build-dependencies]
+cmake = "0.1.58"
+cc = "1.2"
+
+# Its own workspace root: it is excluded from the MeshFixer workspace (see
+# the root Cargo.toml), and this stops cargo looking further up for one.
+[workspace]

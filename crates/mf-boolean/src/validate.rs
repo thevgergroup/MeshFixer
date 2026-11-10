@@ -19,9 +19,14 @@
 //!
 //! Every decision is exact; nothing is decided with a tolerance.
 
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use mf_runtime::{Cancelled, RunContext, par_sort_unstable_by_key};
 use rayon::prelude::*;
 use robust::{Coord, Coord3D, orient2d, orient3d};
+
+use crate::kernel::{KernelMesh, KernelResult};
 
 /// Why a mesh is not a valid solid. Each variant names the first offender
 /// (in a deterministic order) and how many there are.
@@ -81,6 +86,16 @@ pub fn validate_solid(
     triangles: &[[u32; 3]],
     ctx: &RunContext,
 ) -> Result<(), SolidError> {
+    prechecks(positions, triangles, ctx)?;
+    check_intersections(positions, triangles, &|_, _| true, ctx)
+}
+
+/// Steps 1–3 of [`validate_solid`].
+fn prechecks(
+    positions: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    ctx: &RunContext,
+) -> Result<(), SolidError> {
     ctx.checkpoint()?;
     if triangles.is_empty() {
         return Err(SolidError::Empty);
@@ -100,7 +115,107 @@ pub fn validate_solid(
             faces: degenerate.iter().filter(|&&d| d).count(),
         });
     }
-    check_intersections(positions, triangles, ctx)
+    Ok(())
+}
+
+/// Checks a boolean result (D4, Task 7b): everything [`validate_solid`]
+/// checks, except that a self-intersection already present in an input is
+/// the input's, not the kernel's. A pair of intersecting output faces is
+/// *new* unless both lie on faces of the same operand that intersect each
+/// other in that operand (found through `result.origin` and the operands'
+/// `face_ids`). Faces of the two operands meeting is always new: the
+/// kernel should have resolved it. Two pieces of one input face meeting is
+/// new too.
+///
+/// Labels in `result.origin` that name no input face make the pair new.
+pub fn validate_boolean(
+    result: &KernelResult,
+    inputs: [&KernelMesh; 2],
+    ctx: &RunContext,
+) -> Result<(), SolidError> {
+    let (positions, triangles) = (&result.positions, &result.triangles);
+    prechecks(positions, triangles, ctx)?;
+    // Label → (operand, triangle).
+    let mut source: HashMap<(u8, u32), (usize, u32)> = HashMap::new();
+    for (i, m) in inputs.iter().enumerate() {
+        for (t, label) in m.face_ids.iter().enumerate() {
+            source.insert(*label, (i, t as u32));
+        }
+    }
+    let src: Vec<Option<(usize, u32)>> = result
+        .origin
+        .iter()
+        .map(|o| source.get(o).copied())
+        .collect();
+    let counts = |f: u32, g: u32| -> bool {
+        let (Some(Some((i, x))), Some(Some((j, y)))) = (src.get(f as usize), src.get(g as usize))
+        else {
+            return true;
+        };
+        if i != j || x == y {
+            return true;
+        }
+        let m = inputs[*i];
+        !input_faces_intersect(
+            &m.positions,
+            m.triangles[*x as usize],
+            m.triangles[*y as usize],
+        )
+    };
+    check_intersections(positions, triangles, &counts, ctx)
+}
+
+/// Whether faces `a` and `b` of an input intersect (by the same rule as
+/// [`validate_solid`]). A degenerate face counts as touching whatever it
+/// meets: it is the input's own defect.
+fn input_faces_intersect(p: &[[f64; 3]], a: [u32; 3], b: [u32; 3]) -> bool {
+    let degenerate = |t: [u32; 3]| {
+        let [x, y, z] = corners(p, t);
+        t[0] == t[1] || t[1] == t[2] || t[0] == t[2] || drop_axis(x, y, z).is_none()
+    };
+    if degenerate(a) || degenerate(b) {
+        return true;
+    }
+    intersects(p, a, b)
+}
+
+/// Which faces intersect another face of the same mesh (by the rule of
+/// [`validate_solid`], step 4). Indices must be in range; degenerate faces
+/// are tested as they are.
+pub fn self_intersecting_faces(
+    positions: &[[f64; 3]],
+    triangles: &[[u32; 3]],
+    ctx: &RunContext,
+) -> Result<Vec<bool>, SolidError> {
+    let n = positions.len() as u64;
+    if let Some(face) = triangles
+        .iter()
+        .position(|t| t.iter().any(|&v| u64::from(v) >= n))
+    {
+        return Err(SolidError::IndexOutOfRange { face: face as u32 });
+    }
+    let flags: Vec<AtomicBool> = (0..triangles.len())
+        .map(|_| AtomicBool::new(false))
+        .collect();
+    if triangles.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mark = |f: u32, g: u32| -> bool {
+        flags[f as usize].store(true, Ordering::Relaxed);
+        flags[g as usize].store(true, Ordering::Relaxed);
+        false
+    };
+    check_intersections(positions, triangles, &mark, ctx)?;
+    Ok(flags.into_iter().map(AtomicBool::into_inner).collect())
+}
+
+/// Whether some edge is used by only one face.
+#[cfg(feature = "manifold-cpp")]
+pub(crate) fn has_open_edge(triangles: &[[u32; 3]]) -> bool {
+    matches!(
+        check_edges(triangles, &RunContext::none()),
+        Err(SolidError::NotClosed { .. })
+    )
 }
 
 fn c3(p: [f64; 3]) -> Coord3D<f64> {
@@ -271,9 +386,12 @@ fn merge_found(a: Found, b: Found) -> Found {
     }
 }
 
+/// Step 4: every pair of faces that intersect, decided exactly, is passed
+/// to `counts`; the pairs it returns `true` for are reported.
 fn check_intersections(
     positions: &[[f64; 3]],
     triangles: &[[u32; 3]],
+    counts: &(dyn Fn(u32, u32) -> bool + Sync),
     ctx: &RunContext,
 ) -> Result<(), SolidError> {
     let bounds: Vec<Bounds> = triangles
@@ -343,7 +461,7 @@ fn check_intersections(
     let cells: Vec<&[(u64, u32)]> = entries.chunk_by(|a, b| a.0 == b.0).collect();
 
     let test = |f: u32, g: u32| -> bool {
-        intersects(positions, triangles[f as usize], triangles[g as usize])
+        intersects(positions, triangles[f as usize], triangles[g as usize]) && counts(f, g)
     };
 
     let in_cells: Found = cells

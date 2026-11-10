@@ -14,6 +14,12 @@ manifold-rust.workspace = true
 robust.workspace = true
 thiserror.workspace = true
 rayon.workspace = true
+mf-manifold-sys = { workspace = true, optional = true }
+
+[features]
+# The C++ Manifold kernel (`ManifoldCpp`, Task 7b). Needs CMake, a C++17
+# compiler, git and network access at build time (see mf-manifold-sys).
+manifold-cpp = ["dep:mf-manifold-sys"]
 
 [dev-dependencies]
 mf-fixtures.workspace = true

@@ -1,60 +1,133 @@
 # ADR-0002: Boolean kernel
 
-Status: **Rejected for shipping (NO-GO)**: Phase 1 Task 7 qualification, 2026-11-10. `manifold-rust` =0.19.2 failed gates 1, 3 (on real models), 4 and 5. Booleans don't ship on it. Per D1, work on booleans stops until there is a replacement-kernel plan (ADR-0002b).
+Status: **No kernel qualifies (re-qualified in Task 7b, 2026-11-10).** `manifold-rust` 0.19.2 fails gates 1, 3 and 5. C++ Manifold 3.5.3 passes gates 1–4 but fails gate 5: its exact operand check refuses a gated window. The outline plan for our own kernel is ADR-0002b (`0002b-home-grown-kernel.md`), with two cheaper alternatives for the owner to rule on. Booleans don't ship until one of them passes these gates.
 
 ## Context
 
-D1 (Phase 1 plan) picked `manifold-rust` 0.19.2's robust engine as the boolean kernel. It runs exact rational arithmetic on a mesh arrangement. It sits behind the `mf-boolean::Kernel` trait, on the condition that it passes the Task 7 qualification gate. D4 says every result is validated independently and an invalid result is refused by name. D5 says booleans cost what the overlap costs.
+D1 (Phase 1 plan) picked `manifold-rust` 0.19.2's robust engine as the boolean kernel, behind the `mf-boolean::Kernel` trait, if it passed the Task 7 qualification. D4 says every result is validated independently, and an invalid result is refused by name. D5 says booleans cost what the overlap costs: the kernel only ever sees a local window.
 
-Task 7 built:
-- the adapter (`ManifoldRobust`, `crates/mf-boolean/src/manifold.rs`);
-- the cancel and progress bridge;
-- a minimal exact `validate_solid` (`crates/mf-boolean/src/validate.rs`). It checks that the mesh is closed, edge-manifold and consistently oriented, that no face is degenerate, and that it doesn't self-intersect. It uses `robust` predicates over a grid broad phase.
-- the five gates (`crates/mf-boolean/tests/qualify.rs`).
+Task 7 rejected `manifold-rust` (history below). The controller found that two of its gates didn't match the plan's own contracts:
+- Gate 1 counted the input's *own* self-intersections against the kernel. D4 asks for no *new* ones.
+- Gates 4 and 5 timed whole 1M × 1M operands, a case D5 never runs.
 
-## Gate results
+Task 7b fixed the gates and qualified a second kernel through the same harness.
 
-Measured on an Apple M2 Max (12 cores, 32 GB) in the test harness. `manifold-rust` and `dashu` ran at opt-level 3 without debug assertions; there was no LTO. The machine was shared with another agent's work: load average 15–35, and swap almost full. That probably inflates the times, but by less than the margins they missed by. 1M × 1M ran *faster* on 1 thread (21.8 s) than on 11 (31.6 s). Raw results: `artifacts/phase1/p1-m2/qualify.json`. The corpus run hit a bug in the test harness on its last model and was finished by re-running that model alone (the note in the JSON says how).
+## What Task 7b changed
+
+- **Validator** (`validate_boolean`, `crates/mf-boolean/src/validate.rs`). A self-intersection in a result counts only if it is *new*. Two output faces that meet are excused only when both lie on faces of the same operand that meet each other in that operand. Origins are mapped back through the operands' `face_ids`. Faces of the two operands meeting is always new, and so are two pieces of one input face meeting. Everything else `validate_solid` checks is unchanged. `self_intersecting_faces` flags an input's own crossing faces, and the provenance completeness check skips them.
+- **Degenerate post-pass** (`remove_created_degenerates`, `crates/mf-boolean/src/cleanup.rs`). It removes zero-area triangles that the kernel created on input faces with area. Each decision uses exact `orient2d`, and each edit leaves the surface's point set unchanged:
+  - **flip:** a collinear cap is flipped against its neighbour, and both new triangles take the neighbour's provenance;
+  - **collapse:** coincident vertices are collapsed, under the link condition.
+
+  The pass doesn't touch what it can't remove; D4 refuses it by name. Nothing is decided with a tolerance.
+- **Windows** (gate 4 and 5 cases). A window operand is cut from the real model (untimed) and validated before use:
+  - **Closed targets:** `target ∩ (tool box + margin)`. This is the D5 window geometry: the target's faces clipped at the box, plus caps from the box faces.
+  - **The open Archaeopteryx scan:** the connected patch inside the box, closed into a prism (the patch, a copy translated along its mean normal, and side walls). This stands in for D15's local closure. The first seed whose prism validates is used, and the rejected ones are recorded.
+
+  "End to end" counts the linear scan of the whole target for faces in the window, the kernel, the post-pass and `validate_boolean`. D5's clip, cap triangulation and weld are Task 8 and aren't measured.
+- **The C++ kernel** (`ManifoldCpp`, `crates/mf-boolean/src/manifold_cpp.rs`, feature `manifold-cpp`). It runs through our own minimal binding, `crates/mf-manifold-sys`: CMake builds C++ Manifold v3.5.3 and oneTBB, and a 160-line C++ shim sits on top. The `manifold3d` / `manifold-csg` crates were rejected because upstream's C API can't set `MeshGL64::faceID`. Without it, Manifold merges coplanar input triangles, so per-triangle provenance is lost. The C API also can't bound the thread count.
+  - **Provenance:** every input triangle is its own `faceID`.
+  - **Cancel:** import and boolean both observe Manifold's `ExecutionContext` (added in v3.5). A watcher forwards our token every 2 ms. The C++ call returns, so nothing is detached.
+  - **Threads:** the boolean runs in a oneTBB arena as wide as the current `rayon` pool.
+  - **Two variants were measured.** `cpp` checks each operand exactly first and refuses one that intersects itself (`KernelError::SelfIntersecting`, code `self_intersecting_operand`); an open operand is still `not_closed`. `cpp-unchecked` has no check (`ManifoldCpp::unchecked()`), and measures what the check prevents.
+
+## Gate results (Task 7b)
+
+Measured on an Apple M2 Max (12 cores, 32 GB) in the test harness:
+- `manifold-rust` and `dashu` at opt-level 3, with no debug assertions;
+- C++ Manifold and oneTBB as Release (-O3);
+- `mf-boolean` at opt-level 2.
+
+The machine was shared and heavily loaded: the load average was **9–41** during the runs, and swap was ~97% used. Every timing in `artifacts/phase1/p1-m2/qualify.json` (under `kernels.<rust|cpp|cpp-unchecked>.<gate>`, git-ignored) has its load average next to it. Times are pessimistic for all three kernels alike. Logs: `/tmp/mf7b-{windows,windows-cpp,corpus,corpus-cpp,1m}.log`.
+
+### `manifold-rust` 0.19.2 (robust engine)
 
 | # | Gate | Result | Verdict |
 |---|---|---|---|
-| 1 | Corpus: each of the 15 messy models, unioned with a sphere at its centroid, unioned with itself shifted 10%, and minus a box. Every result must be valid or a named error. | 11 models are open, so their 33 operations were refused with `not_closed` (correct). The 4 closed models (puritan, bunny-peel, sullivan, winged victory) gave 12 operations: **1 valid, 8 invalid for `degenerate_face`, 2 invalid for `self_intersecting`, 1 timed out.** The degenerate faces are zero-area triangles the kernel *created* on input faces that had area: 2–54 per result, none passed through from degenerate input. On puritan, every self-intersection found once they are set aside touches one of those slivers. The two self-intersecting results are winged victory ∪ sphere (6 pairs) and winged victory − box (13 pairs), both with no degenerate faces. The timeout was winged victory ∪ itself shifted (5.7M + 5.7M triangles), still running at 300 s with a 7.6 GB peak. 0 panics. | **FAIL** |
-| 2 | Determinism: 1 vs N threads, and two runs | Identical hashes everywhere it was measured: 20k spheres (all 3 operations, threads 1/11/11/1), 1M × 1M (two runs at 11 threads, and 1 thread), every computed corpus result under 500k triangles (1 thread vs 11), and winged victory ∪ sphere across the two corpus runs (5.7M input). | PASS |
-| 3 | Provenance: `origin` names a real face; coverage within 1e-9 | Synthetic cases pass at ~1e-17: spheres, box ∩ sphere, coplanar boxes, 50k and 1M spheres. On real models it fails. The worst output vertex is 7.4e-6 of the bounding-box diagonal off its named face's plane (sullivan, bunny-peel, winged victory at 1.8e-9). Output on one face covers up to 4× its area (sullivan). Every `origin` named a real input face. One caveat: the test's "untouched face" check expects a face outside the other operand's box to be kept whole or dropped. That is wrong for faces cut by their own model's self-intersections, so its 0.37–1.06 errors on real scans overstate the problem. The plane-distance and over-coverage findings don't depend on that check. Neither has been root-caused. | **FAIL** (real models) |
-| 4 | Cancel-to-stop ≤ 250 ms on 1M × 1M | Inside the engine: 12–71 ms. During operand import, `Manifold::from_mesh_gl64_robust` takes no cancel token and runs about 1.3 s per 1M operand, so the measured worst case is **695 ms**. | **FAIL** |
-| 5 | Time: 1M × 1M ≤ 10 s, 50k × 50k ≤ 0.5 s | 1M × 1M: **31.6 s** (29.4 s on a second run, 21.8 s on 1 thread), 1.94 GB peak heap, 1.36M-triangle output, valid. 50k × 50k: **1.83 s** median of 3, 0.10 GB peak. | **FAIL** |
+| 1 | Corpus (15 messy models × 3 tools) | 33 refused `not_closed` (11 open models). Of the 12 operations on the 4 closed models: **3 valid** (all of puritan; the post-pass flipped 2, 57 and 0 slivers). **8 invalid with new self-intersections:** bunny-peel 97/453/192 pairs, sullivan 6,346/88,463/45,871, winged victory 2 and 3. Winged victory ∪ itself shifted (5.7M + 5.7M) **passed the 12 GB heap limit** at 295 s. The post-pass left no degenerate face anywhere. 0 panics. | **FAIL** |
+| 2 | Determinism | Same hash at 1 and 11 threads: 20k spheres (3 ops), every corpus result under 500k triangles, every window case (3 runs plus 1 thread). | PASS |
+| 3 | Provenance | Synthetic cases ~1e-17. Excluding the scans' own crossing faces removes Task 7's "untouched" errors (0 everywhere but sullivan − box, 0.32). Two failures remain: output vertices off their face's plane (bunny-peel 6e-7, sullivan 7e-6 of the diagonal), and over-coverage on sullivan (up to 3.0×). | **FAIL** (real) |
+| 4 | Cancel ≤ 250 ms (largest gated window, winged victory, 123k + 50k) | worst **65 ms** over 10 cancels (load 26) | PASS |
+| 5 | Time through D5 windows | Below. | **FAIL** |
 
-On synthetic, clean, closed input (spheres, boxes) every result was valid, exact (cube volumes to 1e-12), deterministic, and carried exact provenance. The engine's design is sound. What fails is speed, cancelling during import, and output quality on real scans.
+### C++ Manifold 3.5.3, with the operand check (`cpp`)
+
+| # | Gate | Result | Verdict |
+|---|---|---|---|
+| 1 | Corpus | Every operation is refused by name: 24 `not_closed`, 21 `self_intersecting_operand`. Every closed model in the corpus intersects itself somewhere; even winged victory has 1,006 crossing faces, and its whole-model check takes 11.8 s. No invalid output and 0 panics, but **nothing is computed**. | PASS (by refusal) |
+| 2 | Determinism | Same hash at 1 and 11 threads (oneTBB arena): 20k spheres (3 ops), every window case. | PASS |
+| 3 | Provenance | Every case it computes: ≤ 3e-15 (synthetic and windows). | PASS |
+| 4 | Cancel ≤ 250 ms (winged victory window) | worst **25 ms** over 7 cancels (load 14). It includes the exact operand check, which is cancellable. | PASS |
+| 5 | Time through D5 windows | Below. **Archaeopteryx is refused**: the window holds 50 faces of the scan's own crossings (under the part, and their copies in the prism). Every other case passes, by 2–6×. | **FAIL** |
+
+### C++ Manifold 3.5.3, unchecked (`cpp-unchecked`, measured only to show what the check prevents)
+
+| # | Gate | Result | Verdict |
+|---|---|---|---|
+| 1 | Corpus | 24 `not_closed` and 9 `kernel_internal` refusals. The 9 come from Manifold's `NotManifold`: closed by index but wound inconsistently (cube-achim, walking-man, cleopatras-needle). **9 invalid** results (puritan, bunny-peel, sullivan): up to 384,163 new intersecting pairs, overlapping sheets (coverage up to 5,131×), vertices up to 0.6% of the diagonal off their faces, and an edge on 4 faces. Winged victory: 3 results valid by D4, but they miss gate 3's 1e-9 plane check at 1.8e-9, as `manifold-rust` does on the same model; that is probably the float plane test on near-degenerate source faces (see concerns in the Task 7b report). Every result ran in 0.02–12.6 s. | **FAIL** |
+| 2–4 | | As `cpp`. Cancel worst 5 ms. | PASS |
+| 5 | Windows | All five pass, Archaeopteryx included (0.16 s, valid, provenance exact). | PASS |
+
+### Gate 5 through D5 windows (median of 3 runs; seconds; load is the 1-min average at the first run)
+
+| Case (limit) | Window + tool (tris) | `manifold-rust` | `cpp` | `cpp-unchecked` |
+|---|---|---|---|---|
+| 50k sphere ∪ winged victory, 5.7M (3 s) | 123,404 + 50,176 | **4.18** (kernel 3.80), load 9 | 0.68 (check 0.38, kernel 0.04), load 18 | 0.31, load 14 |
+| 50k sphere ∪ Archaeopteryx, 1M, open (3 s) | 29,268 + 50,176 | 1.80, load 19 | **refused: self-intersecting window** | 0.16, load 13 |
+| Slab cut through a 1M model (10 s) (1M UV sphere; no closed real model of that size) | 23,996 + 12 | 2.24, load 19 | 1.58, load 16 | 1.13, load 13 |
+| 50k × 50k overlapping spheres (0.5 s, kernel time) | 50,176 + 50,176 | **1.70**, load 22 | 0.24, load 14 | 0.03, load 12 |
+| Slab cut through winged victory (informational) | 163,606 + 12 | 6.30 | 1.07 | 0.56 |
+| Whole 1M × 1M union (informational since 7b) | 1M + 1M | 30.6, 1.94 GB, load 33 | 4.85 (check ~4.4), 0.14 GB, load 40 | 0.44, 0.14 GB, load 39 |
+
+On every window, every kernel's result was valid with exact provenance and identical across runs and at 1 thread. One exception: the `cpp` Archaeopteryx case, which it refused. The validation share is large for the C++ kernel. `validate_boolean` on the slab window takes 1.1 s, because its big cap triangles leave the grid; that is the validator's cost, and Task 8 bounds it to created faces (D4).
 
 ## Decision
 
-**NO-GO.** `manifold-rust` 0.19.2 does not qualify as the D1 kernel:
-- **Gate 1:** it produced invalid output (zero-area slivers and self-intersections) on 10 of the 11 real-model booleans it finished. It timed out on the 12th (5.7M × 5.7M).
-- **Gate 3:** its provenance doesn't hold on real models.
-- **Gate 4:** its import isn't cancellable.
-- **Gate 5:** it is 3–4× over the time budget at 50k and 1M.
+**Neither kernel passes every gate, so neither is accepted.** ADR-0002b gives the outline plan for our own exact local-window kernel. The ruling is D1's own rule, applied to corrected gates:
+- **`manifold-rust`** is the only kernel that handles self-intersecting scans, but it still emits new self-intersections on three of the four closed scans. It is also 1.4–3.4× too slow on gated windows, even at D5 sizes.
+- **C++ Manifold** is fast (unchecked, 10–300× inside the limits; with its exact operand check, 2–6×), cancellable, deterministic and exact in its provenance, but only on operands that don't intersect themselves. Unchecked, it produces garbage on scans that do. Checked, it is safe, but it refuses booleans wherever a scan crosses itself near the tool, and the one open scan in the window gates does.
 
-D4 would refuse every one of those invalid results by name, so shipping it would not produce bad models. But the boolean would mostly refuse on real scans, which defeats MF-MODEL-001.
+What a kernel must do is exact handling of self-intersecting operands, at window sizes, in well under a second. That is what ADR-0002b specifies.
 
-The `mf-boolean::Kernel` trait, the adapter, the bridge, `validate_solid` and the qualification suite stay. A replacement kernel is qualified with the same `qualify.rs`.
+ADR-0002b also gives the owner two cheaper options:
+- **A.** Profile and speed up `manifold-rust` upstream; its corpus defects would need fixing too.
+- **B.** Ship C++ Manifold with the exact operand check as an interim. Booleans would be valid or refused, with "repair the self-intersections near the tool first" as the next action. That changes what MF-MODEL-001 promises on real scans, so it is the owner's call, not this task's.
 
-## Deviations from the plan's reading of the API (checked against the 0.19.2 source)
+## Cost of the C++ option (if B is chosen)
 
-- **`robust::boolean_with_progress`** takes `&ManifoldImpl`, not `MeshGL64`. The adapter imports with `Manifold::from_mesh_gl64_robust`. It then calls `Manifold::boolean_with_engine_rule_and_progress(…, BooleanEngine::Robust, WindingRule::Positive, Some(&token), Some(&reporter))`, which goes straight to `robust::boolean_with_rule`, so it is the same pipeline. The float engine is never called.
-- **Provenance** works as planned. `run_original_id` is set per operand (from `Manifold::reserve_ids(2)`) and `face_id` per triangle. `get_mesh_gl64` exports each output triangle's `TriRef` as its run's original ID plus its `face_id`. Subtracted-operand runs and flipped siblings keep the original ID.
-- **Cancel.** `manifold_rust::cancel::CancelToken` is its own `Arc<AtomicBool>` and can't wrap ours. So `bridge` runs a watcher thread that polls our token every 2 ms (unit-tested to forward within 10 ms). The import (`from_mesh_gl64_robust`) and export take no token. The adapter checks for cancellation between the stages, and that gap is what failed gate 4.
-- **Progress.** `ProgressReporter::new` takes a `'static` callback, so it can't hold a borrowed `mf_runtime::Span`. The bridge maps the 9 robust phases onto 0.05–0.95 of a cloned `Progress` instead, as stages named `"boolean: <phase>"`, and keeps it monotonic. Import and export take the bands either side.
+- **Licences:** Manifold, Apache-2.0; oneTBB, Apache-2.0; `cmake` and `cc` crates, MIT/Apache. No `NOTICE` files. Recorded in `THIRD_PARTY_NOTICES.md`. `cargo deny` doesn't see the C++ sources.
+- **Build.**
+  - A clean build of `mf-manifold-sys` takes **1 min 08 s at `-j 2`** on the M2 Max (load ~5): git clone, CMake configure, the oneTBB fetch, and C++ compile. `OUT_DIR` grows by 180 MB.
+  - Needs CMake ≥ 3.18, a C++17 compiler, git, and network access at build time.
+  - Pinning: the Manifold tag is checked against commit `0edd9d5`, and Manifold's CMake pins oneTBB to v2022.3.0.
+  - Offline builds: set `MF_MANIFOLD_SRC` to point at a cached checkout. oneTBB's FetchContent still needs network access, unless it is pre-seeded via `FETCHCONTENT_SOURCE_DIR_TBB`.
+- **CI.**
+  - **macOS:** measured locally.
+  - **Linux:** expected to work with the runner's GCC and CMake.
+  - **Windows:** not tried. The `cmake` crate with MSVC multi-config needs the Release runtime to match Rust's, and static oneTBB on MSVC is "not recommended" by oneTBB.
+  - Expect ~3–6 min per OS per cold cache, cached by `rust-cache` afterwards.
+  - Today the crate sits outside the workspace (`exclude`), and the feature is off by default, so `--workspace` builds and every existing CI job compile no C++. Only the on-demand `kernel-qualification` job builds it (macOS).
+- **Cancel:** acceptable without a detached thread. Manifold 3.5's `ExecutionContext` is checked between phases, and stop-to-return was ≤ 25 ms on the largest gated window. The call returns, so nothing keeps running in the background.
 
-## Alternatives (for ADR-0002b)
+## History: Task 7 (superseded gates)
 
-As D1: a home-grown kernel behind the same trait (indirect predicates, Cherchi et al. 2022), or re-qualify a later `manifold-rust` once:
-- its sliver clean-up is fixed;
-- its import takes a token;
-- its robust engine is faster.
+Task 7, on the original gates (whole-model 1M × 1M; all self-intersections counted; machine at load 15–35):
+- gate 1: 1 valid result, 8 `degenerate_face`, 2 `self_intersecting`, 1 timeout;
+- gate 2: pass;
+- gate 3: fail on real models;
+- gate 4: fail, 695 ms during the uncancellable import;
+- gate 5: fail, 1M × 1M in 31.6 s and 50k × 50k in 1.83 s.
 
-The zero-area slivers alone could be removed by a deterministic, exact edge-flip pass after the kernel. That is a design change for the owner to rule on under D4, and it wouldn't fix gates 3–5.
+The adapter's API deviations from the plan still stand:
+- **Import:** `from_mesh_gl64_robust`, then `boolean_with_engine_rule_and_progress(Robust, Positive, …)`.
+- **Provenance:** from the `TriRef` runs.
+- **Cancel:** a 2 ms watcher. The import takes no token; on a window it costs tens of milliseconds, not seconds.
+- **Progress:** mapped onto a cloned `Progress`.
+
+Task 7's raw JSON was overwritten by the Task 7b layout. Its logs are kept in `artifacts/phase1/p1-m2/task7-logs/` (git-ignored).
 
 ## Consequences
 
-- MF-MODEL-001 and P1-M2 Tasks 8–10 are blocked on ADR-0002b.
-- The heavy gates (`qualify_corpus`, `qualify_1m_union`, `qualify_cancel`) are in the `scripts/run-tests.sh` timing list, and they fail until a kernel passes.
+- MF-MODEL-001 and P1-M2 Tasks 8–10 stay blocked, pending the owner's choice between ADR-0002b, A and B.
+- The `Kernel` trait, both adapters, `validate_boolean`, the degenerate post-pass and the qualification suite stay. Any kernel, including our own, is qualified with the same `qualify.rs`.
+- The qualification no longer runs in the milestone heavy workflow's required jobs. It has its own on-demand job (`kernel-qualification` in heavy.yml), started by the `run-qualify` label or a dispatch with `qualify` ticked.

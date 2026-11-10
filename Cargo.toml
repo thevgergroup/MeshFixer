@@ -1,6 +1,10 @@
 [workspace]
 resolver = "3"
 members = ["crates/*"]
+# The C++ Manifold binding (Phase 1 Task 7b) is outside the workspace so
+# `--workspace` builds and CI don't compile C++ Manifold and oneTBB. Only
+# mf-boolean's `manifold-cpp` feature (off by default) builds it.
+exclude = ["crates/mf-manifold-sys"]
 
 [workspace.package]
 version = "0.0.1"
@@ -21,6 +25,7 @@ mf-document = { path = "crates/mf-document" }
 mf-selection = { path = "crates/mf-selection" }
 mf-runtime = { path = "crates/mf-runtime" }
 mf-boolean = { path = "crates/mf-boolean" }
+mf-manifold-sys = { path = "crates/mf-manifold-sys" }
 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }

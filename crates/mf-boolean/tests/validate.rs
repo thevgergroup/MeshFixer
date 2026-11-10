@@ -4,7 +4,9 @@
 //! consistently oriented, no degenerate faces and no self-intersections,
 //! decided with exact predicates.
 
-use mf_boolean::{SolidError, validate_solid};
+use mf_boolean::{
+    KernelMesh, KernelResult, SolidError, self_intersecting_faces, validate_boolean, validate_solid,
+};
 use mf_fixtures::{
     cube, cube_with_missing_face, flipped_tetrahedron, merge, translated, uv_sphere,
 };
@@ -144,4 +146,103 @@ fn validation_is_cancellable() {
     ctx.cancel.cancel();
     let (p, t) = uv_sphere(64, 128).to_arrays();
     assert_eq!(validate_solid(&p, &t, &ctx), Err(SolidError::Cancelled));
+}
+
+// ---------------------------------------------------------------------------
+// Task 7b: a boolean result is checked for *new* self-intersections (D4).
+// ---------------------------------------------------------------------------
+
+fn operand(m: &Mesh, op: u8) -> KernelMesh {
+    let (p, t) = m.to_arrays();
+    KernelMesh::labelled(p, t, op)
+}
+
+/// A "result" made of whole operands, each face labelled by its source.
+fn result_of(parts: &[&KernelMesh]) -> KernelResult {
+    let mut r = KernelResult::default();
+    for m in parts {
+        let base = r.positions.len() as u32;
+        r.positions.extend(&m.positions);
+        r.triangles
+            .extend(m.triangles.iter().map(|t| t.map(|v| v + base)));
+        r.origin.extend(&m.face_ids);
+    }
+    r
+}
+
+#[test]
+fn an_operands_own_self_intersection_is_not_new() {
+    // Operand a intersects itself: two overlapping cubes in one mesh.
+    let a = operand(
+        &merge(&[cube(1.0), translated(&cube(1.0), [0.5, 0.25, 0.125])]),
+        0,
+    );
+    let b = operand(&translated(&cube(1.0), [5.0, 0.0, 0.0]), 1);
+    let r = result_of(&[&a, &b]);
+    assert!(matches!(
+        validate_solid(&r.positions, &r.triangles, &RunContext::none()),
+        Err(SolidError::SelfIntersecting { .. })
+    ));
+    validate_boolean(&r, [&a, &b], &RunContext::none()).unwrap();
+}
+
+#[test]
+fn faces_of_the_two_operands_intersecting_are_new() {
+    let a = operand(&cube(1.0), 0);
+    let b = operand(&translated(&cube(1.0), [0.5, 0.25, 0.125]), 1);
+    match validate_boolean(&result_of(&[&a, &b]), [&a, &b], &RunContext::none()) {
+        Err(SolidError::SelfIntersecting { faces, pairs }) => {
+            assert!(faces[0] < 12 && faces[1] >= 12, "{faces:?}");
+            assert!(pairs >= 4, "{pairs}");
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn faces_of_one_operand_that_did_not_intersect_in_the_input_are_new() {
+    // a is two disjoint cubes; the "result" moves the second into the first.
+    let a = operand(
+        &merge(&[cube(1.0), translated(&cube(1.0), [3.0, 0.0, 0.0])]),
+        0,
+    );
+    let b = operand(&translated(&cube(1.0), [9.0, 0.0, 0.0]), 1);
+    let mut r = result_of(&[&a]);
+    for p in &mut r.positions[8..16] {
+        p[0] -= 2.5;
+    }
+    assert!(matches!(
+        validate_boolean(&r, [&a, &b], &RunContext::none()),
+        Err(SolidError::SelfIntersecting { .. })
+    ));
+}
+
+#[test]
+fn a_boolean_result_is_still_checked_for_everything_else() {
+    let a = operand(&cube_with_missing_face(), 0);
+    let b = operand(&translated(&cube(1.0), [5.0, 0.0, 0.0]), 1);
+    assert!(matches!(
+        validate_boolean(&result_of(&[&a, &b]), [&a, &b], &RunContext::none()),
+        Err(SolidError::NotClosed { .. })
+    ));
+}
+
+#[test]
+fn self_intersecting_faces_are_flagged() {
+    let (p, t) = merge(&[cube(1.0), translated(&cube(1.0), [0.5, 0.25, 0.125])]).to_arrays();
+    let flags = self_intersecting_faces(&p, &t, &RunContext::none()).unwrap();
+    assert_eq!(flags.len(), 24);
+    assert!(flags.iter().any(|&f| f));
+    // The faces away from the overlap (the first cube's -x, -y, -z sides
+    // and the second's +x, +y, +z sides) don't intersect anything.
+    for f in [0, 1, 4, 5, 10, 11, 14, 15, 20, 21, 18, 19] {
+        assert!(!flags[f], "face {f}");
+    }
+    let (p, t) = cube(1.0).to_arrays();
+    assert!(
+        self_intersecting_faces(&p, &t, &RunContext::none())
+            .unwrap()
+            .iter()
+            .all(|&f| !f)
+    );
 }
