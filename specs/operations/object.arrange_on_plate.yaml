@@ -1,0 +1,36 @@
+id: object.arrange_on_plate
+version: 1
+summary: Move an object to free space on the build plate, clear of every other object, resting on the plate.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: plate_width
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Width (x) of the build plate, centred on the origin"
+  - name: plate_depth
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Depth (y) of the build plate, centred on the origin"
+  - name: spacing
+    type: float
+    default: 3.0
+    min: 0.0
+    unit: mm
+    description: "Gap kept between the object and everything else"
+preconditions:
+  - target is a whole object with geometry
+postconditions:
+  - the object's world footprint overlaps no other object's (D21 layout, rows from the plate's -x -y corner), or it is placed beside the plate and the report says the plate is full
+  - its lowest world-space z is 0
+  - only the translation changes; geometry unchanged and shared
+effects: [transform_changes]
+runtime:
+  cancellable: true
+  progress: false

@@ -293,6 +293,114 @@ impl Operation for Delete {
     }
 }
 
+/// `object.arrange_on_plate` (D21): moves the object to the first free
+/// spot on the build plate, clear of every other object (the scene), and
+/// rests it on the plate. Only its x/y/z translation changes.
+pub struct ArrangeOnPlate;
+
+impl Operation for ArrangeOnPlate {
+    fn id(&self) -> &'static str {
+        "object.arrange_on_plate"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn execute(
+        &self,
+        _: &Mesh,
+        _: &Target,
+        _: &Params,
+        _: &RunContext,
+    ) -> Result<OpOutput, OpError> {
+        Err(needs_document(self.id()))
+    }
+
+    fn wants_scene(&self) -> bool {
+        true
+    }
+
+    fn execute_doc(
+        &self,
+        inputs: &[OperandInput],
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<DocOutput, OpError> {
+        self.execute_scene(inputs, &[], params, ctx)
+    }
+
+    fn execute_scene(
+        &self,
+        inputs: &[OperandInput],
+        scene: &[crate::SceneObject],
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<DocOutput, OpError> {
+        let target = whole_object(self.id(), inputs)?;
+        let empty = || OpError::Failed {
+            code: "empty_object",
+            message: "the object has no geometry to place on the plate".into(),
+        };
+        let own = crate::SceneObject::of(target.object, target.mesh, &target.transform, ctx)?
+            .ok_or_else(empty)?;
+        let occupied: Vec<crate::layout::Footprint> = scene
+            .iter()
+            .filter(|o| o.object != target.object)
+            .map(|o| o.footprint())
+            .collect();
+        let plate = crate::layout::Plate {
+            size: [
+                params.get_float("plate_width")?,
+                params.get_float("plate_depth")?,
+            ],
+        };
+        let layout = crate::layout::layout_on_plate(
+            &occupied,
+            &[own.footprint()],
+            &plate,
+            params.get_float("spacing")?,
+        );
+        let mut moved = target.transform;
+        moved[9] += layout.transforms[0][9];
+        moved[10] += layout.transforms[0][10];
+        // Then rest it on the plate, exactly as drop_to_plate does.
+        let dropped = DropToPlate.execute_doc(
+            &[OperandInput {
+                transform: moved,
+                ..target.clone()
+            }],
+            params,
+            ctx,
+        )?;
+        let transform = dropped
+            .changes
+            .iter()
+            .find_map(|c| match c {
+                ObjectChange::Transform { transform, .. } => Some(*transform),
+                _ => None,
+            })
+            .unwrap_or(moved); // allow-swallow: no drop change means it already rests at the new spot
+        let off_plate = !layout.off_plate.is_empty();
+        let changes = if transform.map(f64::to_bits) == target.transform.map(f64::to_bits) {
+            Vec::new()
+        } else {
+            vec![ObjectChange::Transform {
+                operand: 0,
+                transform,
+            }]
+        };
+        Ok(DocOutput {
+            changes,
+            report: serde_json::json!({
+                "transform": transform,
+                "off_plate": off_plate,
+                "message": off_plate.then_some("The plate is full; the object is placed beside it"),
+            }),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used)] // tests may panic on failure

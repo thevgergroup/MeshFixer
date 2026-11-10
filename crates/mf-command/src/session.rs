@@ -198,6 +198,10 @@ pub struct Prepared {
     /// The ids a recorded run of this command gave the objects it created
     /// (replay and re-execution), so the same objects get the same ids.
     created_ids: Option<Vec<ObjectId>>,
+    /// Every object at the base revision (shared geometry, cheap), for an
+    /// operation that reads the scene; its boxes are built in `run`, never
+    /// on the caller's thread (MF-RT-001).
+    scene: Vec<(ObjectId, Mesh, [f64; 12])>,
 }
 
 /// What `run` worked out for one [`ObjectChange`], so `commit` does no
@@ -244,7 +248,17 @@ impl Prepared {
                 target: o.target.clone(),
             })
             .collect();
-        let output = self.op.execute_doc(&inputs, &self.params, ctx)?;
+        let output = if self.op.wants_scene() {
+            let mut scene = Vec::with_capacity(self.scene.len());
+            for (object, mesh, transform) in &self.scene {
+                scene.extend(mf_operations::SceneObject::of(
+                    *object, mesh, transform, ctx,
+                )?);
+            }
+            self.op.execute_scene(&inputs, &scene, &self.params, ctx)?
+        } else {
+            self.op.execute_doc(&inputs, &self.params, ctx)?
+        };
         drop(inputs);
         #[cfg(feature = "test-position-jitter")]
         let output = crate::jitter::perturb(output);
@@ -823,12 +837,22 @@ impl Session {
                 &o.kinds,
             )?);
         }
+        let scene = if op.wants_scene() {
+            self.document()
+                .objects()
+                .iter()
+                .filter_map(|o| o.mesh().map(|m| (o.id, m.clone(), o.transform)))
+                .collect()
+        } else {
+            Vec::new()
+        };
         Ok(Prepared {
             base_revision: self.cursor,
             op,
             operands: prepared,
             params,
             created_ids: None,
+            scene,
         })
     }
 
