@@ -159,6 +159,11 @@ struct SceneUniforms {
     /// Split's preview plane in the shifted frame: normal (xyz) and
     /// offset (w); `shading.z` is 1 while it shows.
     split_plane: [f32; 4],
+    /// The studio lights (towards the light, world): key, fill, and the
+    /// key's half vector with the view.
+    light_key: [f32; 4],
+    light_fill: [f32; 4],
+    light_half: [f32; 4],
 }
 
 #[repr(C)]
@@ -685,6 +690,17 @@ impl MeshRenderer {
         let eye_shifted = (camera.eye() - camera.target).as_vec3();
         let eye_dir = eye_shifted.normalize_or_zero();
         let p = &self.palette;
+        // The studio lights, relative to the view (UI plan §4): the key
+        // above and left of the camera, the fill from the right.
+        let v = eye_dir;
+        let right = glam::Vec3::Z
+            .cross(v)
+            .try_normalize()
+            .unwrap_or(glam::Vec3::X);
+        let cam_up = v.cross(right).normalize_or_zero();
+        let key = (v + 1.1 * cam_up - 0.6 * right).normalize_or_zero();
+        let fill = (v - 0.25 * cam_up + 0.8 * right).normalize_or_zero();
+        let half = (key + v).normalize_or_zero();
         let u = SceneUniforms {
             view_proj: camera.view_proj(aspect, camera.target).to_cols_array_2d(),
             eye_dir: Vec4::from((eye_dir, 0.0)).to_array(),
@@ -716,6 +732,9 @@ impl MeshRenderer {
                 f32::from(u8::from(self.split_preview.is_some())),
                 0.0,
             ],
+            light_key: Vec4::from((key, 0.0)).to_array(),
+            light_fill: Vec4::from((fill, 0.0)).to_array(),
+            light_half: Vec4::from((half, 0.0)).to_array(),
             split_plane: match self.split_preview {
                 Some((p, n)) => {
                     let n = n.normalize_or_zero();

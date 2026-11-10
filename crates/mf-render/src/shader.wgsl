@@ -33,6 +33,11 @@ struct Scene {
     shading: vec4<f32>,
     // Split's plane in the shifted frame: normal (xyz), offset (w).
     split_plane: vec4<f32>,
+    // The studio lights' directions (world, towards the light), worked
+    // out once per frame on the CPU: key, fill, and the key's half vector.
+    light_key: vec4<f32>,
+    light_fill: vec4<f32>,
+    light_half: vec4<f32>,
 };
 
 struct Draw {
@@ -117,22 +122,25 @@ fn base_color(front: bool, state: u32) -> vec3<f32> {
 // and a faint rim, all relative to the view so the model reads the same
 // from any side. Two-sided: the normal is turned to face the camera.
 fn studio(n_in: vec3<f32>) -> vec4<f32> {
-    let v = normalize(scene.eye_dir.xyz);
+    // Kept cheap (the lights are per frame, powers by squaring): a heavy
+    // fragment stage makes Metal's pass timestamps unusable.
+    let v = scene.eye_dir.xyz;
     var n = normalize(n_in);
-    n = select(-n, n, dot(n, v) >= 0.0);
-    let up = vec3<f32>(0.0, 0.0, 1.0);
-    var right = cross(up, v);
-    right = select(vec3<f32>(1.0, 0.0, 0.0), normalize(right), length(right) > 1e-3);
-    let cam_up = normalize(cross(v, right));
-    let key = normalize(v + 1.1 * cam_up - 0.6 * right);
-    let fill = normalize(v - 0.25 * cam_up + 0.8 * right);
+    let nv = dot(n, v);
+    n = select(-n, n, nv >= 0.0);
     // Wrapped diffuse: soft terminators, no hard black side.
-    let k = max((dot(n, key) + 0.25) / 1.25, 0.0);
-    let f = max(dot(n, fill), 0.0);
+    let k = max((dot(n, scene.light_key.xyz) + 0.25) * 0.8, 0.0);
+    let f = max(dot(n, scene.light_fill.xyz), 0.0);
     let hemi = 0.5 + 0.5 * n.z;
-    let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
-    let half_vec = normalize(key + v);
-    let spec = pow(max(dot(n, half_vec), 0.0), 48.0);
+    let e = 1.0 - abs(nv);
+    let rim = e * e * e;
+    var s = max(dot(n, scene.light_half.xyz), 0.0);
+    s = s * s;
+    s = s * s;
+    s = s * s;
+    s = s * s;
+    s = s * s;
+    let spec = s;
     // x: diffuse light, y: specular, z: rim.
     return vec4<f32>(0.14 + 0.70 * k + 0.12 * f + 0.12 * hemi, spec, rim, 0.0);
 }
@@ -209,7 +217,10 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
     } else if (glowing) {
         rgb = rim(rgb, in.normal, scene.tint_hover.rgb, 0.7);
     }
-    rgb = mix(rgb, rgb * 0.45, wire(in.bary));
+    // Derivatives only when the wireframe is on (a uniform branch).
+    if (scene.shading.y > 0.5) {
+        rgb = mix(rgb, rgb * 0.45, wire(in.bary));
+    }
     // Split's preview: the top part a little lighter, the bottom a little
     // darker, and the cut drawn where the plane crosses the surface.
     if (scene.shading.z > 0.5) {
