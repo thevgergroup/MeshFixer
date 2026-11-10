@@ -95,6 +95,9 @@ pub struct ViewOptions<'a> {
     pub tool_hint: Option<&'a str>,
     /// How the surface is shaded (the View menu's presets and wireframe).
     pub shading: mf_render::Shading,
+    /// Split's plane (point, normal; world): the two sides are shaded
+    /// apart and the cut line drawn on the model.
+    pub split_preview: Option<(glam::DVec3, glam::DVec3)>,
 }
 
 /// What [`Viewport::input`] found, for [`Viewport::paint`].
@@ -416,6 +419,7 @@ impl Viewport {
             plate,
             tool_hint,
             shading,
+            split_preview,
         } = options;
         let rect = input.rect;
         let (Some(cam), true) = (camera.as_mut(), input.drawn && !objects.is_empty()) else {
@@ -449,6 +453,7 @@ impl Viewport {
         let size = self.target_size(ui, rect);
         self.renderer.set_selection_cue(cue);
         self.renderer.set_shading(shading);
+        self.renderer.set_split_preview(split_preview);
         self.wireframe_on = shading.wireframe;
         let ppp = f64::from(ui.ctx().pixels_per_point());
         let view = (rect.width() as f64, rect.height() as f64);

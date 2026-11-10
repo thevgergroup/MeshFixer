@@ -24,6 +24,10 @@ pub const NON_MANIFOLD: Color32 = Color32::from_rgb(235, 52, 52);
 /// Faces created by the last few commands (toggle: View ▸ Highlight recent repairs).
 pub const RECENT_REPAIR: Color32 = Color32::from_rgb(80, 205, 120);
 
+/// Where two objects cross (`mesh.intersections`), drawn while Combine is
+/// open: a violet, apart from the accent's indigo and `CRACK`'s magenta.
+pub const INTERSECTION: Color32 = Color32::from_rgb(0xB3, 0x6B, 0xFF);
+
 /// The gizmo's X handle only (D8): the conventional axis colour, familiar
 /// from Meshmixer, Fusion and Blender. Never used for anything else, so a
 /// colour still has one meaning while the Transform tool is open.

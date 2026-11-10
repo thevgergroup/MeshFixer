@@ -156,6 +156,9 @@ struct SceneUniforms {
     /// x: the shading preset (0 clay, 1 studio, 2 x-ray), y: 1 for the
     /// wireframe.
     shading: [f32; 4],
+    /// Split's preview plane in the shifted frame: normal (xyz) and
+    /// offset (w); `shading.z` is 1 while it shows.
+    split_plane: [f32; 4],
 }
 
 #[repr(C)]
@@ -251,6 +254,7 @@ pub struct MeshRenderer {
     glass_pipeline_cw: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     shading: Shading,
+    split_preview: Option<(DVec3, DVec3)>,
 }
 
 impl MeshRenderer {
@@ -600,6 +604,7 @@ impl MeshRenderer {
             glass_pipeline_cw,
             background_pipeline,
             shading: Shading::default(),
+            split_preview: None,
             xray_surface_pipeline_ccw,
             xray_surface_pipeline_cw,
             xray_line_pipeline,
@@ -623,6 +628,13 @@ impl MeshRenderer {
 
     pub fn palette(&self) -> &Palette {
         &self.palette
+    }
+
+    /// Split's plane (point, normal; world) from the next
+    /// [`Self::prepare`] on: the surface on either side is shaded apart and
+    /// the cut drawn where the plane crosses it (`None`: no preview).
+    pub fn set_split_preview(&mut self, plane: Option<(DVec3, DVec3)>) {
+        self.split_preview = plane;
     }
 
     /// How the surface is shaded from the next [`Self::prepare`] on.
@@ -701,9 +713,17 @@ impl MeshRenderer {
                     ShadingPreset::XRay => 2.0,
                 },
                 f32::from(u8::from(self.shading.wireframe)),
-                0.0,
+                f32::from(u8::from(self.split_preview.is_some())),
                 0.0,
             ],
+            split_plane: match self.split_preview {
+                Some((p, n)) => {
+                    let n = n.normalize_or_zero();
+                    let shifted = p - camera.target;
+                    [n.x as f32, n.y as f32, n.z as f32, -n.dot(shifted) as f32]
+                }
+                None => [0.0; 4],
+            },
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
