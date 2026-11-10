@@ -623,6 +623,7 @@ impl Operation for FillHoles {
                     Sources {
                         faces: vec![],
                         loops: vec![l.id],
+                        operands: vec![],
                     },
                 )
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;

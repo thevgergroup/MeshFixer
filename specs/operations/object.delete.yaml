@@ -1,0 +1,17 @@
+id: object.delete
+version: 1
+summary: Remove an object from the document (undo brings it back unchanged).
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters: []
+preconditions:
+  - target is a whole object
+postconditions:
+  - the object is no longer in the document
+  - undo restores it with the same id, name, geometry and transform
+effects: [removes_objects]
+runtime:
+  cancellable: true
+  progress: false

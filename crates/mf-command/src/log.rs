@@ -14,7 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::record::CommandRecord;
 use crate::session::{CommandError, Session};
 
-pub const LOG_FORMAT: &str = "mfx-log/1";
+/// The format this build writes. Version 2 (Phase 1, D6) adds each
+/// command's `operands` and `outputs`; both default to empty, so a
+/// version 1 log reads as single-object commands.
+pub const LOG_FORMAT: &str = "mfx-log/2";
+
+/// Every format this build replays.
+pub const READABLE_LOG_FORMATS: &[&str] = &["mfx-log/1", LOG_FORMAT];
 
 #[derive(Debug, Serialize, Deserialize)]
 pub(crate) struct Manifest {
@@ -63,7 +69,7 @@ pub enum LogError {
         line: usize,
         message: String,
     },
-    #[error("unsupported log format '{0}' (expected {LOG_FORMAT})")]
+    #[error("unsupported log format '{0}' (expected mfx-log/1 or {LOG_FORMAT})")]
     UnsupportedFormat(String),
     #[error("object {object} has no source file, so the session can't be replayed")]
     NoSource { object: ObjectId },
@@ -187,6 +193,13 @@ impl Session {
                     && let Some(mesh) = node.document.object(record.target).and_then(|o| o.mesh())
                 {
                     record.output_summary = Some(crate::record::GeometrySummary::of(mesh));
+                }
+                for out in record.outputs.iter_mut().filter(|o| !o.removed) {
+                    if out.summary.is_none()
+                        && let Some(mesh) = node.document.object(out.object).and_then(|o| o.mesh())
+                    {
+                        out.summary = Some(crate::record::GeometrySummary::of(mesh));
+                    }
                 }
                 events.push(Event::Command(Box::new(record)));
             }

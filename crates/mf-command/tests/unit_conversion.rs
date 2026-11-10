@@ -36,6 +36,7 @@ fn session_at(dir: &std::path::Path, unit: Unit) -> (Session, mf_command::Object
 
 fn invocation(target: mf_command::ObjectId, clearance: &str) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         op_id: "test.unit_conversion".into(),
         target,
         selection: None,

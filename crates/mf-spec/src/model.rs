@@ -280,6 +280,20 @@ impl OperationSpec {
         self.effects.iter().any(|e| e == "read_only")
     }
 
+    /// True for an operation on objects rather than one mesh (D6): it
+    /// places, removes or creates objects, or takes other operands. Such
+    /// an operation needs its own tool (the gizmo, Delete, a boolean's
+    /// tool picker), so frontends don't list it among a mesh's repairs.
+    pub fn acts_on_objects(&self) -> bool {
+        !self.operands.is_empty()
+            || self.effects.iter().any(|e| {
+                matches!(
+                    e.as_str(),
+                    "transform_changes" | "removes_objects" | "creates_objects"
+                )
+            })
+    }
+
     pub fn parameter(&self, name: &str) -> Option<&ParamSpec> {
         self.parameters.iter().find(|p| p.name == name)
     }

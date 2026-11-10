@@ -13,12 +13,15 @@ workspace = true
 # `test-kinds`-gated spec of the same id, so mf-command's tests can
 # exercise real unit-conversion wiring end to end. Off in every normal
 # build; only mf-command's dev-dependency enables it.
+# Also registers `test.consume_tool`, a stand-in for a boolean (removes
+# its tool operand and creates an object) for multi-object command tests.
 test-kinds = ["mf-spec/test-kinds"]
 
 [dependencies]
 faer.workspace = true
 rayon.workspace = true
 mf-runtime.workspace = true
+mf-document.workspace = true
 serde.workspace = true
 mf-geometry.workspace = true
 mf-spec.workspace = true

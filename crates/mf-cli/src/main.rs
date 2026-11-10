@@ -122,9 +122,12 @@ impl From<IoError> for Failure {
 impl From<CommandError> for Failure {
     fn from(e: CommandError) -> Self {
         match e {
-            CommandError::Spec(_) | CommandError::UnknownOperation(_) => {
-                Failure::Usage(e.to_string())
-            }
+            CommandError::Spec(_)
+            | CommandError::UnknownOperation(_)
+            | CommandError::UnknownOperand { .. }
+            | CommandError::MissingOperand { .. }
+            | CommandError::RepeatedOperand { .. }
+            | CommandError::RepeatedObject { .. } => Failure::Usage(e.to_string()),
             CommandError::Cancelled => Failure::Cancelled,
             _ => Failure::Runtime(e.to_string()),
         }
@@ -400,6 +403,15 @@ fn cli() -> Command {
                         .action(clap::ArgAction::Append)
                         .help("name=value for the preceding --op (repeatable)"),
                 )
+                .arg(
+                    Arg::new("operand")
+                        .long("operand")
+                        .action(clap::ArgAction::Append)
+                        .help(
+                            "name=<object index> for the preceding --op (repeatable): another \
+                             object it uses, by its position in the input file (0 is the first)",
+                        ),
+                )
                 .arg(select_arg(true))
                 .arg(
                     Arg::new("save-log")
@@ -496,17 +508,23 @@ fn export(
     ctx: &RunContext,
 ) -> Result<(), Failure> {
     let doc = session.document();
-    let object = doc
-        .object(id)
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    let mesh = object
-        .mesh()
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    metrics.structures(mesh);
     if format == Format::ThreeMf {
+        if let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) {
+            metrics.structures(mesh);
+        }
         let model = threemf_model(doc)?;
         metrics.record("export", || write_threemf(&model, output, ctx))?;
     } else {
+        let object = doc.object(id).ok_or_else(|| {
+            Failure::Runtime(format!(
+                "object {id} was deleted, so there is no mesh to write to {}; write a .3mf to keep the others",
+                output.display()
+            ))
+        })?;
+        let mesh = object
+            .mesh()
+            .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+        metrics.structures(mesh);
         // MF-ISSUE-035: STL/OBJ write a single mesh with no transform of
         // its own, so apply the object's here (mirrors
         // mf-desktop's App::export_to) and say so, like the desktop's
@@ -570,6 +588,7 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<()
         metrics.structures(&mesh);
     }
     let inv = Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: "mesh.inspect".into(),
         target: id,
@@ -1055,23 +1074,29 @@ fn selection_for(
     }
 }
 
-/// One `--op` with the `--param`s and optional `--select` that follow it.
+/// One `--op` with the `--param`s, `--operand`s and optional `--select`
+/// that follow it.
 struct Step {
     op: String,
     raw: BTreeMap<String, String>,
+    /// `(operand name, object index in the input file)`.
+    operands: Vec<(String, usize)>,
     select: Option<Select>,
 }
 
+/// `(position on the command line, value)` of every use of a repeatable
+/// argument.
+fn positioned(m: &ArgMatches, name: &str) -> Vec<(usize, String)> {
+    match (m.indices_of(name), m.get_many::<String>(name)) {
+        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
-    let ops: Vec<(usize, String)> = match (m.indices_of("op"), m.get_many::<String>("op")) {
-        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
-        _ => Vec::new(),
-    };
-    let params: Vec<(usize, String)> = match (m.indices_of("param"), m.get_many::<String>("param"))
-    {
-        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
-        _ => Vec::new(),
-    };
+    let ops = positioned(m, "op");
+    let params = positioned(m, "param");
+    let operands = positioned(m, "operand");
     if ops.is_empty() {
         return Err(Failure::Usage("run needs at least one --op".into()));
     }
@@ -1105,9 +1130,21 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
             )));
         }
         let select = mine.first().map(|v| parse_select(v)).transpose()?;
+        let mut step_operands = Vec::new();
+        for (oi, o) in operands.iter().filter(|(oi, _)| oi > idx && *oi < next) {
+            let usage = || {
+                Failure::Usage(format!(
+                    "--operand '{o}' (position {oi}) must be name=<object index>"
+                ))
+            };
+            let (name, index) = o.split_once('=').ok_or_else(usage)?;
+            let index = index.trim().parse::<usize>().map_err(|_| usage())?;
+            step_operands.push((name.to_owned(), index));
+        }
         seq.push(Step {
             op: op.clone(),
             raw,
+            operands: step_operands,
             select,
         });
     }
@@ -1115,6 +1152,7 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     if let Some((_, p)) = params
         .iter()
         .chain(selects.iter())
+        .chain(operands.iter())
         .find(|(pi, _)| *pi < first_op)
     {
         return Err(Failure::Usage(format!("'{p}' comes before any --op")));
@@ -1134,20 +1172,50 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
     })?;
     let seq = op_sequence(m)?;
     // Validate every step before touching files.
-    for Step { op, raw, .. } in &seq {
+    for Step {
+        op, raw, operands, ..
+    } in &seq
+    {
         let spec = mf_spec::builtin::get(op)
             .ok_or_else(|| Failure::Usage(format!("unknown operation '{op}'")))?;
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
+        if let Some((name, _)) = operands
+            .iter()
+            .find(|(name, _)| !spec.operands.iter().any(|o| &o.name == name))
+        {
+            return Err(Failure::Usage(format!(
+                "{op} has no operand named '{name}'"
+            )));
+        }
     }
     let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
     let import = session.current();
-    for Step { op, raw, select } in seq {
+    // Objects in input-file order, for `--operand name=<index>`.
+    let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
+    for Step {
+        op,
+        raw,
+        operands,
+        select,
+    } in seq
+    {
         let selection = selection_for(&session, id, import, &select)?;
+        let operands = operands
+            .into_iter()
+            .map(|(name, index)| match objects.get(index) {
+                Some(&object) => Ok((name, object, None)),
+                None => Err(Failure::Usage(format!(
+                    "--operand {name}={index}: the input has {} object(s), numbered from 0",
+                    objects.len()
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let outcome = metrics.record("operation", || {
             execute(
                 &mut session,
                 Invocation {
+                    operands,
                     selection,
                     op_id: op.clone(),
                     target: id,
@@ -1269,6 +1337,7 @@ fn run_operation(
         execute(
             &mut session,
             Invocation {
+                operands: Vec::new(),
                 selection,
                 op_id: spec.id.clone(),
                 target: id,

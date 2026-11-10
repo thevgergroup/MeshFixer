@@ -985,3 +985,95 @@ fn units_flag_on_a_3mf_is_a_usage_error() {
     );
     assert!(String::from_utf8_lossy(&r.stderr).contains("--units"));
 }
+
+/// Two objects in a 3MF, for the object operations.
+fn two_objects(dir: &Path) -> std::path::PathBuf {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+    let input = dir.join("two.3mf");
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                name: "a".into(),
+                mesh: cube(1.0),
+                transform: IDENTITY,
+            },
+            ModelObject {
+                name: "b".into(),
+                mesh: tetrahedron(),
+                transform: IDENTITY,
+            },
+        ],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    input
+}
+
+/// MF-OBJ-001, D7: `run --op object.set_transform --param transform=…`
+/// then `object.drop_to_plate` writes the placement to the 3MF bit for
+/// bit, leaves the other object alone, and the saved log replays exactly.
+#[test]
+fn run_sets_a_transform_and_drops_to_the_plate() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    let log = dir.path().join("s.mfx.log");
+    // 90 degrees about x (world z = y + 5), then dropped: z translation 0.
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "object.set_transform",
+        "--param",
+        "transform=1,0,0,0,0,1,0,-1,0,0.25,-7.5,5",
+        "--op",
+        "object.drop_to_plate",
+        "--save-log",
+        log.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    assert_eq!(back.objects.len(), 2);
+    let want = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.25, -7.5, 0.0,
+    ];
+    assert_eq!(
+        back.objects[0].transform.map(f64::to_bits),
+        want.map(f64::to_bits)
+    );
+    assert_eq!(back.objects[1].transform, mf_io::threemf::IDENTITY);
+    let replayed = meshfixer(&["replay", log.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&replayed.stdout);
+    assert!(replayed.status.success(), "{text}");
+    assert!(text.contains("verdicts: 2 exact"), "{text}");
+}
+
+/// `--operand name=<index>` is checked against the operation's spec and
+/// the input's objects before anything is written.
+#[test]
+fn run_operand_mistakes_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    for operand in ["tool=1", "tool", "tool=x"] {
+        let r = meshfixer(&[
+            "run",
+            input.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--op",
+            "object.drop_to_plate",
+            "--operand",
+            operand,
+        ]);
+        assert_eq!(
+            r.status.code(),
+            Some(2),
+            "{operand}: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(!out.exists());
+    }
+}

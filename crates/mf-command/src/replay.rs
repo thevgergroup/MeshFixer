@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use crate::log::{Event, LOG_FORMAT, LogError, Manifest};
-use crate::record::{CommandId, GeometrySummary};
+use crate::log::{Event, LogError, Manifest, READABLE_LOG_FORMATS};
+use crate::record::{CommandId, CommandRecord, GeometrySummary, ObjectOutput};
 use crate::session::{CommitOutcome, Session};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -54,7 +54,7 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
         line: e.line(),
         message: e.to_string(),
     })?;
-    if manifest.format != LOG_FORMAT {
+    if !READABLE_LOG_FORMATS.contains(&manifest.format.as_str()) {
         return Err(LogError::UnsupportedFormat(manifest.format));
     }
     let commands = std::fs::read_to_string(dir.join("commands.jsonl"))?;
@@ -139,42 +139,10 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                 // meaningless if the input already differs (review I4). A
                 // content difference with identical structure is expected
                 // after an earlier `Equivalent` verdict (platform drift).
-                let input = session
-                    .document()
-                    .object(record.target)
-                    .and_then(|o| o.mesh())
-                    .cloned();
                 let drifted = results
                     .iter()
                     .any(|(_, v)| matches!(v, Verdict::Equivalent { .. }));
-                let input_verdict = match &input {
-                    None => Some(Verdict::Failed {
-                        error: if session.document().object(record.target).is_none() {
-                            format!(
-                                "the log's target object {} does not exist in the replayed session",
-                                record.target
-                            )
-                        } else {
-                            format!(
-                                "object {} is not a mesh in the replayed session",
-                                record.target
-                            )
-                        },
-                    }),
-                    Some(m) => {
-                        let content = m.content_hash().to_hex();
-                        let structure_ok =
-                            m.structure_hash().to_hex() == record.input_structure_hash;
-                        if content == record.input_hash || (drifted && structure_ok) {
-                            None
-                        } else {
-                            Some(Verdict::InputMismatch {
-                                expected_hash: record.input_hash.clone(),
-                                actual_hash: content,
-                            })
-                        }
-                    }
-                };
+                let input_verdict = check_inputs(&session, &record, drifted);
                 let verdict = match input_verdict {
                     Some(v) => v,
                     None => run_and_classify(&mut session, &record)?,
@@ -193,65 +161,255 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
     Ok(ReplayReport { results, session })
 }
 
-/// Run one recorded command and compare its output with the record.
-/// `Exact`: same content hash. `Equivalent`: same structure (slots, liveness,
-/// face indices, so orientation too) with extent within `1e-9 ×` diagonal and
-/// area within `1e-9` relative. Anything else is a `Mismatch`.
-fn run_and_classify(
-    session: &mut Session,
-    record: &crate::record::CommandRecord,
-) -> Result<Verdict, LogError> {
-    // The input matched (checked by the caller), so the recorded ids name
+/// Every operand the record read, as `(object, content hash, structure
+/// hash, transform)`. A record from before Phase 1 (no `operands`) read
+/// only its target, at whatever transform (it didn't record one). The
+/// target's object and hashes are always the record's own `target`,
+/// `input_hash` and `input_structure_hash` (MF-CMD-004's fields, which
+/// operand 0 repeats).
+fn recorded_inputs(
+    record: &CommandRecord,
+) -> Vec<(mf_document::ObjectId, &str, &str, Option<[f64; 12]>)> {
+    if record.operands.is_empty() {
+        return vec![(
+            record.target,
+            record.input_hash.as_str(),
+            record.input_structure_hash.as_str(),
+            None,
+        )];
+    }
+    record
+        .operands
+        .iter()
+        .enumerate()
+        .map(|(k, o)| {
+            if k == 0 {
+                (
+                    record.target,
+                    record.input_hash.as_str(),
+                    record.input_structure_hash.as_str(),
+                    Some(o.input_transform),
+                )
+            } else {
+                (
+                    o.object,
+                    o.input_revision_hash.as_str(),
+                    o.input_structure_hash.as_str(),
+                    Some(o.input_transform),
+                )
+            }
+        })
+        .collect()
+}
+
+/// `None` if every operand the record read is in the replayed session as
+/// it was recorded; otherwise why the command can't be compared.
+fn check_inputs(session: &Session, record: &CommandRecord, drifted: bool) -> Option<Verdict> {
+    for (object, hash, structure, transform) in recorded_inputs(record) {
+        let Some(o) = session.document().object(object) else {
+            return Some(Verdict::Failed {
+                error: format!(
+                    "the log's {} object {object} does not exist in the replayed session",
+                    if object == record.target {
+                        "target"
+                    } else {
+                        "operand"
+                    }
+                ),
+            });
+        };
+        let Some(m) = o.mesh() else {
+            return Some(Verdict::Failed {
+                error: format!("object {object} is not a mesh in the replayed session"),
+            });
+        };
+        let content = m.content_hash().to_hex();
+        let structure_ok = m.structure_hash().to_hex() == structure;
+        if !(content == hash || (drifted && structure_ok)) {
+            return Some(Verdict::InputMismatch {
+                expected_hash: hash.to_owned(),
+                actual_hash: content,
+            });
+        }
+        if let Some(t) = transform
+            && t.map(f64::to_bits) != o.transform.map(f64::to_bits)
+        {
+            return Some(Verdict::InputMismatch {
+                expected_hash: format!("{hash} at transform {t:?}"),
+                actual_hash: format!("{content} at transform {:?}", o.transform),
+            });
+        }
+    }
+    None
+}
+
+/// How bad a verdict is, for "the worst verdict among its objects".
+fn severity(v: &Verdict) -> u8 {
+    match v {
+        Verdict::Exact => 0,
+        Verdict::Equivalent { .. } => 1,
+        Verdict::Mismatch { .. } => 2,
+        Verdict::InputMismatch { .. } => 3,
+        Verdict::Failed { .. } => 4,
+    }
+}
+
+/// The worse of two verdicts (two `Equivalent`s keep the larger deviation).
+fn worst(a: Verdict, b: Verdict) -> Verdict {
+    match (&a, &b) {
+        (Verdict::Equivalent { max_deviation: x }, Verdict::Equivalent { max_deviation: y }) => {
+            Verdict::Equivalent {
+                max_deviation: x.max(*y),
+            }
+        }
+        _ if severity(&b) > severity(&a) => b,
+        _ => a,
+    }
+}
+
+/// Compare a replayed mesh with a recorded output. `Exact`: same content
+/// hash. `Equivalent`: same structure (slots, liveness, face indices, so
+/// orientation too) with extent within `1e-9 ×` diagonal and area within
+/// `1e-9` relative. Anything else is a `Mismatch`.
+fn classify_mesh(
+    mesh: &mf_geometry::Mesh,
+    hash: &str,
+    structure_hash: &str,
+    summary: Option<&GeometrySummary>,
+) -> Verdict {
+    let actual_hash = mesh.content_hash().to_hex();
+    let mismatch = |actual_hash: String| Verdict::Mismatch {
+        expected_hash: hash.to_owned(),
+        actual_hash,
+    };
+    if actual_hash == hash {
+        return Verdict::Exact;
+    }
+    if mesh.structure_hash().to_hex() != structure_hash {
+        return mismatch(actual_hash);
+    }
+    match summary {
+        None => mismatch(actual_hash),
+        Some(expected) => {
+            let tolerance = 1e-9 * expected.diagonal().max(1.0);
+            match GeometrySummary::of(mesh).deviation(expected) {
+                Some((bbox, area)) if bbox <= tolerance && area <= 1e-9 => Verdict::Equivalent {
+                    max_deviation: bbox,
+                },
+                _ => mismatch(actual_hash),
+            }
+        }
+    }
+}
+
+/// One recorded object output against the replayed document. A removed
+/// object must be gone; any other must have matching geometry and exactly
+/// the recorded transform (bit for bit: D7, replay runs no trigonometry).
+fn classify_output(session: &Session, record: &CommandRecord, out: &ObjectOutput) -> Verdict {
+    let object = session.document().object(out.object);
+    if out.removed {
+        return match object {
+            None => Verdict::Exact,
+            Some(o) => Verdict::Mismatch {
+                expected_hash: format!("object {} removed", out.object),
+                actual_hash: o.geometry.content_hash().to_hex(),
+            },
+        };
+    }
+    let Some(o) = object else {
+        return Verdict::Mismatch {
+            expected_hash: out.hash.clone(),
+            actual_hash: format!("object {} missing", out.object),
+        };
+    };
+    let Some(mesh) = o.mesh() else {
+        return Verdict::Mismatch {
+            expected_hash: out.hash.clone(),
+            actual_hash: format!("object {} is not a mesh", out.object),
+        };
+    };
+    // The target's output is the record's own `output_hash`,
+    // `output_structure_hash` and `output_summary` (MF-CMD-004's fields,
+    // which its entry here repeats); other objects carry theirs.
+    let (hash, structure_hash, summary) = if out.object == record.target {
+        (
+            record.output_hash.as_str(),
+            record.output_structure_hash.as_str(),
+            record.output_summary.as_ref().or(out.summary.as_ref()),
+        )
+    } else {
+        (
+            out.hash.as_str(),
+            out.structure_hash.as_str(),
+            out.summary.as_ref(),
+        )
+    };
+    let geometry = classify_mesh(mesh, hash, structure_hash, summary);
+    if out.transform.map(f64::to_bits) != o.transform.map(f64::to_bits) {
+        return worst(
+            geometry,
+            Verdict::Mismatch {
+                expected_hash: format!("{} at transform {:?}", out.hash, out.transform),
+                actual_hash: format!("{} at transform {:?}", out.hash, o.transform),
+            },
+        );
+    }
+    geometry
+}
+
+/// Run one recorded command and compare its output with the record: each
+/// recorded object output (D6), or, for a record from before Phase 1, the
+/// target's geometry. The command's verdict is the worst among its
+/// objects.
+fn run_and_classify(session: &mut Session, record: &CommandRecord) -> Result<Verdict, LogError> {
+    // The inputs matched (checked by the caller), so the recorded ids name
     // the same elements here; only the revision number can differ (replay
     // numbers revisions afresh: marks, undo and branches all shift it).
-    let selection = record.selection.clone().map(|mut sel| {
-        sel.revision = session.current();
-        sel
-    });
-    // `execute_recorded`, not `execute`/`Invocation`: `record.params` are
-    // already in document units (converted once, at the original
-    // `prepare`, D20). Round-tripping them through `Invocation`'s raw
-    // string params would re-validate through `Session::prepare`, which
-    // converts again — corrupting a replayed length, including when
-    // replaying onto a document in another unit.
+    let rebind = |sel: &Option<mf_selection::Selection>, rev| {
+        sel.clone().map(|mut sel| {
+            sel.revision = rev;
+            sel
+        })
+    };
+    let current = session.current();
+    let selection = rebind(&record.selection, current);
+    let operands = record
+        .operands
+        .iter()
+        .skip(1)
+        .map(|o| (o.name.clone(), o.object, rebind(&o.selection, current)))
+        .collect();
+    // `execute_recorded_with_operands`, not `execute`/`Invocation`:
+    // `record.params` are already in document units (converted once, at
+    // the original `prepare`, D20). Round-tripping them through
+    // `Invocation`'s raw string params would re-validate through
+    // `Session::prepare`, which converts again — corrupting a replayed
+    // length, including when replaying onto a document in another unit.
     Ok(
-        match session.execute_recorded(
+        match session.execute_recorded_with_operands(
             &record.op_id,
             record.target,
             selection,
+            operands,
             record.params.clone(),
         ) {
+            Ok(CommitOutcome::NewRevision { .. }) if !record.outputs.is_empty() => record
+                .outputs
+                .iter()
+                .map(|out| classify_output(session, record, out))
+                .fold(Verdict::Exact, worst),
             Ok(CommitOutcome::NewRevision { .. }) => {
                 let mesh = session
                     .document()
                     .object(record.target)
                     .and_then(|o| o.mesh())
                     .ok_or(LogError::TargetMissing(record.target))?;
-                let actual_hash = mesh.content_hash().to_hex();
-                let mismatch = |actual_hash: String| Verdict::Mismatch {
-                    expected_hash: record.output_hash.clone(),
-                    actual_hash,
-                };
-                if actual_hash == record.output_hash {
-                    Verdict::Exact
-                } else if mesh.structure_hash().to_hex() != record.output_structure_hash {
-                    mismatch(actual_hash)
-                } else {
-                    match &record.output_summary {
-                        None => mismatch(actual_hash),
-                        Some(expected) => {
-                            let tolerance = 1e-9 * expected.diagonal().max(1.0);
-                            match GeometrySummary::of(mesh).deviation(expected) {
-                                Some((bbox, area)) if bbox <= tolerance && area <= 1e-9 => {
-                                    Verdict::Equivalent {
-                                        max_deviation: bbox,
-                                    }
-                                }
-                                _ => mismatch(actual_hash),
-                            }
-                        }
-                    }
-                }
+                classify_mesh(
+                    mesh,
+                    &record.output_hash,
+                    &record.output_structure_hash,
+                    record.output_summary.as_ref(),
+                )
             }
             Ok(_) => Verdict::Mismatch {
                 expected_hash: record.output_hash.clone(),

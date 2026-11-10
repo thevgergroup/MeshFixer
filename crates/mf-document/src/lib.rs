@@ -111,4 +111,91 @@ impl Document {
         d.objects.iter_mut().find(|o| o.id == id)?.geometry = geometry;
         Some(d)
     }
+
+    /// A new document with one object's placement replaced (the absolute
+    /// 3MF row-major 3×4 affine, D7), or `None` if the object doesn't
+    /// exist. The geometry is shared, not copied.
+    pub fn with_transform(&self, id: ObjectId, transform: [f64; 12]) -> Option<Document> {
+        let mut d = self.clone();
+        d.objects.iter_mut().find(|o| o.id == id)?.transform = transform;
+        Some(d)
+    }
+
+    /// A new document without one object, or `None` if it doesn't exist.
+    /// The original document still holds it, so undo restores it with the
+    /// same id, in the same place.
+    pub fn without_object(&self, id: ObjectId) -> Option<Document> {
+        let at = self.objects.iter().position(|o| o.id == id)?;
+        let mut d = self.clone();
+        d.objects.remove(at);
+        Some(d)
+    }
+
+    /// A new document with a newly created object appended, or `None` if
+    /// an object with its id already exists (ids are never reused,
+    /// MF-DOC-004).
+    pub fn with_new_object(&self, object: Object) -> Option<Document> {
+        if self.object(object.id).is_some() {
+            return None;
+        }
+        Some(self.with_object(object))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
+
+    use super::*;
+
+    fn object(id: u64) -> Object {
+        let mesh = mf_geometry::Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        Object {
+            id: ObjectId(id),
+            name: format!("o{id}"),
+            geometry: Geometry::Mesh(mesh),
+            source: None,
+            transform: IDENTITY_TRANSFORM,
+            openings: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn object_changes_leave_the_original_document_alone() {
+        let doc = Document::default()
+            .with_object(object(1))
+            .with_object(object(2));
+        let mut t = IDENTITY_TRANSFORM;
+        t[11] = 5.0;
+        let moved = doc.with_transform(ObjectId(1), t).unwrap();
+        assert_eq!(moved.object(ObjectId(1)).unwrap().transform, t);
+        assert_eq!(
+            doc.object(ObjectId(1)).unwrap().transform,
+            IDENTITY_TRANSFORM
+        );
+        assert!(Geometry::ptr_eq(
+            &moved.object(ObjectId(1)).unwrap().geometry,
+            &doc.object(ObjectId(1)).unwrap().geometry
+        ));
+        assert!(doc.with_transform(ObjectId(9), t).is_none());
+
+        let without = doc.without_object(ObjectId(1)).unwrap();
+        assert!(without.object(ObjectId(1)).is_none());
+        assert!(doc.object(ObjectId(1)).is_some());
+        assert!(doc.without_object(ObjectId(9)).is_none());
+
+        let added = without.with_new_object(object(3)).unwrap();
+        assert_eq!(
+            added.objects().iter().map(|o| o.id).collect::<Vec<_>>(),
+            vec![ObjectId(2), ObjectId(3)]
+        );
+        assert!(
+            added.with_new_object(object(2)).is_none(),
+            "ids are never reused"
+        );
+    }
 }

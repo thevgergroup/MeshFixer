@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use mf_geometry::{FaceId, Mesh, Provenance, inspect};
-use mf_operations::{Target, find};
+use mf_operations::{ObjectChange, OperandInput, Target, find};
 use serde::Deserialize;
 use serde_json::Value;
 
@@ -27,6 +27,10 @@ struct Case {
 struct Given {
     fixture: Option<String>,
     file: Option<String>,
+    /// The object's placement, 12 comma-separated numbers (3MF row-major
+    /// 3×4, D7); identity when absent.
+    #[serde(default)]
+    transform: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,9 +172,20 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         .collect();
     let params = spec.validate(&raw).map_err(|e| e.to_string())?;
     let target = target(&before, &case.select)?;
-    let result = op.execute(
-        &before,
-        &target,
+    let placement = match &case.given.transform {
+        None => mf_io::threemf::IDENTITY,
+        Some(t) => parse_affine(t)?,
+    };
+    // Through `execute_doc`, as a command runs it: a mesh operation's
+    // default wraps `execute`, an object operation changes the placement
+    // or removes the object.
+    let result = op.execute_doc(
+        &[OperandInput {
+            object: mf_document::ObjectId(1),
+            mesh: &before,
+            transform: placement,
+            target,
+        }],
         &params,
         &mf_operations::RunContext::none(),
     );
@@ -187,10 +202,26 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         return Ok(problems);
     }
     let output = result.map_err(|e| format!("operation failed: {e}"))?;
-    let (after, prov) = output
-        .change
-        .clone()
-        .unwrap_or((before.clone(), Provenance::default()));
+    let mut geometry = None;
+    let mut transform = placement;
+    let mut removed = false;
+    for change in &output.changes {
+        match change {
+            ObjectChange::Geometry {
+                operand: 0,
+                mesh,
+                provenance,
+            } => geometry = Some((mesh.clone(), provenance.clone())),
+            ObjectChange::Transform {
+                operand: 0,
+                transform: t,
+            } => transform = *t,
+            ObjectChange::Remove { operand: 0 } => removed = true,
+            other => return Err(format!("unexpected change {other:?}")),
+        }
+    }
+    let geometry_changed = geometry.is_some();
+    let (after, prov) = geometry.unwrap_or((before.clone(), Provenance::default()));
     let diag = serde_json::to_value(inspect(&after)).unwrap();
     for (key, want) in &case.expect {
         let got: Value = match key.as_str() {
@@ -198,7 +229,26 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
                 Value::Bool(untouched_outside_target(&before, &after, &prov))
             }
             "provenance_total" => Value::Bool(provenance_total(&before, &after, &prov)),
-            "changed" => Value::Bool(output.change.is_some()),
+            "changed" => Value::Bool(!output.changes.is_empty()),
+            "geometry_changed" => Value::Bool(geometry_changed),
+            "removed" => Value::Bool(removed),
+            // Bit-for-bit (D7): true when equal, else the actual values.
+            "transform" => {
+                let expected = parse_affine(want.as_str().ok_or("transform needs a string")?)?;
+                if expected.map(f64::to_bits) == transform.map(f64::to_bits) {
+                    want.clone()
+                } else {
+                    Value::String(csv(&transform))
+                }
+            }
+            "world_min_z" => {
+                let t = transform;
+                after
+                    .vertices()
+                    .map(|(_, p)| t[2] * p[0] + t[5] * p[1] + t[8] * p[2] + t[11])
+                    .reduce(f64::min)
+                    .map_or(Value::Null, Value::from)
+            }
             "volume_delta_pct_lt" => {
                 let v0 = inspect(&before)
                     .signed_volume
@@ -227,6 +277,24 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         }
     }
     Ok(problems)
+}
+
+fn parse_affine(text: &str) -> Result<[f64; 12], String> {
+    let values: Vec<f64> = text
+        .split(',')
+        .map(|v| {
+            v.trim()
+                .parse::<f64>()
+                .map_err(|e| format!("'{text}': {e}"))
+        })
+        .collect::<Result<_, _>>()?;
+    values
+        .try_into()
+        .map_err(|v: Vec<f64>| format!("'{text}' has {} numbers, not 12", v.len()))
+}
+
+fn csv(m: &[f64; 12]) -> String {
+    m.iter().map(f64::to_string).collect::<Vec<_>>().join(",")
 }
 
 fn load(path: &Path) -> Result<Vec<Case>, String> {

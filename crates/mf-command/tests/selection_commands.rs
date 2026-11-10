@@ -21,6 +21,7 @@ fn session() -> (Session, ObjectId) {
 
 fn remove_with(target: ObjectId, selection: Option<Selection>, max: &str) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         op_id: "mesh.remove_small_components".into(),
         target,
         selection,
@@ -130,6 +131,7 @@ fn selection_of_filled_loop_reports_loop_closed() {
         ids: vec![loop_id],
     };
     s.execute(Invocation {
+        operands: Vec::new(),
         op_id: "mesh.fill_holes".into(),
         target: id,
         selection: Some(sel.clone()),

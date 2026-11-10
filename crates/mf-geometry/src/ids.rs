@@ -12,8 +12,15 @@ pub struct VertexId(pub u32);
 /// What a created face was made from (input faces and/or boundary loops).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sources {
+    /// Faces of the same object's previous revision.
     pub faces: Vec<FaceId>,
     pub loops: Vec<u32>,
+    /// Faces of the command's operands, by operand index (0 is the
+    /// command's target) and the face's id in that operand's input
+    /// revision (MF-P1-SEL-001). A face of a newly created object names
+    /// all of its sources here. Absent in Phase 0 records.
+    #[serde(default)]
+    pub operands: Vec<(u32, FaceId)>,
 }
 
 /// Old-slot → new-slot maps (`None` = the slot is gone). Produced by

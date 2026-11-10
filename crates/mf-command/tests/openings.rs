@@ -63,6 +63,7 @@ fn marks_are_an_undoable_command_and_follow_edits() {
     // Fill another hole: the mark follows to the new revision's loop id.
     let (_, fill_loop) = holes[0];
     s.execute(Invocation {
+        operands: Vec::new(),
         op_id: "mesh.fill_holes".into(),
         target: id,
         selection: Some(Selection {
@@ -98,6 +99,7 @@ fn filling_a_marked_hole_drops_its_mark() {
     let (_, l) = holes_by_vertex(&mesh(&s, id))[1];
     s.set_openings(id, vec![l], "Mark".into());
     s.execute(Invocation {
+        operands: Vec::new(),
         op_id: "mesh.fill_holes".into(),
         target: id,
         selection: Some(Selection {

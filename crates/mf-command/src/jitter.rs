@@ -10,7 +10,8 @@
 //! can: replaying it must give `Equivalent`. Unset, nothing changes. A value
 //! that isn't a positive finite number panics rather than being ignored.
 
-use mf_operations::OpOutput;
+use mf_geometry::{Mesh, Provenance};
+use mf_operations::{DocOutput, ObjectChange};
 
 pub(crate) const VAR: &str = "MF_TEST_POSITION_JITTER";
 
@@ -29,18 +30,46 @@ fn fraction() -> Option<f64> {
     Some(f)
 }
 
-pub(crate) fn perturb(output: OpOutput) -> OpOutput {
+pub(crate) fn perturb(output: DocOutput) -> DocOutput {
     let Some(f) = fraction() else {
         return output;
     };
-    let Some((mesh, prov)) = output.change else {
-        return output;
-    };
+    let changes = output
+        .changes
+        .into_iter()
+        .map(|change| match change {
+            ObjectChange::Geometry {
+                operand,
+                mesh,
+                provenance,
+            } => ObjectChange::Geometry {
+                operand,
+                mesh: jitter(mesh, &provenance, f),
+                provenance,
+            },
+            ObjectChange::Create {
+                name,
+                mesh,
+                transform,
+                provenance,
+            } => ObjectChange::Create {
+                name,
+                mesh: jitter(mesh, &provenance, f),
+                transform,
+                provenance,
+            },
+            other => other,
+        })
+        .collect();
+    DocOutput {
+        changes,
+        report: output.report,
+    }
+}
+
+fn jitter(mesh: Mesh, prov: &Provenance, f: f64) -> Mesh {
     if prov.created_vertices.is_empty() {
-        return OpOutput {
-            change: Some((mesh, prov)),
-            report: output.report,
-        };
+        return mesh;
     }
     let mut edit = mesh.edit();
     for (k, &v) in prov.created_vertices.iter().enumerate() {
@@ -52,8 +81,5 @@ pub(crate) fn perturb(output: OpOutput) -> OpOutput {
     // Moving vertices this command created changes no element sets, so the
     // operation's own provenance still describes the change.
     let (moved, _) = edit.finish().expect("only positions changed");
-    OpOutput {
-        change: Some((moved, prov)),
-        report: output.report,
-    }
+    moved
 }

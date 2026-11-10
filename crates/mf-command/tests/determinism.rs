@@ -17,36 +17,35 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
         let mesh = damaged_sphere(&DamageSpec::for_triangles(80_000, 9));
         let mut out = Vec::new();
         for op in mf_operations::registry() {
+            // Operations that need another object have their own
+            // determinism through replay (tests/objects.rs).
+            let spec = mf_spec::builtin::get(op.id()).unwrap();
+            if spec.operands.iter().any(|o| o.required) {
+                continue;
+            }
             let mut s = Session::new();
             let id = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture".into(), None);
             s.execute(Invocation {
+                operands: Vec::new(),
                 selection: None,
                 op_id: op.id().into(),
                 target: id,
                 raw_params: BTreeMap::new(),
             })
             .unwrap();
-            let hash = s
-                .document()
-                .object(id)
-                .unwrap()
-                .geometry
-                .content_hash()
-                .to_hex();
+            // An object operation may move or remove the object: its
+            // placement is part of the result (and "removed" is one).
+            let Some(object) = s.document().object(id) else {
+                out.push((op.id().to_owned(), "removed".into()));
+                continue;
+            };
+            let hash = object.geometry.content_hash().to_hex();
+            let placement = format!("{:?}", object.transform.map(f64::to_bits));
             // Fresh topology per run so cached results can't mask differences.
-            let topo = format!(
-                "{:?}",
-                s.document()
-                    .object(id)
-                    .unwrap()
-                    .mesh()
-                    .unwrap()
-                    .topology()
-                    .boundary_loops
-            );
+            let topo = format!("{:?}", object.mesh().unwrap().topology().boundary_loops);
             out.push((
                 op.id().to_owned(),
-                format!("{hash}/{}", blake3::hash(topo.as_bytes())),
+                format!("{hash}/{placement}/{}", blake3::hash(topo.as_bytes())),
             ));
         }
         out

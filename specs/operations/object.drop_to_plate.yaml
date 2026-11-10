@@ -1,0 +1,18 @@
+id: object.drop_to_plate
+version: 1
+summary: Move an object straight down (or up) so its lowest point rests on the build plate.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters: []
+preconditions:
+  - target is a whole object with geometry
+postconditions:
+  - the lowest world-space z of the transformed vertices is 0
+  - only the z translation changes; geometry unchanged and shared
+  - nothing changes (no revision) if the object already rests on the plate
+effects: [transform_changes]
+runtime:
+  cancellable: true
+  progress: true

@@ -60,6 +60,7 @@ fn edit_remove_and_add_keeps_ids() {
             Sources {
                 faces: vec![FaceId(2)],
                 loops: vec![],
+                operands: vec![],
             },
         )
         .unwrap();
@@ -354,6 +355,7 @@ fn sources_must_be_faces_of_the_input_revision() {
         Sources {
             faces: vec![a],
             loops: vec![],
+            operands: vec![],
         },
     );
     assert!(
@@ -365,6 +367,7 @@ fn sources_must_be_faces_of_the_input_revision() {
         Sources {
             faces: vec![FaceId(500)],
             loops: vec![],
+            operands: vec![],
         },
     );
     assert!(
@@ -378,7 +381,8 @@ fn sources_must_be_faces_of_the_input_revision() {
             [5, 6, v.0],
             Sources {
                 faces: vec![FaceId(2)],
-                loops: vec![]
+                loops: vec![],
+                operands: vec![],
             }
         )
         .is_ok()

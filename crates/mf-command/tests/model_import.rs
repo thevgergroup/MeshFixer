@@ -60,6 +60,7 @@ fn log_importing_a_multi_object_3mf_replays_exactly() {
     let mut s = Session::new();
     let (ids, _) = s.import_model(read_model(&three_part(dir.path())).unwrap());
     s.execute(Invocation {
+        operands: Vec::new(),
         op_id: "mesh.remove_small_components".into(),
         target: ids[0],
         selection: None,

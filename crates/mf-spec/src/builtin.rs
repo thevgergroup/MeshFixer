@@ -21,6 +21,23 @@ const SOURCES: &[(&str, &str)] = &[
         "mesh.compact.yaml",
         include_str!("../../../specs/operations/mesh.compact.yaml"),
     ),
+    (
+        "object.set_transform.yaml",
+        include_str!("../../../specs/operations/object.set_transform.yaml"),
+    ),
+    (
+        "object.drop_to_plate.yaml",
+        include_str!("../../../specs/operations/object.drop_to_plate.yaml"),
+    ),
+    (
+        "object.delete.yaml",
+        include_str!("../../../specs/operations/object.delete.yaml"),
+    ),
+    #[cfg(feature = "test-kinds")]
+    (
+        "test.consume_tool.yaml",
+        include_str!("../../../specs/test-operations/test.consume_tool.yaml"),
+    ),
     #[cfg(feature = "test-kinds")]
     (
         "test.unit_conversion.yaml",

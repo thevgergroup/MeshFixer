@@ -882,7 +882,9 @@ impl MeshFixerApp {
         }
         mf_spec::builtin::specs()
             .iter()
-            .filter(|s| !s.is_read_only() && s.target.whole_object)
+            // Object operations (move, drop, delete, booleans) have their
+            // own tools; Properties lists a mesh's repairs.
+            .filter(|s| !s.is_read_only() && s.target.whole_object && !s.acts_on_objects())
             .map(|s| Tool {
                 op_id: s.id.clone(),
                 // allow-swallow: an operation without plain words is named by its id
@@ -1065,6 +1067,7 @@ impl MeshFixerApp {
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
         match self.session.prepare(Invocation {
+            operands: Vec::new(),
             selection: tool.selection.clone(),
             op_id: tool.op_id.clone(),
             target,

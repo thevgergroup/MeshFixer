@@ -1,0 +1,27 @@
+# Test-only (`test-kinds` feature): a stand-in for a boolean, so
+# mf-command's tests can check undo, replay and provenance of a
+# multi-object command (Phase 1 Task 3, Review Focus 5) before the real
+# boolean exists. Compiled in only with mf-spec's "test-kinds" feature
+# (mf-command's dev-dependency only).
+id: test.consume_tool
+version: 1
+summary: "Test-only operation: removes its tool and creates an object from both operands' faces."
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+operands:
+  - name: tool
+    role: consumed
+    kinds: [object]
+    required: true
+parameters: []
+preconditions: []
+postconditions:
+  - the tool is removed
+  - a new object holds the target's faces then the tool's, in the target's frame
+  - the target is unchanged
+effects: [removes_objects, creates_objects]
+runtime:
+  cancellable: true
+  progress: false

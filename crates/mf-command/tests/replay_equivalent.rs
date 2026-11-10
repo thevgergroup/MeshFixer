@@ -195,6 +195,7 @@ fn record_the_jittered_fixture() {
     // Fill the first open hole, twice: loop 0, then the other (renumbered 0).
     for _ in 0..2 {
         let inv = Invocation {
+            operands: Vec::new(),
             selection: Some(Selection {
                 object: id,
                 revision: s.current(),

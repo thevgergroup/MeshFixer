@@ -5,14 +5,18 @@ use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, Revi
 use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
-use mf_operations::{OpError, OpOutput, Operation, Target};
+use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, Operation, Target};
 use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
-use mf_spec::{Params, SpecError};
+use mf_spec::{OperandRole, OperationSpec, Params, SpecError};
 
 use crate::record::{
-    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, platform,
+    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, ObjectOutput,
+    RecordedOperand, platform,
 };
+
+/// The name operand 0 (the command's target) is recorded under.
+pub const TARGET_OPERAND: &str = "target";
 
 /// A request to run an operation, as issued by any frontend.
 #[derive(Debug, Clone)]
@@ -22,6 +26,11 @@ pub struct Invocation {
     /// What part of the object to act on; `None` is the whole object. Must be
     /// bound to the current revision (translate it first).
     pub selection: Option<Selection>,
+    /// The command's other operands (D6): `(name, object, selection)`,
+    /// named as in the spec's `operands:` list, in any order. A `None`
+    /// selection is the whole object; a selection must be bound to the
+    /// current revision. Empty for single-object operations.
+    pub operands: Vec<(String, ObjectId, Option<Selection>)>,
     pub raw_params: BTreeMap<String, String>,
 }
 
@@ -93,6 +102,18 @@ pub enum CommandError {
         recorded: u32,
         current: u32,
     },
+    #[error("{op} has no operand named '{name}'")]
+    UnknownOperand { op: String, name: String },
+    #[error("{op} needs its '{name}' operand")]
+    MissingOperand { op: String, name: String },
+    #[error("{op} was given operand '{name}' more than once")]
+    RepeatedOperand { op: String, name: String },
+    #[error("object {object} can't be two operands of one command ({op})")]
+    RepeatedObject { op: String, object: ObjectId },
+    /// The operation returned changes its spec doesn't allow (a defect in
+    /// the operation, refused rather than committed).
+    #[error("{op} returned invalid object changes: {reason}")]
+    InvalidChanges { op: String, reason: String },
 }
 
 impl From<mf_runtime::Cancelled> for CommandError {
@@ -137,18 +158,39 @@ fn untranslatable_reason(t: &Translation) -> String {
     }
 }
 
+/// One operand of a prepared command: operand 0 is the target.
+struct PreparedOperand {
+    name: String,
+    /// `None` for the target; the spec's role otherwise.
+    role: Option<OperandRole>,
+    object: ObjectId,
+    mesh: Mesh,
+    transform: [f64; 12],
+    target: Target,
+    selection: Option<Selection>,
+    /// The object's intentional openings at the input revision, translated
+    /// to the output by `run` if its geometry changes (on the worker: it
+    /// needs the new topology).
+    openings: Vec<u32>,
+}
+
 /// A validated command, ready to run on any thread.
 pub struct Prepared {
     base_revision: RevisionId,
-    target: ObjectId,
     op: &'static dyn Operation,
-    input: Mesh,
-    target_spec: Target,
-    selection: Option<Selection>,
+    /// Operand 0 is the target; the rest in the spec's `operands:` order.
+    operands: Vec<PreparedOperand>,
     params: Params,
-    /// The target's intentional openings at the input revision, translated
-    /// to the output by `run` (on the worker: it needs the new topology).
-    openings: Vec<u32>,
+}
+
+/// What `run` worked out for one [`ObjectChange`], so `commit` does no
+/// O(n) work (MF-RT-001).
+#[derive(Debug, Clone, Default)]
+struct ChangeInfo {
+    /// Output hashes (hex) of a geometry or created mesh.
+    hashes: Option<(String, String)>,
+    /// A geometry change's operand's openings, translated to the output.
+    openings: Option<Vec<u32>>,
 }
 
 impl Prepared {
@@ -174,67 +216,164 @@ impl Prepared {
     /// is exactly one outcome.
     pub fn run(self, ctx: &RunContext) -> Result<Completed, CommandError> {
         let start = Instant::now();
-        let output = self
-            .op
-            .execute(&self.input, &self.target_spec, &self.params, ctx)?;
+        let inputs: Vec<OperandInput> = self
+            .operands
+            .iter()
+            .map(|o| OperandInput {
+                object: o.object,
+                mesh: &o.mesh,
+                transform: o.transform,
+                target: o.target.clone(),
+            })
+            .collect();
+        let output = self.op.execute_doc(&inputs, &self.params, ctx)?;
+        drop(inputs);
         #[cfg(feature = "test-position-jitter")]
         let output = crate::jitter::perturb(output);
+        check_changes(self.op.id(), &self.operands, &output.changes)?;
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6). Still
         // cancellable: the first hash of a freshly imported mesh is O(n).
-        let (input_hash, input_structure_hash) = self.input.hashes_with(ctx)?;
-        let (input_hash, input_structure_hash) =
-            (input_hash.to_hex(), input_structure_hash.to_hex());
-        let output_hashes = match &output.change {
-            Some((m, _)) => {
-                let (content, structure) = m.hashes_with(ctx)?;
-                Some((content.to_hex(), structure.to_hex()))
-            }
-            None => None,
-        };
-        let kept = output
-            .change
-            .as_ref()
-            .map_or(0, |(m, p)| (m.face_count() - p.created_faces.len()) as u64);
-        let openings = match &output.change {
-            Some((m, p)) if !self.openings.is_empty() => {
-                let sel = Selection {
-                    object: self.target,
-                    revision: self.base_revision,
-                    kind: SelectionKind::BoundaryLoop,
-                    ids: self.openings.clone(),
-                };
-                // The output's revision id isn't known yet; only the ids matter.
-                match mf_selection::resolve(
-                    &sel,
-                    &self.input,
-                    m,
-                    &[Step::Forward(p)],
-                    self.base_revision,
-                ) {
-                    Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
-                    // Filled, removed or merged away: no longer a hole to mark.
-                    Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+        let mut recorded = Vec::with_capacity(self.operands.len());
+        for o in &self.operands {
+            let (content, structure) = o.mesh.hashes_with(ctx)?;
+            recorded.push(RecordedOperand {
+                name: o.name.clone(),
+                object: o.object,
+                selection: o.selection.clone(),
+                input_revision_hash: content.to_hex(),
+                input_structure_hash: structure.to_hex(),
+                input_transform: o.transform,
+            });
+        }
+        let mut info = Vec::with_capacity(output.changes.len());
+        for change in &output.changes {
+            info.push(match change {
+                ObjectChange::Geometry {
+                    operand,
+                    mesh,
+                    provenance,
+                } => {
+                    let (content, structure) = mesh.hashes_with(ctx)?;
+                    let o = &self.operands[*operand];
+                    ChangeInfo {
+                        hashes: Some((content.to_hex(), structure.to_hex())),
+                        openings: Some(translate_openings(o, self.base_revision, mesh, provenance)),
+                    }
                 }
-            }
-            _ => self.openings.clone(),
-        };
+                ObjectChange::Create { mesh, .. } => {
+                    let (content, structure) = mesh.hashes_with(ctx)?;
+                    ChangeInfo {
+                        hashes: Some((content.to_hex(), structure.to_hex())),
+                        openings: None,
+                    }
+                }
+                ObjectChange::Transform { .. } | ObjectChange::Remove { .. } => {
+                    ChangeInfo::default()
+                }
+            });
+        }
+        let target = &self.operands[0];
         Ok(Completed {
             base_revision: self.base_revision.0,
-            target: self.target,
+            target: target.object,
             op_id: self.op.id(),
             op_version: self.op.version(),
-            selection: self.selection,
+            selection: target.selection.clone(),
             params: self.params,
             output,
-            input_hash,
-            input_structure_hash,
-            output_hashes,
-            kept,
-            openings,
+            operands: recorded,
+            info,
             duration: start.elapsed(),
         })
     }
+}
+
+/// The intentional openings of operand `o` translated through a geometry
+/// change to `output`.
+fn translate_openings(
+    o: &PreparedOperand,
+    base: RevisionId,
+    output: &Mesh,
+    provenance: &Provenance,
+) -> Vec<u32> {
+    if o.openings.is_empty() {
+        return Vec::new();
+    }
+    let sel = Selection {
+        object: o.object,
+        revision: base,
+        kind: SelectionKind::BoundaryLoop,
+        ids: o.openings.clone(),
+    };
+    // The output's revision id isn't known yet; only the ids matter.
+    match mf_selection::resolve(&sel, &o.mesh, output, &[Step::Forward(provenance)], base) {
+        Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
+        // Filled, removed or merged away: no longer a hole to mark.
+        Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+    }
+}
+
+/// Refuse changes an operation isn't allowed to make: an operand index out
+/// of range, two changes of one kind to one object, a change to a removed
+/// object, or any change to an operand the spec marks `read` or `kept`
+/// (and anything but removal of a `consumed` one).
+fn check_changes(
+    op: &str,
+    operands: &[PreparedOperand],
+    changes: &[ObjectChange],
+) -> Result<(), CommandError> {
+    let invalid = |reason: String| CommandError::InvalidChanges {
+        op: op.to_owned(),
+        reason,
+    };
+    // Per operand: (geometry, transform, removed).
+    let mut seen = vec![(false, false, false); operands.len()];
+    for change in changes {
+        let (operand, slot) = match change {
+            ObjectChange::Geometry { operand, .. } => (*operand, 0),
+            ObjectChange::Transform { operand, .. } => (*operand, 1),
+            ObjectChange::Remove { operand } => (*operand, 2),
+            ObjectChange::Create { .. } => continue,
+        };
+        let o = operands.get(operand).ok_or_else(|| {
+            invalid(format!(
+                "operand {operand} doesn't exist (it has {})",
+                operands.len()
+            ))
+        })?;
+        match o.role {
+            None => {}
+            Some(OperandRole::Consumed) if slot == 2 => {}
+            Some(role) => {
+                return Err(invalid(format!(
+                    "operand '{}' is {role:?}, so it can't be changed{}",
+                    o.name,
+                    if role == OperandRole::Consumed {
+                        " (only removed)"
+                    } else {
+                        " or removed"
+                    }
+                )));
+            }
+        }
+        let s = &mut seen[operand];
+        let flags = [&mut s.0, &mut s.1, &mut s.2];
+        if *flags[slot] {
+            return Err(invalid(format!(
+                "operand '{}' has two changes of one kind",
+                o.name
+            )));
+        }
+        *flags[slot] = true;
+        if s.2 && (s.0 || s.1) {
+            return Err(invalid(format!(
+                "operand '{}' is both changed and removed",
+                o.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub struct Completed {
@@ -244,13 +383,12 @@ pub struct Completed {
     pub op_version: u32,
     pub selection: Option<Selection>,
     pub params: Params,
-    pub output: OpOutput,
-    input_hash: String,
-    input_structure_hash: String,
-    output_hashes: Option<(String, String)>,
-    kept: u64,
-    /// The target's intentional openings, translated to the output.
-    pub openings: Vec<u32>,
+    /// The operation's object changes and report.
+    pub output: DocOutput,
+    /// Every operand as it was read (operand 0 is the target).
+    operands: Vec<RecordedOperand>,
+    /// Per entry of `output.changes`.
+    info: Vec<ChangeInfo>,
     pub duration: Duration,
 }
 
@@ -503,7 +641,7 @@ impl Session {
             .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
         let mut params = spec.validate(&inv.raw_params)?;
         spec.to_document_units(&mut params, self.document().units());
-        self.prepare_validated(&inv.op_id, inv.target, inv.selection, params)
+        self.prepare_validated(&inv.op_id, inv.target, inv.selection, inv.operands, params)
     }
 
     /// As [`Session::prepare`], with parameters already validated.
@@ -512,16 +650,90 @@ impl Session {
         op_id: &str,
         target: ObjectId,
         selection: Option<Selection>,
+        operands: Vec<(String, ObjectId, Option<Selection>)>,
         params: Params,
     ) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(op_id)
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
         let op = mf_operations::find(op_id)
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
+        let mut supplied: BTreeMap<String, (ObjectId, Option<Selection>)> = BTreeMap::new();
+        for (name, object, sel) in operands {
+            if !spec.operands.iter().any(|o| o.name == name) {
+                return Err(CommandError::UnknownOperand {
+                    op: spec.id.clone(),
+                    name,
+                });
+            }
+            if supplied.contains_key(&name) {
+                return Err(CommandError::RepeatedOperand {
+                    op: spec.id.clone(),
+                    name,
+                });
+            }
+            supplied.insert(name, (object, sel));
+        }
+        let mut prepared = vec![self.prepare_operand(
+            spec,
+            TARGET_OPERAND,
+            None,
+            target,
+            selection,
+            spec.target.whole_object,
+            &spec.target.kinds,
+        )?];
+        for o in &spec.operands {
+            let Some((object, sel)) = supplied.remove(&o.name) else {
+                if o.required {
+                    return Err(CommandError::MissingOperand {
+                        op: spec.id.clone(),
+                        name: o.name.clone(),
+                    });
+                }
+                continue;
+            };
+            if prepared.iter().any(|p| p.object == object) {
+                return Err(CommandError::RepeatedObject {
+                    op: spec.id.clone(),
+                    object,
+                });
+            }
+            let whole = o.kinds.iter().any(|k| k == "object");
+            prepared.push(self.prepare_operand(
+                spec,
+                &o.name,
+                Some(o.role),
+                object,
+                sel,
+                whole,
+                &o.kinds,
+            )?);
+        }
+        Ok(Prepared {
+            base_revision: self.cursor,
+            op,
+            operands: prepared,
+            params,
+        })
+    }
+
+    /// Check one operand (its object, geometry kind and selection) against
+    /// the spec and capture it for the run.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_operand(
+        &self,
+        spec: &OperationSpec,
+        name: &str,
+        role: Option<OperandRole>,
+        object_id: ObjectId,
+        selection: Option<Selection>,
+        whole_object: bool,
+        kinds: &[String],
+    ) -> Result<PreparedOperand, CommandError> {
         let object = self
             .document()
-            .object(target)
-            .ok_or(CommandError::UnknownObject(target))?;
+            .object(object_id)
+            .ok_or(CommandError::UnknownObject(object_id))?;
         let kind = object.geometry.kind().as_str();
         let unsupported = || CommandError::UnsupportedGeometry {
             op: spec.id.clone(),
@@ -530,11 +742,11 @@ impl Session {
         if !spec.geometry_kinds.iter().any(|k| k == kind) {
             return Err(unsupported());
         }
-        // Every Phase 0 operation is a mesh operation; the spec check above
+        // Every operation so far is a mesh operation; the spec check above
         // guarantees the object is a mesh here.
-        let input = object.mesh().ok_or_else(unsupported)?.clone();
-        let target_spec = match &selection {
-            None if spec.target.whole_object => Target::WholeObject,
+        let mesh = object.mesh().ok_or_else(unsupported)?.clone();
+        let target = match &selection {
+            None if whole_object => Target::WholeObject,
             None => {
                 return Err(CommandError::UnsupportedTarget {
                     op: spec.id.clone(),
@@ -542,10 +754,10 @@ impl Session {
                 });
             }
             Some(sel) => {
-                if sel.object != target {
+                if sel.object != object_id {
                     return Err(CommandError::SelectionMismatch {
                         selection: sel.object,
-                        target,
+                        target: object_id,
                     });
                 }
                 if sel.revision != self.cursor {
@@ -555,8 +767,8 @@ impl Session {
                     });
                 }
                 let allowed = match spec_kind(sel.kind) {
-                    None => spec.target.whole_object,
-                    Some(k) => spec.target.kinds.iter().any(|x| x == k),
+                    None => whole_object,
+                    Some(k) => kinds.iter().any(|x| x == k),
                 };
                 if !allowed {
                     return Err(CommandError::UnsupportedTarget {
@@ -567,20 +779,21 @@ impl Session {
                 target_of(sel)
             }
         };
-        Ok(Prepared {
-            base_revision: self.cursor,
+        Ok(PreparedOperand {
+            name: name.to_owned(),
+            role,
+            object: object_id,
+            mesh,
+            transform: object.transform,
             target,
-            op,
-            input,
-            target_spec,
             selection,
-            params,
             openings: object.openings.clone(),
         })
     }
 
-    /// The command whose revision last changed `object`'s geometry at or
-    /// before `rev`, or `None` if its current geometry came from the import.
+    /// The command whose revision last changed, placed or created `object`
+    /// at or before `rev`, or `None` if its current state came from the
+    /// import.
     fn producer(&self, object: ObjectId, rev: RevisionId) -> Option<CommandId> {
         let mut cur = Some(rev);
         while let Some(r) = cur {
@@ -588,16 +801,24 @@ impl Session {
             if node.import.as_ref().is_some_and(|i| i.object == object) {
                 return None;
             }
-            if let Some(rec) = &node.record
-                && rec.target == object
-            {
-                return Some(rec.id);
+            if let Some(rec) = &node.record {
+                let produced = if rec.outputs.is_empty() {
+                    rec.target == object
+                } else {
+                    rec.outputs.iter().any(|o| o.object == object && !o.removed)
+                };
+                if produced {
+                    return Some(rec.id);
+                }
             }
             cur = node.parent;
         }
         None
     }
 
+    /// Commit a completed run as one new revision: every object change at
+    /// once, so one undo reverts them all (D6). O(changed objects): hashes
+    /// were computed by `run`, and unchanged geometry keeps its own.
     pub fn commit(&mut self, c: Completed) -> Result<CommitOutcome, CommandError> {
         if c.base_revision != self.cursor.0 {
             return Err(CommandError::StaleInput {
@@ -605,7 +826,7 @@ impl Session {
                 actual: self.cursor.0,
             });
         }
-        let Some((mesh, provenance)) = c.output.change else {
+        if c.output.changes.is_empty() {
             let read_only = mf_spec::builtin::get(c.op_id).is_some_and(|s| s.is_read_only());
             return Ok(if read_only {
                 CommitOutcome::Report(c.output.report)
@@ -614,19 +835,154 @@ impl Session {
                     report: c.output.report,
                 }
             });
+        }
+        let base = self.document().clone();
+        let mut document = base.clone();
+        let mut provenance = BTreeMap::new();
+        let mut next_object = self.next_object;
+        let mut affected = AffectedSummary {
+            removed: 0,
+            created: 0,
+            kept: 0,
         };
-        let (output_hash, output_structure_hash) = c
-            .output_hashes
-            .clone()
-            .expect("a change always has output hashes");
-        let document = self
-            .document()
-            .with_geometry(c.target, Geometry::Mesh(mesh))
-            .and_then(|d| d.with_openings(c.target, c.openings.clone()))
-            .ok_or(CommandError::UnknownObject(c.target))?;
+        // Per operand: (output hashes, removed); created objects separately.
+        let mut operand_out: Vec<Option<(String, String)>> = vec![None; c.operands.len()];
+        let mut operand_changed = vec![false; c.operands.len()];
+        let mut operand_removed = vec![false; c.operands.len()];
+        let mut created: Vec<ObjectOutput> = Vec::new();
+        let unknown = |id: ObjectId| CommandError::UnknownObject(id);
+        let DocOutput { changes, report } = c.output;
+        for (change, info) in changes.into_iter().zip(c.info) {
+            match change {
+                ObjectChange::Geometry {
+                    operand,
+                    mesh,
+                    provenance: p,
+                } => {
+                    let id = c.operands[operand].object;
+                    affected.removed += p.removed_faces.len() as u64;
+                    affected.created += p.created_faces.len() as u64;
+                    affected.kept += (mesh.face_count() - p.created_faces.len()) as u64;
+                    let openings = info
+                        .openings
+                        .expect("run translates openings for every geometry change");
+                    document = document
+                        .with_geometry(id, Geometry::Mesh(mesh))
+                        .and_then(|d| d.with_openings(id, openings))
+                        .ok_or(unknown(id))?;
+                    provenance.insert(id, p);
+                    operand_out[operand] = info.hashes;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Transform { operand, transform } => {
+                    let id = c.operands[operand].object;
+                    document = document.with_transform(id, transform).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Remove { operand } => {
+                    let id = c.operands[operand].object;
+                    affected.removed += base
+                        .object(id)
+                        .and_then(|o| o.mesh())
+                        .map_or(0, |m| m.face_count() as u64);
+                    document = document.without_object(id).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                    operand_removed[operand] = true;
+                }
+                ObjectChange::Create {
+                    name,
+                    mesh,
+                    transform,
+                    provenance: p,
+                } => {
+                    let id = ObjectId(next_object);
+                    next_object += 1;
+                    affected.created += mesh.face_count() as u64;
+                    let (hash, structure_hash) =
+                        info.hashes.expect("run hashes every created mesh");
+                    document = document
+                        .with_new_object(Object {
+                            id,
+                            name,
+                            geometry: Geometry::Mesh(mesh),
+                            source: None,
+                            transform,
+                            openings: Vec::new(),
+                        })
+                        .ok_or(CommandError::InvalidChanges {
+                            op: c.op_id.to_owned(),
+                            reason: format!("object {id} already exists"),
+                        })?;
+                    provenance.insert(id, p);
+                    created.push(ObjectOutput {
+                        object: id,
+                        created: true,
+                        removed: false,
+                        hash,
+                        structure_hash,
+                        transform,
+                        summary: None,
+                    });
+                }
+            }
+        }
+        let mut outputs = Vec::new();
+        for (k, operand) in c.operands.iter().enumerate() {
+            if !operand_changed[k] {
+                continue;
+            }
+            let removed = operand_removed[k];
+            let (hash, structure_hash) = match (&operand_out[k], removed) {
+                (_, true) => (String::new(), String::new()),
+                (Some(h), false) => h.clone(),
+                // Transform only: the geometry and its hash are unchanged.
+                (None, false) => (
+                    operand.input_revision_hash.clone(),
+                    operand.input_structure_hash.clone(),
+                ),
+            };
+            if !removed && operand_out[k].is_none() {
+                affected.kept += base
+                    .object(operand.object)
+                    .and_then(|o| o.mesh())
+                    .map_or(0, |m| m.face_count() as u64);
+            }
+            let transform = document
+                .object(operand.object)
+                .map_or(operand.input_transform, |o| o.transform);
+            outputs.push(ObjectOutput {
+                object: operand.object,
+                created: false,
+                removed,
+                hash,
+                structure_hash,
+                transform,
+                summary: None,
+            });
+        }
+        outputs.extend(created);
+        let target = &c.operands[0];
+        let (output_hash, output_structure_hash) = outputs
+            .iter()
+            .find(|o| o.object == target.object)
+            .map_or_else(
+                || {
+                    (
+                        target.input_revision_hash.clone(),
+                        target.input_structure_hash.clone(),
+                    )
+                },
+                |o| (o.hash.clone(), o.structure_hash.clone()),
+            );
         let id = CommandId(self.next_command);
-        self.next_command += 1;
         let input_revision = self.cursor;
+        let mut depends_on: Vec<CommandId> = c
+            .operands
+            .iter()
+            .filter_map(|o| self.producer(o.object, input_revision))
+            .collect();
+        depends_on.sort_unstable();
+        depends_on.dedup();
         let record = CommandRecord {
             id,
             op_id: c.op_id.to_owned(),
@@ -635,27 +991,24 @@ impl Session {
             selection: c.selection.clone(),
             params: c.params.clone(),
             input_revision,
-            input_hash: c.input_hash,
-            input_structure_hash: c.input_structure_hash,
+            input_hash: target.input_revision_hash.clone(),
+            input_structure_hash: target.input_structure_hash.clone(),
             output_revision: RevisionId(self.nodes.len() as u64),
             output_hash,
             output_structure_hash,
             output_summary: None,
-            depends_on: self
-                .producer(c.target, input_revision)
-                .into_iter()
-                .collect(),
-            affected_objects: vec![c.target],
-            affected: AffectedSummary {
-                removed: provenance.removed_faces.len() as u64,
-                created: provenance.created_faces.len() as u64,
-                kept: c.kept,
-            },
+            depends_on,
+            affected_objects: outputs.iter().map(|o| o.object).collect(),
+            affected,
             engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             platform: platform(),
             duration_ms: c.duration.as_secs_f64() * 1000.0,
             status: CommandStatus::Ok,
+            operands: c.operands,
+            outputs,
         };
+        self.next_command += 1;
+        self.next_object = next_object;
         let params: Vec<String> = c.params.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
         self.push(RevisionNode {
             id: RevisionId(0),
@@ -665,12 +1018,10 @@ impl Session {
             record: Some(record),
             import: None,
             document,
-            provenance: BTreeMap::from([(c.target, provenance)]),
+            provenance,
             openings: None,
         });
-        Ok(CommitOutcome::NewRevision {
-            report: c.output.report,
-        })
+        Ok(CommitOutcome::NewRevision { report })
     }
 
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
@@ -691,8 +1042,21 @@ impl Session {
         selection: Option<Selection>,
         params: Params,
     ) -> Result<CommitOutcome, CommandError> {
+        self.execute_recorded_with_operands(op_id, target, selection, Vec::new(), params)
+    }
+
+    /// As [`Self::execute_recorded`], with the command's other operands
+    /// (`(name, object, selection)`, as in [`Invocation::operands`]).
+    pub fn execute_recorded_with_operands(
+        &mut self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        operands: Vec<(String, ObjectId, Option<Selection>)>,
+        params: Params,
+    ) -> Result<CommitOutcome, CommandError> {
         let completed = self
-            .prepare_validated(op_id, target, selection, params)?
+            .prepare_validated(op_id, target, selection, operands, params)?
             .run(&RunContext::none())?;
         self.commit(completed)
     }
@@ -733,9 +1097,33 @@ impl Session {
                 }
             },
         };
+        // The other operands (entry 0 is the target), their selections
+        // translated the same way.
+        let mut operands = Vec::new();
+        for o in record.operands.iter().skip(1) {
+            let sel = match &o.selection {
+                None => None,
+                Some(sel) => match self.translate(sel, onto) {
+                    Translation::Mapped(s) | Translation::Partial { mapped: s, .. } => Some(s),
+                    other => {
+                        return Err(CommandError::Untranslatable {
+                            onto,
+                            reason: untranslatable_reason(&other),
+                        });
+                    }
+                },
+            };
+            operands.push((o.name.clone(), o.object, sel));
+        }
         let back = self.cursor;
         self.checkout(onto);
-        let result = self.execute_recorded(&record.op_id, record.target, selection, params);
+        let result = self.execute_recorded_with_operands(
+            &record.op_id,
+            record.target,
+            selection,
+            operands,
+            params,
+        );
         if result.is_err() {
             self.checkout(back);
         }

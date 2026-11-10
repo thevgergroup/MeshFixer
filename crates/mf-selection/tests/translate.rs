@@ -134,6 +134,7 @@ fn loop_selection_maps_while_open_and_fails_when_closed() {
             Sources {
                 faces: vec![],
                 loops: vec![loop_id],
+                operands: vec![],
             },
         )
         .unwrap();
@@ -143,6 +144,7 @@ fn loop_selection_maps_while_open_and_fails_when_closed() {
             Sources {
                 faces: vec![],
                 loops: vec![loop_id],
+                operands: vec![],
             },
         )
         .unwrap();
