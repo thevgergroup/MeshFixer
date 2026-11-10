@@ -224,3 +224,49 @@ runtime:
     spec.to_document_units(&mut params_mm, Unit::Millimeter);
     assert_eq!(params_mm.get_float("hole_diameter").unwrap(), 5.0);
 }
+
+/// An operand (or the target) may be `many`: a list of objects. Absent, it
+/// is a single operand, so every older spec parses unchanged.
+#[test]
+fn many_operands_parse_and_validate() {
+    let schema: serde_json::Value =
+        serde_json::from_str(include_str!("../../../specs/operation.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    let yaml = r#"
+id: mesh.test_many
+version: 1
+summary: Test fixture with list operands.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+  many: true
+operands:
+  - name: solids
+    role: consumed
+    kinds: [object]
+    required: false
+    many: true
+  - name: tool
+    role: read
+    kinds: [object]
+    required: false
+parameters: []
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true
+"#;
+    let value: serde_json::Value = serde_saphyr::from_str(yaml).unwrap();
+    let errors: Vec<String> = validator
+        .iter_errors(&value)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:?}");
+    let spec: mf_spec::OperationSpec = serde_saphyr::from_str(yaml).unwrap();
+    assert!(spec.target.many);
+    assert!(spec.operands[0].many);
+    assert!(!spec.operands[1].many, "many defaults to false");
+    let boolean = builtin::get("mesh.boolean").unwrap();
+    assert!(!boolean.target.many && !boolean.operands[0].many);
+}

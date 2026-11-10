@@ -474,10 +474,19 @@ fn cli() -> Command {
                 Arg::new(o.name.clone())
                     .long(o.name.clone())
                     .required(o.required)
+                    .action(if o.many {
+                        clap::ArgAction::Append
+                    } else {
+                        clap::ArgAction::Set
+                    })
                     .value_parser(clap::value_parser!(usize))
                     .help(format!(
-                        "The '{}' object ({:?}): its position in the input file (0 is the first)",
-                        o.name, o.role
+                        "The '{}' object{} ({:?}): its position in the input file (0 is the \
+                         first){}",
+                        o.name,
+                        if o.many { "s" } else { "" },
+                        o.role,
+                        if o.many { "; repeat for each" } else { "" }
                     )),
             );
         }
@@ -1533,7 +1542,12 @@ fn run_operation(
     let operands = spec
         .operands
         .iter()
-        .filter_map(|o| m.get_one::<usize>(&o.name).map(|&i| (o.name.clone(), i)))
+        .flat_map(|o| {
+            m.get_many::<usize>(&o.name)
+                .into_iter()
+                .flatten()
+                .map(|&i| (o.name.clone(), i))
+        })
         .map(|(name, index)| match objects.get(index) {
             Some(&object) => Ok((name, object, None)),
             None => Err(Failure::Usage(format!(

@@ -31,6 +31,11 @@ pub struct OperationSpec {
 pub struct TargetSpec {
     pub whole_object: bool,
     pub kinds: Vec<String>,
+    /// The command may act on several targets at once (a split of every
+    /// selected object): the first is the invocation's `target`, the rest
+    /// are operands named `target`, in order. One command, one undo step.
+    #[serde(default)]
+    pub many: bool,
 }
 
 /// An operand other than the command's target (D6, MF-P1-SEL-001): names
@@ -40,7 +45,14 @@ pub struct OperandSpec {
     pub name: String,
     pub role: OperandRole,
     pub kinds: Vec<String>,
+    /// For a single operand: it must be given. For a `many` operand: at
+    /// least one object must be given (otherwise any number, even none).
     pub required: bool,
+    /// The operand is a list: an invocation may name it any number of
+    /// times, and each object is its own operand (its own provenance index,
+    /// recorded input and output), in the order given.
+    #[serde(default)]
+    pub many: bool,
 }
 
 /// What an operation does to an operand's object once the command

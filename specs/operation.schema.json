@@ -16,6 +16,7 @@
       "required": ["whole_object", "kinds"],
       "properties": {
         "whole_object": { "type": "boolean" },
+        "many": { "type": "boolean" },
         "kinds": { "type": "array", "items": { "enum": ["face_set", "component", "boundary_loop"] } }
       }
     },
@@ -33,7 +34,8 @@
             "items": { "enum": ["object", "face_set", "component"] },
             "minItems": 1
           },
-          "required": { "type": "boolean" }
+          "required": { "type": "boolean" },
+          "many": { "type": "boolean" }
         }
       }
     },

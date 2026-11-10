@@ -27,9 +27,12 @@ pub struct Invocation {
     /// bound to the current revision (translate it first).
     pub selection: Option<Selection>,
     /// The command's other operands (D6): `(name, object, selection)`,
-    /// named as in the spec's `operands:` list, in any order. A `None`
-    /// selection is the whole object; a selection must be bound to the
-    /// current revision. Empty for single-object operations.
+    /// named as in the spec's `operands:` list. A `many` operand is a list:
+    /// name it once per object, in order (extra targets of a `many` target
+    /// are named `target`). Slots may come in any order; within a slot the
+    /// order is kept and recorded. A `None` selection is the whole object;
+    /// a selection must be bound to the current revision. Empty for
+    /// single-object operations.
     pub operands: Vec<(String, ObjectId, Option<Selection>)>,
     pub raw_params: BTreeMap<String, String>,
 }
@@ -192,7 +195,9 @@ struct PreparedOperand {
 pub struct Prepared {
     base_revision: RevisionId,
     op: &'static dyn Operation,
-    /// Operand 0 is the target; the rest in the spec's `operands:` order.
+    /// Operand 0 is the target, then any extra targets, then each of the
+    /// spec's `operands:` slots in order (a `many` slot's objects in the
+    /// order given).
     operands: Vec<PreparedOperand>,
     params: Params,
     /// The ids a recorded run of this command gave the objects it created
@@ -829,21 +834,37 @@ impl Session {
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
         let op = mf_operations::find(op_id)
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
-        let mut supplied: BTreeMap<String, (ObjectId, Option<Selection>)> = BTreeMap::new();
+        // Each operand slot's objects, in the order given: a `many` slot
+        // (and a `many` target's extra targets, named `target`) is a list.
+        let mut supplied: BTreeMap<String, Vec<(ObjectId, Option<Selection>)>> = BTreeMap::new();
         for (name, object, sel) in operands {
-            if !spec.operands.iter().any(|o| o.name == name) {
-                return Err(CommandError::UnknownOperand {
-                    op: spec.id.clone(),
-                    name,
-                });
-            }
-            if supplied.contains_key(&name) {
+            let many = if name == TARGET_OPERAND {
+                if !spec.target.many {
+                    return Err(CommandError::RepeatedOperand {
+                        op: spec.id.clone(),
+                        name,
+                    });
+                }
+                true
+            } else {
+                match spec.operands.iter().find(|o| o.name == name) {
+                    Some(o) => o.many,
+                    None => {
+                        return Err(CommandError::UnknownOperand {
+                            op: spec.id.clone(),
+                            name,
+                        });
+                    }
+                }
+            };
+            let slot = supplied.entry(name.clone()).or_default();
+            if !many && !slot.is_empty() {
                 return Err(CommandError::RepeatedOperand {
                     op: spec.id.clone(),
                     name,
                 });
             }
-            supplied.insert(name, (object, sel));
+            slot.push((object, sel));
         }
         let mut prepared = vec![self.prepare_operand(
             spec,
@@ -854,32 +875,49 @@ impl Session {
             spec.target.whole_object,
             &spec.target.kinds,
         )?];
-        for o in &spec.operands {
-            let Some((object, sel)) = supplied.remove(&o.name) else {
-                if o.required {
-                    return Err(CommandError::MissingOperand {
-                        op: spec.id.clone(),
-                        name: o.name.clone(),
-                    });
-                }
-                continue;
-            };
+        let repeated = |prepared: &[PreparedOperand], object: ObjectId| {
             if prepared.iter().any(|p| p.object == object) {
-                return Err(CommandError::RepeatedObject {
+                Err(CommandError::RepeatedObject {
                     op: spec.id.clone(),
                     object,
+                })
+            } else {
+                Ok(())
+            }
+        };
+        for (object, sel) in supplied.remove(TARGET_OPERAND).unwrap_or_default() {
+            repeated(&prepared, object)?;
+            prepared.push(self.prepare_operand(
+                spec,
+                TARGET_OPERAND,
+                None,
+                object,
+                sel,
+                spec.target.whole_object,
+                &spec.target.kinds,
+            )?);
+        }
+        for o in &spec.operands {
+            let given = supplied.remove(&o.name).unwrap_or_default();
+            if given.is_empty() && o.required {
+                return Err(CommandError::MissingOperand {
+                    op: spec.id.clone(),
+                    name: o.name.clone(),
                 });
             }
             let whole = o.kinds.iter().any(|k| k == "object");
-            prepared.push(self.prepare_operand(
-                spec,
-                &o.name,
-                Some(o.role),
-                object,
-                sel,
-                whole,
-                &o.kinds,
-            )?);
+            for (object, sel) in given {
+                repeated(&prepared, object)?;
+                prepared.push(self.prepare_operand(
+                    spec,
+                    &o.name,
+                    Some(o.role),
+                    object,
+                    sel,
+                    whole,
+                    &o.kinds,
+                )?);
+            }
         }
         let scene = if op.wants_scene() {
             self.document()

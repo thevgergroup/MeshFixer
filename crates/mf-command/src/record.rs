@@ -55,7 +55,10 @@ pub struct CommandRecord {
     pub status: CommandStatus,
     /// Every operand the command read (MF-P1-SEL-001), index-aligned with
     /// the operation's operands: entry 0 is the target (named `target`),
-    /// the rest follow the spec's `operands:` order. Empty in records
+    /// then any extra targets of a `many` target, then the spec's
+    /// `operands:` slots in order. A `many` slot is a list: consecutive
+    /// entries with the slot's name, in the order given (see
+    /// [`CommandRecord::operand_slot`]). Empty in records
     /// written before Phase 1 (`mfx-log/1`), which had only the target.
     #[serde(default)]
     pub operands: Vec<RecordedOperand>,
@@ -65,6 +68,15 @@ pub struct CommandRecord {
     /// is the target's (`output_hash`).
     #[serde(default)]
     pub outputs: Vec<ObjectOutput>,
+}
+
+impl CommandRecord {
+    /// Every object recorded for operand slot `name`, in order (`target`
+    /// lists the target and any extra targets). Empty for a slot the
+    /// command wasn't given, and for every slot of an `mfx-log/1` record.
+    pub fn operand_slot<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a RecordedOperand> {
+        self.operands.iter().filter(move |o| o.name == name)
+    }
 }
 
 /// One operand of a recorded command, as it was read (MF-P1-SEL-001).

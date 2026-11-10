@@ -419,6 +419,28 @@ fn operands_are_validated_against_the_spec() {
     // The target can't also be an operand.
     assert!(s.prepare(consume_tool(ids[0], ids[0])).is_err());
     assert!(s.prepare(consume_tool(ids[0], ObjectId(999))).is_err());
+    // A single (not `many`) operand named twice, or an extra target for a
+    // single-target operation, is refused by name.
+    let (s, ids) = session_with(
+        dir.path(),
+        vec![
+            ("a", cube(1.0), IDENTITY),
+            ("b", tetrahedron(), IDENTITY),
+            ("c", cube(2.0), IDENTITY),
+        ],
+    );
+    let mut twice = consume_tool(ids[0], ids[1]);
+    twice.operands.push(("tool".into(), ids[2], None));
+    assert!(matches!(
+        s.prepare(twice),
+        Err(mf_command::CommandError::RepeatedOperand { .. })
+    ));
+    let mut extra_target = plain("object.drop_to_plate", ids[0]);
+    extra_target.operands = vec![("target".into(), ids[1], None)];
+    assert!(matches!(
+        s.prepare(extra_target),
+        Err(mf_command::CommandError::RepeatedOperand { .. })
+    ));
 }
 
 /// `mfx-log/1` logs still replay: the committed fixture, and a log written
