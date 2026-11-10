@@ -121,6 +121,14 @@ impl Document {
         Some(d)
     }
 
+    /// A new document with one object renamed, or `None` if it doesn't
+    /// exist.
+    pub fn with_name(&self, id: ObjectId, name: String) -> Option<Document> {
+        let mut d = self.clone();
+        d.objects.iter_mut().find(|o| o.id == id)?.name = name;
+        Some(d)
+    }
+
     /// A new document without one object, or `None` if it doesn't exist.
     /// The original document still holds it, so undo restores it with the
     /// same id, in the same place.

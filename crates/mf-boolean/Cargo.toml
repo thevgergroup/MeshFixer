@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 mf-runtime.workspace = true
+mf-geometry.workspace = true
+spade.workspace = true
 manifold-rust.workspace = true
 robust.workspace = true
 thiserror.workspace = true

@@ -50,6 +50,8 @@ timing=(
   # Fairing the largest holes (MF-ISSUE-053): seconds of single-threaded
   # solve, timed, with a 100 ms checkpoint gate.
   "mf-operations fill_holes large_holes_fair_quickly"
+  # mesh.split_plane on 5M and 30M (Phase 1 Task 12): each alone.
+  "mf-operations split_timing split_5m_under_2s split_30m_under_10s"
   # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"

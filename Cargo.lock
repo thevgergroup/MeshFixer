@@ -2713,6 +2713,7 @@ dependencies = [
  "rayon",
  "robust",
  "serde_json",
+ "spade",
  "thiserror 2.0.21",
 ]
 
@@ -2853,6 +2854,7 @@ version = "0.0.1"
 dependencies = [
  "faer",
  "jsonschema",
+ "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
@@ -4681,6 +4683,18 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spade"
+version = "2.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9699399fd9349b00b184f5635b074f9ec93afffef30c853f8c875b32c0f8c7fa"
+dependencies = [
+ "hashbrown 0.16.1",
+ "num-traits",
+ "robust",
+ "smallvec",
 ]
 
 [[package]]

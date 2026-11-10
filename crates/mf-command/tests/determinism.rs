@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use mf_command::{Geometry, Invocation, Session};
-use mf_fixtures::{DamageSpec, damaged_sphere};
+use mf_fixtures::{DamageSpec, damaged_sphere, uv_sphere};
 
 fn run_all_ops(threads: usize) -> Vec<(String, String)> {
     let pool = rayon::ThreadPoolBuilder::new()
@@ -23,16 +23,37 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
             if spec.operands.iter().any(|o| o.required) {
                 continue;
             }
+            // A split needs a closed model and a plane through it: a bias
+            // cut with a gap through a closed sphere.
+            let (input, raw_params) = if op.id() == "mesh.split_plane" {
+                (
+                    uv_sphere(160, 250),
+                    BTreeMap::from([
+                        ("plane_point".to_string(), "0.01,0.02,0.1".to_string()),
+                        ("plane_normal".to_string(), "0.3,0.2,1".to_string()),
+                        ("cut_gap".to_string(), "0.05".to_string()),
+                    ]),
+                )
+            } else {
+                (mesh.clone(), BTreeMap::new())
+            };
             let mut s = Session::new();
-            let id = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture".into(), None);
+            let id = s.add_geometry(Geometry::Mesh(input), "fixture".into(), None);
             s.execute(Invocation {
                 operands: Vec::new(),
                 selection: None,
                 op_id: op.id().into(),
                 target: id,
-                raw_params: BTreeMap::new(),
+                raw_params,
             })
             .unwrap();
+            // Objects an operation created (a split's bottom part).
+            for o in s.document().objects().iter().filter(|o| o.id != id) {
+                out.push((
+                    format!("{} created {}", op.id(), o.name),
+                    o.geometry.content_hash().to_hex(),
+                ));
+            }
             // An object operation may move or remove the object: its
             // placement is part of the result (and "removed" is one).
             let Some(object) = s.document().object(id) else {

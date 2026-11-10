@@ -60,6 +60,8 @@ sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 manifold-rust = { version = "=0.19.2", default-features = false, features = ["parallel"] }
 # D2: Shewchuk's adaptive exact predicates.
 robust = "1.2"
+# D3: constrained Delaunay triangulation for cut caps (exact predicates).
+spade = "2.15"
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 
 [workspace.lints.rust]

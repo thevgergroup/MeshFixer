@@ -66,6 +66,7 @@ fn fixture(name: &str) -> Result<Mesh, String> {
     };
     Ok(match name {
         "cube" => cube(1.0),
+        "cube_2" => cube(2.0),
         "cube_with_missing_face" => cube_with_missing_face(),
         "cube_and_two_tetrahedra" => merge(&[
             cube(1.0),
@@ -182,6 +183,7 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
     let result = op.execute_doc(
         &[OperandInput {
             object: mf_document::ObjectId(1),
+            name: "object",
             mesh: &before,
             transform: placement,
             target,
@@ -205,6 +207,8 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
     let mut geometry = None;
     let mut transform = placement;
     let mut removed = false;
+    let mut name = None;
+    let mut created: Vec<Mesh> = Vec::new();
     for change in &output.changes {
         match change {
             ObjectChange::Geometry {
@@ -217,6 +221,11 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
                 transform: t,
             } => transform = *t,
             ObjectChange::Remove { operand: 0 } => removed = true,
+            ObjectChange::Rename {
+                operand: 0,
+                name: n,
+            } => name = Some(n.clone()),
+            ObjectChange::Create { mesh, .. } => created.push(mesh.clone()),
             other => return Err(format!("unexpected change {other:?}")),
         }
     }
@@ -232,6 +241,18 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
             "changed" => Value::Bool(!output.changes.is_empty()),
             "geometry_changed" => Value::Bool(geometry_changed),
             "removed" => Value::Bool(removed),
+            "name" => name.clone().map_or(Value::Null, Value::String),
+            "created_objects" => Value::from(created.len()),
+            // The first created object's diagnostics, as `created_<key>`.
+            k if k.starts_with("created_") => {
+                let first = created.first().ok_or("nothing was created")?;
+                let d = serde_json::to_value(inspect(first)).unwrap();
+                match d.get(&k["created_".len()..]) {
+                    Some(Value::Array(a)) => Value::from(a.len()),
+                    Some(v) => v.clone(),
+                    None => return Err(format!("unknown expect key '{k}'")),
+                }
+            }
             // Bit-for-bit (D7): true when equal, else the actual values.
             "transform" => {
                 let expected = parse_affine(want.as_str().ok_or("transform needs a string")?)?;
