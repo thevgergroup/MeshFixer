@@ -552,7 +552,7 @@ The owner delegated technical decisions (2026-11-10). Each entry gives the choic
 **Controller amendment (2026-11-10, after Task 7b; ADR-0002 option B):**
 - **Kernel:**
   - The kernel is `ManifoldCpp`, with the operand check.
-  - The `manifold-cpp` feature becomes the default for `mf-boolean`. `mf-manifold-sys` joins the workspace, and the CI fast job builds it on all 3 OSes (use `rust-cache`).
+  - The `manifold-cpp` feature becomes the default for `mf-boolean`, and `mf-manifold-sys` joins the workspace. It is verified locally on macOS only (owner ruling 2026-11-11: no GitHub Actions). The Linux and Windows builds are an explicit, documented risk in ADR-0002 and the milestone report. Update the `run-qualify` label references in ADR-0002 and run-tests.sh to "manual dispatch only".
   - `ManifoldRobust` stays behind its own off-by-default feature, for comparison only.
 - **Operand check:**
   - The self-intersection check runs on the window operands (`clip_to_box` output), never on the whole model.
