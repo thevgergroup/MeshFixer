@@ -1323,7 +1323,7 @@ fn fit_profile(m: &ArgMatches) -> Result<mf_parts::FitProfile, Failure> {
     let dir = mf_parts::dirs::meshfixer_dir().map_err(|e| Failure::Runtime(e.to_string()))?;
     let profiles =
         mf_parts::FitProfiles::load(&dir).map_err(|e| Failure::Runtime(e.to_string()))?;
-    profiles.get(name).cloned().ok_or_else(|| {
+    profiles.lookup(name).cloned().ok_or_else(|| {
         let names: Vec<&str> = profiles.profiles.iter().map(|p| p.name.as_str()).collect();
         Failure::Usage(format!(
             "--fit-profile '{name}': no such profile (have: {})",

@@ -142,9 +142,23 @@ impl Operation for SplitPlane {
         Err(needs_document(self.id()))
     }
 
+    fn wants_scene(&self) -> bool {
+        true
+    }
+
     fn execute_doc(
         &self,
         inputs: &[OperandInput],
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<DocOutput, OpError> {
+        self.execute_scene(inputs, &[], params, ctx)
+    }
+
+    fn execute_scene(
+        &self,
+        inputs: &[OperandInput],
+        scene: &[crate::SceneObject],
         params: &Params,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
@@ -211,7 +225,9 @@ impl Operation for SplitPlane {
         let mut peg_report = serde_json::Value::Null;
         if pegs != "none" {
             let world_n = unit;
-            let out = alignment(params, pegs, target, world_n, &mut above, &mut below, ctx)?;
+            let out = alignment(
+                params, pegs, target, scene, world_n, &mut above, &mut below, ctx,
+            )?;
             created_dowels = out.0;
             peg_report = out.1;
         }
@@ -324,6 +340,7 @@ fn alignment(
     params: &Params,
     pegs: &str,
     target: &OperandInput,
+    scene: &[crate::SceneObject],
     world_n: [f64; 3],
     above: &mut Option<HalfCut>,
     below: &mut Option<HalfCut>,
@@ -505,8 +522,10 @@ fn alignment(
             prints.push(footprint(&mesh, &crate::affine::IDENTITY).unwrap_or([0.0; 4]));
             meshes.push(mesh);
         }
+        // Clear of the split object and of everything else on the plate.
         let occupied: Vec<Footprint> = footprint(target.mesh, &target.transform)
             .into_iter()
+            .chain(scene.iter().map(|o| o.footprint()))
             .collect();
         let layout = layout_on_plate(&occupied, &prints, &plate, spacing);
         off_plate = layout.off_plate.clone();
