@@ -117,6 +117,17 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 });
                 ui.menu_button(t!("menu.view"), |ui| {
                     command_item(app, ui, "view.overlays");
+                    ui.separator();
+                    // The shading presets (UI plan §4): one level, as radios.
+                    for (preset, label) in [
+                        (mf_render::ShadingPreset::Clay, t!("view.clay")),
+                        (mf_render::ShadingPreset::Studio, t!("view.studio")),
+                        (mf_render::ShadingPreset::XRay, t!("view.xray")),
+                    ] {
+                        ui.radio_value(&mut app.shading.preset, preset, label);
+                    }
+                    ui.checkbox(&mut app.shading.wireframe, t!("view.wireframe"));
+                    ui.separator();
                     ui.checkbox(&mut app.show_boundaries, "Show defects");
                     ui.checkbox(&mut app.shown.recent_repairs, "Highlight recent repairs");
                     ui.checkbox(&mut app.show_hole_markers, "Show hole markers")

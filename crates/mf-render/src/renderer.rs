@@ -14,7 +14,11 @@ use crate::overlay::GIZMO_LINE_WIDTH_PT;
 /// written to the (non-sRGB) render target.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Palette {
+    /// The stage's background at the bottom of the view…
     pub background: [f32; 4],
+    /// …and at the top: a soft vertical gradient between the two (the
+    /// same colour twice for a flat background).
+    pub background_top: [f32; 4],
     /// Front faces of the model.
     pub surface: [f32; 4],
     /// Back faces (seen through holes, or flipped).
@@ -40,6 +44,28 @@ pub struct Palette {
     /// Opacity (0–1) of the selection drawn through nearer surfaces (the
     /// x-ray pass, in the selection's own colour; see [`SelectionCue`]).
     pub xray_opacity: f32,
+}
+
+/// How the model's surface is shaded (UI plan §4 "Shaders").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShadingPreset {
+    /// One matte neutral under soft studio light: best for reading shape
+    /// and defects. The default.
+    #[default]
+    Clay,
+    /// Brighter, with a soft highlight: for presenting a part.
+    Studio,
+    /// See-through: every surface at once, edges brighter, for what's
+    /// inside or behind.
+    XRay,
+}
+
+/// The surface's shading this frame.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Shading {
+    pub preset: ShadingPreset,
+    /// Draw every triangle's edges over the surface.
+    pub wireframe: bool,
 }
 
 /// How the selection is drawn this frame, besides its face tint and
@@ -76,6 +102,7 @@ impl Palette {
     /// theme; these are the renderer's own neutral colours for them.
     pub const HEADLESS: Palette = Palette {
         background: [38.0 / 255.0, 41.0 / 255.0, 46.0 / 255.0, 1.0],
+        background_top: [38.0 / 255.0, 41.0 / 255.0, 46.0 / 255.0, 1.0],
         surface: [0.70, 0.72, 0.76, 1.0],
         back_face: [0.62, 0.30, 0.30, 1.0],
         boundary: [1.0, 0.55, 0.05, 1.0],
@@ -123,6 +150,12 @@ struct SceneUniforms {
     eye_pos: [f32; 4],
     /// The build plate's grid colour (D9 `PLATE`).
     plate: [f32; 4],
+    /// The background gradient: bottom, top.
+    background: [f32; 4],
+    background_top: [f32; 4],
+    /// x: the shading preset (0 clay, 1 studio, 2 x-ray), y: 1 for the
+    /// wireframe.
+    shading: [f32; 4],
 }
 
 #[repr(C)]
@@ -214,6 +247,10 @@ pub struct MeshRenderer {
     /// one reusable slot, since only one plate is ever drawn.
     /// The plate's minor and major lines' uniforms (two draws, one pass).
     plate_slots: [DrawSlot; 2],
+    glass_pipeline_ccw: wgpu::RenderPipeline,
+    glass_pipeline_cw: wgpu::RenderPipeline,
+    background_pipeline: wgpu::RenderPipeline,
+    shading: Shading,
 }
 
 impl MeshRenderer {
@@ -292,6 +329,9 @@ impl MeshRenderer {
             /// attachment (required for pipeline/pass compatibility), but
             /// always passes and never writes.
             NoTest,
+            /// The x-ray preset's surface: blended, every surface drawn
+            /// (no depth test), writing no depth.
+            Glass,
         }
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -319,14 +359,17 @@ impl MeshRenderer {
                 ),
                 depth_compare: Some(match depth_mode {
                     DepthMode::XRay => wgpu::CompareFunction::Greater,
-                    DepthMode::NoTest => wgpu::CompareFunction::Always,
+                    DepthMode::NoTest | DepthMode::Glass => wgpu::CompareFunction::Always,
                     DepthMode::Opaque | DepthMode::Blended => wgpu::CompareFunction::LessEqual,
                 }),
                 stencil: Default::default(),
                 bias: Default::default(),
             });
-            let blend = (depth_mode == DepthMode::XRay || depth_mode == DepthMode::Blended)
-                .then_some(blend_state);
+            let blend = matches!(
+                depth_mode,
+                DepthMode::XRay | DepthMode::Blended | DepthMode::Glass
+            )
+            .then_some(blend_state);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
@@ -437,6 +480,35 @@ impl MeshRenderer {
                 DepthMode::XRay,
             )
         };
+        let glass = |label: &str, front_face| {
+            pipeline_with(
+                label,
+                &surface_layout,
+                "vs_surface",
+                "fs_glass_surface",
+                &surface_buffers,
+                front_face,
+                DepthMode::Glass,
+            )
+        };
+        let glass_pipeline_ccw = glass("mf x-ray preset ccw", wgpu::FrontFace::Ccw);
+        let glass_pipeline_cw = glass("mf x-ray preset cw", wgpu::FrontFace::Cw);
+        // The stage's background gradient: one full-screen triangle, drawn
+        // first, testing and writing no depth.
+        let background_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mf background pipeline layout"),
+            bind_group_layouts: &[Some(&scene_bgl)],
+            immediate_size: 0,
+        });
+        let background_pipeline = pipeline_with(
+            "mf background",
+            &background_layout,
+            "vs_background",
+            "fs_background",
+            &[],
+            wgpu::FrontFace::Ccw,
+            DepthMode::NoTest,
+        );
         let xray_surface_pipeline_ccw = xray_surface("mf x-ray surface ccw", wgpu::FrontFace::Ccw);
         let xray_surface_pipeline_cw = xray_surface("mf x-ray surface cw", wgpu::FrontFace::Cw);
         let xray_line_pipeline = pipeline_with(
@@ -524,6 +596,10 @@ impl MeshRenderer {
         };
         let plate_slots = [plate_slot(), plate_slot()];
         MeshRenderer {
+            glass_pipeline_ccw,
+            glass_pipeline_cw,
+            background_pipeline,
+            shading: Shading::default(),
             xray_surface_pipeline_ccw,
             xray_surface_pipeline_cw,
             xray_line_pipeline,
@@ -547,6 +623,27 @@ impl MeshRenderer {
 
     pub fn palette(&self) -> &Palette {
         &self.palette
+    }
+
+    /// How the surface is shaded from the next [`Self::prepare`] on.
+    pub fn set_shading(&mut self, shading: Shading) {
+        self.shading = shading;
+    }
+
+    pub fn shading(&self) -> Shading {
+        self.shading
+    }
+
+    /// Fill the target with the stage's background gradient. Call first in
+    /// a pass, after [`Self::prepare`] (a flat palette background makes it
+    /// the clear colour again).
+    pub fn draw_background(&self, pass: &mut wgpu::RenderPass<'_>) {
+        if self.palette.background == self.palette.background_top {
+            return;
+        }
+        pass.set_bind_group(0, &self.scene_bind_group, &[]);
+        pass.set_pipeline(&self.background_pipeline);
+        pass.draw(0..3, 0..1);
     }
 
     /// How the selection is drawn from the next [`Self::prepare`] on.
@@ -595,6 +692,18 @@ impl MeshRenderer {
             cue: [self.cue.emphasis.clamp(0.0, 1.0), p.xray_opacity, 0.0, 0.0],
             eye_pos: Vec4::from((eye_shifted, 0.0)).to_array(),
             plate: p.plate,
+            background: p.background,
+            background_top: p.background_top,
+            shading: [
+                match self.shading.preset {
+                    ShadingPreset::Clay => 0.0,
+                    ShadingPreset::Studio => 1.0,
+                    ShadingPreset::XRay => 2.0,
+                },
+                f32::from(u8::from(self.shading.wireframe)),
+                0.0,
+                0.0,
+            ],
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
@@ -684,11 +793,13 @@ impl MeshRenderer {
         }
 
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
+        let glass = self.shading.preset == ShadingPreset::XRay;
         for (slot, item) in self.draw_slots.iter().zip(items) {
-            let pipeline = if item.model.determinant() < 0.0 {
-                &self.surface_pipeline_cw
-            } else {
-                &self.surface_pipeline_ccw
+            let pipeline = match (glass, item.model.determinant() < 0.0) {
+                (true, true) => &self.glass_pipeline_cw,
+                (true, false) => &self.glass_pipeline_ccw,
+                (false, true) => &self.surface_pipeline_cw,
+                (false, false) => &self.surface_pipeline_ccw,
             };
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(pipeline);
@@ -782,12 +893,8 @@ impl MeshRenderer {
                 model: shifted_model(DMat4::IDENTITY, DVec3::ZERO, world_origin).to_cols_array_2d(),
                 normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 color,
-                params: [
-                    0.0,
-                    self.palette.overlay_width * self.pixels_per_point,
-                    0.0,
-                    0.0,
-                ],
+                // Hairlines: the plate steps back (UI plan §11).
+                params: [0.0, self.pixels_per_point, 0.0, 0.0],
                 states: [0; 4],
             };
             let slot = &self.plate_slots[slot];

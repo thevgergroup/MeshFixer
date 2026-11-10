@@ -214,6 +214,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("nav.pan", "Pan"),
     ("nav.pan.tip", "Drag pans (or Shift + drag)"),
     ("nav.reset.tip", "Reset view (Home, or Cmd/Ctrl+0)"),
+    ("nav.wireframe", "Wireframe"),
+    (
+        "nav.wireframe.tip",
+        "Show every triangle's edges (View > Wireframe)",
+    ),
     ("nav.zoom", "Zoom"),
     ("nav.zoom.tip", "Drag up/down zooms (or Option/Alt + drag)"),
     ("nav.zoom_in", "Zoom in"),
@@ -349,8 +354,12 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("transform.uniform", "Uniform scale"),
     ("transform.uniform.tip", "Scale fields change together"),
+    ("view.clay", "Clay"),
     ("view.overlays", "Overlays…"),
     ("view.pseudo", "Pseudo-locale (debug)"),
+    ("view.studio", "Studio"),
+    ("view.wireframe", "Wireframe"),
+    ("view.xray", "X-ray"),
 ];
 
 #[cfg(test)]

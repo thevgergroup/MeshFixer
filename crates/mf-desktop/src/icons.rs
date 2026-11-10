@@ -97,3 +97,4 @@ pub const ZOOM_IN: &str = "\u{E3D4}"; // plus
 pub const FRAME: &str = "\u{E626}"; // frame-corners
 pub const HOME: &str = "\u{E2C2}"; // house
 pub const OVERLAYS: &str = "\u{E468}"; // stack-simple
+pub const WIREFRAME: &str = "\u{E464}"; // squares-four

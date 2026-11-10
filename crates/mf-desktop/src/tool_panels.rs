@@ -607,10 +607,16 @@ fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 /// A section heading with an icon in a meaning colour and a count badge.
-fn counted_section(ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &str, n: usize) {
+fn counted_section(
+    ui: &mut egui::Ui,
+    icon: &str,
+    color: egui::Color32,
+    name: &str,
+    n: usize,
+) -> egui::Rect {
     ui.add_space(theme::SPACE_L);
     let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), egui::Sense::hover());
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), egui::Sense::hover());
     let p = ui.painter();
     let mid = rect.center().y;
     p.text(
@@ -634,6 +640,7 @@ fn counted_section(ui: &mut egui::Ui, icon: &str, color: egui::Color32, name: &s
         theme::TEXT_MUTED,
     );
     ui.add_space(2.0);
+    rect
 }
 
 // ---------------------------------------------------------------------
@@ -1360,41 +1367,59 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let primary_holes = holes > 0;
     let primary_loose = !primary_holes && loose > 0;
 
-    counted_section(
+    // Each section: its header (icon, name, count; Holes adds Previous /
+    // Next), one line saying what it is, its action, then its list.
+    let header = counted_section(
         ui,
         icons::HOLE,
         theme::HOLE,
         &t!("repair.section.holes"),
         holes,
     );
-    if counts.is_none() {
-    } else if holes == 0 {
-        widgets::caption(ui, t!("repair.holes.none"));
-    } else {
-        widgets::caption(ui, tp!("repair.holes.summary", holes));
-        hole_steps(app, ui);
-        hole_groups(app, ui);
+    if holes > 0 {
+        let steps = egui::Rect::from_min_max(
+            egui::pos2(header.right() - 36.0 - 52.0, header.top()),
+            egui::pos2(header.right() - 36.0, header.bottom()),
+        );
+        ui.scope_builder(
+            egui::UiBuilder::new()
+                .max_rect(steps)
+                .layout(egui::Layout::right_to_left(egui::Align::Center)),
+            |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                hole_steps_compact(app, ui);
+            },
+        );
     }
-    if marked > 0 {
-        widgets::caption(ui, tp!("repair.openings.summary", marked));
-    }
-    {
-        ui.add_space(theme::SPACE_XS);
-        let kind = if primary_holes {
-            Kind::Primary
+    if counts.is_some() {
+        let mut line = if holes == 0 {
+            t!("repair.holes.none")
         } else {
-            Kind::Secondary
+            tp!("repair.holes.summary", holes)
         };
-        if ui
-            .add_enabled_ui(idle && (holes > 0 || counts.is_none()), |ui| {
-                widgets::wide_button(ui, kind, Some(icons::HOLE), &t!("cmd.fill_holes"))
-            })
-            .inner
-            .on_hover_text("Choose how, then Apply: one step, one Undo")
-            .clicked()
-        {
-            app.tool = Some("mesh.fill_holes".into());
+        if marked > 0 {
+            line = format!("{line} · {}", tp!("repair.openings.summary", marked));
         }
+        widgets::caption(ui, line);
+    }
+    ui.add_space(theme::SPACE_XS);
+    let kind = if primary_holes {
+        Kind::Primary
+    } else {
+        Kind::Secondary
+    };
+    if ui
+        .add_enabled_ui(idle && (holes > 0 || counts.is_none()), |ui| {
+            widgets::wide_button(ui, kind, Some(icons::HOLE), &t!("cmd.fill_holes"))
+        })
+        .inner
+        .on_hover_text("Choose how, then Apply: one step, one Undo")
+        .clicked()
+    {
+        app.tool = Some("mesh.fill_holes".into());
+    }
+    if holes > 0 {
+        hole_groups(app, ui);
     }
 
     counted_section(
@@ -1491,32 +1516,9 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 }
 
-/// Previous / Next hole (Shift+N / N): select and frame the next one.
-fn hole_steps(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    ui.horizontal(|ui| {
-        if labelled(
-            widgets::button(ui, Kind::Tertiary, Some(icons::CARET_LEFT), "Previous", 0.0),
-            &t!("repair.previous_hole"),
-        )
-        .on_hover_text(t!("repair.previous_hole.tip"))
-        .clicked()
-        {
-            app.next_hole(false);
-        }
-        if labelled(
-            widgets::button(ui, Kind::Tertiary, Some(icons::CARET_RIGHT), "Next", 0.0),
-            &t!("repair.next_hole"),
-        )
-        .on_hover_text(t!("repair.next_hole.tip"))
-        .clicked()
-        {
-            app.next_hole(true);
-        }
-    });
-}
-
-/// [`hole_steps`] as two icon buttons (laid out right to left), beside
-/// the back link while a hole is shown.
+/// Previous / Next hole (Shift+N / N) as two icon buttons, laid out right
+/// to left: on the Holes header, and beside the back link while a hole is
+/// shown.
 fn hole_steps_compact(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let next = t!("repair.next_hole");
     if widgets::icon_button(ui, icons::CARET_RIGHT, &next, None, 24.0)

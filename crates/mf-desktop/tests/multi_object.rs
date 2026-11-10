@@ -97,20 +97,25 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
     let pos_gap = h.state().screen_point(world_gap).unwrap();
     let frame = h.render().unwrap();
     let pixel_at = |p: egui::Pos2| frame.get_pixel(p.x as u32, p.y as u32).0;
-    assert_ne!(
-        pixel_at(pos_first),
+    // The stage is a vertical gradient between these two (UI plan §4).
+    let (lo, hi) = (
         mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
+        mf_desktop::theme::VIEWPORT_BACKGROUND_TOP.to_array(),
+    );
+    let background =
+        |p: [u8; 4]| (0..3).all(|k| p[k] + 1 >= lo[k].min(hi[k]) && p[k] <= lo[k].max(hi[k]) + 1);
+    assert!(
+        !background(pixel_at(pos_first)),
         "the active (first) object must be drawn"
     );
-    assert_ne!(
-        pixel_at(pos_second),
-        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
+    assert!(
+        !background(pixel_at(pos_second)),
         "the inactive (second) object must also be drawn, not skipped"
     );
-    assert_eq!(
-        pixel_at(pos_gap),
-        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
-        "the gap between the cubes must stay background"
+    assert!(
+        background(pixel_at(pos_gap)),
+        "the gap between the cubes must stay background: {:?}",
+        pixel_at(pos_gap)
     );
     if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
         frame

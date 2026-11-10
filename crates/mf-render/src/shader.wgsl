@@ -25,6 +25,11 @@ struct Scene {
     eye_pos: vec4<f32>,
     // The build plate's grid colour (D9 `PLATE`).
     plate: vec4<f32>,
+    // The background gradient: bottom, top.
+    background: vec4<f32>,
+    background_top: vec4<f32>,
+    // x: preset (0 clay, 1 studio, 2 x-ray), y: 1 for the wireframe.
+    shading: vec4<f32>,
 };
 
 struct Draw {
@@ -64,6 +69,9 @@ struct SurfaceOut {
     @location(0) normal: vec3<f32>,
     // The face's shown state flags.
     @location(1) @interpolate(flat) state: u32,
+    // Barycentric coordinates (each face is three consecutive vertices):
+    // the wireframe draws where one of them is near 0.
+    @location(2) bary: vec3<f32>,
 };
 
 // Inactive objects are desaturated and dimmed (MF-ISSUE-042, theme.rs).
@@ -99,9 +107,46 @@ fn base_color(front: bool, state: u32) -> vec3<f32> {
     return rgb;
 }
 
+// Soft studio lighting (UI plan §4, the Clay preset): a key light above
+// and left of the camera, a fill from the right, a sky/ground hemisphere
+// and a faint rim, all relative to the view so the model reads the same
+// from any side. Two-sided: the normal is turned to face the camera.
+fn studio(n_in: vec3<f32>) -> vec4<f32> {
+    let v = normalize(scene.eye_dir.xyz);
+    var n = normalize(n_in);
+    n = select(-n, n, dot(n, v) >= 0.0);
+    let up = vec3<f32>(0.0, 0.0, 1.0);
+    var right = cross(up, v);
+    right = select(vec3<f32>(1.0, 0.0, 0.0), normalize(right), length(right) > 1e-3);
+    let cam_up = normalize(cross(v, right));
+    let key = normalize(v + 1.1 * cam_up - 0.6 * right);
+    let fill = normalize(v - 0.25 * cam_up + 0.8 * right);
+    // Wrapped diffuse: soft terminators, no hard black side.
+    let k = max((dot(n, key) + 0.25) / 1.25, 0.0);
+    let f = max(dot(n, fill), 0.0);
+    let hemi = 0.5 + 0.5 * n.z;
+    let rim = pow(1.0 - max(dot(n, v), 0.0), 3.0);
+    let half_vec = normalize(key + v);
+    let spec = pow(max(dot(n, half_vec), 0.0), 48.0);
+    // x: diffuse light, y: specular, z: rim.
+    return vec4<f32>(0.14 + 0.70 * k + 0.12 * f + 0.12 * hemi, spec, rim, 0.0);
+}
+
 fn lit(rgb: vec3<f32>, n_in: vec3<f32>) -> vec3<f32> {
-    let light = abs(dot(normalize(n_in), normalize(scene.eye_dir.xyz)));
-    return rgb * (0.25 + 0.75 * light);
+    let l = studio(n_in);
+    if (scene.shading.x > 0.5) {
+        // Studio: brighter, with a soft highlight.
+        return rgb * (0.08 + 1.0 * l.x) + vec3<f32>(0.22 * l.y + 0.06 * l.z);
+    }
+    return rgb * l.x + vec3<f32>(0.05 * l.z);
+}
+
+// The wireframe: how much of a triangle edge this fragment is (0–1), a
+// screen-constant ~1 px line.
+fn wire(bary: vec3<f32>) -> f32 {
+    let d = fwidth(bary);
+    let a = smoothstep(vec3<f32>(0.0), d * 1.25, bary);
+    return (1.0 - min(min(a.x, a.y), a.z)) * scene.shading.y;
 }
 
 // `first_face` (the instance index) is where the buffer's first face's
@@ -122,6 +167,8 @@ fn vs_surface(
     let face = first_face + vertex / 3u;
     let bits = (face_states[face / 4u] >> ((face % 4u) * 8u)) & 0xffu;
     out.state = bits & draw.states.x;
+    let corner = vertex % 3u;
+    out.bary = vec3<f32>(f32(corner == 0u), f32(corner == 1u), f32(corner == 2u));
     return out;
 }
 
@@ -142,7 +189,45 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
     if (selected) {
         rgb = mix(rgb, glow(base, in.normal), scene.cue.x);
     }
+    rgb = mix(rgb, rgb * 0.45, wire(in.bary));
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), 1.0);
+}
+
+// The x-ray preset: every surface faintly, brighter where it turns edge-on
+// (a fresnel), so what's inside or behind shows.
+@fragment
+fn fs_glass_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base = base_color(front, in.state);
+    let v = normalize(scene.eye_dir.xyz);
+    let n = normalize(in.normal);
+    let edge_on = pow(1.0 - abs(dot(n, v)), 2.0);
+    let w = wire(in.bary);
+    let rgb = mix(base, base * 0.5, w);
+    let a = clamp(0.10 + 0.45 * edge_on + 0.5 * w, 0.0, 1.0);
+    return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
+}
+
+// --- The stage's background: a soft vertical gradient (UI plan §4). ---
+struct BackgroundOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) t: f32,
+};
+
+@vertex
+fn vs_background(@builtin(vertex_index) i: u32) -> BackgroundOut {
+    // One triangle covering the target.
+    let x = f32(i32(i & 1u) * 4 - 1);
+    let y = f32(i32(i >> 1u) * 4 - 1);
+    var out: BackgroundOut;
+    out.clip = vec4<f32>(x, y, 1.0, 1.0);
+    out.t = y * 0.5 + 0.5;
+    return out;
+}
+
+@fragment
+fn fs_background(in: BackgroundOut) -> @location(0) vec4<f32> {
+    let t = clamp(in.t, 0.0, 1.0);
+    return vec4<f32>(mix(scene.background.rgb, scene.background_top.rgb, t), 1.0);
 }
 
 // One line segment (a..b) as a screen-space quad `draw.params.y` pixels
@@ -298,7 +383,10 @@ fn fs_plate(in: PlateOut) -> @location(0) vec4<f32> {
     // camera, gone by four times that, so the grid reads around and well
     // beyond the object.
     let scale = max(length(scene.eye_pos.xyz), 1e-3);
-    let fade = clamp(1.0 - dist / (scale * 4.0), 0.0, 1.0);
+    // Fades faster than it used to (UI plan §11: the accoutrement steps
+    // back): squared, gone by 2.5 framing distances.
+    let lin = clamp(1.0 - dist / (scale * 2.5), 0.0, 1.0);
+    let fade = lin * lin;
     // The line's colour: the plate's minor or major lines (renderer.rs
     // `draw_plate` sets it per draw).
     return vec4<f32>(draw.color.rgb, draw.color.a * fade);
