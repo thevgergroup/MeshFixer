@@ -87,8 +87,20 @@ pub enum HandleGeometry {
         points: Vec<(f64, f64)>,
         front: Vec<bool>,
     },
+    /// A ring's grab handle (`Handle::Ring`, alongside its `Ring`): a
+    /// short arc along the ring at the point nearest the viewer (see
+    /// [`grip_angle`]), drawn as a thick band, with an arrowhead at each
+    /// end pointing along the ring — the ring's counterpart of a move
+    /// arrow's head, saying "drag along here". `arc` is the band's
+    /// polyline; each of `heads` is a triangle `[tip, base_a, base_b]`.
+    RingGrip {
+        arc: Vec<(f64, f64)>,
+        heads: [[(f64, f64); 3]; 2],
+    },
     /// `Handle::ViewRing`: a plain screen-space circle (it has no single
-    /// world axis to project, so there is no front/back half).
+    /// world axis to project, so there is no front/back half). Not part of
+    /// the gizmo at rest: it is drawn only while it is hovered or dragged
+    /// (see [`Gizmo::shapes`]), so no ring on screen looks extra.
     Circle { center: (f64, f64), radius_px: f64 },
     /// A plane handle (`Handle::Plane`): a small filled square in the
     /// plane spanned by its two axes, as its four screen corners in
@@ -112,6 +124,28 @@ pub const POINT_HANDLE_RADIUS_PX: f64 = 8.0;
 pub const RING_SEGMENTS: usize = 64;
 
 const AXES: [DVec3; 3] = [DVec3::X, DVec3::Y, DVec3::Z];
+
+/// A ring grip's band runs this far (screen points) either side of its
+/// centre, to where its arrowheads start.
+pub const GRIP_HALF_ARC_PX: f64 = 18.0;
+/// A ring grip's arrowheads: length along the ring and half-width across
+/// it (screen points), a little larger than a move arrow's so the curved
+/// heads read at a glance.
+pub const GRIP_HEAD_LENGTH_PX: f64 = 12.0;
+pub const GRIP_HEAD_HALF_WIDTH_PX: f64 = 7.5;
+/// A grip is kept at least this fraction of its ring's screen radius
+/// from the pivot (a ring within about 20° of edge-on would otherwise put
+/// it on top of the other handles).
+pub const GRIP_CLEARANCE: f64 = 0.35;
+/// Grips keep at least this far apart (screen points, centre to centre),
+/// so two never sit on top of each other: a later one slides along its
+/// ring.
+pub const GRIP_SEPARATION_PX: f64 = 2.0 * (GRIP_HALF_ARC_PX + GRIP_HEAD_LENGTH_PX) * 0.85;
+/// How many segments a grip's band is drawn with.
+const GRIP_SEGMENTS: usize = 10;
+/// The view ring's radius, as a multiple of the gizmo's size: just
+/// outside the axis rings, so pointing there reveals it.
+pub const VIEW_RING_SCALE: f64 = 1.15;
 
 /// Screen-pixel distance from `world`'s own projection to the projection of
 /// `world + dir * len`, or `None` if either point is behind the camera.
@@ -289,6 +323,157 @@ fn ring_geometry(
     Some(HandleGeometry::Ring { points, front })
 }
 
+/// Where on ring `normal` (world radius `radius` around `centre`) its grip
+/// sits, as an angle in the ring's own basis ([`plane_basis_for_normal`]):
+/// the point nearest the viewer, so the grip is on the ring's front and
+/// its tangent lies flat to the screen (the arc reads at full length).
+///
+/// Two views need care. Seen face-on (the camera looking along the axis)
+/// every point is equally near, so the grip settles at the ring's
+/// lower-right on screen, blending smoothly into the nearest point as
+/// the view tilts away. Seen edge-on the nearest point projects onto the
+/// pivot, where the grip would sit on top of the other handles, so it
+/// slides along the ring (towards the screen's bottom) until it is at
+/// least [`GRIP_CLEARANCE`] of the ring's screen radius out. It also
+/// slides to keep [`GRIP_SEPARATION_PX`] from the grips in `avoid`.
+fn grip_angle(
+    cam: &OrbitCamera,
+    origin: DVec3,
+    view: (f64, f64),
+    centre: DVec3,
+    normal: DVec3,
+    radius: f64,
+    avoid: &[(f64, f64)],
+) -> Option<f64> {
+    let (u, v) = plane_basis_for_normal(normal);
+    let centre_px = screen_position(cam, origin, view, centre.to_array())?;
+    let at = |theta: f64| {
+        let dir = u * theta.cos() + v * theta.sin();
+        screen_position(cam, origin, view, (centre + dir * radius).to_array())
+    };
+    let samples: Vec<(f64, (f64, f64))> = (0..RING_SEGMENTS)
+        .filter_map(|i| {
+            let theta = std::f64::consts::TAU * i as f64 / RING_SEGMENTS as f64;
+            at(theta).map(|p| (theta, p))
+        })
+        .collect();
+    let dist = |p: (f64, f64)| ((p.0 - centre_px.0).powi(2) + (p.1 - centre_px.1).powi(2)).sqrt();
+    let r_max = samples.iter().map(|(_, p)| dist(*p)).fold(0.0, f64::max);
+    if r_max <= 1e-9 {
+        return None;
+    }
+    // Face-on: the screen's lower-right, on the ring's drawn (front) half.
+    let eye = cam.eye();
+    let (rest, _) = samples
+        .iter()
+        .copied()
+        .filter(|(t, _)| front_facing(centre, normal, u * t.cos() + v * t.sin(), eye))
+        .max_by(|a, b| {
+            let score = |p: (f64, f64)| (p.1 - centre_px.1) + 0.4 * (p.0 - centre_px.0);
+            score(a.1).total_cmp(&score(b.1))
+        })?;
+    let to_eye = eye - centre;
+    let in_plane = to_eye.reject_from(normal);
+    // How far from face-on: 0 looking straight along the axis.
+    let tilt = in_plane.length() / to_eye.length().max(1e-18);
+    let near = u * in_plane.dot(u) + v * in_plane.dot(v);
+    let rest_dir = u * rest.cos() + v * rest.sin();
+    let blend = (tilt / 0.2).clamp(0.0, 1.0);
+    let dir = rest_dir * (1.0 - blend) + near.normalize_or_zero() * blend;
+    let mut theta = if dir.length_squared() < 1e-18 {
+        rest
+    } else {
+        dir.dot(v).atan2(dir.dot(u))
+    };
+    // Edge-on: slide along the front until clear of the pivot, towards
+    // the screen's bottom (larger y) for a stable choice.
+    let clear = GRIP_CLEARANCE * r_max;
+    let fits = |p: (f64, f64)| {
+        dist(p) >= clear
+            && avoid
+                .iter()
+                .all(|q| (p.0 - q.0).hypot(p.1 - q.1) >= GRIP_SEPARATION_PX)
+    };
+    if at(theta).is_none_or(|p| !fits(p)) {
+        let step = 1f64.to_radians();
+        for k in 1..=90 {
+            let d = step * k as f64;
+            let candidates = [theta + d, theta - d];
+            let ok: Vec<(f64, (f64, f64))> = candidates
+                .iter()
+                .filter_map(|&t| at(t).map(|p| (t, p)))
+                .filter(|(_, p)| fits(*p))
+                .collect();
+            if let Some(&(t, _)) = ok.iter().max_by(|a, b| a.1.1.total_cmp(&b.1.1)) {
+                theta = t;
+                break;
+            }
+        }
+    }
+    Some(theta)
+}
+
+/// A ring's grip ([`HandleGeometry::RingGrip`]) at angle `theta` of ring
+/// `normal`, its band `GRIP_HALF_ARC_PX` either side on screen
+/// (`radius_px`: the ring's screen radius, turning screen lengths into
+/// angles), with an arrowhead at each end pointing along the ring.
+#[allow(clippy::too_many_arguments)]
+fn grip_geometry(
+    cam: &OrbitCamera,
+    origin: DVec3,
+    view: (f64, f64),
+    centre: DVec3,
+    normal: DVec3,
+    radius: f64,
+    theta: f64,
+    radius_px: f64,
+) -> Option<HandleGeometry> {
+    let (u, v) = plane_basis_for_normal(normal);
+    let at = |t: f64| {
+        let dir = u * t.cos() + v * t.sin();
+        screen_position(cam, origin, view, (centre + dir * radius).to_array())
+    };
+    let half = GRIP_HALF_ARC_PX / radius_px.max(1e-9);
+    let head = GRIP_HEAD_LENGTH_PX / radius_px.max(1e-9);
+    let mut arc = Vec::with_capacity(GRIP_SEGMENTS + 1);
+    for i in 0..=GRIP_SEGMENTS {
+        let t = theta - half + 2.0 * half * i as f64 / GRIP_SEGMENTS as f64;
+        arc.push(at(t)?);
+    }
+    let arrowhead = |base: (f64, f64), tip: (f64, f64), back: (f64, f64)| {
+        // Along the ring at the band's end: towards the tip, or (if the
+        // tip lands on the base, a degenerate view) on from the band.
+        let (mut dx, mut dy) = (tip.0 - base.0, tip.1 - base.1);
+        let mut len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 {
+            (dx, dy) = (base.0 - back.0, base.1 - back.1);
+            len = (dx * dx + dy * dy).sqrt().max(1e-9);
+        }
+        let (ux, uy) = (dx / len, dy / len);
+        let (px, py) = (-uy, ux);
+        let w = GRIP_HEAD_HALF_WIDTH_PX;
+        let tip = if (tip.0 - base.0).hypot(tip.1 - base.1) < 1e-6 {
+            (
+                base.0 + ux * GRIP_HEAD_LENGTH_PX,
+                base.1 + uy * GRIP_HEAD_LENGTH_PX,
+            )
+        } else {
+            tip
+        };
+        [
+            tip,
+            (base.0 + px * w, base.1 + py * w),
+            (base.0 - px * w, base.1 - py * w),
+        ]
+    };
+    let n = arc.len();
+    let heads = [
+        arrowhead(arc[n - 1], at(theta + half + head)?, arc[n - 2]),
+        arrowhead(arc[0], at(theta - half - head)?, arc[1]),
+    ];
+    Some(HandleGeometry::RingGrip { arc, heads })
+}
+
 /// The two orthonormal in-plane axes for a ring/plane handle whose plane
 /// has unit `normal`, picked from the world axes where possible (matching
 /// [`plane_basis`]'s meaning for the three world-aligned rings), and
@@ -312,8 +497,50 @@ fn plane_basis_for_normal(normal: DVec3) -> (DVec3, DVec3) {
 }
 
 impl Gizmo {
-    /// Screen-space shapes for the handles of the current mode, at a
-    /// constant on-screen size regardless of camera distance.
+    /// What to draw this frame: [`Self::handles`], plus the view ring
+    /// while it is `highlight`ed (hovered or dragged). The view ring turns
+    /// the object in the screen's plane; drawn always, it read as a
+    /// mistake (owner review, Phase 1), so it appears only when the
+    /// pointer is on it, just outside the axis rings.
+    ///
+    /// Draw/hit parity: [`Self::hit`] tests exactly these shapes with the
+    /// view ring included, so any handle a press can hit is on screen at
+    /// that moment (the view ring because the pointer is on it).
+    pub fn shapes(
+        &self,
+        cam: &OrbitCamera,
+        view: (f64, f64),
+        highlight: Option<Handle>,
+    ) -> Vec<HandleShape> {
+        let mut out = self.handles(cam, view);
+        if highlight == Some(Handle::ViewRing)
+            && let Some(ring) = self.view_ring(cam, view)
+        {
+            out.push(ring);
+        }
+        out
+    }
+
+    /// The view ring's shape (Rotate mode only).
+    fn view_ring(&self, cam: &OrbitCamera, view: (f64, f64)) -> Option<HandleShape> {
+        if self.mode != GizmoMode::Rotate {
+            return None;
+        }
+        let centre_px = screen_position(cam, self.pivot, view, self.pivot.to_array())?;
+        Some(HandleShape {
+            handle: Handle::ViewRing,
+            geometry: HandleGeometry::Circle {
+                center: centre_px,
+                radius_px: self.size_pt * VIEW_RING_SCALE,
+            },
+        })
+    }
+
+    /// Screen-space shapes for the handles of the current mode at rest
+    /// (the view ring isn't among them: see [`Self::shapes`]), at a
+    /// constant on-screen size regardless of camera distance. In Rotate
+    /// mode each ring comes with its grip ([`HandleGeometry::RingGrip`]),
+    /// a second shape for the same handle.
     pub fn handles(&self, cam: &OrbitCamera, view: (f64, f64)) -> Vec<HandleShape> {
         let origin = self.pivot;
         // Each axis probes its own direction, so its arm lands at
@@ -360,6 +587,8 @@ impl Gizmo {
                 });
             }
             GizmoMode::Rotate => {
+                // (index, axis, world radius, screen radius) of each ring drawn.
+                let mut rings = Vec::new();
                 for i in 0..3u8 {
                     let axis = AXES[i as usize];
                     // The ring's radius is solved along its own *in-plane*
@@ -378,24 +607,71 @@ impl Gizmo {
                     // sweeps close to the camera, where a handful of its
                     // points' perspective-divided screen coordinates blow
                     // up even though none are strictly behind the camera.
+                    // An in-plane direction seen end-on (looking straight
+                    // along it) foreshortens to nothing and its arm can't
+                    // be solved, so only the other one sizes the ring:
+                    // otherwise a ring seen from an exact axis view
+                    // collapsed to a dot.
                     let (u, v) = plane_basis(i);
-                    let radius = arm_along(u).min(arm_along(v)).min(cam.distance * 0.3);
-                    if let Some(geometry) =
-                        ring_geometry(cam, origin, view, self.pivot, axis, radius)
-                    {
-                        out.push(HandleShape {
-                            handle: Handle::Ring(i),
-                            geometry,
+                    let forward = (cam.target - cam.eye()).normalize_or_zero();
+                    let radius = [u, v]
+                        .into_iter()
+                        .filter(|d| !is_end_on(forward, *d))
+                        .map(arm_along)
+                        .fold(f64::INFINITY, f64::min)
+                        .min(cam.distance * 0.3);
+                    let Some(geometry) = ring_geometry(cam, origin, view, self.pivot, axis, radius)
+                    else {
+                        continue;
+                    };
+                    let HandleGeometry::Ring { points, .. } = &geometry else {
+                        unreachable!("ring_geometry makes a Ring");
+                    };
+                    let radius_px = points
+                        .iter()
+                        .map(|p| (p.0 - centre_px.0).hypot(p.1 - centre_px.1))
+                        .fold(0.0, f64::max);
+                    out.push(HandleShape {
+                        handle: Handle::Ring(i),
+                        geometry,
+                    });
+                    rings.push((i, axis, radius, radius_px));
+                }
+                // Each ring's grip (the same handle, so grabbing either
+                // turns about that axis). The most oblique ring places
+                // first (its nearest point is the most telling); the
+                // others keep clear of grips already placed.
+                let eye = cam.eye();
+                let obliqueness = |axis: DVec3| {
+                    let to_eye = (eye - self.pivot).normalize_or_zero();
+                    (to_eye.reject_from(axis).length() - 0.7).abs()
+                };
+                let mut order: Vec<usize> = (0..rings.len()).collect();
+                order.sort_by(|&a, &b| obliqueness(rings[a].1).total_cmp(&obliqueness(rings[b].1)));
+                let mut placed: Vec<(f64, f64)> = Vec::new();
+                let mut grips: Vec<(u8, HandleGeometry)> = Vec::new();
+                for k in order {
+                    let (i, axis, radius, radius_px) = rings[k];
+                    let grip = grip_angle(cam, origin, view, self.pivot, axis, radius, &placed)
+                        .and_then(|theta| {
+                            grip_geometry(
+                                cam, origin, view, self.pivot, axis, radius, theta, radius_px,
+                            )
                         });
+                    if let Some(grip) = grip {
+                        if let HandleGeometry::RingGrip { arc, .. } = &grip {
+                            placed.push(arc[arc.len() / 2]);
+                        }
+                        grips.push((i, grip));
                     }
                 }
-                out.push(HandleShape {
-                    handle: Handle::ViewRing,
-                    geometry: HandleGeometry::Circle {
-                        center: centre_px,
-                        radius_px: self.size_pt * 1.15,
-                    },
-                });
+                // Drawn after every ring (so no ring's line crosses a
+                // grip), in axis order.
+                grips.sort_by_key(|(i, _)| *i);
+                out.extend(grips.into_iter().map(|(i, geometry)| HandleShape {
+                    handle: Handle::Ring(i),
+                    geometry,
+                }));
             }
             GizmoMode::Scale => {
                 for (i, axis) in AXES.into_iter().enumerate() {
@@ -421,8 +697,9 @@ impl Gizmo {
         out
     }
 
-    /// The nearest handle within 8pt of `px`, or `None`. Axes beat planes,
-    /// which beat rings, which beat the centre. An axis within 10 degrees
+    /// The nearest handle within 8pt of `px`, or `None`. Axes beat planes
+    /// and ring grips, which beat rings (the view ring among them), which
+    /// beat the centre. An axis within 10 degrees
     /// of end-on (the view direction nearly parallel to it) isn't offered.
     /// Measures against the same geometry [`Self::handles`] draws (fix
     /// round 1, review point 3): the ring's own projected polyline (front
@@ -441,7 +718,7 @@ impl Gizmo {
             }
         };
 
-        for shape in self.handles(cam, view) {
+        for shape in self.shapes(cam, view, Some(Handle::ViewRing)) {
             match (&shape.geometry, shape.handle) {
                 (
                     HandleGeometry::Arrow {
@@ -472,6 +749,11 @@ impl Gizmo {
                     if let Some(d) = d {
                         consider(2, d, h);
                     }
+                }
+                // A grip beats any ring passing near it: it is its ring's
+                // own, drawn on top.
+                (HandleGeometry::RingGrip { arc, heads }, h) => {
+                    consider(1, distance_to_grip(px, arc, heads), h);
                 }
                 (HandleGeometry::Circle { center, radius_px }, h) => {
                     let dx = px.0 - center.0;
@@ -683,6 +965,32 @@ fn distance_to_ring_front(p: (f64, f64), points: &[(f64, f64)], front: &[bool]) 
         best = best.min(d);
     }
     any.then_some(best)
+}
+
+/// Distance from `p` to a ring grip: zero inside either arrowhead,
+/// otherwise the nearest of the band's centreline and the heads' edges.
+fn distance_to_grip(p: (f64, f64), arc: &[(f64, f64)], heads: &[[(f64, f64); 3]; 2]) -> f64 {
+    let mut best = f64::INFINITY;
+    for head in heads {
+        if point_in_triangle(p, head) {
+            return 0.0;
+        }
+        for i in 0..3 {
+            best = best.min(point_segment_distance(p, head[i], head[(i + 1) % 3]).0);
+        }
+    }
+    for w in arc.windows(2) {
+        best = best.min(point_segment_distance(p, w[0], w[1]).0);
+    }
+    best
+}
+
+/// True when `p` is inside triangle `t` (either winding).
+fn point_in_triangle(p: (f64, f64), t: &[(f64, f64); 3]) -> bool {
+    let cross =
+        |a: (f64, f64), b: (f64, f64)| (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0);
+    let d = [cross(t[0], t[1]), cross(t[1], t[2]), cross(t[2], t[0])];
+    d.iter().all(|&x| x >= 0.0) || d.iter().all(|&x| x <= 0.0)
 }
 
 /// The parameter `s` such that `line_origin + s*axis` is the closest point

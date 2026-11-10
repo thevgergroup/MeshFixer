@@ -441,7 +441,7 @@ impl Viewport {
         // renderer draws in target pixels.
         let gizmo = gizmo.map(|(g, highlight)| {
             let shapes: Vec<mf_render::HandleShape> = g
-                .handles(cam, view)
+                .shapes(cam, view, highlight)
                 .into_iter()
                 .map(|s| scaled_shape(s, ppp))
                 .collect();
@@ -1039,6 +1039,10 @@ fn scaled_shape(shape: mf_render::HandleShape, ppp: f64) -> mf_render::HandleSha
         G::Ring { points, front } => G::Ring {
             points: points.into_iter().map(p).collect(),
             front,
+        },
+        G::RingGrip { arc, heads } => G::RingGrip {
+            arc: arc.into_iter().map(p).collect(),
+            heads: heads.map(|h| h.map(p)),
         },
         G::Circle { center, radius_px } => G::Circle {
             center: p(center),

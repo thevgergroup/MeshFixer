@@ -819,3 +819,78 @@ fn plate_stays_at_world_origin_when_the_camera_target_moves() {
     assert!(drawn([0.0, 3.0, 0.0]), "the x = 0 line is at x = 0");
     assert!(!drawn([5.0, 3.0, 0.0]), "nothing at x = 5, mid-cell");
 }
+
+/// Phase 1 design stream (owner review): in Rotate mode each ring's grip
+/// draws its arrowheads in the ring's axis colour, nothing is drawn where
+/// the view ring used to be at rest, and pointing there (the view ring
+/// highlighted) draws it.
+#[test]
+fn rotate_mode_grips_draw_and_the_view_ring_only_when_hovered() {
+    let Some((device, queue, target, mut renderer)) = gpu_or_skip(
+        "rotate_mode_grips_draw_and_the_view_ring_only_when_hovered",
+        setup(320, 320),
+    ) else {
+        return;
+    };
+    let cam = OrbitCamera {
+        target: DVec3::ZERO,
+        distance: 6.0,
+        yaw: -45f64.to_radians(),
+        pitch: 25f64.to_radians(),
+        fov_y: 40f64.to_radians(),
+        radius: 1.0,
+    };
+    let view = (320.0, 320.0);
+    let gizmo = Gizmo {
+        pivot: DVec3::ZERO,
+        mode: GizmoMode::Rotate,
+        size_pt: 90.0,
+    };
+    let items: [DrawItem<'_>; 0] = [];
+    let mut render = |highlight: Option<Handle>| {
+        let shapes = gizmo.shapes(&cam, view, highlight);
+        renderer.prepare(&queue, &cam, (320, 320));
+        render_pass_frame(&device, &queue, &target, |pass| {
+            renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
+            renderer.draw_gizmo(&device, pass, &shapes, highlight, &GizmoPalette::HEADLESS);
+        });
+        offscreen::read_back(&device, &queue, &target).unwrap()
+    };
+
+    let rest = render(None);
+    let shapes = gizmo.handles(&cam, view);
+    let mut grips = 0;
+    for s in &shapes {
+        let (HandleGeometry::RingGrip { heads, .. }, Handle::Ring(i)) = (&s.geometry, s.handle)
+        else {
+            continue;
+        };
+        grips += 1;
+        for head in heads {
+            // Inside the arrowhead: between its centroid and its base.
+            let c = (
+                (head[0].0 + head[1].0 + head[2].0) / 3.0,
+                (head[0].1 + head[1].1 + head[2].1) / 3.0,
+            );
+            let base = ((head[1].0 + head[2].0) / 2.0, (head[1].1 + head[2].1) / 2.0);
+            let p = ((c.0 + base.0) / 2.0, (c.1 + base.1) / 2.0);
+            pixel_close_to(&rest, p, axis_color_u8(i), &format!("ring {i}'s grip head"));
+        }
+    }
+    assert_eq!(grips, 3);
+
+    // Where the view ring would be (up-left, clear of every ring): the
+    // background at rest, the neutral colour (lightened) once hovered.
+    let centre = mf_render::screen_position(&cam, DVec3::ZERO, view, [0.0; 3]).unwrap();
+    let r = 90.0 * mf_render::VIEW_RING_SCALE;
+    let a = 225f64.to_radians();
+    let p = (centre.0 + r * a.cos(), centre.1 + r * a.sin());
+    let bg = offscreen::BACKGROUND_RGBA;
+    pixel_close_to(&rest, p, [bg[0], bg[1], bg[2]], "no view ring at rest");
+    let hovered = render(Some(Handle::ViewRing));
+    let px = hovered.get_pixel(p.0.round() as u32, p.1.round() as u32).0;
+    assert!(
+        px[0] > bg[0] + 60 && px[1] > bg[1] + 60 && px[2] > bg[2] + 60,
+        "the hovered view ring draws: {px:?}"
+    );
+}

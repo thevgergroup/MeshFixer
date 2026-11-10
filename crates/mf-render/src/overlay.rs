@@ -119,9 +119,13 @@ const POINT_DISC_SEGMENTS: usize = 16;
 /// for the ordinary overlay lines); the hovered handle draws at twice this.
 pub const GIZMO_LINE_WIDTH_PT: f32 = 2.0;
 
+/// A ring grip's band is this many times the gizmo's line width (the
+/// arrowheads at its ends are filled triangles).
+pub const GRIP_BAND_SCALE: f32 = 3.0;
+
 /// Screen-space line-segment vertices (pairs, one segment per two
 /// vertices) for every shape in `shapes` that has one (an axis's shaft, a
-/// ring's front-facing polyline segments — the dimmed back half is left
+/// ring grip's band, a ring's front-facing polyline segments — the dimmed back half is left
 /// out, as in Blender and Meshmixer), coloured by `palette` per
 /// [`GizmoPalette::color_for`]. `highlight`'s shape, if present, is drawn
 /// 40% lighter and twice as wide (the same rule as the selection pulse,
@@ -153,6 +157,13 @@ pub fn gizmo_line_vertices(
             HandleGeometry::Circle { center, radius_px } => {
                 push_circle(&mut out, *center, *radius_px, color, width)
             }
+            // The grip's band: the ring's own line, thickened, so it reads
+            // as a grip on the ring rather than a separate mark.
+            HandleGeometry::RingGrip { arc, .. } => {
+                for w in arc.windows(2) {
+                    push_segment(&mut out, w[0], w[1], color, width * GRIP_BAND_SCALE);
+                }
+            }
             HandleGeometry::Plane { .. } | HandleGeometry::Point { .. } => {}
         }
     }
@@ -161,7 +172,7 @@ pub fn gizmo_line_vertices(
 
 /// Filled triangle vertices for every shape in `shapes` that is filled (an
 /// arrowhead or scale cube, a plane handle's square, a point handle's
-/// disc), coloured and emphasised the same way as
+/// disc, a ring grip's two arrowheads), coloured and emphasised the same way as
 /// [`gizmo_line_vertices`].
 pub fn gizmo_fill_vertices(
     shapes: &[HandleShape],
@@ -177,6 +188,11 @@ pub fn gizmo_fill_vertices(
             HandleGeometry::Plane { corners } => push_fan(&mut out, corners, color),
             HandleGeometry::Point { center, radius_px } => {
                 push_disc(&mut out, *center, *radius_px, color)
+            }
+            HandleGeometry::RingGrip { heads, .. } => {
+                for head in heads {
+                    push_fan(&mut out, head, color);
+                }
             }
             HandleGeometry::Ring { .. } | HandleGeometry::Circle { .. } => {}
         }

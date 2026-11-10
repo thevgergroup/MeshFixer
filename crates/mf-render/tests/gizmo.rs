@@ -588,3 +588,418 @@ fn shear_is_reported_as_sheared() {
     let decomposed = decompose(&t);
     assert!(matches!(decomposed, Decomposed::Sheared), "{decomposed:?}");
 }
+
+// --- Phase 1 design stream (owner review): no view ring at rest, and a
+// curved-arrow grip on each rotation ring. ---
+
+fn rotate_gizmo(pivot: DVec3) -> Gizmo {
+    Gizmo {
+        pivot,
+        mode: GizmoMode::Rotate,
+        size_pt: 110.0,
+    }
+}
+
+/// A camera at `yaw`/`pitch` degrees around the origin.
+fn camera_at(yaw: f64, pitch: f64) -> OrbitCamera {
+    OrbitCamera {
+        target: DVec3::ZERO,
+        distance: 10.0,
+        yaw: yaw.to_radians(),
+        pitch: pitch.to_radians(),
+        fov_y: 40f64.to_radians(),
+        radius: 1.0,
+    }
+}
+
+/// A grip, for these tests: its ring, its band's middle point, and the
+/// centroid of each arrowhead.
+type Grip = (u8, (f64, f64), [(f64, f64); 2]);
+
+/// Every grip of `shapes`.
+fn grips(shapes: &[mf_render::HandleShape]) -> Vec<Grip> {
+    shapes
+        .iter()
+        .filter_map(|s| match (&s.geometry, s.handle) {
+            (HandleGeometry::RingGrip { arc, heads }, Handle::Ring(i)) => {
+                let mid = arc[arc.len() / 2];
+                let c = |t: &[(f64, f64); 3]| {
+                    (
+                        (t[0].0 + t[1].0 + t[2].0) / 3.0,
+                        (t[0].1 + t[1].1 + t[2].1) / 3.0,
+                    )
+                };
+                Some((i, mid, [c(&heads[0]), c(&heads[1])]))
+            }
+            (HandleGeometry::RingGrip { .. }, other) => panic!("a grip on {other:?}"),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The gizmo at rest draws no view ring: only the three axis rings and a
+/// grip on each (the owner read the grey outer ring as a mistake).
+#[test]
+fn rotate_mode_draws_three_rings_each_with_a_grip_and_no_view_ring() {
+    let cam = test_camera();
+    let gizmo = rotate_gizmo(DVec3::ZERO);
+    let shapes = gizmo.handles(&cam, VIEW);
+    assert!(
+        shapes.iter().all(|s| s.handle != Handle::ViewRing),
+        "no view ring at rest"
+    );
+    assert!(
+        shapes
+            .iter()
+            .all(|s| !matches!(s.geometry, HandleGeometry::Circle { .. })),
+        "no plain circle at rest"
+    );
+    let rings: Vec<u8> = shapes
+        .iter()
+        .filter_map(|s| match (&s.geometry, s.handle) {
+            (HandleGeometry::Ring { .. }, Handle::Ring(i)) => Some(i),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(rings, [0, 1, 2]);
+    let with_grips: Vec<u8> = grips(&shapes).iter().map(|g| g.0).collect();
+    assert_eq!(with_grips, [0, 1, 2], "each ring has one grip");
+    // Grips come after every ring, so no ring's line crosses a grip.
+    let first_grip = shapes
+        .iter()
+        .position(|s| matches!(s.geometry, HandleGeometry::RingGrip { .. }))
+        .unwrap();
+    assert!(
+        shapes[first_grip..]
+            .iter()
+            .all(|s| matches!(s.geometry, HandleGeometry::RingGrip { .. }))
+    );
+    // Move and Scale have no rings or grips.
+    for mode in [GizmoMode::Move, GizmoMode::Scale] {
+        let g = Gizmo { mode, ..gizmo };
+        assert!(g.handles(&cam, VIEW).iter().all(|s| !matches!(
+            s.geometry,
+            HandleGeometry::RingGrip { .. }
+                | HandleGeometry::Ring { .. }
+                | HandleGeometry::Circle { .. }
+        )));
+    }
+}
+
+/// Each grip is its ring's handle: pressing its band or either arrowhead
+/// hits that ring, and dragging from it along the arrow turns the object
+/// about that ring's axis.
+#[test]
+fn a_ring_grip_is_hittable_and_turns_about_its_axis() {
+    let pivot = DVec3::new(1.0, 2.0, 3.0);
+    let gizmo = rotate_gizmo(pivot);
+    for cam in [
+        test_camera(),
+        camera_at(30.0, 35.0),
+        camera_at(-120.0, 20.0),
+    ] {
+        let shapes = gizmo.handles(&cam, VIEW);
+        for (i, mid, heads) in grips(&shapes) {
+            assert_eq!(
+                gizmo.hit(&cam, VIEW, mid),
+                Some(Handle::Ring(i)),
+                "band {i}"
+            );
+            for c in heads {
+                assert_eq!(gizmo.hit(&cam, VIEW, c), Some(Handle::Ring(i)), "head {i}");
+            }
+            // Drag from the band's middle to one arrowhead's centroid:
+            // a turn about axis i only.
+            let drag = gizmo.begin(Handle::Ring(i), mid, &cam, VIEW, IDENTITY);
+            let off = Snap {
+                grid: None,
+                angle_deg: None,
+                scale_step: None,
+                plate: None,
+            };
+            let t = drag.update(heads[0], &off);
+            let Decomposed::Trs { rotate_deg_xyz, .. } = decompose(&t) else {
+                panic!("a turn is not a shear");
+            };
+            let r = rotate_deg_xyz.to_array();
+            assert!(r[i as usize].abs() > 1.0, "ring {i} turned {r:?}");
+            for (k, v) in r.iter().enumerate() {
+                if k != i as usize {
+                    assert!(v.abs() < 1e-6, "ring {i} turned about {k}: {r:?}");
+                }
+            }
+        }
+    }
+}
+
+/// The grip sits where the ring is nearest the viewer (a ring seen at an
+/// angle, neither face-on nor edge-on): on the ring's front half, at the
+/// ring point in the eye's direction.
+#[test]
+fn a_grip_sits_at_the_ring_point_nearest_the_viewer() {
+    let cam = test_camera();
+    let gizmo = rotate_gizmo(DVec3::ZERO);
+    let shapes = gizmo.handles(&cam, VIEW);
+    for (i, mid, _) in grips(&shapes) {
+        let axis = [DVec3::X, DVec3::Y, DVec3::Z][i as usize];
+        let ring = shapes.iter().find(|s| s.handle == Handle::Ring(i)).unwrap();
+        let HandleGeometry::Ring { points, .. } = &ring.geometry else {
+            panic!("a ring");
+        };
+        // The ring's world radius, from its first point.
+        let centre = screen_of(&cam, DVec3::ZERO, DVec3::ZERO);
+        let toward_eye = cam.eye().reject_from(axis).normalize();
+        // Bisect the world radius whose projection along `toward_eye`
+        // lands on one of the ring's own points (they share the radius).
+        let near = |r: f64| screen_of(&cam, DVec3::ZERO, toward_eye * r);
+        let on_ring = |p: (f64, f64)| {
+            points
+                .iter()
+                .map(|q| (p.0 - q.0).hypot(p.1 - q.1))
+                .fold(f64::INFINITY, f64::min)
+        };
+        let r = (1..=400)
+            .map(|k| k as f64 * 0.005)
+            .min_by(|a, b| on_ring(near(*a)).total_cmp(&on_ring(near(*b))))
+            .unwrap();
+        let want = near(r);
+        let d = (want.0 - mid.0).hypot(want.1 - mid.1);
+        assert!(
+            d < 6.0,
+            "ring {i}: grip at {mid:?}, nearest point {want:?} ({d:.1} px apart)"
+        );
+        assert!(
+            (mid.0 - centre.0).hypot(mid.1 - centre.1) > 30.0,
+            "ring {i}'s grip is clear of the pivot"
+        );
+    }
+}
+
+/// Edge-on (the Z ring from a level camera) the nearest point would sit on
+/// the pivot, over the other handles: the grip slides out along the ring
+/// instead. Face-on (the Z ring from straight above) it rests on the
+/// ring's drawn half.
+#[test]
+fn a_grip_stays_clear_of_the_pivot_edge_on_and_on_the_drawn_half_face_on() {
+    let gizmo = rotate_gizmo(DVec3::ZERO);
+    for cam in [
+        camera_at(-30.0, 0.0),
+        camera_at(-30.0, 89.0),
+        camera_at(0.0, 0.0),
+    ] {
+        let centre = screen_of(&cam, DVec3::ZERO, DVec3::ZERO);
+        let shapes = gizmo.handles(&cam, VIEW);
+        let gs = grips(&shapes);
+        assert_eq!(gs.len(), 3, "every ring keeps its grip");
+        for (i, mid, _) in gs {
+            let ring = shapes.iter().find(|s| s.handle == Handle::Ring(i)).unwrap();
+            let HandleGeometry::Ring { points, front } = &ring.geometry else {
+                panic!("a ring");
+            };
+            let r_max = points
+                .iter()
+                .map(|p| (p.0 - centre.0).hypot(p.1 - centre.1))
+                .fold(0.0, f64::max);
+            let out = (mid.0 - centre.0).hypot(mid.1 - centre.1);
+            assert!(
+                out >= 0.33 * r_max,
+                "ring {i} grip {out:.1} px from the pivot (ring {r_max:.1})"
+            );
+            // On (near) a drawn, front-facing point of its ring.
+            let near_front = points
+                .iter()
+                .zip(front)
+                .filter(|(_, f)| **f)
+                .map(|(q, _)| (mid.0 - q.0).hypot(mid.1 - q.1))
+                .fold(f64::INFINITY, f64::min);
+            assert!(
+                near_front < 8.0,
+                "ring {i}'s grip is {near_front:.1} px off its drawn half"
+            );
+        }
+    }
+}
+
+/// The view ring isn't drawn at rest, but pointing just outside the axis
+/// rings finds it: that hover draws it (`shapes` with it highlighted), and
+/// a drag there turns about the view direction.
+#[test]
+fn the_view_ring_appears_only_when_pointed_at() {
+    let cam = test_camera();
+    let gizmo = rotate_gizmo(DVec3::ZERO);
+    let centre = screen_of(&cam, DVec3::ZERO, DVec3::ZERO);
+    let r = gizmo.size_pt * mf_render::VIEW_RING_SCALE;
+    // Up and to the left, away from every grip.
+    let a = 200f64.to_radians();
+    let px = (centre.0 + r * a.cos(), centre.1 + r * a.sin());
+    assert_eq!(gizmo.hit(&cam, VIEW, px), Some(Handle::ViewRing));
+    assert!(
+        gizmo
+            .shapes(&cam, VIEW, None)
+            .iter()
+            .all(|s| s.handle != Handle::ViewRing)
+    );
+    let shown = gizmo.shapes(&cam, VIEW, Some(Handle::ViewRing));
+    let ring = shown
+        .iter()
+        .find(|s| s.handle == Handle::ViewRing)
+        .expect("the hovered view ring is drawn");
+    assert!(matches!(ring.geometry, HandleGeometry::Circle { .. }));
+    // Not in Move or Scale.
+    for mode in [GizmoMode::Move, GizmoMode::Scale] {
+        let g = Gizmo { mode, ..gizmo };
+        assert_ne!(g.hit(&cam, VIEW, px), Some(Handle::ViewRing));
+        assert!(
+            g.shapes(&cam, VIEW, Some(Handle::ViewRing))
+                .iter()
+                .all(|s| s.handle != Handle::ViewRing)
+        );
+    }
+}
+
+/// Distance from `p` to what `shape` draws (pixels), for the parity sweep.
+fn drawn_distance(p: (f64, f64), shape: &mf_render::HandleShape) -> f64 {
+    let seg = |a: (f64, f64), b: (f64, f64)| {
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let l2 = dx * dx + dy * dy;
+        let t = if l2 > 0.0 {
+            (((p.0 - a.0) * dx + (p.1 - a.1) * dy) / l2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        (p.0 - a.0 - t * dx).hypot(p.1 - a.1 - t * dy)
+    };
+    let inside = |poly: &[(f64, f64)]| {
+        let n = poly.len();
+        let s: Vec<f64> = (0..n)
+            .map(|i| {
+                let (a, b) = (poly[i], poly[(i + 1) % n]);
+                (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+            })
+            .collect();
+        s.iter().all(|&x| x >= 0.0) || s.iter().all(|&x| x <= 0.0)
+    };
+    let edges = |poly: &[(f64, f64)]| {
+        if inside(poly) {
+            return 0.0;
+        }
+        (0..poly.len())
+            .map(|i| seg(poly[i], poly[(i + 1) % poly.len()]))
+            .fold(f64::INFINITY, f64::min)
+    };
+    match &shape.geometry {
+        HandleGeometry::Arrow {
+            shaft_start,
+            shaft_end,
+            head,
+            ..
+        } => seg(*shaft_start, *shaft_end).min(edges(head)),
+        HandleGeometry::Ring { points, front } => (0..points.len())
+            .filter(|&i| front[i] || front[(i + 1) % points.len()])
+            .map(|i| seg(points[i], points[(i + 1) % points.len()]))
+            .fold(f64::INFINITY, f64::min),
+        HandleGeometry::RingGrip { arc, heads } => arc
+            .windows(2)
+            .map(|w| seg(w[0], w[1]))
+            .chain(heads.iter().map(|h| edges(h)))
+            .fold(f64::INFINITY, f64::min),
+        HandleGeometry::Circle { center, radius_px } => {
+            ((p.0 - center.0).hypot(p.1 - center.1) - radius_px).abs()
+        }
+        HandleGeometry::Plane { corners } => edges(corners),
+        HandleGeometry::Point { center, radius_px } => {
+            ((p.0 - center.0).hypot(p.1 - center.1) - radius_px).max(0.0)
+        }
+    }
+}
+
+/// Draw/hit parity (Task 4's contract, kept with the grips and the
+/// hover-only view ring): sweeping every 3 px around the gizmo in each
+/// mode from several views, wherever `hit` finds a handle, `shapes` with
+/// that handle highlighted (what the view draws once the pointer rests
+/// there) draws that handle within the 8 pt hit tolerance of the pointer.
+#[test]
+fn every_hit_lands_on_a_drawn_shape_of_that_handle() {
+    let pivot = DVec3::new(0.5, -1.0, 2.0);
+    let cams = [
+        test_camera(),
+        camera_at(30.0, 35.0),
+        camera_at(-120.0, 20.0),
+        camera_at(-30.0, 0.0),
+        camera_at(10.0, 89.0),
+    ];
+    for mode in [GizmoMode::Move, GizmoMode::Rotate, GizmoMode::Scale] {
+        let gizmo = Gizmo {
+            pivot,
+            mode,
+            size_pt: 110.0,
+        };
+        for cam in cams {
+            let mut cam = cam;
+            cam.target = pivot;
+            let centre = screen_of(&cam, pivot, pivot);
+            let reach = 1.5 * gizmo.size_pt;
+            let mut hits = 0;
+            let mut y = centre.1 - reach;
+            while y <= centre.1 + reach {
+                let mut x = centre.0 - reach;
+                while x <= centre.0 + reach {
+                    if let Some(h) = gizmo.hit(&cam, VIEW, (x, y)) {
+                        hits += 1;
+                        let d = gizmo
+                            .shapes(&cam, VIEW, Some(h))
+                            .iter()
+                            .filter(|s| s.handle == h)
+                            .map(|s| drawn_distance((x, y), s))
+                            .fold(f64::INFINITY, f64::min);
+                        assert!(
+                            d <= 8.0 + 1e-9,
+                            "{mode:?}: {h:?} hit at ({x:.0}, {y:.0}) but drawn {d:.1} px away"
+                        );
+                    }
+                    x += 3.0;
+                }
+                y += 3.0;
+            }
+            assert!(hits > 100, "{mode:?}: the sweep found handles ({hits})");
+        }
+    }
+}
+
+/// From any view, the three grips stay apart (no two on top of each
+/// other) and each sits on its ring's drawn half.
+#[test]
+fn grips_never_overlap_from_any_view() {
+    let gizmo = rotate_gizmo(DVec3::ZERO);
+    for yaw in (0..360).step_by(15) {
+        for pitch in (-75..=89).step_by(16) {
+            let cam = camera_at(f64::from(yaw), f64::from(pitch));
+            let shapes = gizmo.handles(&cam, VIEW);
+            let gs = grips(&shapes);
+            assert_eq!(gs.len(), 3, "yaw {yaw} pitch {pitch}");
+            for (a, &(i, pa, _)) in gs.iter().enumerate() {
+                for &(j, pb, _) in &gs[a + 1..] {
+                    let d = (pa.0 - pb.0).hypot(pa.1 - pb.1);
+                    assert!(
+                        d >= mf_render::GRIP_SEPARATION_PX - 1e-6,
+                        "yaw {yaw} pitch {pitch}: grips {i} and {j} {d:.1} px apart"
+                    );
+                }
+                let ring = shapes.iter().find(|s| s.handle == Handle::Ring(i)).unwrap();
+                let HandleGeometry::Ring { points, front } = &ring.geometry else {
+                    panic!("a ring");
+                };
+                let off = points
+                    .iter()
+                    .zip(front)
+                    .filter(|(_, f)| **f)
+                    .map(|(q, _)| (pa.0 - q.0).hypot(pa.1 - q.1))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    off < 8.0,
+                    "yaw {yaw} pitch {pitch}: grip {i} {off:.1} px off its ring"
+                );
+            }
+        }
+    }
+}

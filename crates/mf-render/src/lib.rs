@@ -20,8 +20,9 @@ mod transform;
 pub use bvh::{Bvh, LEAF_MAX};
 pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
 pub use gizmo::{
-    Decomposed, Drag, Gizmo, GizmoMode, Handle, HandleGeometry, HandleShape,
-    POINT_HANDLE_RADIUS_PX, PlateSnap, RING_SEGMENTS, Snap, compose, decompose,
+    Decomposed, Drag, GRIP_HALF_ARC_PX, GRIP_HEAD_HALF_WIDTH_PX, GRIP_HEAD_LENGTH_PX,
+    GRIP_SEPARATION_PX, Gizmo, GizmoMode, Handle, HandleGeometry, HandleShape,
+    POINT_HANDLE_RADIUS_PX, PlateSnap, RING_SEGMENTS, Snap, VIEW_RING_SCALE, compose, decompose,
 };
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
@@ -30,8 +31,8 @@ pub use gpu_mesh::{
     wait_for_submitted,
 };
 pub use overlay::{
-    GIZMO_LINE_WIDTH_PT, GizmoFillVertex, GizmoLineVertex, GizmoPalette, Plate, PlateVertex,
-    gizmo_fill_vertices, gizmo_line_vertices, plate_vertices,
+    GIZMO_LINE_WIDTH_PT, GRIP_BAND_SCALE, GizmoFillVertex, GizmoLineVertex, GizmoPalette, Plate,
+    PlateVertex, gizmo_fill_vertices, gizmo_line_vertices, plate_vertices,
 };
 pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,

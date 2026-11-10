@@ -179,23 +179,27 @@ pub fn transform_legend() -> Vec<LegendRow> {
         row(
             "X axis",
             theme::AXIS_X,
-            "The gizmo's X handles: drag the arrow to move along X, the ring to turn about X",
+            "The gizmo's X handles: drag the arrow to move along X, the ring or its curved \
+             arrows to turn about X",
         ),
         row(
             "Y axis",
             theme::AXIS_Y,
-            "The gizmo's Y handles: drag the arrow to move along Y, the ring to turn about Y",
+            "The gizmo's Y handles: drag the arrow to move along Y, the ring or its curved \
+             arrows to turn about Y",
         ),
         row(
             "Z axis",
             theme::AXIS_Z,
-            "The gizmo's Z handles: drag the arrow to move along Z, the ring to turn about Z",
+            "The gizmo's Z handles: drag the arrow to move along Z, the ring or its curved \
+             arrows to turn about Z",
         ),
         row(
             "Free handles",
             theme::GIZMO_FREE,
-            "The centre (move in the view's plane), the outer ring (turn about the view \
-             direction) and the centre of the scale handles (scale evenly)",
+            "The centre (move in the view's plane), the ring that appears just outside the \
+             others when you point there (turn in the view's plane) and the centre of the \
+             scale handles (scale evenly)",
         ),
         LegendRow {
             name: "Hover",

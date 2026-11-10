@@ -1151,3 +1151,108 @@ fn turning_a_30m_object_keeps_the_analysis_and_frames_under_50ms() {
     );
     assert!(*worst < FRAME_BUDGET, "a frame took {worst:?}");
 }
+
+/// Where ring `i`'s grip is (window points): its band's middle, and the
+/// centroid of the arrowhead its drag heads towards.
+fn ring_grip(h: &Harness<'_, MeshFixerApp>, i: u8) -> (egui::Pos2, egui::Pos2) {
+    let app = h.state();
+    let g = app.transform_gizmo().unwrap();
+    let cam = app.camera.unwrap();
+    let rect = app.viewport.last_rect.unwrap();
+    let view = (rect.width() as f64, rect.height() as f64);
+    let (arc, heads) = g
+        .handles(&cam, view)
+        .into_iter()
+        .find_map(|s| match (s.geometry, s.handle) {
+            (HandleGeometry::RingGrip { arc, heads }, Handle::Ring(k)) if k == i => {
+                Some((arc, heads))
+            }
+            _ => None,
+        })
+        .expect("each ring has a grip");
+    let mid = arc[arc.len() / 2];
+    let head = heads[0];
+    let tip = (
+        (head[0].0 + head[1].0 + head[2].0) / 3.0,
+        (head[0].1 + head[1].1 + head[2].1) / 3.0,
+    );
+    let at = |p: (f64, f64)| rect.left_top() + egui::vec2(p.0 as f32, p.1 as f32);
+    (at(mid), at(tip))
+}
+
+/// Phase 1 design stream (owner review): each rotation ring has a curved
+/// arrow grip in its axis colour. Pressing it and dragging along the
+/// arrow turns the object about that axis (one command, one undo), and
+/// highlights the grip's ring while hovered.
+#[test]
+fn dragging_a_ring_grip_turns_the_object_about_its_axis() {
+    require_gpu!("dragging_a_ring_grip_turns_the_object_about_its_axis");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(slab_file(dir.path()));
+    open_transform(&mut h);
+    h.key_press(egui::Key::E);
+    h.run_steps(3);
+    let (grip, toward) = ring_grip(&h, 2);
+    h.event(egui::Event::PointerMoved(grip));
+    h.run_steps(2);
+    assert_eq!(
+        h.state().transform_tool().unwrap().hover,
+        Some(Handle::Ring(2)),
+        "the grip is the Z ring's handle"
+    );
+    let history = steps(&h);
+    press(&mut h, grip);
+    // Past the arrowhead, along the ring.
+    let end = grip + (toward - grip) * 2.5;
+    move_to(&mut h, grip, end);
+    release(&mut h, end);
+    wait_until(&mut h, "the turn commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    assert_eq!(steps(&h), history + 1, "one command");
+    match decompose(&transform(&h)) {
+        Decomposed::Trs { rotate_deg_xyz, .. } => {
+            assert!(rotate_deg_xyz.z.abs() >= 15.0 - 1e-9, "{rotate_deg_xyz:?}");
+            assert!(rotate_deg_xyz.x.abs() < 1e-9 && rotate_deg_xyz.y.abs() < 1e-9);
+        }
+        Decomposed::Sheared => panic!("a turn isn't a shear"),
+    }
+}
+
+/// No view ring at rest; pointing just outside the axis rings shows it
+/// (it is the hovered handle, so it's drawn highlighted).
+#[test]
+fn the_view_ring_shows_only_under_the_pointer() {
+    require_gpu!("the_view_ring_shows_only_under_the_pointer");
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = open(slab_file(dir.path()));
+    open_transform(&mut h);
+    h.key_press(egui::Key::E);
+    h.run_steps(3);
+    let app = h.state();
+    let g = app.transform_gizmo().unwrap();
+    let cam = app.camera.unwrap();
+    let rect = app.viewport.last_rect.unwrap();
+    let view = (rect.width() as f64, rect.height() as f64);
+    assert!(
+        g.handles(&cam, view)
+            .iter()
+            .all(|s| s.handle != Handle::ViewRing),
+        "no view ring at rest"
+    );
+    let centre = mf_render::screen_position(&cam, g.pivot, view, g.pivot.to_array()).unwrap();
+    let r = g.size_pt * mf_render::VIEW_RING_SCALE;
+    let a = 200f64.to_radians();
+    let at = rect.left_top()
+        + egui::vec2(
+            (centre.0 + r * a.cos()) as f32,
+            (centre.1 + r * a.sin()) as f32,
+        );
+    h.event(egui::Event::PointerMoved(at));
+    h.run_steps(2);
+    assert_eq!(
+        h.state().transform_tool().unwrap().hover,
+        Some(Handle::ViewRing)
+    );
+    save(&mut h, "transform-rotate-view-ring.png");
+}
