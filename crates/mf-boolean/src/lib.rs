@@ -21,6 +21,7 @@ mod manifold;
 #[cfg(feature = "manifold-cpp")]
 mod manifold_cpp;
 mod plane_cut;
+pub mod primitives;
 mod section;
 mod validate;
 mod weld;

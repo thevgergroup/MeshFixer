@@ -26,8 +26,8 @@ parameters:
     min: 0.0
     unit: mm
     description: "Thickness of the slab removed at the cut, centred on the plane, so the parts don't touch (D23; 0 cuts without a gap)"
-  # Alignment holes and dowels (Task 13, D12). Until the boolean engine
-  # lands, anything but pegs: none is refused by name (pegs_need_booleans).
+  # Alignment holes and dowels (Task 13, D12). dovetail is Task 14 and is
+  # refused by name (dovetail_not_available) until then.
   - name: pegs
     type: choice
     default: none
@@ -81,6 +81,26 @@ parameters:
     min: 0.0
     unit: mm
     description: "Thinnest wall left between a hole and the outside"
+  # Where loose dowels are laid out (D21): the plate, centred on the
+  # origin, and the gap kept between parts.
+  - name: plate_width
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Width (x) of the build plate the dowels are laid out on"
+  - name: plate_depth
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Depth (y) of the build plate the dowels are laid out on"
+  - name: plate_spacing
+    type: float
+    default: 3.0
+    min: 0.0
+    unit: mm
+    description: "Gap kept between laid-out dowels and everything else on the plate"
 preconditions:
   - target is a whole, closed, manifold object
   - the plane crosses the object
@@ -89,6 +109,8 @@ postconditions:
   - faces away from the plane are kept with their ids, bit for bit
   - with keep both, the target becomes "<name> (top)" and "<name> (bottom)" is created with the same transform
   - the report lists each part's cap faces
+  - with pegs dowels, both cut faces get the same holes, and each dowel (diameter = hole - peg_clearance, length = hole_depth_above + hole_depth_below - length_allowance) is a new object standing upright on the plate (world min z 0), laid out clear of the split object; dowels that don't fit are placed beside the plate and reported
+  - with pegs attached, pegs of the dowel's diameter and hole_depth_below - length_allowance long stick out of the top part, and the bottom part has the holes
 effects: [geometry_changes, topology_changes, creates_objects]
 runtime:
   cancellable: true

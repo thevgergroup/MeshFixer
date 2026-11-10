@@ -16,9 +16,19 @@ use mf_io::{read_model, write_model_path};
 use mf_runtime::RunContext;
 
 fn session_with(dir: &Path, name: &str, mesh: Mesh, transform: [f64; 12]) -> (Session, ObjectId) {
+    session_in(dir, name, mesh, transform, Unit::Millimeter)
+}
+
+fn session_in(
+    dir: &Path,
+    name: &str,
+    mesh: Mesh,
+    transform: [f64; 12],
+    unit: Unit,
+) -> (Session, ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
-        unit: Unit::Millimeter,
+        unit,
         objects: vec![ModelObject {
             name: name.into(),
             mesh,
@@ -163,4 +173,70 @@ fn cancel_at_every_stage_leaves_document_unchanged() {
             "never cancelled in {stage}: {stages:?}"
         );
     }
+}
+
+/// Review Focus 4: in a metre document the default 0.2 mm clearance is
+/// 0.0002 document units, and that is what is recorded.
+#[test]
+fn default_clearance_is_0_2_mm_in_a_metre_document() {
+    let dir = tempfile::tempdir().unwrap();
+    // A 60 mm sphere in metres.
+    let sphere = mf_fixtures::scaled(&uv_sphere(48, 96), 0.03);
+    let (s, id) = session_in(
+        dir.path(),
+        "scan",
+        sphere,
+        mf_io::threemf::IDENTITY,
+        Unit::Meter,
+    );
+    let prepared = s
+        .prepare(split(
+            id,
+            &[("pegs", "dowels"), ("plane_point", "0,0,0.37")],
+        ))
+        .unwrap();
+    let p = prepared.params();
+    assert!((p.get_float("peg_clearance").unwrap() - 0.0002).abs() < 1e-15);
+    assert!((p.get_float("length_allowance").unwrap() - 0.0004).abs() < 1e-15);
+    assert!((p.get_float("hole_diameter").unwrap() - 0.005).abs() < 1e-15);
+}
+
+#[test]
+fn pegs_replay_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, id) = session_with(
+        dir.path(),
+        "scan",
+        mf_fixtures::scaled(&uv_sphere(48, 96), 30.0),
+        mf_io::threemf::IDENTITY,
+    );
+    s.execute(split(
+        id,
+        &[
+            ("pegs", "dowels"),
+            ("plane_point", "0,0,0.37"),
+            ("hole_depth_above", "5"),
+            ("hole_depth_below", "8"),
+        ],
+    ))
+    .unwrap();
+    assert_eq!(
+        names(&s),
+        [
+            "scan (top)",
+            "scan (bottom)",
+            "scan dowel 1",
+            "scan dowel 2"
+        ]
+    );
+    let after = state(&s);
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        report.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(state(&report.session), after);
 }

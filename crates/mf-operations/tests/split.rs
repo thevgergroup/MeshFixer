@@ -371,14 +371,14 @@ fn refusals_are_named() {
         )),
         "invalid_plane"
     );
-    // HOOK (Task 13): pegs need the boolean engine.
+    // A unit cube's section is too thin for the default 5 mm hole.
     assert_eq!(
         code(split_with(
             &c,
             IDENTITY,
             &[("plane_point", "0,0,0.5"), ("pegs", "dowels")]
         )),
-        "pegs_need_booleans"
+        "section_too_thin"
     );
     // Two cubes touching along an edge, cut through that edge: the two
     // section squares touch at a point, which is refused, not guessed.

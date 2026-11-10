@@ -27,6 +27,7 @@ pub use make_solid::{
     MAX_GRID_POINTS as MAKE_SOLID_MAX_GRID_POINTS, STAGES as MAKE_SOLID_STAGES,
     TRADE_OFF as MAKE_SOLID_TRADE_OFF,
 };
+pub mod layout;
 mod remove_small;
 pub mod sculpt;
 mod split;
@@ -36,6 +37,9 @@ mod test_consume_tool;
 mod test_unit_conversion;
 mod transform;
 
+pub use split::pegs::{
+    HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
+};
 pub use split::{SPLIT_STAGES, split_names};
 pub use transform::{world_min_z, world_min_z_with};
 

@@ -45,3 +45,6 @@ pub(crate) fn determinant(t: &[f64; 12]) -> f64 {
     t[0] * (t[4] * t[8] - t[5] * t[7]) - t[1] * (t[3] * t[8] - t[5] * t[6])
         + t[2] * (t[3] * t[7] - t[4] * t[6])
 }
+
+/// The identity placement.
+pub(crate) const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
