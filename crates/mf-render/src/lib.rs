@@ -7,6 +7,7 @@
 pub mod bench;
 mod bvh;
 mod camera;
+mod gizmo;
 mod gpu_mesh;
 pub mod offscreen;
 mod pick;
@@ -17,6 +18,9 @@ mod transform;
 
 pub use bvh::{Bvh, LEAF_MAX};
 pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
+pub use gizmo::{
+    Decomposed, Drag, Gizmo, GizmoMode, Handle, HandleShape, PlateSnap, Snap, compose, decompose,
+};
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
