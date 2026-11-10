@@ -30,6 +30,8 @@ esac
 # skipped in step 1).
 timing=(
   "mf-render bvh face_pick_under_16ms_at_5m bvh_build_is_cancellable brute_force_pick_is_cancellable"
+  # A worker's GPU wait must not stall other threads' GPU calls (MF-RT-001).
+  "mf-render gpu_wait a_worker_waiting_for_the_gpu_does_not_stall_other_threads_gpu_calls"
   "mf-desktop checkpoint_b checkpoint_b_5m_mesh checkpoint_b_real_scan"
   "mf-desktop checkpoint_b_followup checkpoint_b_followup_real_scan"
   "mf-geometry topology_pool a_second_caller_never_waits_for_another_threads_computation topology_requests_on_one_pool_all_finish"
@@ -85,6 +87,14 @@ fi
 echo "=== step 2: timing tests, one at a time ==="
 for entry in "${timing[@]}"; do
   read -r -a words <<<"$entry"
-  cargo test -p "${words[0]}" --test "${words[1]}" --no-fail-fast -- --test-threads=1 --nocapture "${words[@]:2}" || status=1
+  # The desktop's timing tests (MF-RT-001's frame gates among them) time
+  # the app itself, so they measure it as shipped: optimised (--release).
+  # Unoptimised, mf-desktop's own UI code (the tree's rows) took ~25 ms of
+  # a 5M frame, which the gate would have blamed on the product (M4 final
+  # review I4).
+  profile=""
+  [ "${words[0]}" = mf-desktop ] && profile="--release"
+  # shellcheck disable=SC2086 # $profile is empty or one flag
+  cargo test $profile -p "${words[0]}" --test "${words[1]}" --no-fail-fast -- --test-threads=1 --nocapture "${words[@]:2}" || status=1
 done
 exit $status

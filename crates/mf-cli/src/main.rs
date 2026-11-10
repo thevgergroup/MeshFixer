@@ -511,8 +511,8 @@ fn export(
         // its own, so apply the object's here (mirrors
         // mf-desktop's App::export_to) and say so, like the desktop's
         // status note.
-        let transformed = mf_io::transform_mesh(mesh, &object.transform);
         metrics.record("export", || {
+            let transformed = mf_io::transform_mesh(mesh, &object.transform, ctx)?;
             mf_io::write_path_with(&transformed, output, format, doc.units(), ctx)
         })?;
         eprintln!(
@@ -1223,7 +1223,7 @@ fn replay_log(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
         if format == Format::ThreeMf {
             write_threemf(&threemf_model(doc)?, out, ctx)?;
         } else {
-            let transformed = mf_io::transform_mesh(mesh, &object.transform);
+            let transformed = mf_io::transform_mesh(mesh, &object.transform, ctx)?;
             mf_io::write_path_with(&transformed, out, format, doc.units(), ctx)?;
             eprintln!(
                 "exported with the object's position applied: {}",

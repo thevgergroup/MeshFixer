@@ -601,6 +601,67 @@ fn ui_frames_stay_under_50ms_while_a_5m_file_imports() {
     });
 }
 
+/// MF-RT-001 for an STL export of a placed 5M object (M4 final review
+/// I3): applying its transform is O(n), and runs in the export job. Gated
+/// from the frame that starts the export (`export_to` included) through
+/// the frame that sees it finish.
+#[test]
+fn ui_frames_stay_under_50ms_while_a_placed_5m_object_exports() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable(
+            "ui_frames_stay_under_50ms_while_a_placed_5m_object_exports",
+        );
+        return;
+    }
+    let _heavy = heavy();
+    gate("placed 5M STL export", |_attempt| {
+        let (mut harness, render_state) = empty_app();
+        let mut model = big_model();
+        model.objects[0].transform = mf_fixtures::rotation_translation(2, 30.0, [5.0, -3.0, 2.0]);
+        harness.state_mut().import_model(model);
+        wait_until(&mut harness, "5M analysis", Duration::from_secs(600), |a| {
+            a.current_analysis().is_some() && a.viewport.frames_rendered > 0
+        });
+        let painter = Painter::new(render_state, [1440, 900]);
+        for _ in 0..5 {
+            orbit_frame(&mut harness, &painter);
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("placed.stl");
+        let paged = page_ins();
+        let start = Instant::now();
+        harness.state_mut().export_to(out.clone());
+        let held = start.elapsed();
+        let first = orbit_frame(&mut harness, &painter);
+        let mut frames = vec![GatedFrame {
+            time: held + first.total(),
+            page_ins: page_ins_since(paged),
+            at: format!(
+                "export started; export_to {:.1} ms, app update {:.1} ms, egui paint {:.1} ms, \
+                 GPU wait {:.1} ms",
+                ms(held),
+                ms(first.app),
+                ms(first.paint),
+                ms(first.gpu_wait)
+            ),
+        }];
+        assert!(harness.state().busy.is_some(), "the export didn't start");
+        frames.extend(gated_frames(&mut harness, &painter, |app| {
+            app.busy.is_none()
+        }));
+        let app = harness.state();
+        assert!(app.error.is_none(), "{:?}", app.error);
+        assert!(out.is_file(), "the STL was written");
+        assert!(
+            frames.len() >= 10,
+            "too few frames while the export ran to judge: {}",
+            frames.len()
+        );
+        report("placed 5M STL export", &frames, app);
+        frames
+    });
+}
+
 /// Clicks Cancel and returns how long until the job has stopped and the
 /// app is idle (MF-RT-002: within 250 ms).
 fn cancel_latency(harness: &mut Harness<'_, MeshFixerApp>) -> Duration {

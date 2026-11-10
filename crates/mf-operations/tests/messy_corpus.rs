@@ -283,6 +283,7 @@ fn io_outcome(e: &mf_io::IoError, timed_out: bool, wall_s: f64) -> Outcome {
         UnsupportedFormat(_) => "unsupported_format",
         Cancelled => "cancelled",
         LimitExceeded { .. } => "limit_exceeded",
+        TransformOutOfRange { .. } => "transform_out_of_range",
     };
     Outcome::Refused {
         code: code.into(),

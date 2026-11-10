@@ -123,12 +123,8 @@ impl Gpu {
             true,
             &[],
         );
-        let submission = self.queue.submit([]);
-        self.device
-            .poll(wgpu::PollType::Wait {
-                submission_index: Some(submission),
-                timeout: None,
-            })
+        self.queue.submit([]);
+        mf_render::wait_for_submitted(&self.device, &self.queue)
             .expect("the GPU device was lost while preparing a mesh");
     }
 }
@@ -348,6 +344,15 @@ pub struct Analysis {
     /// Every face with a corner on a hole (not a crack), sorted: the hole
     /// overview's tint.
     pub hole_ring: Arc<[u32]>,
+}
+
+impl crate::analysis::GpuHeld for Analysis {
+    fn gpu_held(&self, out: &mut Vec<(usize, u64)>) {
+        self.render.gpu.allocations(out);
+        for lines in [&self.layers.cracks, &self.layers.tangled] {
+            out.push((Arc::as_ptr(lines) as usize, lines.resident_bytes()));
+        }
+    }
 }
 
 /// Line overlays for the defects the 3D view colours (theme.rs): cracks
@@ -604,6 +609,13 @@ impl Workers {
     /// The background pool, shared with the analysis worker.
     pub fn background(&self) -> Arc<JobPool> {
         self.background.clone()
+    }
+
+    /// Tasks on the app's pools not yet finished (see
+    /// [`JobPool::in_flight`]): every worker message still to come is
+    /// counted here until it has been sent.
+    pub fn in_flight(&self) -> usize {
+        self.jobs.in_flight() + self.background.in_flight() + self.lane.in_flight()
     }
 
     /// The running job, on the jobs pool.
@@ -937,14 +949,19 @@ impl Workers {
         );
     }
 
-    /// Export on the pool; cancelling leaves no file behind (see
-    /// [`mf_io::write_path_with`]).
+    /// Export on the pool, applying an STL/OBJ object's transform first;
+    /// cancelling leaves no file behind (see [`mf_io::write_path_with`]).
     pub fn export(&self, job: ExportJob, path: PathBuf, ctx: RunContext) {
         self.spawn_job("export", move || {
             let result = match &job {
-                ExportJob::Mesh(mesh, format, unit) => {
-                    mf_io::write_path_with(mesh, &path, *format, *unit, &ctx).map(|()| Vec::new())
-                }
+                ExportJob::Mesh {
+                    mesh,
+                    transform,
+                    format,
+                    unit,
+                } => mf_io::transform_mesh(mesh, transform, &ctx)
+                    .and_then(|placed| mf_io::write_path_with(&placed, &path, *format, *unit, &ctx))
+                    .map(|()| Vec::new()),
                 ExportJob::Model(model) => mf_io::write_model_path_with(model, &path, &ctx),
             };
             Message::Exported(result.map(|warnings| (path, warnings)))
@@ -1638,9 +1655,15 @@ fn nearest_edge_candidates<T>(candidates: &mut Vec<T>, distance: impl Fn(&T) -> 
 
 /// What to export: one mesh, or a whole 3MF model.
 pub enum ExportJob {
-    /// A single mesh, already at the object's transform (MF-ISSUE-035),
-    /// with the document's unit for a 3MF export of it.
-    Mesh(Mesh, Format, mf_io::threemf::Unit),
+    /// A single mesh in object space and the object's transform, applied
+    /// in the job (MF-ISSUE-035; O(n), so never on the UI thread: M4
+    /// final review I3), with the document's unit for a 3MF export of it.
+    Mesh {
+        mesh: Mesh,
+        transform: [f64; 12],
+        format: Format,
+        unit: mf_io::threemf::Unit,
+    },
     Model(mf_io::threemf::Model),
 }
 

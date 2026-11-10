@@ -5,7 +5,7 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mf_desktop::analysis::{AnalysisCache, LatestWorker};
+use mf_desktop::analysis::{AnalysisCache, GpuHeld, LatestWorker};
 use mf_fixtures::{cube, tetrahedron};
 use mf_runtime::{JobPool, RunContext};
 
@@ -84,13 +84,25 @@ fn a_newer_request_cancels_the_running_one() {
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 }
 
+/// A cached value holding one GPU allocation of `1` byte of its own.
+#[derive(Debug, PartialEq)]
+struct Tagged(&'static str);
+
+impl GpuHeld for Tagged {
+    fn gpu_held(&self, out: &mut Vec<(usize, u64)>) {
+        out.push((self.0.as_ptr() as usize, 1));
+    }
+}
+
 #[test]
 fn cache_only_answers_for_the_exact_revision() {
     let a = cube(1.0);
     let b = tetrahedron();
-    let mut cache: AnalysisCache<&'static str> = AnalysisCache::new(2);
-    cache.insert(a.clone(), "A");
-    assert_eq!(cache.get(&a), Some(&"A"));
+    // Room for two revisions' bytes; none is current.
+    let mut cache: AnalysisCache<Tagged> = AnalysisCache::new(2);
+    let current = |_: &mf_geometry::Mesh| false;
+    cache.insert(a.clone(), Tagged("A"), current);
+    assert_eq!(cache.get(&a), Some(&Tagged("A")));
     // Same content, different revision object: not a hit (identity is by revision, not by value).
     assert_eq!(
         cache.get(&{
@@ -104,9 +116,9 @@ fn cache_only_answers_for_the_exact_revision() {
         None,
         "a stale result for A never answers for B"
     );
-    cache.insert(b.clone(), "B");
-    cache.insert(cube(2.0), "C");
-    assert_eq!(cache.get(&a), None, "evicted beyond capacity");
-    assert_eq!(cache.get(&b), Some(&"B"));
+    cache.insert(b.clone(), Tagged("B"), current);
+    cache.insert(cube(2.0), Tagged("C"), current);
+    assert_eq!(cache.get(&a), None, "evicted beyond the budget");
+    assert_eq!(cache.get(&b), Some(&Tagged("B")));
     let _ = Mutex::new(());
 }

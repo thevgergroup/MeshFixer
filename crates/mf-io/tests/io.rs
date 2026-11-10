@@ -303,7 +303,8 @@ fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
     // A rotation + translation: STL export must write the transformed
     // positions, not the object-space ones.
     let transform = mf_fixtures::rotation_translation(2, 25.0, [10.0, -2.0, 3.0]);
-    let moved = mf_io::transform_mesh(&mesh, &transform);
+    let none = mf_runtime::RunContext::none();
+    let moved = mf_io::transform_mesh(&mesh, &transform, &none).unwrap();
     let p = dir.path().join("moved.stl");
     mf_io::write_path(
         &moved,
@@ -332,7 +333,7 @@ fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
     // A mirrored transform (negative determinant) flips winding so normals
     // stay outward: the transformed cube's signed volume stays positive.
     let mirror: [f64; 12] = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-    let mirrored = mf_io::transform_mesh(&mesh, &mirror);
+    let mirrored = mf_io::transform_mesh(&mesh, &mirror, &none).unwrap();
     let vol = mf_geometry::inspect(&mirrored).signed_volume.unwrap();
     assert!(vol > 0.0, "mirrored mesh's winding wasn't flipped: {vol}");
 
@@ -341,6 +342,38 @@ fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
     mf_io::write_path(&mesh, &p3, Format::ThreeMf, mf_io::threemf::Unit::Inch).unwrap();
     let model = read_model(&p3).unwrap();
     assert_eq!(model.unit, mf_io::threemf::Unit::Inch);
+}
+
+/// M4 final review I3: applying an object's transform for an STL/OBJ export
+/// runs in the export job, so it reports progress, stops when cancelled,
+/// and fails by name (never panics) when the transform puts a vertex out
+/// of range, as a corrupt or hostile 3MF scale can.
+#[test]
+fn transform_mesh_reports_progress_is_cancellable_and_names_an_out_of_range_transform() {
+    let mesh = cube(1.0);
+    let scale = |s: f64| [s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0];
+
+    let ctx = mf_runtime::RunContext::none();
+    let moved = mf_io::transform_mesh(&mesh, &scale(2.0), &ctx).unwrap();
+    assert_eq!(moved.triangle_count(), mesh.triangle_count());
+    assert_eq!(ctx.progress.snapshot(), (mf_io::TRANSFORMING, 1.0));
+
+    let cancelled = mf_runtime::RunContext::none();
+    cancelled.cancel.cancel();
+    let r = mf_io::transform_mesh(&mesh, &scale(2.0), &cancelled);
+    assert!(matches!(r, Err(IoError::Cancelled)), "{r:?}");
+
+    // The cube's corners are at ±0.5 (or 0..1): scaled by 1e308 times
+    // 1e10 they overflow to infinity.
+    let r = mf_io::transform_mesh(&mesh, &scale(1e308), &ctx)
+        .and_then(|m| mf_io::transform_mesh(&m, &scale(1e10), &ctx));
+    match r {
+        Err(e @ IoError::TransformOutOfRange { .. }) => {
+            let msg = e.to_string();
+            assert!(msg.contains("transform"), "{msg}");
+        }
+        other => panic!("expected TransformOutOfRange, got {other:?}"),
+    }
 }
 
 /// A cancelled export writes nothing: no file at the path (an existing one

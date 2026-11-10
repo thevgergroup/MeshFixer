@@ -51,6 +51,10 @@ pub struct Settings {
     /// reads as millimetres with a warning saying so, as the CLI does
     /// without `--units` (tests and scripted use).
     pub unit_prompt: bool,
+    /// GPU memory cached revisions may hold beyond the current revisions'
+    /// (`None`: [`crate::analysis::DEFAULT_EXTRA_GPU_BYTES`], 1 GiB; M4
+    /// final review I5).
+    pub gpu_cache_extra_bytes: Option<u64>,
 }
 
 /// How the running job (the one the status bar shows) can be stopped.
@@ -105,7 +109,10 @@ const PULSES: f64 = 2.0;
 pub const TREE_HOLD_SECONDS: f64 = 0.35;
 /// A framing from the tree that is still waiting for what it needs (the
 /// item's bounds, the picking BVHs) after this long gives up, saying so,
-/// rather than wait (and redraw) forever.
+/// rather than wait (and redraw) forever. Wall-clock seconds: what it
+/// waits for is background work, which runs in wall time; input time runs
+/// ahead of it whenever frames come faster than real time (M4 final
+/// review I4).
 pub const FIND_GIVE_UP_SECONDS: f64 = 10.0;
 
 /// What a row of the tree ("Objects & Defects") stands for. Every row
@@ -127,9 +134,9 @@ pub enum TreeItem {
 #[derive(Debug, Clone)]
 struct Find {
     item: TreeItem,
-    /// When it was asked for (input time): it gives up after
-    /// [`FIND_GIVE_UP_SECONDS`].
-    since: f64,
+    /// When it was asked for (wall clock): it gives up
+    /// [`FIND_GIVE_UP_SECONDS`] later.
+    asked: Instant,
     /// The revision a defect belongs to (a later one may not have it).
     mesh: Option<Mesh>,
 }
@@ -435,7 +442,11 @@ impl MeshFixerApp {
             session: Session::new(),
             active: None,
             camera: None,
-            analyses: AnalysisCache::new(4),
+            analyses: AnalysisCache::new(
+                settings
+                    .gpu_cache_extra_bytes
+                    .unwrap_or(crate::analysis::DEFAULT_EXTRA_GPU_BYTES),
+            ),
             analyzer: {
                 let ctx = cc.egui_ctx.clone();
                 LatestWorker::new(
@@ -776,10 +787,19 @@ impl MeshFixerApp {
                 }
             },
             Some(format) => {
-                let mesh = mf_io::transform_mesh(&mesh, &transform);
+                // The transform is applied in the job (O(n), cancellable),
+                // never here on the UI thread (M4 final review I3).
                 let run = self.start_job(format!("Exporting {}", path.display()), true);
-                self.workers
-                    .export(worker::ExportJob::Mesh(mesh, format, unit), path, run);
+                self.workers.export(
+                    worker::ExportJob::Mesh {
+                        mesh,
+                        transform,
+                        format,
+                        unit,
+                    },
+                    path,
+                    run,
+                );
             }
             None => {
                 self.error = Some(format!(
@@ -1171,6 +1191,28 @@ impl MeshFixerApp {
                     && mesh.has_cached_topology()
             })
         })
+    }
+
+    /// Revisions whose analysis (and GPU mesh) is cached.
+    pub fn cached_revisions(&self) -> usize {
+        self.analyses.len()
+    }
+
+    /// GPU memory the cached revisions hold beyond what the current
+    /// revisions hold (bounded by `Settings::gpu_cache_extra_bytes`).
+    pub fn cache_extra_gpu_bytes(&self) -> u64 {
+        let doc = self.session.document();
+        self.analyses
+            .extra_gpu_bytes(|m| is_current_revision(doc, m))
+    }
+
+    /// True while any work handed to the app's pools hasn't finished:
+    /// analyses, BVHs, hover picks, face-state writes, jobs. Their answers
+    /// arrive in wall time, from other threads, so how many frames pass
+    /// meanwhile depends on the machine; tests wait for this to clear
+    /// rather than count frames (M4 final review I4).
+    pub fn background_work_in_flight(&self) -> bool {
+        self.workers.in_flight() > 0
     }
 
     /// True once object `id`'s current revision has its picking BVH (tests
@@ -1703,7 +1745,11 @@ impl MeshFixerApp {
                 {
                     self.requested = None;
                 }
-                if let Some(evicted) = self.analyses.insert(mesh, *analysis) {
+                let doc = self.session.document();
+                let evicted = self
+                    .analyses
+                    .insert(mesh, *analysis, |m| is_current_revision(doc, m));
+                if !evicted.is_empty() {
                     self.workers.discard(evicted);
                 }
             }
@@ -1742,6 +1788,12 @@ impl MeshFixerApp {
                         self.status = Some(note);
                     }
                     Err(IoError::Cancelled) => self.status = Some(CANCELLED_EXPORT.into()),
+                    Err(e @ IoError::TransformOutOfRange { .. }) => {
+                        self.error = Some(format!(
+                            "Export failed: {e}. Export as 3MF to keep the transform as it is, \
+                             or fix the object's placement in the program that made the file."
+                        ))
+                    }
                     Err(e) => {
                         self.error = Some(format!(
                             "Export failed: {e}. Choose another location and try again."
@@ -1772,15 +1824,26 @@ impl MeshFixerApp {
             .and_then(|id| self.session.document().object(id));
         let Some((mesh, transform)) = active.and_then(|o| Some((o.mesh()?.clone(), o.transform)))
         else {
-            self.displayed = None;
+            if let Some(old) = self.displayed.take() {
+                self.workers.discard(old);
+            }
             return;
         };
         if self.analysis_failed_for_active() {
             // Shown as an error; retrying would only fail again.
-        } else if let Some(a) = self.analysis_for(&mesh, &transform) {
+        } else if let Some(render) = self
+            .analysis_for(&mesh, &transform)
+            .map(|a| a.render.clone())
+        {
             if !self.shows_current_revision() {
                 let object = self.active.expect("an active object has a mesh here");
-                self.displayed = Some((object, mesh.clone(), a.render.clone()));
+                self.analyses.touch(&mesh);
+                // The cache may have let go of the revision shown until
+                // now (its GPU budget, M4 final review I5): free its
+                // buffers off the UI thread.
+                if let Some(old) = self.displayed.replace((object, mesh, render)) {
+                    self.workers.discard(old);
+                }
             }
         } else if !self
             .requested
@@ -2067,7 +2130,7 @@ impl MeshFixerApp {
         self.pulse = None;
         self.find = Some(Find {
             item: item.clone(),
-            since: self.now,
+            asked: Instant::now(),
             mesh,
         });
     }
@@ -2116,6 +2179,13 @@ impl MeshFixerApp {
         }
     }
 
+    /// True while a framing from the tree waits for what it needs (the
+    /// item's bounds, the picking BVHs and topology) before its camera
+    /// move starts.
+    pub fn framing_pending(&self) -> bool {
+        self.find.is_some()
+    }
+
     /// True while the camera moves to (or waits to move to) an item found
     /// from the tree.
     pub fn camera_animating(&self) -> bool {
@@ -2134,7 +2204,7 @@ impl MeshFixerApp {
         let Some(find) = self.find.clone() else {
             return;
         };
-        if self.now - find.since > FIND_GIVE_UP_SECONDS {
+        if find.asked.elapsed().as_secs_f64() > FIND_GIVE_UP_SECONDS {
             self.find = None;
             self.status = Some(
                 "Couldn't frame it: the view is still being prepared. Try again in a moment."
@@ -3327,6 +3397,14 @@ impl MeshFixerApp {
             ctx.request_repaint();
         }
     }
+}
+
+/// True if `mesh` is some object's current revision in `doc` (what the
+/// view draws).
+fn is_current_revision(doc: &mf_command::Document, mesh: &Mesh) -> bool {
+    doc.objects()
+        .iter()
+        .any(|o| o.mesh().is_some_and(|c| Mesh::ptr_eq(c, mesh)))
 }
 
 /// An operation's report in plain words for the status line. A 5M fill's
