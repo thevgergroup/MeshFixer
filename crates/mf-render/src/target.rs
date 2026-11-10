@@ -122,6 +122,23 @@ impl RenderTarget {
         &self.resolved_view
     }
 
+    /// The depth attachment, for callers that open their own render pass
+    /// instead of [`Self::draw`]/[`Self::draw_timed`] (the gizmo and plate
+    /// offscreen tests, which also draw [`crate::MeshRenderer::draw_plate`]
+    /// and [`crate::MeshRenderer::draw_gizmo`] into it).
+    pub fn depth_view(&self) -> &wgpu::TextureView {
+        &self.depth_view
+    }
+
+    /// The colour (MSAA, if any) attachment and resolve target a manual
+    /// render pass should use, matching [`Self::draw_timed`]'s own choice.
+    pub fn color_attachment(&self) -> (&wgpu::TextureView, Option<&wgpu::TextureView>) {
+        match &self.msaa_view {
+            Some(msaa) => (msaa, Some(&self.resolved_view)),
+            None => (&self.resolved_view, None),
+        }
+    }
+
     /// Render one frame and submit it. `renderer` must have been built with
     /// [`RenderTarget::format`] for the same sample count. Every item of
     /// `items` is drawn at its own transform (MF-ISSUE-042), shifted into

@@ -10,6 +10,7 @@ mod camera;
 mod gizmo;
 mod gpu_mesh;
 pub mod offscreen;
+mod overlay;
 mod pick;
 mod renderer;
 mod target;
@@ -26,6 +27,10 @@ pub use gpu_mesh::{
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
     chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
     wait_for_submitted,
+};
+pub use overlay::{
+    GIZMO_LINE_WIDTH_PT, GizmoPalette, GizmoVertex, Plate, PlateVertex, gizmo_vertices,
+    plate_vertices,
 };
 pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,

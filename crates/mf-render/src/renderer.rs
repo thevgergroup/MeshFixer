@@ -1,10 +1,12 @@
 use bytemuck::{Pod, Zeroable};
 use glam::{DMat3, DMat4, DVec3, Mat4, Vec4};
+use wgpu::util::DeviceExt;
 
 use crate::camera::OrbitCamera;
 use crate::gpu_mesh::{
     FaceStates, GpuLines, GpuMesh, LineVertex, SurfaceVertex, face_state_layout,
 };
+use crate::overlay::GIZMO_LINE_WIDTH_PT;
 
 /// The colours the 3D view draws with. `mf-render` has no theme of its own
 /// in the app: the desktop passes its colour tokens in (theme.rs), so one
@@ -19,6 +21,9 @@ pub struct Palette {
     pub back_face: [f32; 4],
     /// Every traced boundary loop's outline (holes).
     pub boundary: [f32; 4],
+    /// The build plate's grid (D9 `PLATE`): a neutral, so it never
+    /// competes with a defect or selection colour.
+    pub plate: [f32; 4],
     /// Saturation kept by an inactive object (0 = grey, 1 = unchanged).
     pub inactive_saturation: f32,
     /// Brightness multiplier of an inactive object.
@@ -71,6 +76,7 @@ impl Palette {
         surface: [0.70, 0.72, 0.76, 1.0],
         back_face: [0.62, 0.30, 0.30, 1.0],
         boundary: [1.0, 0.55, 0.05, 1.0],
+        plate: [70.0 / 255.0, 70.0 / 255.0, 70.0 / 255.0, 1.0],
         inactive_saturation: 0.0,
         inactive_brightness: 0.55,
         boundary_width: 1.0,
@@ -107,6 +113,12 @@ struct SceneUniforms {
     tints: [[f32; 4]; 6],
     /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity.
     cue: [f32; 4],
+    /// The camera's eye, in the same shifted (`world_origin`-relative)
+    /// frame as vertex positions: the build plate fades by distance from
+    /// here (xyz; w unused padding).
+    eye_pos: [f32; 4],
+    /// The build plate's grid colour (D9 `PLATE`).
+    plate: [f32; 4],
 }
 
 #[repr(C)]
@@ -180,6 +192,10 @@ pub struct MeshRenderer {
     xray_surface_pipeline_ccw: wgpu::RenderPipeline,
     xray_surface_pipeline_cw: wgpu::RenderPipeline,
     xray_line_pipeline: wgpu::RenderPipeline,
+    /// The build plate (D9): blended, depth-tested like an opaque pass.
+    plate_pipeline: wgpu::RenderPipeline,
+    /// The transform gizmo (D8): screen-space, no depth test.
+    gizmo_pipeline: wgpu::RenderPipeline,
     palette: Palette,
     cue: SelectionCue,
     /// Physical pixels per point (line widths are in points).
@@ -189,6 +205,9 @@ pub struct MeshRenderer {
     scene_bind_group: wgpu::BindGroup,
     /// Grown on demand to cover the most objects drawn in one frame.
     draw_slots: Vec<DrawSlot>,
+    /// The plate's own draw uniforms (model = identity, its line width):
+    /// one reusable slot, since only one plate is ever drawn.
+    plate_slot: DrawSlot,
 }
 
 impl MeshRenderer {
@@ -253,8 +272,22 @@ impl MeshRenderer {
 
         // Opaque passes write and test depth as usual; the x-ray passes
         // draw only behind what's already there (`Greater`), blended,
-        // writing no depth and keeping the target opaque.
-        let xray_blend = wgpu::BlendState {
+        // writing no depth and keeping the target opaque; the plate blends
+        // (it fades with distance) but tests and writes depth like an
+        // opaque pass, so the model drawn afterwards still hides it; the
+        // gizmo draws last with no depth test at all (D8).
+        #[derive(Clone, Copy, PartialEq)]
+        enum DepthMode {
+            Opaque,
+            XRay,
+            Blended,
+            /// No depth test at all (the gizmo, D8): the pipeline still
+            /// declares a depth-stencil state matching the pass's
+            /// attachment (required for pipeline/pass compatibility), but
+            /// always passes and never writes.
+            NoTest,
+        }
+        let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::SrcAlpha,
                 dst_factor: wgpu::BlendFactor::OneMinusSrcAlpha,
@@ -272,7 +305,22 @@ impl MeshRenderer {
                              fs: &str,
                              buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
                              front_face: wgpu::FrontFace,
-                             xray: bool| {
+                             depth_mode: DepthMode| {
+            let depth_stencil = Some(wgpu::DepthStencilState {
+                format: target.depth,
+                depth_write_enabled: Some(
+                    depth_mode == DepthMode::Opaque || depth_mode == DepthMode::Blended,
+                ),
+                depth_compare: Some(match depth_mode {
+                    DepthMode::XRay => wgpu::CompareFunction::Greater,
+                    DepthMode::NoTest => wgpu::CompareFunction::Always,
+                    DepthMode::Opaque | DepthMode::Blended => wgpu::CompareFunction::LessEqual,
+                }),
+                stencil: Default::default(),
+                bias: Default::default(),
+            });
+            let blend = (depth_mode == DepthMode::XRay || depth_mode == DepthMode::Blended)
+                .then_some(blend_state);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(layout),
@@ -288,17 +336,7 @@ impl MeshRenderer {
                     cull_mode: None,
                     ..Default::default()
                 },
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: target.depth,
-                    depth_write_enabled: Some(!xray),
-                    depth_compare: Some(if xray {
-                        wgpu::CompareFunction::Greater
-                    } else {
-                        wgpu::CompareFunction::LessEqual
-                    }),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
+                depth_stencil,
                 multisample: wgpu::MultisampleState {
                     count: target.samples.max(1),
                     ..Default::default()
@@ -308,7 +346,7 @@ impl MeshRenderer {
                     entry_point: Some(fs),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: target.color,
-                        blend: xray.then_some(xray_blend),
+                        blend,
                         write_mask: wgpu::ColorWrites::ALL,
                     })],
                     compilation_options: Default::default(),
@@ -323,7 +361,15 @@ impl MeshRenderer {
                         fs: &str,
                         buffers: &[Option<wgpu::VertexBufferLayout<'_>>],
                         front_face: wgpu::FrontFace| {
-            pipeline_with(label, layout, vs, fs, buffers, front_face, false)
+            pipeline_with(
+                label,
+                layout,
+                vs,
+                fs,
+                buffers,
+                front_face,
+                DepthMode::Opaque,
+            )
         };
         let surface_buffers = [Some(wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<SurfaceVertex>() as u64,
@@ -382,7 +428,7 @@ impl MeshRenderer {
                 "fs_xray_surface",
                 &surface_buffers,
                 front_face,
-                true,
+                DepthMode::XRay,
             )
         };
         let xray_surface_pipeline_ccw = xray_surface("mf x-ray surface ccw", wgpu::FrontFace::Ccw);
@@ -394,12 +440,69 @@ impl MeshRenderer {
             "fs_xray_line",
             &line_buffers,
             wgpu::FrontFace::Ccw,
-            true,
+            DepthMode::XRay,
         );
+        // The build plate: world-space lines like `line_buffers`, but
+        // blended (it fades with distance) while still depth-testing and
+        // -writing like an opaque pass, so the model hides it (D9).
+        let plate_pipeline = pipeline_with(
+            "mf plate",
+            &layout,
+            "vs_plate",
+            "fs_plate",
+            &line_buffers,
+            wgpu::FrontFace::Ccw,
+            DepthMode::Blended,
+        );
+        // The gizmo: screen-space pixel quads, like the overlay lines, but
+        // with per-vertex colour/width (baked on the CPU, see overlay.rs)
+        // and no depth test at all, and no scene-colour/face-state bind
+        // groups beyond the scene uniforms (for the viewport size).
+        let gizmo_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mf gizmo pipeline layout"),
+            bind_group_layouts: &[Some(&scene_bgl)],
+            immediate_size: 0,
+        });
+        let gizmo_buffers = [Some(wgpu::VertexBufferLayout {
+            array_stride: 2 * std::mem::size_of::<crate::GizmoVertex>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                0 => Float32x2, 1 => Float32x4, 2 => Float32,
+                3 => Float32x2, 4 => Float32x4, 5 => Float32,
+            ],
+        })];
+        let gizmo_pipeline = pipeline_with(
+            "mf gizmo",
+            &gizmo_layout,
+            "vs_gizmo",
+            "fs_gizmo",
+            &gizmo_buffers,
+            wgpu::FrontFace::Ccw,
+            DepthMode::NoTest,
+        );
+        let plate_slot = {
+            let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("mf plate draw uniforms"),
+                size: std::mem::size_of::<DrawUniforms>() as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("mf plate draw uniforms"),
+                layout: &draw_bgl,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+            });
+            DrawSlot { buffer, bind_group }
+        };
         MeshRenderer {
             xray_surface_pipeline_ccw,
             xray_surface_pipeline_cw,
             xray_line_pipeline,
+            plate_pipeline,
+            gizmo_pipeline,
             cue: SelectionCue::default(),
             surface_pipeline_ccw,
             surface_pipeline_cw,
@@ -411,6 +514,7 @@ impl MeshRenderer {
             scene_uniforms,
             scene_bind_group,
             draw_slots: Vec::new(),
+            plate_slot,
         }
     }
 
@@ -440,7 +544,10 @@ impl MeshRenderer {
     /// `f32` GPU matrix holds enough precision (MF-GEO-001).
     pub fn prepare(&self, queue: &wgpu::Queue, camera: &OrbitCamera, size: (u32, u32)) {
         let aspect = size.0 as f32 / size.1.max(1) as f32;
-        let eye_dir = (camera.eye() - camera.target).normalize_or_zero().as_vec3();
+        // The camera's target is `world_origin` (see `paint`'s doc): the
+        // eye, shifted into that same frame, is exactly `eye() - target`.
+        let eye_shifted = (camera.eye() - camera.target).as_vec3();
+        let eye_dir = eye_shifted.normalize_or_zero();
         let p = &self.palette;
         let u = SceneUniforms {
             view_proj: camera.view_proj(aspect, camera.target).to_cols_array_2d(),
@@ -459,6 +566,8 @@ impl MeshRenderer {
                 p.tints.hole_neighbourhood,
             ],
             cue: [self.cue.emphasis.clamp(0.0, 1.0), p.xray_opacity, 0.0, 0.0],
+            eye_pos: Vec4::from((eye_shifted, 0.0)).to_array(),
+            plate: p.plate,
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }
@@ -609,6 +718,79 @@ impl MeshRenderer {
                 pass.draw(0..6, 0..*count / 2);
             }
         }
+    }
+
+    /// Draw the build plate's grid (D9): world-space, depth-tested like
+    /// the model's own geometry (so an object resting on it hides the
+    /// lines underneath) and fading with distance from the camera. Its
+    /// colour is [`Palette::plate`] (the renderer has no colours of its
+    /// own). Call after [`Self::prepare`]; draw it before the model's
+    /// surfaces (`paint`) so a resting object's opaque pixels overdraw it.
+    pub fn draw_plate(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        pass: &mut wgpu::RenderPass<'_>,
+        plate: &crate::Plate,
+    ) {
+        let vertices = crate::plate_vertices(plate);
+        if vertices.is_empty() {
+            return;
+        }
+        let u = DrawUniforms {
+            model: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            normal_matrix: glam::Mat4::IDENTITY.to_cols_array_2d(),
+            color: [0.0; 4],
+            params: [
+                0.0,
+                self.palette.overlay_width * self.pixels_per_point,
+                0.0,
+                0.0,
+            ],
+            states: [0; 4],
+        };
+        queue.write_buffer(&self.plate_slot.buffer, 0, bytemuck::bytes_of(&u));
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mf plate vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        pass.set_bind_group(0, &self.scene_bind_group, &[]);
+        pass.set_bind_group(1, &self.plate_slot.bind_group, &[]);
+        pass.set_pipeline(&self.plate_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..6, 0..(vertices.len() / 2) as u32);
+    }
+
+    /// Draw the transform gizmo's handles (D8): screen-space quads with no
+    /// depth test, after every other layer, so a handle is never hidden by
+    /// the model. `highlight`'s shape (the hovered handle) draws 40%
+    /// lighter and twice as wide, the same rule as the selection pulse.
+    /// Colours come from `palette`; the renderer has no colours of its own.
+    /// Call after [`Self::prepare`] and last, once the model and every
+    /// overlay layer are drawn.
+    pub fn draw_gizmo(
+        &mut self,
+        device: &wgpu::Device,
+        pass: &mut wgpu::RenderPass<'_>,
+        shapes: &[crate::HandleShape],
+        highlight: Option<crate::Handle>,
+        palette: &crate::GizmoPalette,
+    ) {
+        let width = GIZMO_LINE_WIDTH_PT * self.pixels_per_point;
+        let vertices = crate::gizmo_vertices(shapes, highlight, palette, width);
+        if vertices.is_empty() {
+            return;
+        }
+        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mf gizmo vertices"),
+            contents: bytemuck::cast_slice(&vertices),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        pass.set_bind_group(0, &self.scene_bind_group, &[]);
+        pass.set_pipeline(&self.gizmo_pipeline);
+        pass.set_vertex_buffer(0, buffer.slice(..));
+        pass.draw(0..6, 0..(vertices.len() / 2) as u32);
     }
 }
 

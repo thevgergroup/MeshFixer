@@ -24,6 +24,18 @@ pub const NON_MANIFOLD: Color32 = Color32::from_rgb(235, 52, 52);
 /// Faces created by the last few commands (toggle: View ▸ Highlight recent repairs).
 pub const RECENT_REPAIR: Color32 = Color32::from_rgb(80, 205, 120);
 
+/// The gizmo's X handle only (D8): the conventional axis colour, familiar
+/// from Meshmixer, Fusion and Blender. Never used for anything else, so a
+/// colour still has one meaning while the Transform tool is open.
+pub const AXIS_X: Color32 = Color32::from_rgb(229, 72, 77);
+/// The gizmo's Y handle only (D8).
+pub const AXIS_Y: Color32 = Color32::from_rgb(70, 167, 88);
+/// The gizmo's Z handle only (D8).
+pub const AXIS_Z: Color32 = Color32::from_rgb(62, 139, 240);
+/// The build-plate grid: a neutral, so it never competes with a defect or
+/// selection colour.
+pub const PLATE: Color32 = Color32::from_gray(70);
+
 /// An inactive object keeps this much of its saturation…
 pub const INACTIVE_SATURATION: f32 = 0.0;
 /// …and this much of its brightness (desaturated, so the active one stands out).
@@ -77,6 +89,7 @@ pub fn palette() -> mf_render::Palette {
         surface: rgba(SURFACE),
         back_face: rgba(BACK_FACE),
         boundary: rgba(HOLE),
+        plate: rgba(PLATE),
         inactive_saturation: INACTIVE_SATURATION,
         inactive_brightness: INACTIVE_BRIGHTNESS,
         boundary_width: BOUNDARY_WIDTH,
@@ -97,6 +110,18 @@ pub fn palette() -> mf_render::Palette {
 fn tint(c: Color32, strength: f32) -> [f32; 4] {
     let [r, g, b, _] = rgba(c);
     [r, g, b, strength]
+}
+
+/// The gizmo's own colours, from these tokens (D8/D9). The build plate's
+/// colour is part of `palette()` above (`mf_render::Palette::plate`): the
+/// renderer has no colours of its own for either.
+pub fn gizmo_palette() -> mf_render::GizmoPalette {
+    mf_render::GizmoPalette {
+        axis_x: rgba(AXIS_X),
+        axis_y: rgba(AXIS_Y),
+        axis_z: rgba(AXIS_Z),
+        neutral: rgba(Color32::WHITE),
+    }
 }
 
 /// Panels use the same tokens: selection is cyan, hover a light outline.

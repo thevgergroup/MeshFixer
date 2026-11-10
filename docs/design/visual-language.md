@@ -90,6 +90,7 @@ They are defined once, in `theme.rs`, and used by the panels and the renderer al
 | `LOOSE_PIECE` | amber `#FFC828` | a piece not connected to the model | tint of every loose piece (every piece but the main body: the same set the tree lists, whatever its size); while "Remove loose pieces" is open, only the pieces its Apply would remove (state bit `LOOSE_PIECE`); the Loose pieces header |
 | `NON_MANIFOLD` | red `#EB3434` | a tangled (non-manifold) edge | tangled-edge lines, and a light red tint (strength 0.35) on the faces that meet at them; the Tangled edges header (tooltip: non-manifold edges) |
 | `RECENT_REPAIR` | green `#50CD78` | faces made by the last 3 commands on the active object | a tint, toggled by View ▸ Highlight recent repairs or the legend (on by default) |
+| `AXIS_X` / `AXIS_Y` / `AXIS_Z` | `#E5484D` / `#46A758` / `#3E8BF0` | the conventional X/Y/Z axis colours (D8) | the transform gizmo's handles only, while the Transform tool is open (its legend shows the axes in these colours in place of the defect legend) |
 | inactive object | desaturated (saturation 0, brightness 0.55) | not the active object | the whole object, outlines included |
 
 Neutral tokens carry no meaning beyond "the model" and "the room":
@@ -102,15 +103,18 @@ Neutral tokens carry no meaning beyond "the model" and "the room":
 | `TEXT_MUTED` | grey 150 | secondary text, hints, steps Redo would take |
 | `PROGRESS` | grey 120 | the running job's progress bar (neutral: progress is neither the selection's cyan nor a defect colour) |
 | `ERROR_FILL` | `#6E203A` | the error banner (a dark rose fill for failures, never used in the 3D view) |
+| `PLATE` | grey 70 | the build plate's grid (256 × 256 mm, 10 mm spacing by default), drawn at world z = 0, depth-tested against the model and fading with distance from the camera |
 
 Line widths: defect outlines are 2 pt; overlay lines (selection, hover, cracks, tangled edges) are 3 pt. They are drawn as screen-space quads, so they keep that width at any zoom and on Retina displays.
 
 Draw order, bottom to top:
 
-1. the model surface, with its face tints, then hole outlines
-2. the x-ray pass for selected faces: drawn only where something nearer hides them (depth test "greater", no depth write), in `SELECTED` at `XRAY_OPACITY`
-3. crack lines, tangled-edge lines, selection outline, hover outline
-4. the x-ray pass for the selection outline (as 2)
+1. the build plate's grid (`PLATE`), depth-tested against the model so an object resting on it hides the plate underneath, fading with distance from the camera
+2. the model surface, with its face tints, then hole outlines
+3. the x-ray pass for selected faces: drawn only where something nearer hides them (depth test "greater", no depth write), in `SELECTED` at `XRAY_OPACITY`
+4. crack lines, tangled-edge lines, selection outline, hover outline
+5. the x-ray pass for the selection outline (as 3)
+6. while the Transform tool is open, the gizmo's handles, last and with no depth test, so they're never hidden by the model (D8); the hovered handle draws 40% lighter and twice as wide, as the selection pulse does
 
 **Hidden selections show through (x-ray).** A selected item hidden behind other geometry, such as a loose piece inside the model or a hole on the far side, is drawn through the surfaces in front of it. It uses the same cyan as the selection, at reduced opacity, because it means the same thing: the current target. The parts in view draw normally, and nothing else is drawn through. While the selection pulses after a double-click framing, the face tint goes up to full strength and is evenly lit, and outlines get up to 40% lighter (same hue) and twice as wide.
 

@@ -20,6 +20,11 @@ struct Scene {
     // The selection cue (renderer.rs `SelectionCue`): x: emphasis (the
     // pulse after framing, 0–1), y: x-ray opacity.
     cue: vec4<f32>,
+    // The camera eye, in the same world_origin-shifted frame as vertex
+    // positions (xyz; w unused): the build plate fades by distance from here.
+    eye_pos: vec4<f32>,
+    // The build plate's grid colour (D9 `PLATE`).
+    plate: vec4<f32>,
 };
 
 struct Draw {
@@ -214,4 +219,122 @@ fn fs_xray_surface(in: SurfaceOut) -> @location(0) vec4<f32> {
 @fragment
 fn fs_xray_line() -> @location(0) vec4<f32> {
     return vec4<f32>(draw.color.rgb, min(scene.cue.y * (1.0 + 0.5 * scene.cue.x), 1.0));
+}
+
+// --- The build plate (overlay.rs `plate_vertices`): a world-space grid at
+// z = 0, drawn before the model, depth-tested like its own geometry, and
+// fading with distance from the camera so it reads as a floor, not a
+// flat decal. ---
+
+struct PlateOut {
+    @builtin(position) clip: vec4<f32>,
+    // World-space (shifted) position, for the distance fade.
+    @location(0) world: vec3<f32>,
+};
+
+// Reuses `vs_line`'s screen-space quad widening (the plate's lines are the
+// same kind of 3 pt-style overlay line, just world-space and depth-tested),
+// but also carries the unprojected world position through for the fade.
+@vertex
+fn vs_plate(
+    @builtin(vertex_index) corner: u32,
+    @location(0) a: vec3<f32>,
+    @location(1) b: vec3<f32>,
+) -> PlateOut {
+    var ca = scene.view_proj * draw.model * vec4<f32>(a, 1.0);
+    var cb = scene.view_proj * draw.model * vec4<f32>(b, 1.0);
+    let wa = (draw.model * vec4<f32>(a, 1.0)).xyz;
+    let wb = (draw.model * vec4<f32>(b, 1.0)).xyz;
+    let near = 1e-5;
+    if (ca.w < near && cb.w < near) {
+        var out: PlateOut;
+        out.clip = vec4<f32>(0.0, 0.0, 2.0, 1.0);
+        out.world = wa;
+        return out;
+    }
+    var wt = 0.0;
+    if (ca.w < near) {
+        wt = (near - ca.w) / (cb.w - ca.w);
+        ca = mix(ca, cb, wt);
+    }
+    if (cb.w < near) {
+        wt = (near - cb.w) / (ca.w - cb.w);
+        cb = mix(cb, ca, wt);
+    }
+    let px = scene.viewport.xy;
+    let sa = ca.xy / ca.w * px;
+    let sb = cb.xy / cb.w * px;
+    let d = sb - sa;
+    let len = length(d);
+    var normal = vec2<f32>(0.0, 0.0);
+    if (len > 1e-6) {
+        normal = vec2<f32>(-d.y, d.x) / len;
+    }
+    var t = array<f32, 6>(0.0, 1.0, 1.0, 0.0, 1.0, 0.0);
+    var side = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
+    var clip = mix(ca, cb, t[corner]);
+    clip = vec4<f32>(clip.xy + normal * side[corner] * draw.params.y / px * clip.w, clip.zw);
+    var out: PlateOut;
+    out.clip = clip;
+    out.world = mix(wa, wb, t[corner]);
+    return out;
+}
+
+// The grid colour, faded to transparent with distance from the camera (an
+// infinite-floor convention) so the plate recedes rather than clipping
+// hard at its edge.
+@fragment
+fn fs_plate(in: PlateOut) -> @location(0) vec4<f32> {
+    let dist = distance(in.world, scene.eye_pos.xyz);
+    // Fades over the camera's own framing distance (eye_pos's own length
+    // from the origin the plate sits at): full strength near the camera,
+    // gone by twice that.
+    let scale = max(length(scene.eye_pos.xyz), 1e-3);
+    let fade = clamp(1.0 - dist / (scale * 2.0), 0.0, 1.0);
+    return vec4<f32>(scene.plate.rgb, scene.plate.a * fade);
+}
+
+// --- The transform gizmo (overlay.rs `gizmo_vertices`): screen-space
+// quads in pixel coordinates (the same unit `screen_position` returns),
+// drawn last with no depth test so a handle is never hidden by the model
+// (D8). Each vertex already carries its own (possibly brightened) colour
+// and line width, computed on the CPU per handle. ---
+
+struct GizmoOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) color: vec4<f32>,
+};
+
+@vertex
+fn vs_gizmo(
+    @builtin(vertex_index) corner: u32,
+    @location(0) a_position: vec2<f32>,
+    @location(1) a_color: vec4<f32>,
+    @location(2) a_width_px: f32,
+    @location(3) b_position: vec2<f32>,
+    @location(4) b_color: vec4<f32>,
+    @location(5) b_width_px: f32,
+) -> GizmoOut {
+    let px = scene.viewport.xy;
+    let d = b_position - a_position;
+    let len = length(d);
+    var normal = vec2<f32>(0.0, 0.0);
+    if (len > 1e-6) {
+        normal = vec2<f32>(-d.y, d.x) / len;
+    }
+    var t = array<f32, 6>(0.0, 1.0, 1.0, 0.0, 1.0, 0.0);
+    var side = array<f32, 6>(-1.0, -1.0, 1.0, -1.0, 1.0, 1.0);
+    let width = mix(a_width_px, b_width_px, t[corner]);
+    let p = mix(a_position, b_position, t[corner]) + normal * side[corner] * width * 0.5;
+    // Pixel space (y down) to NDC (y up): the inverse of `screen_position`.
+    let ndc = vec2<f32>(p.x / px.x * 2.0 - 1.0, 1.0 - p.y / px.y * 2.0);
+    var out: GizmoOut;
+    out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.color = mix(a_color, b_color, t[corner]);
+    return out;
+}
+
+@fragment
+fn fs_gizmo(in: GizmoOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
