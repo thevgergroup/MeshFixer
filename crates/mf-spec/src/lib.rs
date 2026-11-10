@@ -9,5 +9,7 @@ pub mod cli;
 mod model;
 mod params;
 
-pub use model::{OperationSpec, ParamKind, ParamSpec, RuntimeSpec, TargetSpec};
+pub use model::{
+    OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec, RuntimeSpec, TargetSpec,
+};
 pub use params::{ParamValue, Params, SpecError};

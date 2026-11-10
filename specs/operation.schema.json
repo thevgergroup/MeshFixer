@@ -19,6 +19,24 @@
         "kinds": { "type": "array", "items": { "enum": ["face_set", "component", "boundary_loop"] } }
       }
     },
+    "operands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "kinds", "required"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "role": { "enum": ["read", "consumed", "kept"] },
+          "kinds": {
+            "type": "array",
+            "items": { "enum": ["object", "face_set", "component"] },
+            "minItems": 1
+          },
+          "required": { "type": "boolean" }
+        }
+      }
+    },
     "parameters": {
       "type": "array",
       "items": {
@@ -27,8 +45,11 @@
         "required": ["name", "type", "default", "description"],
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "type": { "enum": ["integer", "float", "bool", "choice"] },
-          "default": { "type": ["number", "boolean", "string"] },
+          "type": { "enum": ["integer", "float", "bool", "choice", "vec3", "affine"] },
+          "default": {
+            "type": ["number", "boolean", "string", "array"],
+            "items": { "type": "number" }
+          },
           "values": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "minItems": 2, "uniqueItems": true },
           "min": { "type": "number" },
           "max": { "type": "number" },

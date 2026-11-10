@@ -2900,6 +2900,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "jsonschema",
+ "mf-io",
  "serde",
  "serde-saphyr",
  "serde_json",

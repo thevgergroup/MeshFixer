@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use mf_io::threemf::Unit;
+
 use crate::params::{ParamValue, Params, SpecError};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11,6 +13,11 @@ pub struct OperationSpec {
     pub summary: String,
     pub geometry_kinds: Vec<String>,
     pub target: TargetSpec,
+    /// Other objects or selections the operation reads, consumes or keeps
+    /// (D6, MF-P1-CMD-001). Optional, so every spec YAML written before
+    /// Phase 1 still validates unchanged.
+    #[serde(default)]
+    pub operands: Vec<OperandSpec>,
     pub parameters: Vec<ParamSpec>,
     #[serde(default)]
     pub preconditions: Vec<String>,
@@ -24,6 +31,30 @@ pub struct OperationSpec {
 pub struct TargetSpec {
     pub whole_object: bool,
     pub kinds: Vec<String>,
+}
+
+/// An operand other than the command's target (D6, MF-P1-SEL-001): names
+/// the operand, what happens to it, and what kinds of thing it can be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperandSpec {
+    pub name: String,
+    pub role: OperandRole,
+    pub kinds: Vec<String>,
+    pub required: bool,
+}
+
+/// What an operation does to an operand's object once the command
+/// commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperandRole {
+    /// Read for provenance or geometry, but not changed or removed.
+    Read,
+    /// Removed once the command commits (for example a boolean's tool,
+    /// unless `keep_tool` is set).
+    Consumed,
+    /// Read, and explicitly kept (for example `keep_tool: true`).
+    Kept,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -61,6 +92,16 @@ pub enum ParamKind {
         default: String,
         values: Vec<String>,
     },
+    /// A point or direction (D7). A `unit` of `mm` marks it as a length,
+    /// converted by [`OperationSpec::to_document_units`].
+    Vec3 {
+        default: [f64; 3],
+    },
+    /// The absolute resulting transform (D7): row-major 3x4 (the 3x3
+    /// linear part, then translation), 12 values.
+    Affine {
+        default: [f64; 12],
+    },
 }
 
 impl ParamKind {
@@ -70,6 +111,8 @@ impl ParamKind {
             ParamKind::Float { default, .. } => ParamValue::Float(*default),
             ParamKind::Bool { default } => ParamValue::Bool(*default),
             ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
+            ParamKind::Vec3 { default } => ParamValue::Vec3(*default),
+            ParamKind::Affine { default } => ParamValue::Affine(*default),
         }
     }
 }
@@ -99,6 +142,10 @@ enum Scalar {
     Int(i64),
     Float(f64),
     Text(String),
+    /// `default: [x, y, z]` (vec3) or the 12 values of an affine
+    /// transform. Elements may be written as integers in YAML (`[1, 0,
+    /// 0, ...]`), so this accepts either and widens to `f64`.
+    Array(Vec<Scalar>),
 }
 
 impl Scalar {
@@ -112,7 +159,26 @@ impl Scalar {
         match *self {
             Scalar::Int(i) => Ok(i as f64),
             Scalar::Float(f) => Ok(f),
-            Scalar::Bool(_) | Scalar::Text(_) => Err(format!("{field} must be a number")),
+            Scalar::Bool(_) | Scalar::Text(_) | Scalar::Array(_) => {
+                Err(format!("{field} must be a number"))
+            }
+        }
+    }
+
+    fn as_f64_array<const N: usize>(&self, field: &str) -> Result<[f64; N], String> {
+        match self {
+            Scalar::Array(items) if items.len() == N => {
+                let mut out = [0.0_f64; N];
+                for (slot, item) in out.iter_mut().zip(items) {
+                    *slot = item.as_f64(field)?;
+                }
+                Ok(out)
+            }
+            Scalar::Array(items) => Err(format!(
+                "{field} must have {N} numbers, found {}",
+                items.len()
+            )),
+            _ => Err(format!("{field} must be a list of {N} numbers")),
         }
     }
 }
@@ -145,6 +211,12 @@ impl TryFrom<RawParam> for ParamSpec {
                     _ => return Err("a choice's default must be one of its values".into()),
                 }
             }
+            "vec3" => ParamKind::Vec3 {
+                default: r.default.as_f64_array::<3>("default")?,
+            },
+            "affine" => ParamKind::Affine {
+                default: r.default.as_f64_array::<12>("default")?,
+            },
             other => return Err(format!("unknown parameter type '{other}'")),
         };
         Ok(ParamSpec {
@@ -177,6 +249,18 @@ impl From<ParamSpec> for RawParam {
                 values = Some(v);
                 ("choice", Scalar::Text(default), None, None)
             }
+            ParamKind::Vec3 { default } => (
+                "vec3",
+                Scalar::Array(default.into_iter().map(Scalar::Float).collect()),
+                None,
+                None,
+            ),
+            ParamKind::Affine { default } => (
+                "affine",
+                Scalar::Array(default.into_iter().map(Scalar::Float).collect()),
+                None,
+                None,
+            ),
         };
         RawParam {
             name: p.name,
@@ -229,6 +313,50 @@ impl OperationSpec {
             .collect();
         self.validate(&raw)
     }
+
+    /// Convert every parameter marked `unit: mm` (a length, D20) from
+    /// millimetres to the document's units, in place. Runs once, in
+    /// `prepare` (Global Constraints: "Printing parameters are in
+    /// document units... converted at prepare time. The converted value
+    /// is what's recorded"), so replay never re-reads a unit or a
+    /// profile.
+    ///
+    /// `float` parameters convert their number; `vec3` parameters
+    /// convert all three components (a length vec3, such as a point;
+    /// a direction vec3 has no `unit` and is left alone). Other
+    /// parameter kinds are never marked `unit: mm` and are untouched.
+    pub fn to_document_units(&self, params: &mut Params, unit: Unit) {
+        let mm_per_unit = millimetres_per(unit);
+        for p in &self.parameters {
+            if p.unit.as_deref() != Some("mm") {
+                continue;
+            }
+            match params.0.get_mut(&p.name) {
+                Some(ParamValue::Float(v)) => *v *= mm_per_unit,
+                Some(ParamValue::Vec3(v)) => {
+                    for c in v.iter_mut() {
+                        *c *= mm_per_unit;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// How many document units make up one millimetre. The document's own
+/// numbers are in `unit`, so a length given in mm is multiplied by this
+/// to land in document units (a metre document: 1 mm = 0.001 document
+/// units).
+fn millimetres_per(unit: Unit) -> f64 {
+    match unit {
+        Unit::Micron => 1000.0,
+        Unit::Millimeter => 1.0,
+        Unit::Centimeter => 0.1,
+        Unit::Meter => 0.001,
+        Unit::Inch => 1.0 / 25.4,
+        Unit::Foot => 1.0 / 304.8,
+    }
 }
 
 impl ParamSpec {
@@ -261,6 +389,12 @@ impl ParamSpec {
                     Err(invalid(&format!("expected {}", one_of(values))))
                 }
             }
+            ParamKind::Vec3 { .. } => parse_f64_csv::<3>(text)
+                .map(ParamValue::Vec3)
+                .ok_or_else(|| invalid("expected x,y,z")),
+            ParamKind::Affine { .. } => parse_f64_csv::<12>(text)
+                .map(ParamValue::Affine)
+                .ok_or_else(|| invalid("expected 12 comma-separated numbers")),
         }
     }
 
@@ -291,4 +425,24 @@ pub(crate) fn one_of(values: &[String]) -> String {
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
     }
+}
+
+/// Parse exactly `N` comma-separated finite `f64`s (the CLI and
+/// command-log string form of `vec3` and `affine` parameters, D7).
+/// `None` on a wrong count, a non-finite value, or anything that doesn't
+/// parse, so the caller reports it by name rather than truncating.
+fn parse_f64_csv<const N: usize>(text: &str) -> Option<[f64; N]> {
+    let parts: Vec<&str> = text.trim().split(',').map(str::trim).collect();
+    if parts.len() != N {
+        return None;
+    }
+    let mut out = [0.0_f64; N];
+    for (slot, part) in out.iter_mut().zip(parts) {
+        let v: f64 = part.parse().ok()?;
+        if !v.is_finite() {
+            return None;
+        }
+        *slot = v;
+    }
+    Some(out)
 }
