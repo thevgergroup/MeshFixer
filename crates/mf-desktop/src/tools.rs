@@ -159,6 +159,8 @@ impl Interactive {
 pub enum ToolKey {
     /// Transform: switch the gizmo's mode.
     Mode(mf_render::GizmoMode),
+    /// Sculpt: switch the active brush.
+    Brush(mf_operations::sculpt::BrushKind),
 }
 
 /// The keys the open tool (if any) takes.

@@ -56,6 +56,17 @@ pub const PARTS: &str = "\u{E596}"; // puzzle-piece
 pub const CONNECTORS: &str = "\u{EB56}"; // plugs
 pub const EXPORT: &str = "\u{EAF0}"; // export
 
+// Sculpt brushes (one glyph per `BrushKind`, each matching what the brush
+// does so the rail reads at a glance, not just by which button is lit).
+pub const BRUSH_SMOOTH: &str = "\u{E5D2}"; // wind: softens, blurs detail
+pub const BRUSH_INFLATE: &str = "\u{E210}"; // drop: swells outward
+pub const BRUSH_DEFLATE: &str = "\u{E09A}"; // arrows-in: draws inward
+pub const BRUSH_FLATTEN: &str = "\u{E532}"; // arrows-in-line-vertical: squashes to a plane
+pub const BRUSH_DRAG: &str = "\u{E57C}"; // hand-grabbing: grabs and moves
+pub const BRUSH_PINCH: &str = "\u{E09C}"; // arrows-in-cardinal: draws together from all sides
+pub const BRUSH_CREASE: &str = "\u{E4B0}"; // triangle: a sharp groove
+pub const BRUSH_CARVE: &str = "\u{EBD6}"; // subtract: cuts material away
+
 // The tree.
 pub const OBJECT: &str = "\u{E1DA}"; // cube
 pub const MODEL: &str = "\u{ED0A}"; // cube-focus

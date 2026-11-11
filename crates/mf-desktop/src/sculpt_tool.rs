@@ -122,6 +122,8 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         claims,
         viewport_input,
         hides_defects: |app| app.sculpt_stroke.is_some(),
+        keys: sculpt_keys,
+        on_key: sculpt_on_key,
         on_close: |app, close| end_stroke(app, close),
         ..T::new(
             SCULPT,
@@ -296,6 +298,71 @@ fn falloff_word(f: Falloff) -> &'static str {
 
 fn brush_label(b: BrushKind) -> String {
     crate::i18n::tr(&format!("sculpt.brush.{}", b.word()), &[])
+}
+
+/// Each brush's glyph, matching what it does (owner: "Brush icons are
+/// identical" — every brush used `icons::SCULPT`, so the rail couldn't be
+/// told apart by icon). Order-independent: keyed on the brush itself so
+/// `BRUSHES`' order can change without silently mismatching icons.
+fn brush_icon(b: BrushKind) -> &'static str {
+    match b {
+        BrushKind::Smooth => icons::BRUSH_SMOOTH,
+        BrushKind::Inflate => icons::BRUSH_INFLATE,
+        BrushKind::Deflate => icons::BRUSH_DEFLATE,
+        BrushKind::Flatten => icons::BRUSH_FLATTEN,
+        BrushKind::Drag => icons::BRUSH_DRAG,
+        BrushKind::Pinch => icons::BRUSH_PINCH,
+        BrushKind::Crease => icons::BRUSH_CREASE,
+        BrushKind::Carve => icons::BRUSH_CARVE,
+    }
+}
+
+/// The digit key that switches straight to `b` while Sculpt is open, in
+/// `BRUSHES`' order (1-8). `None` past the ninth brush (never happens: a
+/// tenth brush would need a different scheme).
+fn brush_shortcut(b: BrushKind) -> Option<egui::Key> {
+    const KEYS: [egui::Key; 9] = [
+        egui::Key::Num1,
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+        egui::Key::Num6,
+        egui::Key::Num7,
+        egui::Key::Num8,
+        egui::Key::Num9,
+    ];
+    let i = BRUSHES.iter().position(|&k| k == b)?;
+    KEYS.get(i).copied()
+}
+
+/// The shortcut's label (e.g. "1"), for the tooltip; empty if `b` has none.
+fn brush_shortcut_label(b: BrushKind) -> String {
+    brush_shortcut(b)
+        .map(|k| crate::panels::shortcut_text(egui::Modifiers::NONE, k))
+        .unwrap_or_default()
+}
+
+/// The keys Sculpt takes while open: one digit per brush ([`brush_shortcut`]),
+/// in `BRUSHES`' order, so this table can never drift from the tooltip's.
+fn sculpt_key_table() -> Vec<(egui::Key, crate::tools::ToolKey)> {
+    BRUSHES
+        .iter()
+        .filter_map(|&b| Some((brush_shortcut(b)?, crate::tools::ToolKey::Brush(b))))
+        .collect()
+}
+
+fn sculpt_keys(_app: &MeshFixerApp) -> &'static [(egui::Key, crate::tools::ToolKey)] {
+    use std::sync::OnceLock;
+    static KEYS: OnceLock<Vec<(egui::Key, crate::tools::ToolKey)>> = OnceLock::new();
+    KEYS.get_or_init(sculpt_key_table)
+}
+
+/// Sculpt's key handling: switch brush.
+fn sculpt_on_key(app: &mut MeshFixerApp, key: crate::tools::ToolKey) {
+    if let crate::tools::ToolKey::Brush(b) = key {
+        app.sculpt.brush = b;
+    }
 }
 
 fn falloff_label(f: Falloff) -> String {
@@ -598,8 +665,14 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         for b in BRUSHES {
             let label = brush_label(b);
-            if widgets::icon_button(ui, icons::SCULPT, &label, Some(app.sculpt.brush == b), 28.0)
-                .on_hover_text(label.clone())
+            let shortcut = brush_shortcut_label(b);
+            let tip = if shortcut.is_empty() {
+                label.clone()
+            } else {
+                format!("{label} ({shortcut})")
+            };
+            if widgets::icon_button(ui, brush_icon(b), &label, Some(app.sculpt.brush == b), 28.0)
+                .on_hover_text(tip)
                 .clicked()
             {
                 app.sculpt.brush = b;
@@ -652,5 +725,65 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .on_hover_text(t!("sculpt.detail.tip"));
     if app.sculpt.detail_on {
         ui.add(egui::Slider::new(&mut app.sculpt.detail, 0.05..=1.0).max_decimals(2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Owner (2026-11-11): "Brush icons are identical." Every brush must
+    /// draw its own glyph, not all fall back to the tool's own
+    /// (`icons::SCULPT`).
+    #[test]
+    fn brush_icons_are_unique() {
+        let icons: HashSet<&str> = BRUSHES.iter().map(|&b| brush_icon(b)).collect();
+        assert_eq!(
+            icons.len(),
+            BRUSHES.len(),
+            "every brush must have its own icon, matching what it does"
+        );
+    }
+
+    /// No brush should silently reuse the Sculpt tool's own rail icon:
+    /// that was the bug (every button drew `icons::SCULPT`).
+    #[test]
+    fn no_brush_reuses_the_tool_icon() {
+        for b in BRUSHES {
+            assert_ne!(
+                brush_icon(b),
+                icons::SCULPT,
+                "{b:?} must not fall back to the tool's own icon"
+            );
+        }
+    }
+
+    /// Each brush gets its own digit shortcut (1-8, in `BRUSHES`' order),
+    /// and the tooltip can render it (brief: "The tooltip shows the brush
+    /// name and its shortcut").
+    #[test]
+    fn brush_shortcuts_are_unique_and_present() {
+        let mut seen = HashSet::new();
+        for b in BRUSHES {
+            let key = brush_shortcut(b).expect("every brush has a shortcut");
+            assert!(seen.insert(key), "{b:?}'s shortcut collides with another brush's");
+            assert!(!brush_shortcut_label(b).is_empty());
+        }
+    }
+
+    /// `sculpt_keys`' table agrees with [`brush_shortcut`]: pressing the
+    /// labelled key is wired to the same brush the tooltip promises.
+    #[test]
+    fn sculpt_keys_match_brush_shortcuts() {
+        let keys = sculpt_key_table();
+        for b in BRUSHES {
+            let want = brush_shortcut(b).expect("every brush has a shortcut");
+            let found = keys
+                .iter()
+                .find(|(_, k)| *k == crate::tools::ToolKey::Brush(b))
+                .map(|(k, _)| *k);
+            assert_eq!(found, Some(want), "{b:?}'s wired key must match its tooltip shortcut");
+        }
     }
 }
