@@ -4,6 +4,7 @@
 //! (MF-PLUG-001).
 
 pub mod clasp;
+pub mod flap;
 pub mod hinge;
 
 use mf_geometry::Mesh;
@@ -14,7 +15,7 @@ use crate::connector::Connector;
 /// (or its own registry chained after it); nothing here assumes it's the
 /// only source.
 pub fn connectors() -> Vec<&'static dyn Connector> {
-    vec![&hinge::PinHinge, &clasp::SnapClasp]
+    vec![&hinge::PinHinge, &clasp::SnapClasp, &flap::FlapHinge]
 }
 
 /// A closed surface of revolution around the x axis: `profile` is
