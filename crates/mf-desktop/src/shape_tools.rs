@@ -15,7 +15,7 @@ use mf_command::{Invocation, ObjectId};
 use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 
 use crate::MeshFixerApp;
-use crate::shell::{Availability, Category, Claims, Input, RegisterError, Shell, Tool as T};
+use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
 
@@ -210,24 +210,19 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         shortcut: Some(egui::Key::S),
         help: "tool.split.help",
         availability: needs_object,
-        panel: Some(split_panel),
-        claims: |app| {
-            split_gizmo(app).and_then(|(g, _)| {
-                let cam = app.camera?;
-                let rect = app.viewport.last_rect?;
-                let view = (rect.width() as f64, rect.height() as f64);
-                Some(Box::new(move |px: (f64, f64)| g.hit(&cam, view, px).is_some()) as Claims)
-            })
-        },
-        viewport_input: split_input,
+        panel: Some(crate::split_flow::panel),
+        claims: crate::split_flow::claims,
+        viewport_input: crate::split_flow::input,
         on_open: |app| {
             app.clear_selection();
             app.refusal = None;
             place_plane(app, false);
+            crate::split_flow::set_step(app, crate::split_flow::Step::Define);
         },
         on_close: |app, _| {
             app.split.drag = None;
             app.split.hover = None;
+            crate::split_flow::set_step(app, app.split_flow.step);
         },
         ..T::new(SPLIT, "tool.split.name", icons::SPLIT, Category::Shape, 0)
     })?;
@@ -289,7 +284,7 @@ fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 /// The active object's world bounding box.
-fn world_bounds(app: &MeshFixerApp, id: ObjectId) -> Option<(DVec3, DVec3)> {
+pub(crate) fn world_bounds(app: &MeshFixerApp, id: ObjectId) -> Option<(DVec3, DVec3)> {
     let o = app.session.document().object(id)?;
     let mesh = o.mesh()?;
     let bb = mesh.bounding_box()?;
@@ -419,7 +414,7 @@ fn show_refusal(app: &mut MeshFixerApp, ui: &mut egui::Ui, code: &str, message: 
 /// language, warning-icon card as a refusal, but driven by
 /// [`split_plane_misses_selection`] every frame the plane moves, not by a
 /// run that already failed.
-fn plane_miss_warning(app: &MeshFixerApp, ui: &mut egui::Ui) {
+pub(crate) fn plane_miss_warning(app: &MeshFixerApp, ui: &mut egui::Ui) {
     if !split_plane_misses_selection(app) {
         return;
     }
@@ -498,10 +493,6 @@ fn run_on(
     );
 }
 
-fn vec3(v: DVec3) -> String {
-    format!("{},{},{}", v.x, v.y, v.z)
-}
-
 // ---------------------------------------------------------------------
 // Split.
 // ---------------------------------------------------------------------
@@ -517,7 +508,7 @@ fn vec3(v: DVec3) -> String {
 /// imported scan) was missed or grazed by the default cut — "Split
 /// looked broken". Centring it on the selection's own bounds instead
 /// means Apply with the defaults always crosses the model.
-fn place_plane(app: &mut MeshFixerApp, force: bool) {
+pub(crate) fn place_plane(app: &mut MeshFixerApp, force: bool) {
     let selected = app.selected_objects();
     if selected.is_empty() {
         return;
@@ -547,6 +538,12 @@ pub fn split_gizmo(app: &MeshFixerApp) -> Option<(Gizmo, Option<Handle>)> {
     if app.active_tool != SPLIT || app.active_mesh().is_none() || app.busy.is_some() {
         return None;
     }
+    // Print volume: the box's own gizmo; step 3: none.
+    match (app.split_flow.mode, app.split_flow.step) {
+        (_, crate::split_flow::Step::Connectors) => return None,
+        (crate::split_flow::CutMode::Volume, _) => return crate::split_flow::box_gizmo(app),
+        _ => {}
+    }
     let s = &app.split;
     let g = Gizmo {
         pivot: s.point(),
@@ -574,11 +571,14 @@ pub fn shading(app: &MeshFixerApp) -> mf_render::Shading {
 
 /// The plane as the renderer's split preview: (point, normal) in world.
 pub fn split_preview(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
-    (app.active_tool == SPLIT && app.active_mesh().is_some())
+    (app.active_tool == SPLIT
+        && app.active_mesh().is_some()
+        && app.split_flow.mode == crate::split_flow::CutMode::Slice
+        && app.split_flow.step != crate::split_flow::Step::Connectors)
         .then(|| (app.split.point(), app.split.normal()))
 }
 
-fn split_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
+pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
     use crate::viewport::ToolPointer;
     let Some((g, _)) = split_gizmo(app) else {
         return Input::Pass;
@@ -627,17 +627,21 @@ fn split_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input
     Input::Consumed
 }
 
-fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    place_plane(app, false);
-    let units = crate::defects::unit_symbol(app.session.document().units());
-    // An open model can't be cut (the operation refuses it by name); say
-    // so up front, with the way on.
+/// An open model can't be cut (the operation refuses it by name): say so
+/// up front, with the way on (Repair). True if it's open.
+pub(crate) fn open_model_card(app: &mut MeshFixerApp, ui: &mut egui::Ui) -> bool {
     let open = active_closed(app) == Some(false);
     if open {
         show_refusal(app, ui, "operand_not_closed", &t!("split.refuse_open"));
-    } else {
-        refusal_card(app, ui, "mesh.split_plane");
     }
+    open
+}
+
+/// Step 1's Slice controls: the plane (presets, move or tilt, typed point
+/// and tilt), the section view, which parts to keep and the gap.
+pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    place_plane(app, false);
+    let units = crate::defects::unit_symbol(app.session.document().units());
     // Before Apply can ever refuse it: the plane misses or grazes
     // (owner 2026-11-11, "Also"). `plane_miss_warning` re-checks every
     // frame the gizmo moves, so dragging the plane into the model clears
@@ -753,209 +757,6 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .max_decimals(2),
     )
     .on_hover_text(t!("split.gap_help"));
-    alignment_section(app, ui, units);
-    widgets::caption(ui, t!("split.result"));
-    let n = app.selected_objects().len();
-    if n > 1 {
-        widgets::caption(ui, crate::tp!("split.targets", n));
-    }
-    ui.add_space(theme::SPACE_L);
-    let can = app.busy.is_none() && !open;
-    if ui
-        .add_enabled_ui(can, |ui| {
-            widgets::wide_button(ui, Kind::Primary, Some(icons::SPLIT), &t!("split.apply"))
-        })
-        .inner
-        .clicked()
-    {
-        let s = &app.split;
-        let mut params = BTreeMap::from([
-            ("plane_point".to_owned(), vec3(s.point())),
-            ("plane_normal".to_owned(), vec3(s.normal())),
-            ("keep".to_owned(), s.keep.clone()),
-            ("cut_gap".to_owned(), s.gap.to_string()),
-        ]);
-        params.extend(alignment_params(&app.alignment));
-        // Every selected object, in one command: the first is the target,
-        // the rest more targets.
-        let selected = app.selected_objects();
-        let Some((&first, rest)) = selected.split_first() else {
-            return;
-        };
-        let more = rest
-            .iter()
-            .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
-            .collect();
-        run_on(
-            app,
-            first,
-            "mesh.split_plane",
-            t!("split.apply"),
-            params,
-            more,
-        );
-    }
-}
-
-// ---------------------------------------------------------------------
-// Alignment (Phase 1 Task 13, D12): holes and dowels at the Split cut.
-// ---------------------------------------------------------------------
-
-fn peg_shape_word(s: mf_operations::PegShape) -> &'static str {
-    match s {
-        mf_operations::PegShape::Round => "round",
-        mf_operations::PegShape::Square => "square",
-        mf_operations::PegShape::Keyed => "keyed",
-    }
-}
-
-fn peg_shape_label(s: mf_operations::PegShape) -> String {
-    match s {
-        mf_operations::PegShape::Round => t!("alignment.shape.round"),
-        mf_operations::PegShape::Square => t!("alignment.shape.square"),
-        mf_operations::PegShape::Keyed => t!("alignment.shape.keyed"),
-    }
-}
-
-/// The Alignment settings as `mesh.split_plane`'s raw params.
-fn alignment_params(a: &AlignmentState) -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("pegs".to_owned(), a.pegs.clone()),
-        (
-            "peg_shape".to_owned(),
-            peg_shape_word(a.peg_shape).to_owned(),
-        ),
-        ("hole_diameter".to_owned(), a.hole_diameter.to_string()),
-        (
-            "hole_depth_above".to_owned(),
-            a.hole_depth_above.to_string(),
-        ),
-        (
-            "hole_depth_below".to_owned(),
-            a.hole_depth_below.to_string(),
-        ),
-        ("peg_count".to_owned(), a.peg_count.to_string()),
-        ("peg_clearance".to_owned(), a.peg_clearance.to_string()),
-        (
-            "length_allowance".to_owned(),
-            a.length_allowance.to_string(),
-        ),
-        ("min_wall".to_owned(), a.min_wall.to_string()),
-    ])
-}
-
-/// The Alignment section of the Split panel: pegs mode, shape, sizes, the
-/// dowel size computed live, and the hole-placement refusal (if any) in
-/// the same words `mesh.split_plane` would give.
-fn alignment_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
-    section(ui, &t!("alignment.section.pegs"));
-    let modes = [
-        ("none", t!("alignment.pegs.none")),
-        ("dowels", t!("alignment.pegs.dowels")),
-        ("attached", t!("alignment.pegs.attached")),
-        ("dovetail", t!("alignment.pegs.dovetail")),
-    ];
-    let options: Vec<(&str, &str, bool)> = modes
-        .iter()
-        .map(|(_, l)| (l.as_str(), l.as_str(), true))
-        .collect();
-    let current = modes
-        .iter()
-        .position(|(k, _)| *k == app.alignment.pegs)
-        // allow-swallow: app.alignment.pegs is always set from this same `modes` list; an unrecognized value (shouldn't happen) highlights "none" rather than panicking the panel.
-        .unwrap_or(0);
-    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
-        app.alignment.pegs = modes[i].0.into();
-    }
-    if app.alignment.pegs == "none" {
-        return;
-    }
-    section(ui, &t!("alignment.section.shape"));
-    let shapes = [
-        mf_operations::PegShape::Round,
-        mf_operations::PegShape::Square,
-        mf_operations::PegShape::Keyed,
-    ];
-    let labels: Vec<String> = shapes.iter().map(|&s| peg_shape_label(s)).collect();
-    let options: Vec<(&str, &str, bool)> = labels
-        .iter()
-        .map(|l| (l.as_str(), l.as_str(), true))
-        .collect();
-    let current = shapes
-        .iter()
-        .position(|&s| s == app.alignment.peg_shape)
-        // allow-swallow: `shapes` is the exhaustive, fixed list of PegShape values, so app.alignment.peg_shape is always found; the default is unreachable.
-        .unwrap_or(0);
-    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
-        app.alignment.peg_shape = shapes[i];
-    }
-    section(ui, &t!("alignment.section.diameter", unit = units));
-    ui.add(
-        egui::Slider::new(&mut app.alignment.hole_diameter, 0.5..=50.0)
-            .suffix(format!(" {units}"))
-            .max_decimals(2),
-    );
-    section(ui, &t!("alignment.section.depth", unit = units));
-    ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            widgets::caption(ui, t!("alignment.depth.above"));
-            ui.add(
-                egui::DragValue::new(&mut app.alignment.hole_depth_above)
-                    .speed(0.1)
-                    .range(0.0..=100.0)
-                    .suffix(format!(" {units}"))
-                    .max_decimals(2),
-            );
-        });
-        ui.vertical(|ui| {
-            widgets::caption(ui, t!("alignment.depth.below"));
-            ui.add(
-                egui::DragValue::new(&mut app.alignment.hole_depth_below)
-                    .speed(0.1)
-                    .range(0.0..=100.0)
-                    .suffix(format!(" {units}"))
-                    .max_decimals(2),
-            );
-        });
-    });
-    if app.alignment.pegs == "dowels" || app.alignment.pegs == "attached" {
-        let (d, len) = mf_operations::dowel_size(
-            app.alignment.hole_diameter,
-            app.alignment.hole_depth_above,
-            app.alignment.hole_depth_below,
-            app.alignment.peg_clearance,
-            app.alignment.length_allowance,
-        );
-        if len > 0.0 {
-            widgets::caption(
-                ui,
-                t!(
-                    "alignment.dowel_size",
-                    diameter = crate::defects::measure(d),
-                    length = crate::defects::measure(len),
-                    unit = units
-                ),
-            );
-        } else {
-            widgets::caption(ui, t!("alignment.dowel_too_short"));
-        }
-    }
-    if let Some(preview) = app.peg_preview() {
-        if let Some(refusal) = &preview.refusal {
-            widgets::caption(ui, refusal.clone());
-        } else {
-            widgets::caption(
-                ui,
-                crate::tp!("alignment.holes_placed", preview.holes.len()),
-            );
-            if preview.skipped_regions > 0 {
-                widgets::caption(
-                    ui,
-                    crate::tp!("alignment.regions_skipped", preview.skipped_regions),
-                );
-            }
-        }
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -1245,35 +1046,5 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
             ));
         }
     }
-    // Alignment's hole placements (Task 13), a circle per hole at the
-    // size the operation would cut, on the cut plane.
-    if app.active_tool == SPLIT
-        && app.alignment.pegs != "none"
-        && let Some(preview) = app.peg_preview()
-    {
-        let radius = preview.dowel.0.max(0.0) / 2.0 + app.alignment.peg_clearance / 2.0;
-        for hole in &preview.holes {
-            let c = DVec3::from(hole.center);
-            let axis = DVec3::from(hole.axis);
-            let normal = split_preview(app).map_or(DVec3::Z, |(_, n)| n);
-            let u = if axis.length() > 1e-9 {
-                axis.normalize()
-            } else {
-                normal.any_orthonormal_vector()
-            };
-            let v = normal.cross(u);
-            let pts: Vec<egui::Pos2> = (0..32)
-                .filter_map(|i| {
-                    let a = std::f64::consts::TAU * i as f64 / 32.0;
-                    at(c + (u * a.cos() + v * a.sin()) * radius.max(0.1))
-                })
-                .collect();
-            if pts.len() == 32 {
-                painter.add(egui::Shape::closed_line(
-                    pts,
-                    egui::Stroke::new(1.5, theme::ACCENT),
-                ));
-            }
-        }
-    }
+    crate::split_flow::overlay(app, &painter, rect);
 }

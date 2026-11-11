@@ -16,6 +16,7 @@ pub mod parts_tool;
 pub mod sculpt_tool;
 pub mod shape_tools;
 pub mod shell;
+pub mod split_flow;
 pub mod theme;
 mod tool_panels;
 pub mod tools;

@@ -112,6 +112,7 @@ impl Gpu {
         let camera = mf_render::OrbitCamera::fit(bounds);
         let items = [mf_render::DrawItem {
             hole: false,
+            ghost: false,
             mesh,
             model: DMat4::IDENTITY,
             inactive: false,

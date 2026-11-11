@@ -28,7 +28,7 @@ struct FrameKey {
     /// Each object drawn: the identity of its render mesh, its face-state
     /// generation (a selection change redraws), the states shown and
     /// whether it's dimmed.
-    objects: Vec<(ObjectId, usize, u64, u32, bool, bool)>,
+    objects: Vec<(ObjectId, usize, u64, u32, bool, bool, bool)>,
     /// Identity, colour, x-ray and emphasis (bits) of each overlay layer,
     /// in draw order.
     layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
@@ -85,6 +85,8 @@ pub struct ObjectView {
     pub picked: bool,
     /// Its role is Hole: drawn translucent with a grey hatch.
     pub hole: bool,
+    /// Drawn see-through: the Split workflow's transparent piece.
+    pub ghost: bool,
 }
 
 /// How to draw the view this frame.
@@ -773,6 +775,7 @@ impl Viewport {
                         o.shown_states,
                         !(o.active || o.hovered || o.picked),
                         o.hole,
+                        o.ghost,
                     )
                 })
                 .collect(),
@@ -808,6 +811,7 @@ impl Viewport {
                 .iter()
                 .map(|o| mf_render::DrawItem {
                     hole: o.hole,
+                    ghost: o.ghost,
                     mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
                     inactive: !(o.active || o.hovered || o.picked),
@@ -1079,6 +1083,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     let model = glam::DMat4::IDENTITY;
     let items = [false, true].map(|inactive| mf_render::DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model,
         inactive,

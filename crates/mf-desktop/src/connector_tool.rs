@@ -113,7 +113,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
 /// dropped: a malformed or unreadable file means the user's own classes
 /// are missing, which the panel says so the file can be fixed, rather
 /// than quietly falling back).
-fn fit_classes(app: &MeshFixerApp) -> (FitClasses, Option<String>) {
+pub(crate) fn fit_classes(app: &MeshFixerApp) -> (FitClasses, Option<String>) {
     let Some(dir) = app.settings_dir() else {
         return (FitClasses::default(), None);
     };
@@ -124,7 +124,7 @@ fn fit_classes(app: &MeshFixerApp) -> (FitClasses, Option<String>) {
 }
 
 /// As [`fit_classes`], for Machine profiles.
-fn machine_profiles(app: &MeshFixerApp) -> (MachineProfiles, Option<String>) {
+pub(crate) fn machine_profiles(app: &MeshFixerApp) -> (MachineProfiles, Option<String>) {
     let Some(dir) = app.settings_dir() else {
         return (MachineProfiles::default(), None);
     };
@@ -797,9 +797,7 @@ fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 if print_volume_row(ui, &mut edited.print_volume_mm) {
                     changed = true;
                 }
-                if changed
-                    && profiles.update(edited).is_ok()
-                {
+                if changed && profiles.update(edited).is_ok() {
                     let _ = profiles.save(&dir); // allow-swallow: a failed save leaves the in-memory edit for this session; the next edit retries the write
                 }
             } else {

@@ -351,6 +351,9 @@ pub struct MeshFixerApp {
     /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
+    /// Split's three-step workflow: the step, the print-volume box, the
+    /// joints a cut recorded and the connectors placed on them.
+    pub split_flow: crate::split_flow::Flow,
     /// Split's Alignment section (Task 13): pegs mode, shape, sizes.
     pub alignment: crate::shape_tools::AlignmentState,
     /// The Alignment panel's hole preview for the plane and settings last
@@ -761,6 +764,7 @@ impl MeshFixerApp {
             first_use_hint: true,
             shading: mf_render::Shading::default(),
             split: Default::default(),
+            split_flow: Default::default(),
             alignment: Default::default(),
             peg_preview: None,
             peg_preview_worker,
@@ -1517,6 +1521,15 @@ impl MeshFixerApp {
     /// checked first (O(1), and the builder computes the topology before
     /// reporting one); the topology check never waits for a computation
     /// holding its lock (fix round 2, N1).
+    /// The picking BVH of object `id`, if it's built for `mesh` (that
+    /// revision of it).
+    pub fn object_bvh(&self, id: ObjectId, mesh: &Mesh) -> Option<Arc<Bvh>> {
+        self.bvhs
+            .get(&id)
+            .filter(|(m, _)| Mesh::ptr_eq(m, mesh))
+            .map(|(_, b)| b.clone())
+    }
+
     pub fn picking_ready(&self) -> bool {
         self.session.document().objects().iter().all(|o| {
             o.mesh().is_none_or(|mesh| {
@@ -2258,8 +2271,7 @@ impl MeshFixerApp {
                     ) if r["warnings"].as_array().is_some_and(|w| !w.is_empty()) => Some(report(r)),
                     _ => None,
                 };
-                let is_new_revision =
-                    matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
+                let is_new_revision = matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(match placed {
@@ -2270,6 +2282,9 @@ impl MeshFixerApp {
                         // (D6): keep `active` on an object that exists,
                         // and make a newly created one active.
                         self.after_object_changes();
+                        // Split's workflow: a cut's joints, or a joint's
+                        // connectors applied.
+                        crate::split_flow::after_commit(self, op, &r);
                         // The command's result stays: a filled hole's
                         // "selection cleared" would only repeat it.
                         if let Some(note) = self.retarget_selection()
@@ -2876,7 +2891,8 @@ impl MeshFixerApp {
                     // A sculpt stroke in progress draws its own running
                     // mesh, not the last committed revision (Task 19).
                     stroke.render.clone()
-                } else if active && !self.shows_current_revision()
+                } else if active
+                    && !self.shows_current_revision()
                     && let Some((object, r)) = &self.sculpt_pending
                     && *object == o.id
                 {
@@ -2920,6 +2936,7 @@ impl MeshFixerApp {
                     },
                     picked: self.picked.len() > 1 && self.picked.contains(&o.id),
                     hole: o.is_hole(),
+                    ghost: crate::split_flow::is_ghost(self, o.id),
                 })
             })
             .collect()
@@ -2942,6 +2959,14 @@ impl MeshFixerApp {
             v
         };
         Some(vertices.bounds)
+    }
+
+    /// Object `id`'s world bounding box, from vertices built on a worker
+    /// (`None` until they're ready, or for an empty mesh). O(1).
+    pub fn object_world_bounds(&self, id: ObjectId) -> Option<Aabb> {
+        let o = self.session.document().object(id)?;
+        let bb = self.object_bounds(o)??;
+        Some(transformed_bounds(&bb, &model_matrix(&o.transform)))
     }
 
     /// Union of every object's bounding box, at its transform
@@ -4996,7 +5021,7 @@ impl MeshFixerApp {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
                     || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
             });
-        if delete {
+        if delete && !crate::split_flow::delete_selected(self) {
             self.delete_active_object();
         }
         // H: the selected objects' role, Solid or Hole.
@@ -5272,6 +5297,47 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
                 s(faces),
                 s(vertices)
             )
+        }
+        "mesh.split_plane" => {
+            let (parts, joints) = (len("parts") as u64, len("joints") as u64);
+            let mut text = format!("Cut into {} part{}", thousands(parts), s(parts));
+            if joints > 0 {
+                text.push_str(&format!(
+                    "; {} joint{} ready for connectors (Split, step 3)",
+                    thousands(joints),
+                    s(joints)
+                ));
+            }
+            text
+        }
+        "mesh.split_box" => {
+            let (pieces, joints) = (len("pieces") as u64, len("joints") as u64);
+            format!(
+                "Cut into {} piece{} along the print volume; {} joint{} ready for connectors \
+                 (Split, step 3)",
+                thousands(pieces),
+                s(pieces),
+                thousands(joints),
+                s(joints)
+            )
+        }
+        "split.place_connectors" => {
+            let (n, dowels) = (num("connectors"), num("dowels"));
+            let mut text = format!("Added {} connector{}", thousands(n), s(n));
+            if dowels > 0 {
+                text.push_str(&format!(
+                    ", with {} loose dowel{} on the plate",
+                    thousands(dowels),
+                    s(dowels)
+                ));
+            }
+            for w in report["warnings"].as_array().into_iter().flatten() {
+                if let Some(w) = w.as_str() {
+                    text.push_str(". ");
+                    text.push_str(w);
+                }
+            }
+            text
         }
         _ => {
             let raw = report.to_string();
