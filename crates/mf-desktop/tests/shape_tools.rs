@@ -849,3 +849,149 @@ fn a_browser_rows_toggle_only_shows_on_hover_and_switches_its_role() {
     settle(&mut h);
     assert!(!is_hole(&h, "peg"));
 }
+
+/// The colour at `at` (world space), with the pointer moved out of the
+/// way so it's drawn plainly.
+fn world_pixel(h: &mut Harness<'_, MeshFixerApp>, at: [f64; 3]) -> [i32; 3] {
+    let ppp = h.ctx.pixels_per_point();
+    let pos = h.state().screen_point(at).unwrap();
+    h.event(egui::Event::PointerGone);
+    h.run_steps(2);
+    let image = h.render().unwrap();
+    let (x, y) = ((pos.x * ppp) as u32, (pos.y * ppp) as u32);
+    let p = image.get_pixel(x, y).0;
+    [0, 1, 2].map(|k| i32::from(p[k]))
+}
+
+/// `theme::INTERSECTION` (0xB3, 0x6B, 0xFF) whatever the lighting: a
+/// violet, blue and red both well above green.
+fn violet(p: [i32; 3]) -> bool {
+    p[2] * 10 > p[1] * 13 && p[0] * 10 > p[1] * 12 && p[2] > p[0]
+}
+
+/// Wherever a Hole's surface crosses a Solid's, the exact curve draws in
+/// the violet `INTERSECTION` token, on top of the model; it's off for
+/// objects that don't overlap, and updates (moves with the object) during
+/// a Transform drag.
+#[test]
+fn a_hole_overlapping_a_solid_shows_the_intersection_outline_and_updates_after_a_move() {
+    require_gpu!(
+        "a_hole_overlapping_a_solid_shows_the_intersection_outline_and_updates_after_a_move"
+    );
+    // A 20mm cube (object space [0,20]^3) and a 10mm-radius ball centred
+    // at (10, 10, 16): its top pokes 6mm through the cube's top face
+    // (z=20), crossing it in a circle of radius sqrt(10^2-4^2) ~ 9.16mm
+    // around (10, 10, 20) (not flush with the face, so the surfaces truly
+    // cross rather than just touch).
+    let mut h = opened(
+        WINDOW,
+        vec![
+            ("block", mf_fixtures::cube(20.0), at([0.0, 0.0, 0.0])),
+            ("ball", ball(), at([10.0, 10.0, 16.0])),
+        ],
+    );
+    let ring_point = [10.0, 10.0 - 84f64.sqrt(), 20.0];
+
+    // Not a hole yet: no violet outline (nothing to combine).
+    let before = world_pixel(&mut h, ring_point);
+    assert!(
+        !violet(before),
+        "no outline before the role is set: {before:?}"
+    );
+
+    row(&h, "ball").click();
+    settle(&mut h);
+    h.key_press(egui::Key::H);
+    settle(&mut h);
+    assert!(is_hole(&h, "ball"));
+    // The curve is found on a worker (mesh.intersections): wait for it.
+    let mut found = false;
+    for _ in 0..200 {
+        if violet(world_pixel(&mut h, ring_point)) {
+            found = true;
+            break;
+        }
+        settle(&mut h);
+    }
+    assert!(found, "the crossing curve shows once the ball is a hole");
+    still(&mut h, "intersection-outline-before-move");
+
+    // Drag the ball along X with the Transform tool: during the drag (no
+    // undo step committed yet) the curve already moved with it, at the
+    // live (uncommitted) placement — not the old one.
+    row(&h, "ball (hole)").click();
+    settle(&mut h);
+    h.state_mut().open_transform();
+    settle(&mut h);
+    let gizmo = h.state().transform_gizmo().unwrap();
+    let cam = h.state().camera.unwrap();
+    let rect = h.state().viewport.last_rect.unwrap();
+    let view = (rect.width() as f64, rect.height() as f64);
+    let shape = gizmo
+        .handles(&cam, view)
+        .into_iter()
+        .find(|s| s.handle == mf_render::Handle::Axis(0))
+        .expect("the X arrow is drawn");
+    let mf_render::HandleGeometry::Arrow {
+        shaft_start,
+        shaft_end,
+        ..
+    } = shape.geometry
+    else {
+        panic!("an axis is an arrow");
+    };
+    let mid = egui::pos2(
+        ((shaft_start.0 + shaft_end.0) / 2.0) as f32,
+        ((shaft_start.1 + shaft_end.1) / 2.0) as f32,
+    );
+    let from = rect.left_top() + mid.to_vec2();
+    let dir = egui::vec2(
+        (shaft_end.0 - shaft_start.0) as f32,
+        (shaft_end.1 - shaft_start.1) as f32,
+    )
+    .normalized();
+    let to = from + dir * 250.0;
+    h.event(egui::Event::PointerMoved(from));
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    for i in 1..=10 {
+        h.event(egui::Event::PointerMoved(
+            from + (to - from) * (i as f32 / 10.0),
+        ));
+        h.step();
+    }
+    h.run_steps(3);
+    let history = h.state().session.history_labels().len();
+    assert_eq!(
+        h.state().session.history_labels().len(),
+        history,
+        "mid-drag: no undo step yet"
+    );
+    // Give the throttled worker a few frames to catch up with the drag.
+    for _ in 0..50 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    h.run_steps(3);
+    // The ring moved away in X with the ball: the old spot is no longer
+    // on the (moved) curve, confirming the outline tracks the live drag,
+    // not the pre-move placement.
+    let moved_away = world_pixel(&mut h, ring_point);
+    assert!(
+        !violet(moved_away),
+        "the outline followed the drag away from the old spot: {moved_away:?}"
+    );
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    settle(&mut h);
+    still(&mut h, "intersection-outline-after-move");
+}

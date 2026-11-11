@@ -66,6 +66,10 @@ pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.25;
 /// The selection where nearer surfaces hide it (the x-ray pass) is drawn
 /// in `SELECTED` at this opacity: the same colour, so the same meaning.
 pub const XRAY_OPACITY: f32 = 0.55;
+/// A Hole's hidden part — buried inside or behind a solid — drawn as a
+/// ghost (View ▸ Overlays ▸ "Show holes through solids"): well under the
+/// visible part's ~35% opacity, so it never competes with real geometry.
+pub const HOLE_XRAY_OPACITY: f32 = 0.2;
 
 /// Outline widths in the 3D view, in points: defect outlines, and the
 /// selection / hover / crack / tangled-edge overlays drawn over them.
@@ -121,6 +125,7 @@ pub fn palette() -> mf_render::Palette {
             hover: tint(HOVER, HOVER_FACE_STRENGTH),
         },
         xray_opacity: XRAY_OPACITY,
+        hole_xray_opacity: HOLE_XRAY_OPACITY,
     }
 }
 

@@ -490,6 +490,9 @@ pub enum Message {
         key: u64,
         markers: Arc<Markers>,
     },
+    /// Every overlapping Solid/Hole pair's crossing curve, for the latest
+    /// request ([`IntersectionCurves`]).
+    IntersectionsFound(IntersectionCurves),
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -1760,6 +1763,101 @@ const MAX_EDGE_CANDIDATES: usize = 16;
 fn nearest_edge_candidates<T>(candidates: &mut Vec<T>, distance: impl Fn(&T) -> f64) {
     candidates.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
     candidates.truncate(MAX_EDGE_CANDIDATES);
+}
+
+/// One Solid/Hole pair to find the exact crossing curve of
+/// (`mesh.intersections`): their current revisions, BVHs and transforms.
+/// `solid` is the frame the segments are reported in.
+pub struct IntersectionPair {
+    pub solid: ObjectId,
+    pub solid_mesh: Mesh,
+    pub solid_bvh: Arc<Bvh>,
+    pub solid_transform: [f64; 12],
+    pub hole: ObjectId,
+    pub hole_mesh: Mesh,
+    pub hole_bvh: Arc<Bvh>,
+    pub hole_transform: [f64; 12],
+}
+
+/// Every Solid/Hole pair to check this request, tagged with a number so a
+/// superseded request's result can be told apart from the latest's.
+pub struct IntersectionRequest {
+    pub key: u64,
+    pub pairs: Vec<IntersectionPair>,
+}
+
+/// One pair's crossing curve, in world space (so the view draws it with an
+/// identity model matrix, like the build plate): empty when the pair
+/// doesn't overlap at all.
+pub struct IntersectionCurve {
+    pub solid: ObjectId,
+    pub hole: ObjectId,
+    pub lines: Arc<GpuLines>,
+}
+
+/// Every pair's curve for request `key` (the latest only: see
+/// [`crate::analysis::LatestWorker`]).
+pub struct IntersectionCurves {
+    pub key: u64,
+    pub curves: Vec<IntersectionCurve>,
+}
+
+/// The exact crossing curve of every pair in `req` (MF-MODEL-002's
+/// `mesh.intersections`: ~6 ms at 30M vs 50k faces), on a worker. Each
+/// pair's segments are placed in the solid's frame by `intersections_between`,
+/// then carried into world space by the solid's transform, so the view can
+/// draw every pair's curve with one identity-model layer (like the build
+/// plate). Cancellable: a newer request (roles, transforms, or a Transform
+/// drag) supersedes this one before it finishes.
+pub fn intersections(
+    req: IntersectionRequest,
+    ctx: &RunContext,
+    gpu: &Gpu,
+) -> Result<IntersectionCurves, Cancelled> {
+    let mut curves = Vec::with_capacity(req.pairs.len());
+    for pair in &req.pairs {
+        ctx.checkpoint()?;
+        let solid_to_world = mf_render::model_matrix(&pair.solid_transform);
+        let hole_to_solid =
+            solid_to_world.inverse() * mf_render::model_matrix(&pair.hole_transform);
+        let report = mf_geometry::intersections_between(
+            &pair.solid_mesh,
+            &pair.solid_bvh,
+            &pair.hole_mesh,
+            &pair.hole_bvh,
+            &hole_to_solid,
+            ctx,
+        )?;
+        let mut vertices = Vec::new();
+        for region in &report.regions {
+            for [a, b] in &region.segments {
+                let world = |p: &[f64; 3]| {
+                    (solid_to_world * glam::DVec4::new(p[0], p[1], p[2], 1.0)).truncate()
+                };
+                vertices.push(mf_render::LineVertex {
+                    position: world(a).as_vec3().to_array(),
+                });
+                vertices.push(mf_render::LineVertex {
+                    position: world(b).as_vec3().to_array(),
+                });
+            }
+        }
+        let lines = Arc::new(GpuLines::upload_paced(
+            &gpu.device,
+            &gpu.queue,
+            &vertices,
+            UPLOAD_CHUNK_BYTES,
+        ));
+        curves.push(IntersectionCurve {
+            solid: pair.solid,
+            hole: pair.hole,
+            lines,
+        });
+    }
+    Ok(IntersectionCurves {
+        key: req.key,
+        curves,
+    })
 }
 
 /// What to export: one mesh, or a whole 3MF model.

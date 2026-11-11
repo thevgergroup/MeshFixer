@@ -39,6 +39,10 @@ struct FrameKey {
     /// The gizmo's handles (target pixels) and the highlighted one.
     gizmo: Option<(Vec<mf_render::HandleShape>, Option<mf_render::Handle>)>,
     plate: Option<mf_render::Plate>,
+    /// "Show holes through solids" (View ▸ Overlays): a toggle redraws.
+    show_holes_through_solids: bool,
+    /// Identity of each intersection curve drawn (a new curve redraws).
+    intersections: Vec<usize>,
 }
 
 /// One line overlay to draw on an object (built by a worker; see app.rs).
@@ -55,6 +59,13 @@ pub struct ViewLayer {
     pub xray: bool,
     /// 0–1: drawn brighter and wider (the selection's pulse).
     pub emphasis: f32,
+}
+
+/// Where a Hole's surface crosses a Solid's (`mesh.intersections`): the
+/// exact curve, already in world space (built by a worker), drawn in the
+/// `INTERSECTION` token over everything with no depth test.
+pub struct IntersectionView {
+    pub lines: Arc<GpuLines>,
 }
 
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
@@ -103,6 +114,12 @@ pub struct ViewOptions<'a> {
     /// Split's plane (point, normal; world): the two sides are shaded
     /// apart and the cut line drawn on the model.
     pub split_preview: Option<(glam::DVec3, glam::DVec3)>,
+    /// View ▸ Overlays ▸ "Show holes through solids" (on by default): a
+    /// Hole's hidden part — buried inside or behind a solid — draws as a
+    /// fainter ghost.
+    pub show_holes_through_solids: bool,
+    /// Every overlapping Solid/Hole pair's exact crossing curve.
+    pub intersections: Vec<IntersectionView>,
 }
 
 /// What [`Viewport::input`] found, for [`Viewport::paint`].
@@ -425,6 +442,8 @@ impl Viewport {
             tool_hint,
             shading,
             split_preview,
+            show_holes_through_solids,
+            intersections,
         } = options;
         let rect = input.rect;
         let (Some(cam), true) = (camera.as_mut(), input.drawn && !objects.is_empty()) else {
@@ -459,6 +478,8 @@ impl Viewport {
         self.renderer.set_selection_cue(cue);
         self.renderer.set_shading(shading);
         self.renderer.set_split_preview(split_preview);
+        self.renderer
+            .set_show_holes_through_solids(show_holes_through_solids);
         self.wireframe_on = shading.wireframe;
         let ppp = f64::from(ui.ctx().pixels_per_point());
         let view = (rect.width() as f64, rect.height() as f64);
@@ -481,6 +502,8 @@ impl Viewport {
             frame,
             gizmo.as_ref().map(|(s, h)| (s.as_slice(), *h)),
             plate,
+            show_holes_through_solids,
+            &intersections,
         );
         ui.painter().image(
             texture,
@@ -720,6 +743,8 @@ impl Viewport {
         frame: u64,
         gizmo: Option<(&[mf_render::HandleShape], Option<mf_render::Handle>)>,
         plate: Option<mf_render::Plate>,
+        show_holes_through_solids: bool,
+        intersections: &[IntersectionView],
     ) -> egui::TextureId {
         let mut dirty = self.ensure_target(size);
         let cue = self.renderer.selection_cue();
@@ -770,6 +795,11 @@ impl Viewport {
                 .collect(),
             gizmo: gizmo.map(|(shapes, h)| (shapes.to_vec(), h)),
             plate,
+            show_holes_through_solids,
+            intersections: intersections
+                .iter()
+                .map(|i| Arc::as_ptr(&i.lines) as usize)
+                .collect(),
         };
         dirty |= self.last_frame.as_ref() != Some(&key);
 
@@ -798,6 +828,19 @@ impl Viewport {
                     })
                 })
                 .collect();
+            // Already in world space (built on a worker): an identity
+            // model and origin, like the build plate.
+            let gpu_intersections: Vec<Layer<'_>> = intersections
+                .iter()
+                .map(|i| Layer {
+                    lines: &i.lines,
+                    model: glam::DMat4::IDENTITY,
+                    mesh_origin: glam::DVec3::ZERO,
+                    color: theme::rgba(theme::INTERSECTION),
+                    xray: false,
+                    emphasis: 0.0,
+                })
+                .collect();
             let palette = theme::gizmo_palette();
             let extras = mf_render::SceneExtras {
                 plate: plate.as_ref(),
@@ -815,6 +858,7 @@ impl Viewport {
                 &items,
                 show_boundaries,
                 &gpu_layers,
+                &gpu_intersections,
                 &extras,
                 self.timer.as_mut().map(|t| (t, frame)),
             );

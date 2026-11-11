@@ -18,7 +18,8 @@ struct Scene {
     tint_hover: vec4<f32>,
     tint_hole_neighbourhood: vec4<f32>,
     // The selection cue (renderer.rs `SelectionCue`): x: emphasis (the
-    // pulse after framing, 0–1), y: x-ray opacity.
+    // pulse after framing, 0–1), y: x-ray opacity, z: a Hole's hidden-part
+    // ghost opacity (0 while "Show holes through solids" is off).
     cue: vec4<f32>,
     // The camera eye, in the same world_origin-shifted frame as vertex
     // positions (xyz; w unused): the build plate fades by distance from here.
@@ -273,13 +274,37 @@ fn fs_hole_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @locat
     if (selected) {
         rgb = rim(rgb, in.normal, scene.tint_selected.rgb, 0.9);
     }
+    let h = hatch(in.clip);
+    rgb = mix(rgb, vec3<f32>(0.5), 0.75 * h);
+    let a = mix(0.35, 0.6, h);
+    return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
+}
+
+// How much of this fragment the hole's hatch stripes cover (0–1), from its
+// clip-space position (screen-constant ~8 pt period, `draw.params.w`
+// physical pixels per point).
+fn hatch(clip: vec4<f32>) -> f32 {
     let period = 8.0 * max(draw.params.w, 0.1);
-    let d = (in.clip.x + in.clip.y) / period;
+    let d = (clip.x + clip.y) / period;
     let f = abs(fract(d) - 0.5) * 2.0;
     let aa = fwidth(d) * 2.0;
-    let stripe = 1.0 - smoothstep(0.35 - aa, 0.35 + aa, f);
-    rgb = mix(rgb, vec3<f32>(0.5), 0.75 * stripe);
-    let a = mix(0.35, 0.6, stripe);
+    return 1.0 - smoothstep(0.35 - aa, 0.35 + aa, f);
+}
+
+// A Hole's hidden part — buried inside or behind a solid — the same
+// hatched surface as `fs_hole_surface`, but fainter (`scene.cue.z`,
+// about 20%) and drawn only where a nearer surface is already in the
+// depth buffer (the pipeline's `Greater` compare): a ghost through solid
+// geometry, Tinkercad-style (View ▸ Overlays ▸ "Show holes through
+// solids"). `scene.cue.z` is 0 while the overlay is off, so the pass
+// draws nothing visible rather than needing a separate toggle here.
+@fragment
+fn fs_hole_xray_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base = base_color(front, in.state);
+    var rgb = lit(base, in.normal);
+    let h = hatch(in.clip);
+    rgb = mix(rgb, vec3<f32>(0.5), 0.75 * h);
+    let a = mix(scene.cue.z, scene.cue.z * 1.7, h);
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
 }
 

@@ -74,3 +74,61 @@ fn a_hole_is_translucent_and_hatched() {
     assert!(hole_d < 0.75 * solid_d, "hole {hole_d} vs solid {solid_d}");
     assert!(hole_d > 0.0, "the hole is drawn");
 }
+
+/// "Show holes through solids" (on by default): a Hole buried inside a
+/// Solid shows as a faint ghost through the solid's near face, the same
+/// hatch at lower opacity. Off, the solid's face is plain (the buried hole
+/// draws nothing: depth-tested `LessEqual` against the nearer solid, like
+/// before this overlay existed).
+#[test]
+fn a_buried_hole_shows_through_the_solid_as_a_ghost() {
+    let solid = cube(10.0);
+    let buried = cube(2.0);
+    // The solid spans [0, 10]^3 (mf_fixtures::cube is corner-anchored):
+    // centre the small cube inside it at (4, 4, 4)..(6, 6, 6).
+    let buried_transform = DMat4::from_translation(glam::DVec3::splat(4.0));
+    let cam = OrbitCamera::fit(&solid.bounding_box().unwrap());
+    let (w, h) = (200, 200);
+    let objects = [
+        (&solid, DMat4::IDENTITY, false),
+        (&buried, buried_transform, true),
+    ];
+    let render = |xray: bool| offscreen::render_roles_xray(&objects, &cam, w, h, false, xray);
+    let Some(ghost) = gpu_or_skip(
+        "a_buried_hole_shows_through_the_solid_as_a_ghost",
+        render(true),
+    ) else {
+        return;
+    };
+    let plain = render(false).unwrap();
+    if let Some(dir) = std::env::var_os("MF_ARTIFACTS") {
+        ghost
+            .save(std::path::Path::new(&dir).join("hole-xray-on.png"))
+            .unwrap();
+        plain
+            .save(std::path::Path::new(&dir).join("hole-xray-off.png"))
+            .unwrap();
+    }
+    // The solid alone (no buried hole at all): what a plain, unbroken face
+    // looks like.
+    let solid_only =
+        offscreen::render_roles(&[(&solid, DMat4::IDENTITY, false)], &cam, w, h, false).unwrap();
+    let (y, xs) = (h / 2, (w / 2 - 20)..(w / 2 + 20));
+    // Off: the buried hole is hidden by the nearer solid face exactly like
+    // before this overlay existed — pixel-identical to the solid alone.
+    for x in xs.clone() {
+        assert_eq!(
+            plain.get_pixel(x, y).0,
+            solid_only.get_pixel(x, y).0,
+            "x={x}: the toggle off hides the buried hole, same as before"
+        );
+    }
+    // On: the region over the buried hole differs from the plain solid (a
+    // ghost shows through), and is hatched (many brightness crossings).
+    let differs = xs
+        .clone()
+        .any(|x| ghost.get_pixel(x, y).0 != solid_only.get_pixel(x, y).0);
+    assert!(differs, "the ghost shows through the solid's near face");
+    let ghost_x = crossings(&ghost, y, xs);
+    assert!(ghost_x >= 8, "the ghost is hatched: {ghost_x} crossings");
+}

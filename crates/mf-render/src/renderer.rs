@@ -44,6 +44,10 @@ pub struct Palette {
     /// Opacity (0–1) of the selection drawn through nearer surfaces (the
     /// x-ray pass, in the selection's own colour; see [`SelectionCue`]).
     pub xray_opacity: f32,
+    /// Opacity (0–1) of a Hole's hidden part — buried inside or behind a
+    /// solid — drawn as a ghost (Tinkercad-style "show holes through
+    /// solids"; about 20%, well under the ~35% of its visible part).
+    pub hole_xray_opacity: f32,
 }
 
 /// How the model's surface is shaded (UI plan §4 "Shaders").
@@ -121,6 +125,7 @@ impl Palette {
             hover: [0.91, 0.93, 0.96, 0.85],
         },
         xray_opacity: 0.55,
+        hole_xray_opacity: 0.2,
     };
 }
 
@@ -142,7 +147,9 @@ struct SceneUniforms {
     viewport: [f32; 4],
     /// [`FaceTints`], in its order.
     tints: [[f32; 4]; 6],
-    /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity.
+    /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity,
+    /// z: a Hole's hidden-part ghost opacity (0 while the "Show holes
+    /// through solids" overlay is off, so the pass draws nothing visible).
     cue: [f32; 4],
     /// The camera's eye, in the same shifted (`world_origin`-relative)
     /// frame as vertex positions: the build plate fades by distance from
@@ -243,6 +250,9 @@ pub struct MeshRenderer {
     xray_surface_pipeline_ccw: wgpu::RenderPipeline,
     xray_surface_pipeline_cw: wgpu::RenderPipeline,
     xray_line_pipeline: wgpu::RenderPipeline,
+    /// Where a Hole crosses a Solid (`INTERSECTION`): no depth test at
+    /// all, over everything, like the gizmo.
+    intersection_line_pipeline: wgpu::RenderPipeline,
     /// The build plate (D9): blended, depth-tested like an opaque pass.
     plate_pipeline: wgpu::RenderPipeline,
     /// The transform gizmo (D8): screen-space, no depth test.
@@ -266,9 +276,18 @@ pub struct MeshRenderer {
     /// A Hole object: translucent with a grey diagonal hatch.
     hole_pipeline_ccw: wgpu::RenderPipeline,
     hole_pipeline_cw: wgpu::RenderPipeline,
+    /// A Hole's hidden part — buried inside or behind a solid — drawn as a
+    /// fainter ghost (`DepthMode::HoleXRay`: depth test `Greater`, no
+    /// depth write), the same hatched surface as `hole_pipeline_*` at
+    /// [`Palette::hole_xray_opacity`] (Tinkercad-style "show holes through
+    /// solids").
+    hole_xray_pipeline_ccw: wgpu::RenderPipeline,
+    hole_xray_pipeline_cw: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     shading: Shading,
     split_preview: Option<(DVec3, DVec3)>,
+    /// View ▸ Overlays ▸ "Show holes through solids" (on by default).
+    show_holes_through_solids: bool,
 }
 
 impl MeshRenderer {
@@ -353,6 +372,11 @@ impl MeshRenderer {
             /// A Hole's surface: blended over what's already drawn,
             /// depth-tested so a nearer solid hides it, writing no depth.
             Translucent,
+            /// A Hole's hidden part: blended, drawn only where something
+            /// is already nearer (`Greater`, like the selection's x-ray
+            /// pass), writing no depth — the ghost that shows a buried or
+            /// backside hole through a solid.
+            HoleXRay,
         }
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -379,7 +403,7 @@ impl MeshRenderer {
                     depth_mode == DepthMode::Opaque || depth_mode == DepthMode::Blended,
                 ),
                 depth_compare: Some(match depth_mode {
-                    DepthMode::XRay => wgpu::CompareFunction::Greater,
+                    DepthMode::XRay | DepthMode::HoleXRay => wgpu::CompareFunction::Greater,
                     DepthMode::NoTest | DepthMode::Glass => wgpu::CompareFunction::Always,
                     DepthMode::Opaque | DepthMode::Blended | DepthMode::Translucent => {
                         wgpu::CompareFunction::LessEqual
@@ -390,7 +414,11 @@ impl MeshRenderer {
             });
             let blend = matches!(
                 depth_mode,
-                DepthMode::XRay | DepthMode::Blended | DepthMode::Glass | DepthMode::Translucent
+                DepthMode::XRay
+                    | DepthMode::Blended
+                    | DepthMode::Glass
+                    | DepthMode::Translucent
+                    | DepthMode::HoleXRay
             )
             .then_some(blend_state);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -529,6 +557,19 @@ impl MeshRenderer {
         };
         let hole_pipeline_ccw = hole("mf hole ccw", wgpu::FrontFace::Ccw);
         let hole_pipeline_cw = hole("mf hole cw", wgpu::FrontFace::Cw);
+        let hole_xray = |label: &str, front_face| {
+            pipeline_with(
+                label,
+                &surface_layout,
+                "vs_surface",
+                "fs_hole_xray_surface",
+                &surface_buffers,
+                front_face,
+                DepthMode::HoleXRay,
+            )
+        };
+        let hole_xray_pipeline_ccw = hole_xray("mf hole x-ray ccw", wgpu::FrontFace::Ccw);
+        let hole_xray_pipeline_cw = hole_xray("mf hole x-ray cw", wgpu::FrontFace::Cw);
         // The stage's background gradient: one full-screen triangle, drawn
         // first, testing and writing no depth.
         let background_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -555,6 +596,20 @@ impl MeshRenderer {
             &line_buffers,
             wgpu::FrontFace::Ccw,
             DepthMode::XRay,
+        );
+        // Where a Hole's surface crosses a Solid's (the exact curve from
+        // `mesh.intersections`): drawn over everything, no depth test at
+        // all (like the gizmo), with the same halo as every other overlay
+        // line (`fs_overlay_line`), in `draw.color` (the app's own
+        // `INTERSECTION` token).
+        let intersection_line_pipeline = pipeline_with(
+            "mf intersection lines",
+            &layout,
+            "vs_line",
+            "fs_overlay_line",
+            &line_buffers,
+            wgpu::FrontFace::Ccw,
+            DepthMode::NoTest,
         );
         // The build plate: world-space lines like `line_buffers`, but
         // blended (it fades with distance) while still depth-testing and
@@ -636,12 +691,16 @@ impl MeshRenderer {
             glass_pipeline_cw,
             hole_pipeline_ccw,
             hole_pipeline_cw,
+            hole_xray_pipeline_ccw,
+            hole_xray_pipeline_cw,
             background_pipeline,
             shading: Shading::default(),
             split_preview: None,
+            show_holes_through_solids: true,
             xray_surface_pipeline_ccw,
             xray_surface_pipeline_cw,
             xray_line_pipeline,
+            intersection_line_pipeline,
             plate_pipeline,
             gizmo_line_pipeline,
             gizmo_fill_pipeline,
@@ -669,6 +728,13 @@ impl MeshRenderer {
     /// the cut drawn where the plane crosses it (`None`: no preview).
     pub fn set_split_preview(&mut self, plane: Option<(DVec3, DVec3)>) {
         self.split_preview = plane;
+    }
+
+    /// View ▸ Overlays ▸ "Show holes through solids" (on by default): draw
+    /// a Hole's hidden part — buried inside or behind a solid — as a
+    /// fainter ghost, from the next [`Self::prepare`] on.
+    pub fn set_show_holes_through_solids(&mut self, show: bool) {
+        self.show_holes_through_solids = show;
     }
 
     /// How the surface is shaded from the next [`Self::prepare`] on.
@@ -746,7 +812,16 @@ impl MeshRenderer {
                 p.tints.hover,
                 p.tints.hole_neighbourhood,
             ],
-            cue: [self.cue.emphasis.clamp(0.0, 1.0), p.xray_opacity, 0.0, 0.0],
+            cue: [
+                self.cue.emphasis.clamp(0.0, 1.0),
+                p.xray_opacity,
+                if self.show_holes_through_solids {
+                    p.hole_xray_opacity
+                } else {
+                    0.0
+                },
+                0.0,
+            ],
             eye_pos: Vec4::from((eye_shifted, 0.0)).to_array(),
             plate: p.plate,
             background: p.background,
@@ -815,8 +890,9 @@ impl MeshRenderer {
         items: &[DrawItem<'_>],
         show_boundaries: bool,
         layers: &[Layer<'_>],
+        intersections: &[Layer<'_>],
     ) {
-        self.ensure_slots(device, items.len() + layers.len());
+        self.ensure_slots(device, items.len() + layers.len() + intersections.len());
 
         for (slot, item) in self.draw_slots.iter().zip(items) {
             let model = shifted_model(item.model, item.mesh.origin, world_origin);
@@ -834,8 +910,8 @@ impl MeshRenderer {
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
         }
-        let layer_slots = &self.draw_slots[items.len()..];
-        for (slot, layer) in layer_slots.iter().zip(layers) {
+        let layer_slots = &self.draw_slots[items.len()..items.len() + layers.len()];
+        let write_layer = |slot: &DrawSlot, layer: &Layer<'_>| {
             let shifted = shifted_model(layer.model, layer.mesh_origin, world_origin);
             // The pulse: up to 40% lighter (the same hue) and twice as wide.
             let e = layer.emphasis.clamp(0.0, 1.0);
@@ -858,6 +934,13 @@ impl MeshRenderer {
                 states: [0; 4],
             };
             queue.write_buffer(&slot.buffer, 0, bytemuck::bytes_of(&u));
+        };
+        for (slot, layer) in layer_slots.iter().zip(layers) {
+            write_layer(slot, layer);
+        }
+        let intersection_slots = &self.draw_slots[items.len() + layers.len()..];
+        for (slot, layer) in intersection_slots.iter().zip(intersections) {
+            write_layer(slot, layer);
         }
 
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
@@ -898,6 +981,27 @@ impl MeshRenderer {
                 }
             }
         }
+        // A Hole's hidden part — buried inside or behind a solid — as a
+        // fainter ghost, once every surface is in the depth buffer (so
+        // `Greater` finds what's in front of it). Drawn for every Hole
+        // whether or not it's inactive: the ghost reads the same as the
+        // visible hatch, which isn't desaturated either.
+        if self.show_holes_through_solids {
+            for (slot, item) in self.draw_slots.iter().zip(items).filter(|(_, i)| i.hole) {
+                pass.set_bind_group(1, &slot.bind_group, &[]);
+                pass.set_pipeline(if item.model.determinant() < 0.0 {
+                    &self.hole_xray_pipeline_cw
+                } else {
+                    &self.hole_xray_pipeline_ccw
+                });
+                let (states, buffers) = item.mesh.surface_draws();
+                pass.set_bind_group(2, states, &[]);
+                for (buf, count, first_face) in buffers {
+                    pass.set_vertex_buffer(0, buf.slice(..));
+                    pass.draw(0..count, first_face..first_face + 1);
+                }
+            }
+        }
         // The selected faces where nearer surfaces hide them, once every
         // surface is in the depth buffer.
         if self.cue.xray_faces {
@@ -930,6 +1034,18 @@ impl MeshRenderer {
         for (slot, layer) in layer_slots.iter().zip(layers).filter(|(_, l)| l.xray) {
             pass.set_bind_group(1, &slot.bind_group, &[]);
             pass.set_pipeline(&self.xray_line_pipeline);
+            for (buf, count) in &layer.lines.chunks {
+                pass.set_vertex_buffer(0, buf.slice(..));
+                pass.draw(0..6, 0..*count / 2);
+            }
+        }
+        // Where a Hole crosses a Solid: on top of everything, no depth
+        // test at all (so the exact curve reads even buried inside the
+        // solid, like the hidden-hole ghost but a crisp line, not a
+        // translucent fill).
+        for (slot, layer) in intersection_slots.iter().zip(intersections) {
+            pass.set_bind_group(1, &slot.bind_group, &[]);
+            pass.set_pipeline(&self.intersection_line_pipeline);
             for (buf, count) in &layer.lines.chunks {
                 pass.set_vertex_buffer(0, buf.slice(..));
                 pass.draw(0..6, 0..*count / 2);

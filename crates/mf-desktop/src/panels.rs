@@ -1172,6 +1172,14 @@ pub fn overlays_popover(app: &mut MeshFixerApp, ctx: &egui::Context) {
                             }
                         });
                     }
+                    ui.add_space(theme::SPACE_S);
+                    ui.checkbox(
+                        &mut app.show_holes_through_solids,
+                        "Show holes through solids",
+                    )
+                    .on_hover_text(
+                        "A buried or backside hole shows as a faint ghost through the solid",
+                    );
                 });
         });
     if close {

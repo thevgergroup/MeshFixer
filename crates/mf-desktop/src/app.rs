@@ -436,6 +436,10 @@ pub struct MeshFixerApp {
     /// default, so the view shows where the holes are: M4 final UX I6).
     /// View > Show hole overview shows them too, with its tint.
     pub show_hole_markers: bool,
+    /// View ▸ Overlays ▸ "Show holes through solids" (on by default,
+    /// Tinkercad-style): a Hole's hidden part — buried inside or behind a
+    /// solid — draws as a fainter ghost of its hatch.
+    pub show_holes_through_solids: bool,
     /// The side panels (View > Hide side panels, Cmd/Ctrl+\): hidden, the
     /// view has the window but the rail (M4 final UX I5).
     pub side_panels_hidden: bool,
@@ -447,6 +451,16 @@ pub struct MeshFixerApp {
     markers: Option<(u64, Arc<worker::Markers>)>,
     /// A hole (loop id) N / Shift+N selected: the tree scrolls to its row.
     reveal: Option<u32>,
+    /// Finds every Solid/Hole pair's exact crossing curve on the
+    /// background pool (`mesh.intersections`): a newer request (roles,
+    /// transforms, or a Transform drag) cancels the one running, and the
+    /// previous curves stay shown until the new ones arrive.
+    intersection_worker: LatestWorker<worker::IntersectionRequest>,
+    /// What the curves were last asked for, and its request number.
+    intersection_query: Option<(IntersectionQuery, u64)>,
+    /// The latest curves found (request number, one entry per overlapping
+    /// pair: a pair that doesn't cross has none).
+    intersections: Option<(u64, Vec<worker::IntersectionCurve>)>,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -456,6 +470,31 @@ struct MarkerQuery {
     rect: egui::Rect,
     defects: usize,
     view: usize,
+}
+
+/// What the Solid/Hole intersection curves depend on: each object's
+/// revision, transform (as shown — including a live Transform drag) and
+/// role. A change asks again; the previous curves stay shown meanwhile
+/// (MF-RENDER's "keep the previous curve shown until the new one
+/// arrives").
+#[derive(Debug, Clone)]
+struct IntersectionQuery {
+    /// (object, mesh revision, transform bits, is_hole), sorted by object.
+    objects: Vec<(ObjectId, Mesh, [u64; 12], bool)>,
+}
+
+impl IntersectionQuery {
+    /// True if both ask for the same thing: same objects, in the same
+    /// order, each at the same revision (by identity, not content),
+    /// transform and role.
+    fn same_as(&self, other: &IntersectionQuery) -> bool {
+        self.objects.len() == other.objects.len()
+            && self.objects.iter().zip(&other.objects).all(
+                |((id, mesh, t, hole), (id2, mesh2, t2, hole2))| {
+                    id == id2 && Mesh::ptr_eq(mesh, mesh2) && t == t2 && hole == hole2
+                },
+            )
+    }
 }
 
 impl MeshFixerApp {
@@ -534,6 +573,20 @@ impl MeshFixerApp {
                 let _ = tx.send(msg);
                 ctx.request_repaint();
             })
+        };
+        let intersection_worker = {
+            let (tx, ctx, gpu) = (tx.clone(), cc.egui_ctx.clone(), gpu.clone());
+            LatestWorker::new(
+                workers.background(),
+                move |req: worker::IntersectionRequest, run: &RunContext| {
+                    worker::intersections(req, run, &gpu)
+                },
+                move |curves| {
+                    // allow-swallow: the receiver only disappears while the app is closing
+                    let _ = tx.send(Message::IntersectionsFound(curves));
+                    ctx.request_repaint();
+                },
+            )
         };
         let lowest_worker = {
             let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
@@ -676,11 +729,15 @@ impl MeshFixerApp {
             hole_list_requested: None,
             show_hole_overview: false,
             show_hole_markers: true,
+            show_holes_through_solids: true,
             side_panels_hidden: false,
             marker_worker,
             marker_query: None,
             markers: None,
             reveal: None,
+            intersection_worker,
+            intersection_query: None,
+            intersections: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -2340,6 +2397,19 @@ impl MeshFixerApp {
                     self.markers = Some((key, markers));
                 }
             }
+            Message::IntersectionsFound(worker::IntersectionCurves { key, curves }) => {
+                // The latest request only: an older, slower one that
+                // finishes after a newer one must not overwrite it (the
+                // throttle keeps the previous curve shown until the new
+                // one arrives, never an older one after a newer).
+                if self
+                    .intersection_query
+                    .as_ref()
+                    .is_some_and(|(_, k)| *k == key)
+                {
+                    self.intersections = Some((key, curves));
+                }
+            }
             Message::Analyzed { mesh, analysis } => {
                 // The object's numbering grows with each analysis.
                 let object = self
@@ -3880,6 +3950,92 @@ impl MeshFixerApp {
             .collect()
     }
 
+    /// Ask for every Solid/Hole pair's exact crossing curve
+    /// (`mesh.intersections`) when roles, revisions or transforms changed
+    /// (including a live Transform drag): the view keeps showing the
+    /// previous curves until the new ones arrive (throttled to the latest
+    /// request; a stale one in flight is cancelled by
+    /// [`crate::analysis::LatestWorker`]).
+    fn refresh_intersections(&mut self) {
+        let doc = self.session.document();
+        let mut objects: Vec<(ObjectId, Mesh, [u64; 12], bool)> = doc
+            .objects()
+            .iter()
+            .filter_map(|o| {
+                let mesh = o.mesh()?;
+                let transform = self.shown_transform(o.id).unwrap_or(o.transform);
+                Some((o.id, mesh.clone(), transform.map(f64::to_bits), o.is_hole()))
+            })
+            .collect();
+        objects.sort_by_key(|(id, ..)| *id);
+        let query = IntersectionQuery { objects };
+        if self
+            .intersection_query
+            .as_ref()
+            .is_some_and(|(q, _)| q.same_as(&query))
+        {
+            return;
+        }
+        let key = self.intersection_query.as_ref().map_or(1, |(_, k)| k + 1);
+        let bvh_of = |id: ObjectId, mesh: &Mesh| -> Option<Arc<Bvh>> {
+            self.bvhs
+                .get(&id)
+                .filter(|(m, _)| Mesh::ptr_eq(m, mesh))
+                .map(|(_, b)| b.clone())
+        };
+        let mut pairs = Vec::new();
+        for o in doc.objects() {
+            if o.is_hole() {
+                continue;
+            }
+            let Some(solid_mesh) = o.mesh() else { continue };
+            let Some(solid_bvh) = bvh_of(o.id, solid_mesh) else {
+                continue;
+            };
+            let solid_transform = self.shown_transform(o.id).unwrap_or(o.transform);
+            for h in doc.objects() {
+                if !h.is_hole() {
+                    continue;
+                }
+                let Some(hole_mesh) = h.mesh() else { continue };
+                let Some(hole_bvh) = bvh_of(h.id, hole_mesh) else {
+                    continue;
+                };
+                let hole_transform = self.shown_transform(h.id).unwrap_or(h.transform);
+                pairs.push(worker::IntersectionPair {
+                    solid: o.id,
+                    solid_mesh: solid_mesh.clone(),
+                    solid_bvh: solid_bvh.clone(),
+                    solid_transform,
+                    hole: h.id,
+                    hole_mesh: hole_mesh.clone(),
+                    hole_bvh,
+                    hole_transform,
+                });
+            }
+        }
+        self.intersection_query = Some((query, key));
+        self.intersection_worker
+            .submit(worker::IntersectionRequest { key, pairs });
+    }
+
+    /// Every overlapping Solid/Hole pair's crossing curve, for the 3D view
+    /// (empty while none overlap, or none has a BVH yet).
+    pub fn intersection_views(&self) -> Vec<crate::viewport::IntersectionView> {
+        self.intersections
+            .as_ref()
+            .map(|(_, curves)| {
+                curves
+                    .iter()
+                    .filter(|c| !c.lines.is_empty())
+                    .map(|c| crate::viewport::IntersectionView {
+                        lines: c.lines.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// A box drawn in the view (Select mode, or B): select the visible
     /// listed holes whose centre is inside it (on a worker).
     fn box_select(&mut self, b: crate::viewport::BoxSelect) {
@@ -4561,6 +4717,7 @@ impl MeshFixerApp {
         self.refresh_overlays();
         self.refresh_states();
         self.refresh_markers();
+        self.refresh_intersections();
 
         let objects = self.object_views();
         let empty = crate::panels::empty_state();
@@ -4620,6 +4777,7 @@ impl MeshFixerApp {
                 let hint = self.transform_hint();
                 let split_preview = crate::shape_tools::split_preview(self);
                 let shading = crate::shape_tools::shading(self);
+                let intersections = self.intersection_views();
                 self.viewport.paint(
                     ui,
                     input,
@@ -4638,6 +4796,8 @@ impl MeshFixerApp {
                         tool_hint: hint,
                         shading,
                         split_preview,
+                        show_holes_through_solids: self.show_holes_through_solids,
+                        intersections,
                     },
                 )
             })

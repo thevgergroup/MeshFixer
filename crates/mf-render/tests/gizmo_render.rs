@@ -150,7 +150,7 @@ fn gizmo_draws_over_geometry() {
 
     renderer.prepare(&queue, &cam, (128, 128));
     render_pass_frame(&device, &queue, &target, |pass| {
-        renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
+        renderer.paint(&device, &queue, pass, cam.target, &items, false, &[], &[]);
         renderer.draw_gizmo(&device, pass, &shapes, None, &GizmoPalette::HEADLESS);
     });
     let img = offscreen::read_back(&device, &queue, &target).unwrap();
@@ -215,7 +215,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
     renderer.prepare(&queue, &cam, (160, 160));
     render_pass_frame(&device, &queue, &target, |pass| {
         renderer.draw_plate(&device, &queue, pass, &plate, cam.target);
-        renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
+        renderer.paint(&device, &queue, pass, cam.target, &items, false, &[], &[]);
     });
     let img = offscreen::read_back(&device, &queue, &target).unwrap();
 
@@ -306,7 +306,7 @@ fn highlighted_handle_is_lighter() {
     let mut render_with = |highlight: Option<Handle>| {
         renderer.prepare(&queue, &cam, (128, 128));
         render_pass_frame(&device, &queue, &target, |pass| {
-            renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
+            renderer.paint(&device, &queue, pass, cam.target, &items, false, &[], &[]);
             renderer.draw_gizmo(&device, pass, &shapes, highlight, &GizmoPalette::HEADLESS);
         });
         offscreen::read_back(&device, &queue, &target).unwrap()
@@ -371,7 +371,7 @@ fn render_gizmo_alone(
     let items: [DrawItem<'_>; 0] = [];
     renderer.prepare(queue, cam, (view.0 as u32, view.1 as u32));
     render_pass_frame(device, queue, target, |pass| {
-        renderer.paint(device, queue, pass, cam.target, &items, false, &[]);
+        renderer.paint(device, queue, pass, cam.target, &items, false, &[], &[]);
         renderer.draw_gizmo(device, pass, &shapes, None, &GizmoPalette::HEADLESS);
     });
     offscreen::read_back(device, queue, target).unwrap()
@@ -853,7 +853,7 @@ fn rotate_mode_grips_draw_and_the_view_ring_only_when_hovered() {
         let shapes = gizmo.shapes(&cam, view, highlight);
         renderer.prepare(&queue, &cam, (320, 320));
         render_pass_frame(&device, &queue, &target, |pass| {
-            renderer.paint(&device, &queue, pass, cam.target, &items, false, &[]);
+            renderer.paint(&device, &queue, pass, cam.target, &items, false, &[], &[]);
             renderer.draw_gizmo(&device, pass, &shapes, highlight, &GizmoPalette::HEADLESS);
         });
         offscreen::read_back(&device, &queue, &target).unwrap()

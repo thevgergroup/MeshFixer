@@ -190,13 +190,16 @@ impl RenderTarget {
             items,
             show_boundaries,
             layers,
+            &[],
             &SceneExtras::default(),
             timer,
         )
     }
 
     /// As [`RenderTarget::draw_timed`], with the build plate under the
-    /// model and the transform gizmo over everything ([`SceneExtras`]).
+    /// model and the transform gizmo over everything ([`SceneExtras`]), and
+    /// `intersections`: where a Hole crosses a Solid (`INTERSECTION`),
+    /// drawn over everything with no depth test.
     #[allow(clippy::too_many_arguments)]
     pub fn draw_with(
         &self,
@@ -207,6 +210,7 @@ impl RenderTarget {
         items: &[DrawItem<'_>],
         show_boundaries: bool,
         layers: &[Layer<'_>],
+        intersections: &[Layer<'_>],
         extras: &SceneExtras<'_>,
         mut timer: Option<(&mut GpuTimer, u64)>,
     ) -> bool {
@@ -263,6 +267,7 @@ impl RenderTarget {
                     items,
                     show_boundaries,
                     layers,
+                    intersections,
                 );
                 if let Some(g) = &extras.gizmo {
                     renderer.draw_gizmo(device, &mut pass, g.shapes, g.highlight, g.palette);

@@ -138,9 +138,24 @@ pub fn render_roles(
     height: u32,
     show_boundaries: bool,
 ) -> Result<RgbaImage, RenderError> {
+    render_roles_xray(objects, cam, width, height, show_boundaries, true)
+}
+
+/// As [`render_roles`], with "Show holes through solids" ([`MeshRenderer::
+/// set_show_holes_through_solids`]) set explicitly, for tests comparing it
+/// on and off.
+pub fn render_roles_xray(
+    objects: &[(&Mesh, DMat4, bool)],
+    cam: &OrbitCamera,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+    show_holes_through_solids: bool,
+) -> Result<RgbaImage, RenderError> {
     let (device, queue) = shared_device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES)?;
     let mut renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES), Palette::HEADLESS);
+    renderer.set_show_holes_through_solids(show_holes_through_solids);
     let gpus: Vec<GpuMesh> = objects
         .iter()
         .map(|(mesh, _, _)| GpuMesh::upload(&device, mesh))
