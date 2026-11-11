@@ -372,6 +372,13 @@ pub struct MeshFixerApp {
     /// A stroke in progress (press to release): `None` outside Sculpt, or
     /// between strokes.
     pub sculpt_stroke: Option<crate::sculpt_tool::SculptStroke>,
+    /// The just-released stroke's last live render, kept on screen after
+    /// commit until the committed revision's own GPU mesh and analysis are
+    /// ready (owner: no flicker back to the pre-stroke mesh, and no
+    /// "Updating view…" over it meanwhile). Cleared the frame
+    /// `shows_current_revision()` turns true for this object, which swaps
+    /// in the real thing in the same frame.
+    pub sculpt_pending: Option<(ObjectId, std::sync::Arc<crate::worker::RenderMesh>)>,
     /// Where the pointer is over the view while Sculpt is open (points
     /// from the view's top-left): the brush cursor, and where the next
     /// dab samples.
@@ -762,6 +769,7 @@ impl MeshFixerApp {
             picked: Vec::new(),
             sculpt: Default::default(),
             sculpt_stroke: None,
+            sculpt_pending: None,
             sculpt_hover: None,
             solid: Default::default(),
             parts: Default::default(),
@@ -2250,6 +2258,8 @@ impl MeshFixerApp {
                     ) if r["warnings"].as_array().is_some_and(|w| !w.is_empty()) => Some(report(r)),
                     _ => None,
                 };
+                let is_new_revision =
+                    matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(match placed {
@@ -2303,6 +2313,18 @@ impl MeshFixerApp {
                              or another target."
                         ))
                     }
+                }
+                // A committed stroke (`Ok(NewRevision)`) leaves
+                // `sculpt_pending` up: `refresh_analysis` clears it once
+                // the real revision has swapped in, so the view never
+                // drops to the stale pre-stroke mesh in between. Anything
+                // else for `mesh.sculpt_stroke` (refused, failed,
+                // cancelled, or a no-op) means the document's mesh never
+                // changes, so nothing will ever clear it that way: drop
+                // the stand-in now and let the document's actual state
+                // (the pre-stroke mesh) show again.
+                if op == "mesh.sculpt_stroke" && !is_new_revision {
+                    self.sculpt_pending = None;
                 }
             }
             Message::Hovered {
@@ -2681,6 +2703,18 @@ impl MeshFixerApp {
 
     /// Request analysis when the active revision changes.
     fn refresh_analysis(&mut self) {
+        // A stroke's stand-in render (`sculpt_pending`) only ever belongs
+        // to the active object: switching away from it (or losing it
+        // entirely — deleted, or undone out from under the stroke) means
+        // nothing will ever ready its revision and clear this the usual
+        // way, so drop it here rather than leave it drawn forever.
+        if self
+            .sculpt_pending
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) != self.active)
+        {
+            self.sculpt_pending = None;
+        }
         let active = self
             .active
             .and_then(|id| self.session.document().object(id));
@@ -2689,6 +2723,7 @@ impl MeshFixerApp {
             if let Some(old) = self.displayed.take() {
                 self.workers.discard(old);
             }
+            self.sculpt_pending = None;
             return;
         };
         if self.analysis_failed_for_active() {
@@ -2708,6 +2743,21 @@ impl MeshFixerApp {
                 // buffers off the UI thread.
                 if let Some(old) = self.displayed.replace((object, mesh, render)) {
                     self.workers.discard(old);
+                }
+                // The real, fully-analysed revision just swapped in for
+                // this object: the stroke's stand-in render
+                // (`sculpt_pending`, kept on screen since release so the
+                // view never reverted to the pre-stroke mesh) has done its
+                // job. Drop it in this same frame, so `object_views` picks
+                // up `displayed` instead of a redundant fallback — the
+                // swap is a single frame either way, never a second one
+                // to let go of the stand-in.
+                if self
+                    .sculpt_pending
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == object)
+                {
+                    self.sculpt_pending = None;
                 }
             }
         } else if !self
@@ -2826,6 +2876,16 @@ impl MeshFixerApp {
                     // A sculpt stroke in progress draws its own running
                     // mesh, not the last committed revision (Task 19).
                     stroke.render.clone()
+                } else if active && !self.shows_current_revision()
+                    && let Some((object, r)) = &self.sculpt_pending
+                    && *object == o.id
+                {
+                    // Just released: keep the stroke's last live mesh on
+                    // screen (not the stale pre-stroke `displayed`, and no
+                    // "Updating view…" over it) until the committed
+                    // revision's own render mesh is ready to swap in,
+                    // whole, in one frame (owner: no flicker on release).
+                    r.clone()
                 } else if active {
                     // `displayed` may still hold a previously active
                     // object's render mesh until this one's analysis
@@ -5002,8 +5062,14 @@ impl MeshFixerApp {
         let show_boundaries = self.defect_shown(self.shown.holes);
         // Only while it draws an earlier revision's geometry: after a move
         // the geometry shown is current while the new placement's
-        // measurements are worked out.
-        let updating = self.is_analyzing() && !self.shows_current_revision();
+        // measurements are worked out. A just-released stroke's own live
+        // mesh (`sculpt_pending`) is current work, not an earlier
+        // revision, so it never says "Updating view…" either.
+        let sculpt_settling = self
+            .sculpt_pending
+            .as_ref()
+            .is_some_and(|(id, _)| Some(*id) == self.active);
+        let updating = self.is_analyzing() && !self.shows_current_revision() && !sculpt_settling;
         let layers = self.view_layers();
         // Selected faces show through what hides them (x-ray); an outline
         // carries its own x-ray (`view_layers`).

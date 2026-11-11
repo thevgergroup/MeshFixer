@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
-use mf_desktop::{MeshFixerApp, Settings};
+use mf_desktop::{MeshFixerApp, Settings, theme};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::threemf::{ModelObject, Unit};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
@@ -249,6 +249,116 @@ fn brush_cursor_is_a_hover_outline() {
     h.event(egui::Event::PointerGone);
     h.step();
     assert!(h.state().sculpt_hover.is_none());
+}
+
+/// Owner (2026-11-11): "The view flickers between half-rendered and
+/// complete, while the brush is held and on release." Pixel-sample a
+/// fixed screen point (the brush's dab centre) across every frame of a
+/// stroke and its release: the sampled colour must never drop back to
+/// the exact pre-stroke baseline once it has moved on, and it must never
+/// show the viewport's background (the object must always be drawn
+/// whole, never a gap where a half-uploaded mesh would show through).
+#[test]
+fn stroke_and_release_never_flicker() {
+    require_gpu!("stroke_and_release_never_flicker");
+    let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 20.0]))]);
+    h.get_by_label("Sculpt").click();
+    settle(&mut h);
+
+    let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let pixel_at = |h: &mut Harness<'_, MeshFixerApp>| -> [u8; 4] {
+        h.render().unwrap().get_pixel(top.x as u32, top.y as u32).0
+    };
+    let is_background = |p: [u8; 4]| {
+        let bg = theme::VIEWPORT_BACKGROUND.to_array();
+        (0..3).all(|k| p[k].abs_diff(bg[k]) <= 1)
+    };
+    let dist = |a: [u8; 4], b: [u8; 4]| -> i32 {
+        (0..3).map(|k| (i32::from(a[k]) - i32::from(b[k])).abs()).sum()
+    };
+
+    let baseline = pixel_at(&mut h);
+    assert!(
+        !is_background(baseline),
+        "the ball must be drawn under the dab point before the stroke starts"
+    );
+
+    // Drive the drag one frame at a time (rather than `drag`'s own loop)
+    // so every frame in between is sampled too, not just the start and
+    // end.
+    h.event(egui::Event::PointerMoved(top));
+    h.event(egui::Event::PointerButton {
+        pos: top,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    let to = top + egui::vec2(60.0, 0.0);
+    let mut samples = vec![(0u32, baseline)];
+    let steps = 24;
+    for i in 1..=steps {
+        let p = top + (to - top) * (i as f32 / steps as f32);
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+        samples.push((i, pixel_at(&mut h)));
+    }
+    wait_until(&mut h, "more than one dab recorded", |a| {
+        a.sculpt_stroke.as_ref().is_some_and(|s| s.dab_count() > 1)
+    });
+
+    // Release, then keep sampling every frame until the committed
+    // revision's own render and analysis are fully ready (`sculpt_stroke`
+    // *and* `sculpt_pending` both clear, and the job finishes): the gap
+    // this closes is exactly where the owner saw the flicker (a revert to
+    // the pre-stroke mesh, then "Updating view…" over it).
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    let start = Instant::now();
+    loop {
+        h.step();
+        samples.push((steps + 1, pixel_at(&mut h)));
+        if h.state().sculpt_stroke.is_none()
+            && h.state().sculpt_pending.is_none()
+            && h.state().busy.is_none()
+        {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(90), "never settled");
+    }
+    // A few more frames past settling: the swap must hold, not bounce.
+    for _ in 0..5 {
+        h.step();
+        samples.push((steps + 2, pixel_at(&mut h)));
+    }
+
+    // Once the dabbed point's colour has moved on from the pre-stroke
+    // baseline, no later frame may fall back to exactly that baseline
+    // (a revert), and no frame may show bare background (a gap where the
+    // mesh should be).
+    let mut moved_on = false;
+    for &(i, p) in &samples {
+        assert!(
+            !is_background(p),
+            "frame {i}: the ball must stay drawn, never the bare background ({p:?})"
+        );
+        if moved_on {
+            assert!(
+                dist(p, baseline) > 2,
+                "frame {i}: reverted to the pre-stroke colour {baseline:?} (flicker)"
+            );
+        } else if dist(p, baseline) > 2 {
+            moved_on = true;
+        }
+    }
+    assert!(
+        moved_on,
+        "the stroke never visibly changed the sampled point; the test wouldn't catch a revert"
+    );
 }
 
 /// The brush panel: picking a brush, moving the radius and strength

@@ -516,6 +516,15 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
     let Some(cam) = app.camera else { return };
     let Some(world) = stroke.last_dab else { return };
     let settings = app.sculpt.clone();
+    // Keep the stroke's last live mesh on screen past release: the replay
+    // through `mesh.sculpt_stroke` runs on a worker (this frame only
+    // starts the job), so there's a real gap before the committed
+    // revision's own GPU mesh and analysis are ready. Without this, that
+    // gap shows the pre-stroke mesh again (a revert) and then "Updating
+    // view…" over it — the flicker the owner saw. `refresh_analysis`
+    // clears this once the real revision has swapped in, in that same
+    // frame (owner: "swap in a single frame").
+    app.sculpt_pending = Some((stroke.object, stroke.render.clone()));
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
     let params: BTreeMap<String, String> = BTreeMap::from([
         ("brush".to_owned(), settings.brush.word().to_owned()),
