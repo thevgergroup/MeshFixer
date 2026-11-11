@@ -173,6 +173,123 @@ fn nut_trap_and_bolt_dont_intersect_when_placed_apart() {
     assert_eq!(report.pair_count, 0, "{report:?}");
 }
 
+/// The bolt and the nut's threaded bore, on the same axis, with the nut
+/// screwed on (advanced half a pitch along the shared axis from the
+/// bolt's own phase — ISO 68-1's crest/root flats and flanks are the
+/// same width on both profiles, so a half-pitch advance lines the
+/// bolt's crest up with the nut's root and vice versa, the real mating
+/// pose): the measured gap is the resolved radial clearance everywhere
+/// along the mated flanks, not just at the thread's two ends. Covers
+/// M3 and M8 coarse (owner requirement).
+#[test]
+fn bolt_and_nut_clear_each_other_by_the_resolved_clearance_when_mated() {
+    for (size, major_d) in [("M3", 3.0), ("M8", 8.0)] {
+        let (_, pitch) = mf_parts::connectors::thread::lookup(size).unwrap();
+        let fit_clearance = 0.2;
+        let machine_tolerance = 0.0;
+        let diametral_clearance = fit_clearance + machine_tolerance;
+        let radial_clearance = diametral_clearance / 2.0;
+
+        // A bolt long enough that the nut (height 0.8*d) sits well
+        // inside the shank, clear of the head at one end and the free
+        // tip at the other, with margin for the half-pitch mating
+        // advance.
+        let bolt_length = 4.0 * major_d + 12.0;
+        let nut_height = 0.8 * major_d;
+        let bolt_parts = generate(&[
+            ("size", size),
+            ("shape", "bolt_socket"),
+            ("length", &bolt_length.to_string()),
+        ]);
+        let nut_parts = generate(&[
+            ("size", size),
+            ("shape", "nut"),
+            ("fit_clearance", &fit_clearance.to_string()),
+            ("machine_tolerance", &machine_tolerance.to_string()),
+        ]);
+        let bolt = &bolt_parts.parts[0].mesh;
+        let nut = &nut_parts.parts[0].mesh;
+        let ctx = RunContext::none();
+        let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
+
+        // Screw the nut on: centre it in the shank's middle (the
+        // shank spans [-bolt_length, 0], the nut's own bore spans
+        // [0, nut_height] before this translation), then advance it
+        // half a pitch along the shared z axis (both meshes already
+        // share that axis, concentric) — clear of the head at one end
+        // and the free tip at the other by construction.
+        assert!(
+            nut_height + pitch < bolt_length,
+            "{size}: nut (height {nut_height}) doesn't fit clear of both shank ends"
+        );
+        // `mid` must itself be a whole number of pitches from the
+        // bolt's own z = 0 phase reference, or adding `pitch / 2`
+        // below lands at some other (arbitrary) relative phase
+        // instead of the true crest-against-root mating pose — a
+        // non-whole-pitch `mid` can put the two profiles corner-
+        // against-corner instead, which is genuinely nearly touching,
+        // not a meshing artifact.
+        let turns_mid = (-bolt_length / 2.0 / pitch).round();
+        let mid = turns_mid * pitch;
+        let mated = DMat4::from_translation(glam::DVec3::new(0.0, 0.0, mid + pitch / 2.0));
+        let d = minimum_distance(bolt, &bolt_bvh, nut, &mated, &ctx)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{size}: no measurable distance"));
+        assert!(
+            (d - radial_clearance).abs() < 0.02,
+            "{size}: measured {d:.4} mm, expected {radial_clearance:.4} mm radial clearance"
+        );
+    }
+}
+
+/// Rotating the nut by exactly one full turn about the shared axis
+/// while translating it by exactly one pitch along that axis maps its
+/// helical thread back onto itself (that is what a helix *is*): the
+/// measured clearance to the bolt is unchanged. A non-helical (stacked
+/// rings) thread would not have this invariance in general — this is
+/// the test that proves the thread really is a modelled helix, not
+/// stacked rings pretending to be one.
+#[test]
+fn rotating_the_nut_one_turn_and_translating_one_pitch_preserves_the_helix() {
+    for size in ["M3", "M8"] {
+        let (_, pitch) = mf_parts::connectors::thread::lookup(size).unwrap();
+        let bolt_parts = generate(&[("size", size), ("shape", "bolt_socket"), ("length", "12")]);
+        let nut_parts = generate(&[
+            ("size", size),
+            ("shape", "nut"),
+            ("fit_clearance", "0.2"),
+            ("machine_tolerance", "0.0"),
+        ]);
+        let bolt = &bolt_parts.parts[0].mesh;
+        let nut = &nut_parts.parts[0].mesh;
+        let ctx = RunContext::none();
+        let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
+
+        // An arbitrary mated pose (half a pitch, as above) plus a
+        // smaller arbitrary offset, so the measurement isn't sitting
+        // exactly on a symmetric special case either way.
+        let base = DMat4::from_translation(glam::DVec3::new(0.0, 0.0, pitch * 0.5 + pitch * 0.13));
+        let before = minimum_distance(bolt, &bolt_bvh, nut, &base, &ctx)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{size}: no measurable distance"));
+
+        // Same pose, then one full turn (2*pi about z) plus one pitch
+        // of axial travel: a helix of this pitch maps onto itself
+        // under that combined motion.
+        let turned = DMat4::from_translation(glam::DVec3::new(0.0, 0.0, pitch))
+            * DMat4::from_rotation_z(std::f64::consts::TAU)
+            * base;
+        let after = minimum_distance(bolt, &bolt_bvh, nut, &turned, &ctx)
+            .unwrap()
+            .unwrap_or_else(|| panic!("{size}: no measurable distance"));
+
+        assert!(
+            (before - after).abs() < 0.02,
+            "{size}: before={before:.4} mm after={after:.4} mm (helix invariance)"
+        );
+    }
+}
+
 #[test]
 fn unknown_size_is_refused_by_name() {
     let spec = Thread.spec();
