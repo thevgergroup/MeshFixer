@@ -662,10 +662,24 @@ fn delete_after_a_view_click_targets_the_clicked_part_not_a_stale_one() {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
     settle(&mut h);
+    let top = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name == "ball (top)")
+        .unwrap()
+        .id;
     // No Escape this time: click in the view, on the top half, with the
-    // Split tool still open, then Delete, all in quick succession.
+    // Split tool still open, then Delete. The pick itself is resolved on
+    // a worker (`App::click` hands off to `self.workers.pick`, applied
+    // back through `Message::Picked`), so Delete must wait for that
+    // result to land in `active` rather than for some number of steps -
+    // how many frames the round trip takes depends on the machine.
     let at_top = h.state().screen_point([0.0, 0.0, 17.0]).unwrap();
     h.event(egui::Event::PointerMoved(at_top));
+    h.step();
     for pressed in [true, false] {
         h.event(egui::Event::PointerButton {
             pos: at_top,
@@ -673,7 +687,9 @@ fn delete_after_a_view_click_targets_the_clicked_part_not_a_stale_one() {
             pressed,
             modifiers: egui::Modifiers::NONE,
         });
+        h.step();
     }
+    wait_until(&mut h, "the pick", |a| a.active == Some(top));
     h.event(egui::Event::Key {
         key: egui::Key::Delete,
         physical_key: None,
