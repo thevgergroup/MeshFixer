@@ -70,6 +70,9 @@ timing=(
   # Intersection analysis (Phase 1 Task 9): 30M vs 50k ≤ 1 s, and a
   # cancellable 5M self-intersection pass. The 30M sphere in memory: alone.
   "mf-geometry intersect intersections_30m_vs_50k_under_1s self_intersections_5m_cancellable"
+  # UC1 on the real scan (Phase 1 Task 16a): fill, make solid and three
+  # splits with dowels of a 1M-triangle scan, ~9 minutes.
+  "mf-cli uc1_split_pegs uc1_on_the_real_scan"
   # mesh.make_solid on real self-intersecting scans (winged victory, 5.7M).
   "mf-operations make_solid make_solid_on_real_self_intersecting_scans"
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,

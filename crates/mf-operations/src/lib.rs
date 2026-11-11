@@ -117,6 +117,64 @@ pub enum ObjectChange {
     },
 }
 
+/// Where one object of the document sits (read-only scene context, for
+/// operations that place new things clear of everything already there:
+/// dowels, `object.arrange_on_plate`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct SceneObject {
+    pub object: ObjectId,
+    /// The object's world bounding box (its object-space box's corners,
+    /// placed by its transform: conservative for rotated objects).
+    pub world_min: [f64; 3],
+    pub world_max: [f64; 3],
+}
+
+impl SceneObject {
+    /// Its world XY footprint, `[min_x, min_y, max_x, max_y]`.
+    pub fn footprint(&self) -> [f64; 4] {
+        [
+            self.world_min[0],
+            self.world_min[1],
+            self.world_max[0],
+            self.world_max[1],
+        ]
+    }
+
+    /// The world bounding box of `mesh` placed by `transform`; `None` for
+    /// an empty mesh.
+    pub fn of(
+        object: ObjectId,
+        mesh: &Mesh,
+        transform: &[f64; 12],
+        ctx: &RunContext,
+    ) -> Result<Option<SceneObject>, Cancelled> {
+        let Some(bb) = mesh.bounding_box_with(ctx)? else {
+            return Ok(None);
+        };
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for c in 0..8 {
+            let p = [0, 1, 2].map(|a| {
+                if c & (1 << a) != 0 {
+                    bb.max[a]
+                } else {
+                    bb.min[a]
+                }
+            });
+            let w = affine::apply(transform, p);
+            for a in 0..3 {
+                lo[a] = lo[a].min(w[a]);
+                hi[a] = hi[a].max(w[a]);
+            }
+        }
+        Ok(Some(SceneObject {
+            object,
+            world_min: lo,
+            world_max: hi,
+        }))
+    }
+}
+
 /// What a document-level run produced: every object change, in order,
 /// and the operation's report. No changes means nothing changed.
 #[derive(Debug, Clone)]
@@ -180,6 +238,28 @@ pub trait Operation: Send + Sync {
     /// operand 0 and reports its geometry change, so single-object
     /// operations implement only `execute`. Same cancellation contract as
     /// `execute`.
+    /// Whether the operation reads the scene (every object's world box):
+    /// the command layer then builds it on the worker and calls
+    /// [`Operation::execute_scene`]. Default: no.
+    fn wants_scene(&self) -> bool {
+        false
+    }
+
+    /// [`Operation::execute_doc`] with the scene: every object of the
+    /// document at the command's base revision, operands included, in
+    /// document order (read-only: changes still go through operands).
+    /// Derived from the document, so replay sees the same scene. The
+    /// default ignores it.
+    fn execute_scene(
+        &self,
+        inputs: &[OperandInput],
+        _scene: &[SceneObject],
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<DocOutput, OpError> {
+        self.execute_doc(inputs, params, ctx)
+    }
+
     fn execute_doc(
         &self,
         inputs: &[OperandInput],
@@ -226,8 +306,11 @@ static REGISTRY: &[&dyn Operation] = &[
     &remove_small::RemoveSmallComponents,
     &transform::SetTransform,
     &transform::DropToPlate,
+    &transform::ArrangeOnPlate,
     &transform::Delete,
     &split::SplitPlane,
+    &split::region::SplitRegion,
+    &split::region::DeleteFaces,
     &sculpt::SculptStroke,
     &add_part::AddPart,
     #[cfg(feature = "test-kinds")]

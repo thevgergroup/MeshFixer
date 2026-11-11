@@ -1,0 +1,18 @@
+id: mesh.delete_faces
+version: 1
+summary: Delete the selected faces (Meshmixer's Discard), leaving an opening.
+geometry_kinds: [mesh]
+target:
+  whole_object: false
+  kinds: [face_set]
+parameters: []
+preconditions:
+  - the target is a face set
+postconditions:
+  - the selected faces are removed, and any vertex no other face uses
+  - the opening they leave is an ordinary boundary loop (a hole)
+  - every other face keeps its id, bit for bit
+effects: [geometry_changes, topology_changes]
+runtime:
+  cancellable: true
+  progress: false

@@ -6,7 +6,8 @@
 //! taken when its rectangle (grown by `spacing`) overlaps no occupied
 //! footprint and no part already placed, and lies on the plate. Order is
 //! fixed by input order, so replay is Exact. Parts that don't fit are
-//! placed in a row beside the plate (+x) and listed in `off_plate`.
+//! placed in a row beside the plate (+x), clear of anything that overhangs
+//! it, and listed in `off_plate`.
 
 /// A world XY bounding rectangle: `[min_x, min_y, max_x, max_y]`.
 pub type Footprint = [f64; 4];
@@ -58,7 +59,8 @@ pub fn layout_on_plate(
     let step = (spacing.max(plate.size[0].min(plate.size[1]) / 256.0)).max(f64::MIN_POSITIVE);
     let mut transforms = Vec::with_capacity(new.len());
     let mut off_plate = Vec::new();
-    let mut beside_x = hx + spacing;
+    // Beside the plate: past the plate and past everything on or over it.
+    let mut beside_x = taken.iter().map(|t| t[2]).fold(hx, f64::max) + spacing;
     for (i, f) in new.iter().enumerate() {
         let (w, d) = (f[2] - f[0], f[3] - f[1]);
         let mut spot = None;

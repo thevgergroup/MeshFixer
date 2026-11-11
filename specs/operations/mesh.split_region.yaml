@@ -1,0 +1,24 @@
+id: mesh.split_region
+version: 1
+summary: Split the selected faces off as a new object and close both parts where they were joined.
+geometry_kinds: [mesh]
+target:
+  whole_object: false
+  kinds: [face_set]
+parameters:
+  - name: cap_style
+    type: choice
+    values: [flat, smooth]
+    default: smooth
+    description: "How the new openings are closed: flat, or smoothly continuing the surface around them"
+preconditions:
+  - the target is a face set joined to the rest of the object, not all of it
+  - each new opening has at most 1000 edges (the fill method's limit, MF-ISSUE-043)
+postconditions:
+  - the selected faces are a new object "<name> (piece)" with the object's transform; the rest stays in the object
+  - both new openings are closed with fill_holes' patches; openings the object already had are left open
+  - faces away from the new openings keep their ids, bit for bit
+effects: [geometry_changes, topology_changes, creates_objects]
+runtime:
+  cancellable: true
+  progress: true
