@@ -357,8 +357,12 @@ fn moved_vertex_invalidates_only_chunks_whose_faces_use_it() {
 /// Task 16b (M4 review I1) on the real Archaeopteryx scan: a sculpt-like
 /// dab (every vertex within 1% of the diagonal of a surface point pushed
 /// along z) re-uploads exactly the face chunks holding a face that uses a
-/// moved vertex. The vertex order of a real scan isn't tied to its face
-/// order, so the old per-vertex-chunk rule re-uploaded most of the mesh.
+/// moved vertex, plus (smooth shading, UI plan step 3) the chunks holding
+/// a face that shares a corner with one of those faces, whose smooth
+/// normal now averages in the moved faces. The vertex order of a real
+/// scan isn't tied to its face order, so the old per-vertex-chunk rule
+/// re-uploaded most of the mesh, and a face's neighbours can land in any
+/// chunk.
 #[test]
 fn one_percent_dab_reuploads_only_touched_face_chunks() {
     let test = "one_percent_dab_reuploads_only_touched_face_chunks";
@@ -387,10 +391,17 @@ fn one_percent_dab_reuploads_only_touched_face_chunks() {
             }
         }
         let (dabbed, _) = e.finish().unwrap();
+        // Every corner of a face with a moved corner: its smooth normal
+        // now averages in the moved face, wherever else it's a corner.
+        let affected: std::collections::HashSet<u32> = scan
+            .faces()
+            .filter(|(_, t)| t.iter().any(|v| moved.contains(v)))
+            .flat_map(|(_, t)| t)
+            .collect();
         let touched: Vec<usize> = (0..scan.face_chunk_count())
             .filter(|&i| {
                 scan.faces_in_chunk(i)
-                    .any(|(_, t)| t.iter().any(|v| moved.contains(v)))
+                    .any(|(_, t)| t.iter().any(|v| affected.contains(v)))
             })
             .collect();
         let after = MeshVertices::build_from(Some((&scan, &before)), &dabbed);
