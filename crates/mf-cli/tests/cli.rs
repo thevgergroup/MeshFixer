@@ -1329,3 +1329,58 @@ fn fit_profile_flag_sets_defaults() {
     let err = String::from_utf8_lossy(&out.stderr);
     assert!(err.contains("Nope") && err.contains("Tight"), "{err}");
 }
+
+/// Regression: `mesh.split_plane`'s target is `many` (every selected
+/// object, in one command, D11); extra targets are recorded as operands
+/// named `target` (the same name the command layer's `TARGET_OPERAND`
+/// uses). `run`'s `--operand` validation used to check every operand's
+/// name against the spec's `operands:` list, which never includes
+/// `target` (it's the implicit operand 0), so `--operand target=<n>`
+/// was always refused as "has no operand named 'target'", even though
+/// the command layer (and so the desktop Split panel, which builds the
+/// same `Invocation` directly) has always accepted it. `--operand
+/// target=<n>` must be accepted for an operation whose target is
+/// `many`, and still refused for one that isn't.
+#[test]
+fn run_accepts_target_as_an_operand_name_for_a_many_target_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "mesh.split_plane",
+        "--param",
+        "plane_point=0,0,0.5",
+        "--operand",
+        "target=1",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    let mut names: Vec<&str> = back.objects.iter().map(|o| o.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["a (bottom)", "a (top)", "b (bottom)", "b (top)"],
+        "both targets were split in one command"
+    );
+    // An operation whose target isn't `many` still refuses `target` as
+    // an operand name.
+    let refused = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        dir.path().join("refused.3mf").to_str().unwrap(),
+        "--op",
+        "object.drop_to_plate",
+        "--operand",
+        "target=1",
+    ]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("has no operand named 'target'")
+    );
+}

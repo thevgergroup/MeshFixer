@@ -17,7 +17,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgMatches, Command};
-use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
+use mf_command::{
+    CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session, TARGET_OPERAND,
+};
 use mf_io::{Format, IoError};
 use mf_metrics::{CountingAlloc, GpuBufferBytes, MemoryBreakdown, Phase, measure};
 use mf_runtime::{JobPool, PoolChoice, RunContext};
@@ -1367,10 +1369,10 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
-        if let Some((name, _)) = operands
-            .iter()
-            .find(|(name, _)| !spec.operands.iter().any(|o| &o.name == name))
-        {
+        if let Some((name, _)) = operands.iter().find(|(name, _)| {
+            !spec.operands.iter().any(|o| &o.name == name)
+                && !(name == TARGET_OPERAND && spec.target.many)
+        }) {
             return Err(Failure::Usage(format!(
                 "{op} has no operand named '{name}'"
             )));
