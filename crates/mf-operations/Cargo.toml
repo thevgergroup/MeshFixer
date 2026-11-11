@@ -40,3 +40,4 @@ serde-saphyr.workspace = true
 jsonschema.workspace = true
 mf-fixtures.workspace = true
 rayon.workspace = true
+tempfile.workspace = true

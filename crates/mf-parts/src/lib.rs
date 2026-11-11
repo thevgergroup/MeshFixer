@@ -29,8 +29,8 @@ pub use fit::{
 pub use fit_check::{FitCheck, FitExpectation, MatingSurfaces, check_fit};
 pub use frame::{SurfaceFrame, place};
 pub use library::{
-    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_object_as_part,
-    user_parts_dir,
+    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_connector_as_part,
+    save_object_as_part, user_parts_dir,
 };
 pub use machine::{
     MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, UNCALIBRATED_NAME,

@@ -27,7 +27,7 @@ fn builtins_are_closed_and_deterministic() {
         assert_eq!(mesh.content_hash(), again.content_hash(), "{id}");
         assert_eq!(part.content_hash().unwrap(), part.content_hash().unwrap());
         let topo = mesh.topology();
-        match part.manifest.kind {
+        match &part.manifest.kind {
             PartKind::Solid => {
                 let bvh = Bvh::build(&mesh, &ctx()).unwrap();
                 let all: Vec<FaceId> = mesh.faces().map(|(f, _)| f).collect();
@@ -39,6 +39,7 @@ fn builtins_are_closed_and_deterministic() {
                 assert_eq!(topo.boundary_loops.len(), 1, "{id}");
                 assert!(topo.non_manifold_edges.is_empty() && topo.inconsistent_edges == 0);
             }
+            PartKind::Connector { .. } => panic!("{id}: no built-in part is a connector entry"),
         }
         // Each sits on z = 0, growing along +z (its attach normal).
         let bb = mesh.bounding_box().unwrap();

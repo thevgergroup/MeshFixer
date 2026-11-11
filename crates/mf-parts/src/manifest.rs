@@ -1,14 +1,21 @@
 //! A part's manifest (D16): `part.yaml` next to its mesh.
 
+use mf_spec::Params;
 use serde::{Deserialize, Serialize};
 
 /// Whether a part is a closed solid or an open "stamp" (capped when
-/// joined, D14).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// joined, D14), or a connector (Task 28, MF-MODEL-005): "Save to
+/// library" on a connector object writes `Connector { connector,
+/// params }` instead of a mesh file, and dropping it from the library
+/// regenerates its parts through [`crate::Connector::generate`] (and
+/// `object.add_connector`) rather than reading a stored mesh — a
+/// connector's library entry is its recipe, not a snapshot.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PartKind {
     Solid,
     Open,
+    Connector { connector: String, params: Params },
 }
 
 /// Where a part attaches, in part space: the point that sits on the target

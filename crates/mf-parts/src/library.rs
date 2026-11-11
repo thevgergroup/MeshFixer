@@ -60,8 +60,16 @@ impl LibraryPart {
         matches!(self.source, Source::Builtin(_))
     }
 
-    /// The part's mesh, in part space.
+    /// The part's mesh, in part space: a built-in's generated mesh, a
+    /// user part's stored mesh file, or — for a connector entry
+    /// (`PartKind::Connector`) — every part the connector generates,
+    /// merged into one mesh (a preview/placement shape; `object.
+    /// add_connector`, Task 28, regenerates it with its parts kept
+    /// separate so `connector.join` can act on each role).
     pub fn mesh(&self, ctx: &RunContext) -> Result<Mesh, PartError> {
+        if let crate::manifest::PartKind::Connector { connector, params } = &self.manifest.kind {
+            return self.connector_mesh(connector, params, ctx);
+        }
         match &self.source {
             Source::Builtin(b) => {
                 ctx.checkpoint()?;
@@ -79,11 +87,55 @@ impl LibraryPart {
         }
     }
 
+    fn connector_mesh(
+        &self,
+        connector: &str,
+        params: &mf_spec::Params,
+        ctx: &RunContext,
+    ) -> Result<Mesh, PartError> {
+        let c = crate::connectors()
+            .into_iter()
+            .find(|c| c.id() == connector)
+            .ok_or_else(|| {
+                PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
+            })?;
+        let generated = c.generate(params, ctx).map_err(|e| match e {
+            crate::ConnectorError::Failed { message, .. } => PartError::Invalid(message),
+        })?;
+        let mut positions = Vec::new();
+        let mut triangles = Vec::new();
+        for part in generated.parts {
+            let base = positions.len() as u32;
+            let (p, t) = part.mesh.to_arrays();
+            positions.extend(p);
+            triangles.extend(t.into_iter().map(|tri| tri.map(|i| i + base)));
+        }
+        Mesh::new(positions, triangles)
+            .map_err(|e| PartError::Invalid(format!("the regenerated connector is invalid: {e}")))
+    }
+
     /// What the part is, as a hex BLAKE3 hash: a built-in's generator id,
     /// version and parameters; a user part's manifest and mesh file bytes.
     /// A command records it, so replay verifies it uses the same part.
     pub fn content_hash(&self) -> Result<String, PartError> {
         let mut h = blake3::Hasher::new();
+        if let crate::manifest::PartKind::Connector { connector, params } = &self.manifest.kind {
+            // A connector's identity is its recipe, not a stored mesh:
+            // the id and its own version, plus the recorded params.
+            let c = crate::connectors()
+                .into_iter()
+                .find(|c| c.id() == connector)
+                .ok_or_else(|| {
+                    PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
+                })?;
+            h.update(b"mf-part-connector-v1\0");
+            h.update(connector.as_bytes());
+            h.update(&c.version().to_le_bytes());
+            let params_text = serde_saphyr::to_string(params)
+                .map_err(|e| PartError::Invalid(format!("connector params: {e}")))?;
+            h.update(params_text.as_bytes());
+            return Ok(h.finalize().to_hex().to_string());
+        }
         match &self.source {
             Source::Builtin(b) => {
                 h.update(b"mf-part-builtin-v1\0");
@@ -198,11 +250,15 @@ fn load_user(folder: &Path) -> Result<LibraryPart, String> {
     let manifest: PartManifest =
         serde_saphyr::from_str(text).map_err(|e| format!("{MANIFEST_FILE} is malformed: {e}"))?;
     manifest.check()?;
-    if manifest.mesh.is_empty() || manifest.mesh.contains(['/', '\\']) {
-        return Err("`mesh` must name a file in the part's folder".into());
-    }
-    if !folder.join(&manifest.mesh).is_file() {
-        return Err(format!("its mesh file '{}' is missing", manifest.mesh));
+    // A connector entry has no mesh file: its recipe (connector id and
+    // params) regenerates the parts on demand (`LibraryPart::mesh`).
+    if !matches!(manifest.kind, crate::manifest::PartKind::Connector { .. }) {
+        if manifest.mesh.is_empty() || manifest.mesh.contains(['/', '\\']) {
+            return Err("`mesh` must name a file in the part's folder".into());
+        }
+        if !folder.join(&manifest.mesh).is_file() {
+            return Err(format!("its mesh file '{}' is missing", manifest.mesh));
+        }
     }
     Ok(LibraryPart {
         manifest,
@@ -241,6 +297,38 @@ pub fn save_object_as_part(
     };
     mf_io::write_model_path(&model, &folder.join(&m.mesh))
         .map_err(|e| PartError::Unwritable(e.to_string()))?;
+    let text = serde_saphyr::to_string(&m).map_err(|e| PartError::Unwritable(e.to_string()))?;
+    std::fs::write(folder.join(MANIFEST_FILE), text)
+        .map_err(|e| PartError::Unwritable(e.to_string()))?;
+    Ok(folder)
+}
+
+/// "Save to library" on a connector object (Task 28, MF-MODEL-005):
+/// writes `dir/<id>/part.yaml` with `kind: Connector { connector,
+/// params }` and no mesh file — dropping it back onto a model
+/// regenerates its parts through the connector, from the exact
+/// parameters recorded here, not a stored snapshot. `manifest.kind`
+/// must already be `PartKind::Connector`; refuses an id that's already
+/// there, like [`save_object_as_part`].
+pub fn save_connector_as_part(manifest: &PartManifest, dir: &Path) -> Result<PathBuf, PartError> {
+    manifest.check().map_err(PartError::Invalid)?;
+    let crate::manifest::PartKind::Connector { connector, .. } = &manifest.kind else {
+        return Err(PartError::Invalid(
+            "save_connector_as_part needs a PartKind::Connector manifest".into(),
+        ));
+    };
+    if crate::connectors().into_iter().all(|c| c.id() != connector) {
+        return Err(PartError::Invalid(format!(
+            "'{connector}' isn't a built-in connector"
+        )));
+    }
+    let folder = dir.join(&manifest.id);
+    if folder.exists() {
+        return Err(PartError::Exists(manifest.id.clone()));
+    }
+    std::fs::create_dir_all(&folder).map_err(|e| PartError::Unwritable(e.to_string()))?;
+    let mut m = manifest.clone();
+    m.mesh = String::new();
     let text = serde_saphyr::to_string(&m).map_err(|e| PartError::Unwritable(e.to_string()))?;
     std::fs::write(folder.join(MANIFEST_FILE), text)
         .map_err(|e| PartError::Unwritable(e.to_string()))?;
