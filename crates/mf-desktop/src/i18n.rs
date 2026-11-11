@@ -378,6 +378,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("role.make_solid", "Make it a solid"),
     ("role.make_solids", "Make {n} objects solids"),
     ("role.row_hole", "{name} (hole)"),
+    ("sculpt.apply", "Sculpt"),
     ("sculpt.brush.carve", "Carve"),
     ("sculpt.brush.crease", "Crease"),
     ("sculpt.brush.deflate", "Deflate"),

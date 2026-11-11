@@ -342,6 +342,15 @@ pub struct MeshFixerApp {
     /// of them. Empty (or one) means just the active object. Combine and
     /// Split act on all of them; H toggles their roles.
     pub picked: Vec<ObjectId>,
+    /// The Sculpt tool's brush panel settings (Phase 1 Task 19).
+    pub sculpt: crate::sculpt_tool::SculptSettings,
+    /// A stroke in progress (press to release): `None` outside Sculpt, or
+    /// between strokes.
+    pub sculpt_stroke: Option<crate::sculpt_tool::SculptStroke>,
+    /// Where the pointer is over the view while Sculpt is open (points
+    /// from the view's top-left): the brush cursor, and where the next
+    /// dab samples.
+    pub sculpt_hover: Option<(f64, f64)>,
     pub solid: crate::shape_tools::SolidState,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
@@ -702,6 +711,9 @@ impl MeshFixerApp {
             peg_preview_asked: None,
             combine: Default::default(),
             picked: Vec::new(),
+            sculpt: Default::default(),
+            sculpt_stroke: None,
+            sculpt_hover: None,
             solid: Default::default(),
             refusal: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
@@ -1496,6 +1508,17 @@ impl MeshFixerApp {
             .map(|(_, b)| b.clone())
     }
 
+    /// The device the view's GPU buffers are built on (Sculpt's live
+    /// preview, `sculpt_tool.rs`: it syncs its own `GpuMesh` on the UI
+    /// thread, same device, no worker hand-off for one dab).
+    pub fn gpu_device(&self) -> wgpu::Device {
+        self.viewport.device().0.clone()
+    }
+
+    pub fn gpu_queue(&self) -> wgpu::Queue {
+        self.viewport.device().1.clone()
+    }
+
     /// Ask for the BVH of every object revision that lacks one (the active
     /// object first), and let go of those for revisions no longer current.
     /// O(objects) on the UI thread; the builds run on the background pool.
@@ -1736,6 +1759,12 @@ impl MeshFixerApp {
             return;
         }
         if self.cancel_tool_drag() {
+            return;
+        }
+        // A sculpt stroke mid-drag is dropped, not committed (unlike
+        // closing the tool otherwise, `open_rail_tool`'s always-Commit):
+        // Task 19's Esc semantics.
+        if self.sculpt_stroke.take().is_some() {
             return;
         }
         let tool = self.active_tool_def();
@@ -2711,7 +2740,14 @@ impl MeshFixerApp {
             .iter()
             .filter_map(|o| {
                 let active = Some(o.id) == self.active;
-                let render = if active {
+                let render = if active
+                    && let Some(stroke) = &self.sculpt_stroke
+                    && stroke.object == o.id
+                {
+                    // A sculpt stroke in progress draws its own running
+                    // mesh, not the last committed revision (Task 19).
+                    stroke.render.clone()
+                } else if active {
                     // `displayed` may still hold a previously active
                     // object's render mesh until this one's analysis
                     // returns (review I4): never draw that at this
@@ -4933,6 +4969,7 @@ impl MeshFixerApp {
         crate::tool_panels::first_use_hint(self, &ctx);
         crate::panels::overlays_popover(self, &ctx);
         crate::shape_tools::view_overlay(self, &ctx);
+        crate::sculpt_tool::cursor_overlay(self, &ctx);
         if let Some(c) = out.click
             && self.busy.is_none()
         {

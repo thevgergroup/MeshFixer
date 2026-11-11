@@ -22,15 +22,15 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, RichText};
 use glam::DVec3;
 use mf_command::ObjectId;
-use mf_geometry::{FaceId, Mesh};
+use mf_geometry::Mesh;
 use mf_operations::sculpt::{BrushKind, BrushParams, DabSample, Falloff, SculptIndex, StrokeState};
 use mf_render::MeshVertices;
 use mf_spec::{ParamValue, Params};
 
 use crate::MeshFixerApp;
-use crate::shell::{Availability, Category, Close, Input, RegisterError, Shell, Tool as T};
+use crate::shell::{Availability, Category, Claims, Close, Input, RegisterError, Shell, Tool as T};
 use crate::viewport::ToolPointer;
-use crate::widgets::{self, Kind};
+use crate::widgets;
 use crate::{icons, t, theme};
 
 pub const SCULPT: &str = "sculpt";
@@ -38,7 +38,12 @@ pub const SCULPT: &str = "sculpt";
 /// Every brush, in the order the panel lists them.
 const BRUSHES: [BrushKind; 8] = BrushKind::ALL;
 /// Every falloff, in the order the panel lists them.
-const FALLOFFS: [Falloff; 4] = [Falloff::Smooth, Falloff::Sphere, Falloff::Sharp, Falloff::Flat];
+const FALLOFFS: [Falloff; 4] = [
+    Falloff::Smooth,
+    Falloff::Sphere,
+    Falloff::Sharp,
+    Falloff::Flat,
+];
 /// Dab spacing, as a fraction of the brush radius (brief: 25%).
 const DAB_SPACING: f64 = 0.25;
 
@@ -75,15 +80,18 @@ impl Default for SculptSettings {
 /// A stroke in progress (one undo step when it commits).
 pub struct SculptStroke {
     pub object: ObjectId,
-    /// The revision the stroke started from: what `mesh.sculpt_stroke`
-    /// replays `samples` against.
-    base: Mesh,
     state: StrokeState,
     samples: Vec<DabSample>,
-    /// The vertices `gpu` was last synced to (this stroke's own running
-    /// copy: not the object's displayed `RenderMesh`, which keeps none).
+    /// The vertices `render.gpu` was last synced to (this stroke's own
+    /// running copy: not the object's displayed `RenderMesh`, which keeps
+    /// none).
     vertices: MeshVertices,
-    gpu: mf_render::GpuMesh,
+    /// What the view draws for the object while the stroke is open
+    /// (`object_views` substitutes it for the active object's usual
+    /// render mesh): the only `Arc` to it, so each dab syncs `gpu` in
+    /// place through `Arc::get_mut` rather than rebuilding the whole
+    /// thing (`GpuMesh` holds GPU buffers directly, so it isn't `Clone`).
+    pub render: std::sync::Arc<crate::worker::RenderMesh>,
     /// Where the pointer last dabbed, in world space: the next dab only
     /// samples once the pointer has moved [`DAB_SPACING`] of the radius.
     last_dab: Option<DVec3>,
@@ -92,25 +100,10 @@ pub struct SculptStroke {
 }
 
 impl SculptStroke {
-    /// What the view should show for this stroke right now.
-    pub fn render(&self, mesh: &Mesh) -> RenderMeshLive {
-        RenderMeshLive {
-            mesh: mesh.clone(),
-            bounds: self.vertices.bounds,
-            origin: self.vertices.origin,
-            gpu: self.gpu.clone(),
-        }
+    /// Dabs recorded so far (tests: how far a drag has sampled).
+    pub fn dab_count(&self) -> usize {
+        self.samples.len()
     }
-}
-
-/// What [`crate::worker::RenderMesh::from_live`] needs: cheap to build
-/// per frame from the stroke (no CPU copy of the vertices, like
-/// `RenderMesh` itself).
-pub struct RenderMeshLive {
-    pub mesh: Mesh,
-    pub bounds: Option<mf_geometry::Aabb>,
-    pub origin: DVec3,
-    pub gpu: mf_render::GpuMesh,
 }
 
 fn needs_object(app: &MeshFixerApp) -> Availability {
@@ -126,11 +119,47 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         help: "tool.sculpt.help",
         availability: needs_object,
         panel: Some(panel),
+        claims,
         viewport_input,
         hides_defects: |app| app.sculpt_stroke.is_some(),
         on_close: |app, close| end_stroke(app, close),
-        ..T::new(SCULPT, "tool.sculpt.name", icons::SCULPT, Category::Shape, 30)
+        ..T::new(
+            SCULPT,
+            "tool.sculpt.name",
+            icons::SCULPT,
+            Category::Shape,
+            30,
+        )
     })
+}
+
+/// Sculpt claims a press wherever it lands on the active object's
+/// surface (a stroke, not the camera's orbit), while a stroke isn't
+/// already open mid-drag (never pulled from under it): with one open,
+/// `viewport_input`'s own `Move`/`End` handling continues it regardless
+/// of where the pointer strays, same as any other drag.
+fn claims(app: &MeshFixerApp) -> Option<Claims> {
+    if app.sculpt_stroke.is_some() {
+        return Some(Box::new(|_| true) as Claims);
+    }
+    let id = app.active?;
+    let bvh = app.picking_bvh(id)?;
+    let mesh = app.active_mesh()?.clone();
+    let cam = app.camera?;
+    let rect = app.viewport.last_rect?;
+    let transform = app.shown_transform(id).unwrap_or_else(|| {
+        app.session
+            .document()
+            .object(id)
+            .map(|o| o.transform)
+            .unwrap_or_default()
+    });
+    let size = (rect.width() as f64, rect.height() as f64);
+    Some(Box::new(move |px: (f64, f64)| {
+        let (origin, dir) = cam.ray(cam.target, size, px);
+        let model = mf_render::model_matrix(&transform);
+        bvh.ray_pick(&mesh, origin, dir, &model).is_some()
+    }) as Claims)
 }
 
 // ---------------------------------------------------------------------
@@ -171,7 +200,13 @@ fn surface_point(
     let rect = app.viewport.last_rect?;
     let size = (rect.width() as f64, rect.height() as f64);
     let (origin, dir) = cam.ray(cam.target, size, px);
-    let transform = app.shown_transform(id)?;
+    // `shown_transform` only overrides the object's own transform while
+    // the Transform tool is dragging or its commit is still in flight
+    // (`None` the rest of the time, which is the normal case here: this
+    // isn't `None` meaning "no transform").
+    let transform = app
+        .shown_transform(id)
+        .or_else(|| app.session.document().object(id).map(|o| o.transform))?;
     let model = mf_render::model_matrix(&transform);
     let (face, t) = bvh.ray_pick(mesh, origin, dir, &model)?;
     let world = DVec3::from(origin) + DVec3::from(dir) * t;
@@ -233,11 +268,19 @@ fn brush_params(
     );
     map.insert(
         "detail_mode".to_owned(),
-        ParamValue::Text(if settings.detail_on { "adaptive" } else { "off" }.to_owned()),
+        ParamValue::Text(
+            if settings.detail_on {
+                "adaptive"
+            } else {
+                "off"
+            }
+            .to_owned(),
+        ),
     );
     map.insert("detail".to_owned(), ParamValue::Float(settings.detail));
     let params = Params(map);
-    mf_operations::sculpt::brush_params(&params, transform, &mf_operations::Target::WholeObject).ok()
+    mf_operations::sculpt::brush_params(&params, transform, &mf_operations::Target::WholeObject)
+        .ok()
 }
 
 fn falloff_word(f: Falloff) -> &'static str {
@@ -250,11 +293,11 @@ fn falloff_word(f: Falloff) -> &'static str {
 }
 
 fn brush_label(b: BrushKind) -> String {
-    t!(&format!("sculpt.brush.{}", b.word()))
+    crate::i18n::tr(&format!("sculpt.brush.{}", b.word()), &[])
 }
 
 fn falloff_label(f: Falloff) -> String {
-    t!(&format!("sculpt.falloff.{}", falloff_word(f)))
+    crate::i18n::tr(&format!("sculpt.falloff.{}", falloff_word(f)), &[])
 }
 
 // ---------------------------------------------------------------------
@@ -272,7 +315,9 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     let Some((dab, world)) = surface_point(app, id, &mesh, px) else {
         return;
     };
-    let Some(bvh) = app.picking_bvh(id) else { return };
+    let Some(bvh) = app.picking_bvh(id) else {
+        return;
+    };
     let transform = app.shown_transform(id).unwrap_or_else(|| {
         app.session
             .document()
@@ -294,17 +339,22 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     };
     let preview = state.preview_mesh();
     let vertices = MeshVertices::build(&preview);
-    let Some(mut gpu) = app.active_gpu_mesh() else {
-        return;
-    };
-    gpu.sync(&app.gpu_device(), &app.gpu_queue(), &vertices);
+    // `GpuMesh` isn't `Clone` (its chunks are GPU buffers): the stroke's
+    // own copy starts as a fresh upload of the whole mesh (one-time cost,
+    // paid once per stroke, not per dab), rather than sharing the
+    // displayed revision's buffers. From here, `GpuMesh::sync` against
+    // this stroke's own `vertices` uploads only each dab's touched
+    // chunks.
+    let gpu = mf_render::GpuMesh::from_vertices(&app.gpu_device(), &vertices);
+    let render = std::sync::Arc::new(crate::worker::RenderMesh::from_live(
+        &preview, &vertices, gpu,
+    ));
     app.sculpt_stroke = Some(SculptStroke {
         object: id,
-        base: mesh,
         state,
         samples: vec![dab],
         vertices,
-        gpu,
+        render,
         last_dab: Some(world),
         radius_world,
     });
@@ -342,9 +392,30 @@ fn continue_stroke(app: &mut MeshFixerApp, px: (f64, f64)) {
         stroke.last_dab = Some(world);
         let next_mesh = stroke.state.preview_mesh();
         stroke.vertices = MeshVertices::build_from(Some((&mesh, &stroke.vertices)), &next_mesh);
-        stroke
-            .gpu
-            .sync(&app.gpu_device(), &app.gpu_queue(), &stroke.vertices);
+        let (device, queue) = (app.gpu_device(), app.gpu_queue());
+        // Usually the only `Arc` to it (the previous frame's borrow in
+        // `object_views` doesn't outlive that frame): synced in place, so
+        // only this dab's touched chunks re-upload (MF-RENDER-003). If a
+        // frame's draw still holds a clone when the next dab runs, fall
+        // back to a fresh upload of the whole mesh for this one dab
+        // rather than panicking: correctness over the chunk-reuse
+        // optimization that one time.
+        match std::sync::Arc::get_mut(&mut stroke.render) {
+            Some(render) => {
+                render.gpu.sync(&device, &queue, &stroke.vertices);
+                render.mesh = next_mesh;
+                render.bounds = stroke.vertices.bounds;
+                render.origin = stroke.vertices.origin;
+            }
+            None => {
+                let gpu = mf_render::GpuMesh::from_vertices(&device, &stroke.vertices);
+                stroke.render = std::sync::Arc::new(crate::worker::RenderMesh::from_live(
+                    &next_mesh,
+                    &stroke.vertices,
+                    gpu,
+                ));
+            }
+        }
         Some(())
     })();
     let _ = result;
@@ -364,48 +435,41 @@ fn end_stroke(app: &mut MeshFixerApp, close: Close) {
     commit_stroke(app, stroke);
 }
 
+/// Commits `stroke`: replays its recorded samples through
+/// `mesh.sculpt_stroke` (one undo step), the pivot and view direction
+/// fixed to what the stroke was drawn with (the first dab's hit point and
+/// the camera at the time), so a replay is identical however the camera
+/// moves meanwhile.
 fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
-    let Some(transform) = app
-        .session
-        .document()
-        .object(stroke.object)
-        .map(|o| o.transform)
-    else {
-        return;
-    };
     let Some(cam) = app.camera else { return };
     let Some(world) = stroke.last_dab else { return };
     let settings = app.sculpt.clone();
-    let Some(brush) = brush_params(cam.view_dir(), &settings, &transform, world) else {
-        return;
-    };
-    let mut map = BTreeMap::new();
-    map.insert(
-        "brush".to_owned(),
-        ParamValue::Text(settings.brush.word().to_owned()),
-    );
-    map.insert("radius".to_owned(), settings.radius.to_string());
-    let _ = brush;
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
-    let pivot = stroke.last_dab.unwrap_or(DVec3::ZERO);
     let params: BTreeMap<String, String> = BTreeMap::from([
         ("brush".to_owned(), settings.brush.word().to_owned()),
         ("radius".to_owned(), settings.radius.to_string()),
         ("strength".to_owned(), settings.strength.to_string()),
-        ("falloff".to_owned(), falloff_word(settings.falloff).to_owned()),
+        (
+            "falloff".to_owned(),
+            falloff_word(settings.falloff).to_owned(),
+        ),
         ("symmetry_x".to_owned(), settings.symmetry[0].to_string()),
         ("symmetry_y".to_owned(), settings.symmetry[1].to_string()),
         ("symmetry_z".to_owned(), settings.symmetry[2].to_string()),
-        ("pivot".to_owned(), vec3(pivot)),
+        ("pivot".to_owned(), vec3(world)),
         ("view_dir".to_owned(), vec3(cam.view_dir())),
         ("samples".to_owned(), samples_text(&samples)),
         (
             "detail_mode".to_owned(),
-            (if settings.detail_on { "adaptive" } else { "off" }).to_owned(),
+            (if settings.detail_on {
+                "adaptive"
+            } else {
+                "off"
+            })
+            .to_owned(),
         ),
         ("detail".to_owned(), settings.detail.to_string()),
     ]);
-    let _ = map;
     app.run_invocation(
         mf_command::Invocation {
             op_id: "mesh.sculpt_stroke".into(),
@@ -465,8 +529,7 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     if app.active_tool != SCULPT {
         return;
     }
-    let (Some(rect), Some(cam), Some(id)) = (app.viewport.last_rect, app.camera, app.active)
-    else {
+    let (Some(rect), Some(cam), Some(id)) = (app.viewport.last_rect, app.camera, app.active) else {
         return;
     };
     let Some(px) = app.sculpt_hover else { return };
@@ -498,7 +561,7 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     if pts.len() == 48 {
         let painter = ctx.layer_painter(egui::LayerId::new(
             egui::Order::Middle,
-            egui::Id::new("sculpt cursor"),
+            egui::Id::unique("sculpt cursor"),
         ));
         painter.with_clip_rect(rect).add(egui::Shape::closed_line(
             pts,
@@ -529,15 +592,9 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.horizontal_wrapped(|ui| {
         for b in BRUSHES {
             let label = brush_label(b);
-            if widgets::icon_button(
-                ui,
-                icons::SCULPT,
-                &label,
-                Some(app.sculpt.brush == b),
-                28.0,
-            )
-            .on_hover_text(label.clone())
-            .clicked()
+            if widgets::icon_button(ui, icons::SCULPT, &label, Some(app.sculpt.brush == b), 28.0)
+                .on_hover_text(label.clone())
+                .clicked()
             {
                 app.sculpt.brush = b;
             }
@@ -557,7 +614,10 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
     section(ui, &t!("sculpt.section.falloff"));
     let labels: Vec<String> = FALLOFFS.iter().map(|&f| falloff_label(f)).collect();
-    let options: Vec<(&str, &str, bool)> = labels.iter().map(|l| (l.as_str(), l.as_str(), true)).collect();
+    let options: Vec<(&str, &str, bool)> = labels
+        .iter()
+        .map(|l| (l.as_str(), l.as_str(), true))
+        .collect();
     let current = FALLOFFS
         .iter()
         .position(|&f| f == app.sculpt.falloff)
