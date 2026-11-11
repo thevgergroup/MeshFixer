@@ -2775,6 +2775,7 @@ dependencies = [
  "mf-io",
  "mf-metrics",
  "mf-operations",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2800,6 +2801,7 @@ name = "mf-fixtures"
 version = "0.0.1"
 dependencies = [
  "mf-geometry",
+ "mf-runtime",
  "tempfile",
 ]
 
@@ -2860,6 +2862,7 @@ name = "mf-operations"
 version = "0.0.1"
 dependencies = [
  "faer",
+ "glam",
  "jsonschema",
  "mf-boolean",
  "mf-document",
@@ -2875,6 +2878,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2883,6 +2887,7 @@ name = "mf-parts"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",

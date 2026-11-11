@@ -23,8 +23,18 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
             if spec.operands.iter().any(|o| o.required) {
                 continue;
             }
+            // Operations on a selection only (split by region, delete
+            // faces) are checked with their selections in their own tests.
+            if !spec.target.whole_object {
+                continue;
+            }
             // A split needs a closed model and a plane through it: a bias
-            // cut with a gap through a closed sphere.
+            // cut with a gap through a closed sphere. Combine needs a
+            // second closed solid overlapping the target to join (its
+            // own operands are optional in the spec, so a plain
+            // whole-object run validates, but it refuses to run with
+            // nothing to combine, and a boolean union needs closed
+            // inputs, so the usual holey `mesh` fixture won't do).
             let (input, raw_params) = if op.id() == "mesh.split_plane" {
                 (
                     uv_sphere(160, 250),
@@ -39,13 +49,22 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                     mesh.clone(),
                     BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
                 )
+            } else if op.id() == "mesh.combine" {
+                (uv_sphere(24, 48), BTreeMap::new())
             } else {
                 (mesh.clone(), BTreeMap::new())
             };
             let mut s = Session::new();
             let id = s.add_geometry(Geometry::Mesh(input), "fixture".into(), None);
+            let operands = if op.id() == "mesh.combine" {
+                let other =
+                    s.add_geometry(Geometry::Mesh(uv_sphere(24, 48)), "fixture 2".into(), None);
+                vec![("solids".to_string(), other, None)]
+            } else {
+                Vec::new()
+            };
             s.execute(Invocation {
-                operands: Vec::new(),
+                operands,
                 selection: None,
                 op_id: op.id().into(),
                 target: id,

@@ -474,14 +474,15 @@ fn check_changes(
         match o.role {
             None => {}
             Some(OperandRole::Consumed) if slot == 2 => {}
+            Some(OperandRole::Changed) if slot != 2 => {}
             Some(role) => {
                 return Err(invalid(format!(
                     "operand '{}' is {role:?}, so it can't be changed{}",
                     o.name,
-                    if role == OperandRole::Consumed {
-                        " (only removed)"
-                    } else {
-                        " or removed"
+                    match role {
+                        OperandRole::Consumed => " (only removed)",
+                        OperandRole::Changed => " (it can't be removed)",
+                        _ => " or removed",
                     }
                 )));
             }
@@ -919,6 +920,7 @@ impl Session {
                 Ok(())
             }
         };
+        // allow-swallow: remove() returning None means no extra targets were supplied for this slot, the same as an empty Vec.
         for (object, sel) in supplied.remove(TARGET_OPERAND).unwrap_or_default() {
             repeated(&prepared, object)?;
             prepared.push(self.prepare_operand(
@@ -932,6 +934,7 @@ impl Session {
             )?);
         }
         for o in &spec.operands {
+            // allow-swallow: remove() returning None means no operands were supplied for this slot, the same as an empty Vec.
             let given = supplied.remove(&o.name).unwrap_or_default();
             if given.is_empty() && o.required {
                 return Err(CommandError::MissingOperand {

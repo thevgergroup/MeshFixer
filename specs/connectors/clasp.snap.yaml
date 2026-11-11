@@ -1,0 +1,46 @@
+id: clasp.snap
+version: 1
+summary: Snap clasp, a cantilever arm with a lip (the lid) snapping onto a ridge (the body).
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: width
+    type: float
+    default: 12.0
+    min: 1.0
+    unit: mm
+    description: "Width of the arm and the catch ridge, across the clasp"
+  - name: arm_length
+    type: float
+    default: 10.0
+    min: 1.0
+    unit: mm
+    description: "Length of the cantilever arm from its fixed base to its free end"
+  - name: arm_thickness
+    type: float
+    default: 1.6
+    min: 0.4
+    unit: mm
+    description: "Thickness of the cantilever arm (the beam that flexes to let the lip pass over the catch)"
+  - name: lip_depth
+    type: float
+    default: 0.3
+    min: 0.05
+    unit: mm
+    default_from: fit.clasp_interference
+    description: "How far the lip passes under the catch once engaged (from the print fit profile); also the beam's tip deflection at engagement"
+  - name: gap
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    default_from: fit.hinge_gap
+    description: "Clearance between the lip and the catch's top face in the closed print pose (from the print fit profile)"
+preconditions:
+  - the arm's engagement strain (beam formula from arm_length, arm_thickness and lip_depth) is at most 3%
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

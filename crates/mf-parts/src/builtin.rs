@@ -4,6 +4,7 @@
 
 use mf_geometry::Mesh;
 
+use crate::connector::Connector;
 use crate::manifest::{Attach, PartKind, PartManifest};
 
 /// Segments around every round built-in.
@@ -189,6 +190,38 @@ fn manifest(id: &str, name: &str, kind: PartKind) -> PartManifest {
     }
 }
 
+/// A connector as a library entry (Task 29, MF-MODEL-005): its
+/// `PartKind::Connector` is checked first by both
+/// [`crate::LibraryPart::mesh`] and `content_hash`, so `make` here is
+/// never called (there's no plain generator for a connector; it's
+/// regenerated from `connector::generate` with its own recorded
+/// `connector`/`params`, which is how `connector.join` tells its parts
+/// apart later). `params_text` is the spec's own defaults, as
+/// `mf_spec::Params` would serialize them, so a dragged connector's
+/// preview mesh matches what placing it will actually create.
+fn connector_builtin(c: &'static dyn Connector, name: &str) -> Builtin {
+    let params = c
+        .spec()
+        .validate(&std::collections::BTreeMap::new())
+        .expect("a connector's own spec validates its own defaults");
+    Builtin {
+        manifest: manifest(
+            c.id(),
+            name,
+            PartKind::Connector {
+                connector: c.id().into(),
+                params,
+            },
+        ),
+        params: String::new(),
+        make: || {
+            unreachable!(
+                "a connector library entry's mesh comes from PartKind::Connector, never Builtin::make"
+            )
+        },
+    }
+}
+
 /// Every built-in, in a fixed order. Each sits on z = 0 with its attach
 /// point at the origin and grows along +z, its attach normal: placed, +z
 /// lines up with the target surface's outward normal ([`crate::place`]).
@@ -240,5 +273,9 @@ pub fn builtins() -> Vec<Builtin> {
             params: "r=5".into(),
             make: || revolve(&arc(5.0, 0.0, 0.0, FRAC_PI_2, 12), SEGMENTS),
         },
+        connector_builtin(&crate::connectors::hinge::PinHinge, "Pin hinge"),
+        connector_builtin(&crate::connectors::flap::FlapHinge, "Flap hinge"),
+        connector_builtin(&crate::connectors::clasp::SnapClasp, "Snap clasp"),
+        connector_builtin(&crate::connectors::thread::Thread, "Thread"),
     ]
 }

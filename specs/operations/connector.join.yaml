@@ -1,0 +1,46 @@
+id: connector.join
+version: 1
+summary: Fold a connector's parts into the two objects it joins, in one command, and remove the connector object.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+operands:
+  # Neither consumed nor kept unchanged: each connector part folds into
+  # its side in place (Union/Subtract), so side_a/side_b survive with
+  # their geometry changed, never removed. `role: kept` (read, never
+  # changed) was wrong here and only this operation's own in-process
+  # tests, which bypass Session::commit's operand-role check, missed it.
+  - name: side_a
+    role: changed
+    kinds: [object]
+    required: true
+  - name: side_b
+    role: changed
+    kinds: [object]
+    required: true
+parameters:
+  - name: connector_id
+    type: text
+    default: "hinge.pin"
+    description: "Which built-in connector generated the target's parts (recorded at generation time, D16); refused by name if it isn't registered"
+  - name: connector_params
+    type: text
+    default: "{}"
+    description: "The connector's own parameters, as the JSON object serde_json would write for mf_spec::Params (recorded at generation time, so replay regenerates the exact same parts without reading a profile)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The connector's own clearance between its moving parts (recorded alongside connector_params, so the post-join check doesn't have to parse it out): side_a and side_b must end up at least this far apart, minus the chord tolerance"
+preconditions:
+  - the target is a connector object (its parts were produced by connector_id with connector_params)
+postconditions:
+  - each Union role is unioned into its side, each Subtract role is subtracted from its side, and each Separate role becomes a new object
+  - the connector (target) object is removed
+  - afterwards, side_a and side_b do not intersect, and their minimum distance at the connector is at least gap minus the chord tolerance; otherwise the join is refused as moving_parts_fused
+effects: [geometry_changes, topology_changes, removes_objects, creates_objects]
+runtime:
+  cancellable: true
+  progress: false

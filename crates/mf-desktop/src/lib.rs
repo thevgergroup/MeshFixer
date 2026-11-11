@@ -3,6 +3,7 @@
 
 pub mod analysis;
 pub mod app;
+pub mod connector_tool;
 pub mod defects;
 pub mod framing;
 pub mod gpu;
@@ -11,6 +12,7 @@ pub mod icons;
 pub mod import_dialog;
 pub mod metrics;
 mod panels;
+pub mod parts_tool;
 pub mod sculpt_tool;
 pub mod shape_tools;
 pub mod shell;

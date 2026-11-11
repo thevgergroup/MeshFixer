@@ -53,6 +53,7 @@ pub const COMBINE: &str = "\u{E87E}"; // unite
 pub const MAKE_SOLID: &str = "\u{E1DA}"; // cube
 pub const SCULPT: &str = "\u{E6F0}"; // paint-brush
 pub const PARTS: &str = "\u{E596}"; // puzzle-piece
+pub const CONNECTORS: &str = "\u{EB56}"; // plugs
 pub const EXPORT: &str = "\u{EAF0}"; // export
 
 // The tree.
@@ -77,6 +78,8 @@ pub const CLOSE: &str = "\u{E4F6}"; // x
 pub const PANEL: &str = "\u{EC24}"; // sidebar-simple
 pub const BROWSER: &str = "\u{EE48}"; // tree-view
 pub const SETTINGS: &str = "\u{E270}"; // gear
+pub const MACHINE_PROFILE: &str = "\u{E5D4}"; // wrench
+pub const FIT_CLASS: &str = "\u{E6B8}"; // ruler
 pub const OPEN: &str = "\u{E256}"; // folder-open
 pub const DROP_TO_PLATE: &str = "\u{E05C}"; // arrow-line-down
 pub const RESET: &str = "\u{E038}"; // arrow-counter-clockwise

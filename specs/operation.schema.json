@@ -28,7 +28,7 @@
         "required": ["name", "role", "kinds", "required"],
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "role": { "enum": ["read", "consumed", "kept"] },
+          "role": { "enum": ["read", "consumed", "kept", "changed"] },
           "kinds": {
             "type": "array",
             "items": { "enum": ["object", "face_set", "component"] },

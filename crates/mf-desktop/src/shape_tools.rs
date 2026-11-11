@@ -33,6 +33,20 @@ pub fn op_of(tool: &str) -> Option<&'static str> {
     }
 }
 
+/// As [`op_of`], for a tool whose panel can run more than one operation
+/// (Parts: placing with `object.add_part`, then Join to scan with
+/// `mesh.boolean`; Connectors: placing, then Merge with
+/// `connector.join`): every op id whose refusal that tool's panel knows
+/// how to show, in the order its own `refusal_card_for` calls check
+/// them.
+pub(crate) fn ops_of(tool: &str) -> &'static [&'static str] {
+    match tool {
+        crate::parts_tool::PARTS => &["object.add_part", "mesh.boolean"],
+        crate::connector_tool::CONNECTORS => &["object.add_part", "connector.join"],
+        _ => &[],
+    }
+}
+
 /// A refusal from an operation, shown in its tool's panel in plain words,
 /// with the next action as a button where there is one.
 #[derive(Debug, Clone, PartialEq)]
@@ -303,6 +317,13 @@ fn active_closed(app: &MeshFixerApp) -> Option<bool> {
 /// The refusal card: what went wrong in plain words, and the next action
 /// as a button where there is one. Returns true if it was shown.
 fn refusal_card(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
+    refusal_card_for(app, ui, op_id)
+}
+
+/// As [`refusal_card`], for another tool's panel (Parts, Connectors):
+/// shows `app.refusal` when it names `op_id`, with the same plain-
+/// language card and next action every tool's panel uses.
+pub(crate) fn refusal_card_for(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
     let Some(r) = app.refusal.clone().filter(|r| r.op_id == op_id) else {
         return false;
     };
@@ -732,6 +753,7 @@ fn alignment_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
     let current = modes
         .iter()
         .position(|(k, _)| *k == app.alignment.pegs)
+        // allow-swallow: app.alignment.pegs is always set from this same `modes` list; an unrecognized value (shouldn't happen) highlights "none" rather than panicking the panel.
         .unwrap_or(0);
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.alignment.pegs = modes[i].0.into();
@@ -753,6 +775,7 @@ fn alignment_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
     let current = shapes
         .iter()
         .position(|&s| s == app.alignment.peg_shape)
+        // allow-swallow: `shapes` is the exhaustive, fixed list of PegShape values, so app.alignment.peg_shape is always found; the default is unreachable.
         .unwrap_or(0);
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.alignment.peg_shape = shapes[i];

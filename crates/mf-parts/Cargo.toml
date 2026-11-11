@@ -17,6 +17,7 @@ blake3.workspace = true
 serde.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
+glam.workspace = true
 
 [dev-dependencies]
 mf-command.workspace = true

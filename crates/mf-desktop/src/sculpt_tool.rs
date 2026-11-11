@@ -152,6 +152,7 @@ fn claims(app: &MeshFixerApp) -> Option<Claims> {
             .document()
             .object(id)
             .map(|o| o.transform)
+            // allow-swallow: id is checked live just above (picking_bvh/active_mesh); a vanished object falls back to identity rather than panicking this frame.
             .unwrap_or_default()
     });
     let size = (rect.width() as f64, rect.height() as f64);
@@ -280,6 +281,7 @@ fn brush_params(
     map.insert("detail".to_owned(), ParamValue::Float(settings.detail));
     let params = Params(map);
     mf_operations::sculpt::brush_params(&params, transform, &mf_operations::Target::WholeObject)
+        // allow-swallow: a validation failure here just means no brush preview this frame; the real stroke goes through the full error path.
         .ok()
 }
 
@@ -323,6 +325,7 @@ fn begin_stroke(app: &mut MeshFixerApp) {
             .document()
             .object(id)
             .map(|o| o.transform)
+            // allow-swallow: id is checked live just above (picking_bvh/active_mesh); a vanished object falls back to identity rather than panicking this frame.
             .unwrap_or_default()
     });
     let Some(cam) = app.camera else { return };
@@ -387,6 +390,7 @@ fn continue_stroke(app: &mut MeshFixerApp, px: (f64, f64)) {
             return None;
         }
         let ctx = mf_runtime::RunContext::none();
+        // allow-swallow: a stale/invalid preview dab (e.g. the face it landed on moved since last frame) is a no-op this frame, same as the spacing check above; the committed stroke is validated and refused for real through the command path.
         stroke.state.apply(&dab, &ctx).ok()?;
         stroke.samples.push(dab);
         stroke.last_dab = Some(world);
@@ -418,6 +422,7 @@ fn continue_stroke(app: &mut MeshFixerApp, px: (f64, f64)) {
         }
         Some(())
     })();
+    // allow-swallow: the closure's job is its side effects on `stroke`; every early-return path above is a no-op frame, not a dropped error.
     let _ = result;
     app.sculpt_stroke = Some(stroke);
 }
@@ -542,6 +547,7 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     let transform = app
         .shown_transform(id)
         .or_else(|| app.session.document().object(id).map(|o| o.transform))
+        // allow-swallow: id is checked live just above (active_mesh/surface_point); a vanished object falls back to identity rather than panicking this frame.
         .unwrap_or_default();
     let radius_world = app.sculpt.radius * determinant_cbrt(&transform);
     let view = (rect.width() as f64, rect.height() as f64);
@@ -621,6 +627,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let current = FALLOFFS
         .iter()
         .position(|&f| f == app.sculpt.falloff)
+        // allow-swallow: FALLOFFS is the exhaustive, fixed list of Falloff values, so app.sculpt.falloff is always found; the default is unreachable.
         .unwrap_or(0);
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.sculpt.falloff = FALLOFFS[i];

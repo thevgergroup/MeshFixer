@@ -7,17 +7,32 @@
 //!   user's folder ([`Library`]), [`SurfaceFrame`] and [`place`].
 
 mod builtin;
+mod connector;
+pub mod connectors;
 pub mod dirs;
 mod fit;
+mod fit_check;
 mod frame;
 mod library;
+mod machine;
 mod manifest;
 
 pub use builtin::builtins;
-pub use fit::{BUILTIN_NAME, FIT_PROFILES_FILE, FitError, FitProfile, FitProfiles};
+pub use connector::{
+    Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, RoleFaceRange, Side,
+};
+pub use connectors::connectors;
+pub use fit::{
+    BUILTIN_NAME, Compensation, FIT_PROFILES_FILE, FitClass, FitClasses, FitError, FitProfile,
+    FitProfiles, resolve,
+};
+pub use fit_check::{FitCheck, FitExpectation, MatingSurfaces, check_fit};
 pub use frame::{SurfaceFrame, place};
 pub use library::{
-    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_object_as_part,
-    user_parts_dir,
+    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_connector_as_part,
+    save_object_as_part, user_parts_dir,
+};
+pub use machine::{
+    MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, UNCALIBRATED_NAME,
 };
 pub use manifest::{Attach, PartKind, PartManifest};

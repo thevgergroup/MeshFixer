@@ -59,6 +59,14 @@ pub struct Settings {
     /// (`None`: [`crate::analysis::DEFAULT_EXTRA_GPU_BYTES`], 1 GiB; M4
     /// final review I5).
     pub gpu_cache_extra_bytes: Option<u64>,
+    /// Where Parts/Connectors read and write the user's library and
+    /// Fit class/Machine profile settings (`None`: the platform
+    /// directory, `mf_parts::dirs::meshfixer_dir`). Tests that save a
+    /// part or a profile set this to a temp directory, so they never
+    /// touch the real user's settings: `std::env::set_var` is `unsafe`
+    /// in this edition and the workspace forbids unsafe code, so the
+    /// usual env-var override isn't available to them.
+    pub config_dir: Option<PathBuf>,
 }
 
 /// How the running job (the one the status bar shows) can be stopped.
@@ -239,6 +247,23 @@ pub struct Inspected {
     pub defect: Defect,
 }
 
+/// What Parts/Connectors asked to do once a placement they started
+/// (`object.add_part`) actually commits (see
+/// [`MeshFixerApp::pending_open_transform`]).
+#[derive(Debug, Clone)]
+pub enum PendingPlacement {
+    /// A library part was placed on `scan`.
+    Part { scan: ObjectId },
+    /// A connector was placed with these recorded parameters (so Merge
+    /// can run `connector.join` without reading the object's live
+    /// state).
+    Connector {
+        connector_id: String,
+        connector_params_json: String,
+        gap: f64,
+    },
+}
+
 pub struct MeshFixerApp {
     pub session: Session,
     pub active: Option<ObjectId>,
@@ -352,6 +377,27 @@ pub struct MeshFixerApp {
     /// dab samples.
     pub sculpt_hover: Option<(f64, f64)>,
     pub solid: crate::shape_tools::SolidState,
+    /// The Parts tool's state (Task 23): search, the part last placed
+    /// and its Join-to-scan settings.
+    pub parts: crate::parts_tool::PartsState,
+    /// The Connectors tool's state (Task 29): search, the fit class and
+    /// machine profile pickers, and the connector last placed.
+    pub connectors: crate::connector_tool::ConnectorsState,
+    /// Set by Parts/Connectors right before placing (`object.add_part`):
+    /// once that command's `Message::Completed` has run (so `active` is
+    /// already the newly created object, D6's own `after_object_changes`
+    /// rule), the next frame opens Transform on it, records the
+    /// placement in the tool's own state, and clears this. Placing is
+    /// asynchronous (the job pool), so none of that can happen inside
+    /// the call that starts it.
+    pub pending_open_transform: Option<PendingPlacement>,
+    /// The op id [`Self::run_invocation`] just started, so a refusal
+    /// `Message::Completed` carries back (which doesn't otherwise name
+    /// the op that failed) can still be shown by a tool whose panel
+    /// runs more than one operation (Parts, Connectors:
+    /// `shape_tools::ops_of`), not just the one-op-per-tool
+    /// `shape_tools::op_of` tools.
+    last_invocation_op: Option<&'static str>,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
     pub refusal: Option<crate::shape_tools::Refusal>,
@@ -436,6 +482,9 @@ pub struct MeshFixerApp {
     rx: Receiver<Message>,
     /// Asks for the unit of unitless files ([`Settings::unit_prompt`]).
     ask_units: bool,
+    /// Where Parts/Connectors read and write settings
+    /// ([`Settings::config_dir`]).
+    pub(crate) config_dir: Option<PathBuf>,
     /// A unitless file read and waiting for its unit.
     unit_prompt: Option<UnitPrompt>,
     /// An Apply waiting for confirmation.
@@ -715,6 +764,10 @@ impl MeshFixerApp {
             sculpt_stroke: None,
             sculpt_hover: None,
             solid: Default::default(),
+            parts: Default::default(),
+            connectors: Default::default(),
+            pending_open_transform: None,
+            last_invocation_op: None,
             refusal: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
@@ -756,6 +809,7 @@ impl MeshFixerApp {
             gpu_totals,
             rx,
             ask_units: settings.unit_prompt,
+            config_dir: settings.config_dir,
             unit_prompt: None,
             confirm: None,
             hole_numbers: BTreeMap::new(),
@@ -777,6 +831,16 @@ impl MeshFixerApp {
             app.open(path);
         }
         Ok(app)
+    }
+
+    /// Where Parts/Connectors read and write settings
+    /// ([`Settings::config_dir`], or the platform directory).
+    pub fn settings_dir(&self) -> Option<PathBuf> {
+        match &self.config_dir {
+            Some(dir) => Some(dir.clone()),
+            // allow-swallow: no settings folder (an unset HOME, a sandboxed test environment) means every picker falls back to its own built-in defaults, the documented behaviour, not a hidden error.
+            None => mf_parts::dirs::meshfixer_dir().ok(),
+        }
     }
 
     pub fn active_mesh(&self) -> Option<&Mesh> {
@@ -1821,6 +1885,17 @@ impl MeshFixerApp {
     /// Prepare and start `inv` on the job pool (progress and Cancel in the
     /// status bar), as a whole-object tool's Apply does.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        // Interned against the known op-sets for `ops_of`'s panels
+        // (Parts, Connectors): `Invocation::op_id` is an owned `String`
+        // (it comes from a spec id built at runtime in general), but
+        // every id this matches is one of a small set of `&'static
+        // str`s, so a failure the job pool reports back can still name
+        // which op it was without `Message::Completed` itself carrying
+        // the id on its `Err` path.
+        self.last_invocation_op = crate::shape_tools::ops_of(self.active_tool)
+            .iter()
+            .copied()
+            .find(|&id| id == inv.op_id);
         match self.session.prepare(inv) {
             Ok(prepared) => {
                 let run = self.start_job(format!("{label}…"), true);
@@ -2203,17 +2278,21 @@ impl MeshFixerApp {
                         self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
-                    // The Shape tools' refusals show in their panel, in
-                    // plain words with the next action.
+                    // The Shape tools' (and Parts'/Connectors') refusals
+                    // show in their panel, in plain words with the next
+                    // action.
                     Err(CommandError::Operation(mf_operations::OpError::Failed {
                         code,
                         message,
-                    })) if crate::shape_tools::op_of(self.active_tool).is_some() => {
+                    })) if crate::shape_tools::op_of(self.active_tool).is_some()
+                        || self.last_invocation_op.is_some() =>
+                    {
                         self.status = Some(format!("Nothing was changed: {message}"));
+                        let op_id = crate::shape_tools::op_of(self.active_tool)
+                            .or(self.last_invocation_op)
+                            .expect("checked above");
                         self.refusal = Some(crate::shape_tools::Refusal {
-                            op_id: crate::shape_tools::op_of(self.active_tool)
-                                .expect("checked above")
-                                .to_owned(),
+                            op_id: op_id.to_owned(),
                             code: code.to_owned(),
                             message,
                         });
@@ -4115,6 +4194,7 @@ impl MeshFixerApp {
                     })
                     .collect()
             })
+            // allow-swallow: None means no intersection query has run yet; an empty view list is correct, not an error.
             .unwrap_or_default()
     }
 
@@ -4144,6 +4224,7 @@ impl MeshFixerApp {
             .document()
             .object(id)
             .map(|o| o.transform)
+            // allow-swallow: id came from self.active and is checked live above; a vanished object falls back to identity rather than panicking this frame.
             .unwrap_or_default();
         let key = crate::shape_tools::PegPreviewKey {
             object: id,
@@ -4712,6 +4793,41 @@ impl MeshFixerApp {
         let ctx = ui.ctx().clone();
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
+        }
+        if self.busy.is_none()
+            && let Some(pending) = self.pending_open_transform.take()
+        {
+            // `after_object_changes` (handled above, in the message
+            // loop) already made the new object active if the command
+            // committed; a refusal leaves `active` where it was, so
+            // there's nothing of this placement to record or open.
+            if let Some(new_object) = self.active {
+                match pending {
+                    PendingPlacement::Part { scan } if new_object != scan => {
+                        self.parts.placed = Some(crate::parts_tool::PlacedPart {
+                            part: new_object,
+                            scan,
+                        });
+                        self.open_rail_tool(crate::transform_tool::ID);
+                    }
+                    PendingPlacement::Connector {
+                        connector_id,
+                        connector_params_json,
+                        gap,
+                    } => {
+                        self.connectors.placed = Some(crate::connector_tool::PlacedConnector {
+                            object: new_object,
+                            connector_id,
+                            connector_params_json,
+                            gap,
+                            side_a: None,
+                            side_b: None,
+                        });
+                        self.open_rail_tool(crate::transform_tool::ID);
+                    }
+                    PendingPlacement::Part { .. } => {} // allow-swallow: active is still the scan, meaning add_part was refused; its own refusal card already says why
+                }
+            }
         }
         self.refresh_analysis();
         self.refresh_object_vertices();

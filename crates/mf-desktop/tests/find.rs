@@ -1003,7 +1003,12 @@ fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
 }
 
 /// Fix round 1, P2: double-clicking an object's row frames the object and
-/// doesn't pulse whatever was selected on it.
+/// doesn't pulse whatever was selected on it. Later (`2372f44`, "object-
+/// row clicks clear stale sub-selections"): the object row is a whole-
+/// object pick, so it also clears a leftover sub-selection from before
+/// (a hole's boundary loop, here) rather than leaving it to silently
+/// block Delete and whole-object tools with nothing in the row to say
+/// why.
 #[test]
 fn double_click_on_an_object_row_does_not_pulse_the_selection() {
     require_gpu!("double_click_on_an_object_row_does_not_pulse_the_selection");
@@ -1024,6 +1029,9 @@ fn double_click_on_an_object_row_does_not_pulse_the_selection() {
     double_click_row(&mut h, "plate");
     let (cameras, pulse) = finish_move(&mut h);
     assert!(cameras.windows(2).any(|w| w[0] != w[1]), "framed");
-    assert!(h.state().selection.is_some(), "the selection stays");
+    assert!(
+        h.state().selection.is_none(),
+        "the object row's whole-object pick clears the hole's leftover sub-selection"
+    );
     assert_eq!(pulse, 0.0, "no pulse for an object row");
 }

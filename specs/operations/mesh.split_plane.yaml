@@ -31,8 +31,9 @@ parameters:
     min: 0.0
     unit: mm
     description: "Thickness of the slab removed at the cut, centred on the plane, so the parts don't touch (D23; 0 cuts without a gap)"
-  # Alignment holes and dowels (Task 13, D12). dovetail is Task 14 and is
-  # refused by name (dovetail_not_available) until then.
+  # Alignment holes and dowels (Task 13, D12); dovetail (Task 14): a
+  # groove of hole_diameter at the cut, hole_depth_below deep, flanks at
+  # 15 degrees, through the bottom part, and a matching tail on the top.
   - name: pegs
     type: choice
     default: none
@@ -72,7 +73,7 @@ parameters:
     min: 0.0
     unit: mm
     default_from: fit.peg_clearance
-    description: "The dowel is this much thinner than its hole (from the print fit profile)"
+    description: "The dowel is this much thinner than its hole. Legacy single value (D20); a frontend on the Machine profile/Fit class path fills this from fit_clearance + machine_tolerance and records both below. Old logs that only set this keep working unchanged"
   - name: length_allowance
     type: float
     default: 0.4
@@ -80,6 +81,17 @@ parameters:
     unit: mm
     default_from: fit.length_allowance
     description: "The dowel is this much shorter than the two holes together (from the print fit profile)"
+  - name: fit_clearance
+    type: float
+    default: 0.2
+    min: -10.0
+    unit: mm
+    description: "D20 migration: the chosen Fit class's clearance (design intent), before machine tolerance. Recorded for audit; peg_clearance is what's actually used to size the hole and dowel. Negative is interference (a press fit)"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    description: "D20 migration: the active Machine profile's hole-undersize compensation added to fit_clearance to make peg_clearance. 0 on an uncalibrated machine. Recorded for audit alongside fit_clearance"
   - name: min_wall
     type: float
     default: 1.5
@@ -115,6 +127,7 @@ postconditions:
   - with keep both, the target becomes "<name> (top)" and "<name> (bottom)" is created with the same transform
   - the report lists each part's cap faces
   - with pegs dowels, both cut faces get the same holes, and each dowel (diameter = hole - peg_clearance, length = hole_depth_above + hole_depth_below - length_allowance) is a new object standing upright on the plate (world min z 0), laid out clear of the split object; dowels that don't fit are placed beside the plate and reported
+  - with pegs dovetail, one dovetail per section along its principal axis; the tail is peg_clearance narrower than the groove across its flanks and length_allowance short of its floor, so the parts slide together
   - with pegs attached, pegs of the dowel's diameter and hole_depth_below - length_allowance long stick out of the top part, and the bottom part has the holes
 effects: [geometry_changes, topology_changes, creates_objects]
 runtime:

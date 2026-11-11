@@ -19,6 +19,7 @@ test-kinds = ["mf-spec/test-kinds"]
 
 [dependencies]
 faer.workspace = true
+glam.workspace = true
 rayon.workspace = true
 mf-runtime.workspace = true
 mf-document.workspace = true
@@ -39,3 +40,4 @@ serde-saphyr.workspace = true
 jsonschema.workspace = true
 mf-fixtures.workspace = true
 rayon.workspace = true
+tempfile.workspace = true

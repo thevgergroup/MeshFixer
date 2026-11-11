@@ -15,6 +15,7 @@ pub mod blend;
 mod boolean;
 mod combine;
 mod compact;
+mod connector_ops;
 pub mod materials;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
@@ -315,8 +316,11 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::ArrangeOnPlate,
     &transform::Delete,
     &split::SplitPlane,
+    &split::region::SplitRegion,
+    &split::region::DeleteFaces,
     &sculpt::SculptStroke,
     &add_part::AddPart,
+    &connector_ops::ConnectorJoin,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

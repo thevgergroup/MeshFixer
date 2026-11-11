@@ -67,6 +67,10 @@ pub enum OperandRole {
     Consumed,
     /// Read, and explicitly kept (for example `keep_tool: true`).
     Kept,
+    /// Changed in place (its geometry or transform), never removed
+    /// (for example `connector.join`'s side_a/side_b, each folded
+    /// into by the connector's own parts but never consumed).
+    Changed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

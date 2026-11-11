@@ -19,7 +19,7 @@ fn ctx() -> RunContext {
 fn builtins_are_closed_and_deterministic() {
     let (lib, warnings) = Library::load(None, &ctx());
     assert!(warnings.is_empty());
-    assert_eq!(lib.parts.len(), 8);
+    assert_eq!(lib.parts.len(), 12);
     for part in &lib.parts {
         let id = &part.manifest.id;
         let mesh = part.mesh(&ctx()).unwrap();
@@ -27,23 +27,37 @@ fn builtins_are_closed_and_deterministic() {
         assert_eq!(mesh.content_hash(), again.content_hash(), "{id}");
         assert_eq!(part.content_hash().unwrap(), part.content_hash().unwrap());
         let topo = mesh.topology();
-        match part.manifest.kind {
+        match &part.manifest.kind {
             PartKind::Solid => {
                 let bvh = Bvh::build(&mesh, &ctx()).unwrap();
                 let all: Vec<FaceId> = mesh.faces().map(|(f, _)| f).collect();
                 mf_geometry::validate_solid(&mesh, &all, &bvh, &ctx())
                     .unwrap()
                     .unwrap_or_else(|d| panic!("{id}: {d}"));
+                // Each shape builtin sits on z = 0, growing along +z (its
+                // attach normal).
+                let bb = mesh.bounding_box().unwrap();
+                assert!(bb.min[2].abs() < 1e-9 && bb.max[2] > 1.0, "{id}: {bb:?}");
+                assert_eq!(part.manifest.attach.normal, [0.0, 0.0, 1.0]);
             }
             PartKind::Open => {
                 assert_eq!(topo.boundary_loops.len(), 1, "{id}");
                 assert!(topo.non_manifold_edges.is_empty() && topo.inconsistent_edges == 0);
+                let bb = mesh.bounding_box().unwrap();
+                assert!(bb.min[2].abs() < 1e-9 && bb.max[2] > 1.0, "{id}: {bb:?}");
+                assert_eq!(part.manifest.attach.normal, [0.0, 0.0, 1.0]);
+            }
+            // A connector's preview mesh (Task 29, MF-MODEL-005) is every
+            // part `connector::generate` makes, merged: it isn't a single
+            // solid (a hinge's two leaves and pin are distinct bodies)
+            // and isn't placed by the generic surface-attach convention
+            // above (its own axis and seam-snapping drive placement
+            // instead), so only non-empty and deterministic are checked
+            // here; each connector's own tests cover its geometry.
+            PartKind::Connector { .. } => {
+                assert!(mesh.face_count() > 0, "{id}: generated no faces");
             }
         }
-        // Each sits on z = 0, growing along +z (its attach normal).
-        let bb = mesh.bounding_box().unwrap();
-        assert!(bb.min[2].abs() < 1e-9 && bb.max[2] > 1.0, "{id}: {bb:?}");
-        assert_eq!(part.manifest.attach.normal, [0.0, 0.0, 1.0]);
     }
     // Hashes tell parts apart.
     let hashes: std::collections::BTreeSet<String> = lib

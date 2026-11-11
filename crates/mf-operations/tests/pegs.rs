@@ -255,6 +255,130 @@ fn auto_places_two_holes_in_a_wide_section_and_one_keyed_in_a_narrow_one() {
     );
 }
 
+/// D20 migration: the hole/dowel sizing still uses `peg_clearance`
+/// unchanged (so a legacy log that only recorded `peg_clearance` replays
+/// bit for bit), and the new `fit_clearance`/`machine_tolerance` fields
+/// are recorded separately in the report rather than folded away.
+#[test]
+fn legacy_peg_clearance_still_sizes_the_dowel_when_the_new_fields_are_defaulted() {
+    let out = parts(split(&sphere(), &DOWELS).unwrap());
+    // Same measured diameter as the pre-migration test
+    // (`dowels_measured_on_meshes_fit_their_holes`): clearance 0.2 from
+    // peg_clearance's own default, independent of fit_clearance/
+    // machine_tolerance (also defaulted, to 0.2 and 0.0, but not summed
+    // into peg_clearance by the operation itself).
+    let (dowel, _) = &out.dowels[0];
+    let dowel_r = radius_near(dowel, [0.0, 0.0], 10.0, 0.2, 12.4);
+    assert!((2.0 * dowel_r - 4.8).abs() < 1e-9, "{dowel_r}");
+    assert_eq!(out.report["pegs"]["fit_clearance"], 0.2);
+    assert_eq!(out.report["pegs"]["machine_tolerance"], 0.0);
+}
+
+/// A frontend on the new Machine profile + Fit class path writes the
+/// resolved mm value into `peg_clearance` itself (as `default_from`
+/// already does for the legacy single profile) and records the
+/// breakdown in `fit_clearance`/`machine_tolerance`. This proves the
+/// operation reads all three independently: setting `peg_clearance`
+/// explicitly (what sizes the geometry) while recording a different
+/// breakdown (what the fit check and report show) doesn't cross-talk.
+#[test]
+fn fit_clearance_and_machine_tolerance_are_recorded_independently_of_peg_clearance() {
+    let out = parts(
+        split(
+            &sphere(),
+            &[
+                ("pegs", "dowels"),
+                ("hole_depth_above", "5"),
+                ("hole_depth_below", "8"),
+                ("plane_point", "0,0,0.37"),
+                ("peg_clearance", "0.3"), // fit_clearance (0.2) + machine_tolerance (0.1)
+                ("fit_clearance", "0.2"),
+                ("machine_tolerance", "0.1"),
+            ],
+        )
+        .unwrap(),
+    );
+    let (dowel, _) = &out.dowels[0];
+    let dowel_r = radius_near(dowel, [0.0, 0.0], 10.0, 0.2, 12.4);
+    // Sized from peg_clearance (0.3), not fit_clearance alone.
+    assert!((2.0 * dowel_r - 4.7).abs() < 1e-9, "{dowel_r}");
+    assert_eq!(out.report["pegs"]["fit_clearance"], 0.2);
+    assert_eq!(out.report["pegs"]["machine_tolerance"], 0.1);
+}
+
+/// The exact fit check (owner requirements 2026-11-11) runs after the
+/// holes and dowels are built, measuring the real radial gap between the
+/// hole wall and the dowel with the BVH minimum distance (not the
+/// parameters that were meant to produce it), and reports it in plain
+/// language against the recorded Fit class and Machine profile numbers.
+#[test]
+fn fit_check_runs_after_pegs_and_reports_in_plain_language() {
+    let out = parts(split(&sphere(), &DOWELS).unwrap());
+    let check = &out.report["pegs"]["fit_check"];
+    assert!(!check.is_null(), "{}", out.report);
+    // peg_clearance 0.2 mm diametral = 0.1 mm radial gap (within the
+    // round profile's chord tolerance, clearance/10 = 0.02 mm).
+    assert!(
+        (check["measured_gap"].as_f64().unwrap() - 0.1).abs() < 0.02,
+        "{check}"
+    );
+    assert_eq!(check["pair"], "Peg to hole");
+    let message = check["message"].as_str().unwrap();
+    assert!(message.contains("Peg to hole"), "{message}");
+    assert!(message.contains("0.1"), "{message}");
+}
+
+/// A fit class clearance much smaller than the measured gap (half the
+/// expectation or less) is flagged as risking fusion, in plain words.
+#[test]
+fn fit_check_warns_when_clearance_is_set_too_tight_for_the_measured_gap() {
+    let out = parts(
+        split(
+            &sphere(),
+            &[
+                ("pegs", "dowels"),
+                ("hole_depth_above", "5"),
+                ("hole_depth_below", "8"),
+                ("plane_point", "0,0,0.37"),
+                ("peg_clearance", "0.2"),
+                ("fit_clearance", "0.2"),
+                ("machine_tolerance", "0.0"),
+            ],
+        )
+        .unwrap(),
+    );
+    // The measured gap (0.1 mm radial, from peg_clearance 0.2) is
+    // compared against an inflated expectation recorded separately
+    // (fit_clearance alone would expect 0.1 mm radial; widen it here by
+    // asserting against a case where machine_tolerance is 0, so
+    // expected == measured, i.e. not flagged) — then the opposite case,
+    // fit_clearance set much larger than what peg_clearance delivered.
+    let check = &out.report["pegs"]["fit_check"];
+    assert!(!check["may_fuse"].as_bool().unwrap(), "{check}");
+
+    let tight = parts(
+        split(
+            &sphere(),
+            &[
+                ("pegs", "dowels"),
+                ("hole_depth_above", "5"),
+                ("hole_depth_below", "8"),
+                ("plane_point", "0,0,0.37"),
+                ("peg_clearance", "0.2"), // delivers 0.1 mm radial
+                ("fit_clearance", "0.8"), // but the fit class expects 0.4 mm radial
+                ("machine_tolerance", "0.0"),
+            ],
+        )
+        .unwrap(),
+    );
+    let check = &tight.report["pegs"]["fit_check"];
+    assert!(check["may_fuse"].as_bool().unwrap(), "{check}");
+    assert!(
+        check["message"].as_str().unwrap().contains("may fuse"),
+        "{check}"
+    );
+}
+
 #[test]
 fn too_thin_section_refuses_with_widest_fit() {
     match split(
