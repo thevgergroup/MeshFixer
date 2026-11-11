@@ -7,6 +7,8 @@
 //!   user's folder ([`Library`]), [`SurfaceFrame`] and [`place`].
 
 mod builtin;
+mod connector;
+pub mod connectors;
 pub mod dirs;
 mod fit;
 mod fit_check;
@@ -16,6 +18,10 @@ mod machine;
 mod manifest;
 
 pub use builtin::builtins;
+pub use connector::{
+    Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, RoleFaceRange, Side,
+};
+pub use connectors::connectors;
 pub use fit::{
     BUILTIN_NAME, Compensation, FIT_PROFILES_FILE, FitClass, FitClasses, FitError, FitProfile,
     FitProfiles, resolve,
