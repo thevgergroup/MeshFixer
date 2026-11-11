@@ -130,3 +130,43 @@ pub fn minimum_distance(
         Ok(None)
     }
 }
+
+/// As [`minimum_distance`], looking only as far as `limit` (mm, in `a`'s
+/// frame) and skipping `a`'s faces `skip` names (a cut's own cap, which a
+/// hole opens onto by design): `Ok(None)` when nothing of `a` is within
+/// `limit` of `b`. The box query is bounded by `limit` from the start, so
+/// a small `b` against a huge `a` (a hole against a 30M-face scan) only
+/// visits the faces near it. Deterministic; cancellable.
+pub fn minimum_distance_within(
+    a: &Mesh,
+    a_bvh: &Bvh,
+    b: &Mesh,
+    b_to_a: &DMat4,
+    limit: f64,
+    skip: impl Fn(FaceId, [DVec3; 3]) -> bool,
+    ctx: &RunContext,
+) -> Result<Option<f64>, Cancelled> {
+    let mut best = limit * limit;
+    let mut found = false;
+    let mut tick = ctx.ticker();
+    for (f, _) in b.faces() {
+        tick.tick()?;
+        let Some(cb) = corners(b, f) else { continue };
+        let cb = cb.map(|p| b_to_a.transform_point3(p));
+        let pad = best.sqrt();
+        let lo = [0, 1, 2].map(|k| cb[0][k].min(cb[1][k]).min(cb[2][k]) - pad);
+        let hi = [0, 1, 2].map(|k| cb[0][k].max(cb[1][k]).max(cb[2][k]) + pad);
+        a_bvh.for_each_overlapping(lo, hi, |fa| {
+            if let Some(ca) = corners(a, fa)
+                && !skip(fa, ca)
+            {
+                let d2 = triangle_distance_squared(ca, cb);
+                if d2 <= best {
+                    best = d2;
+                    found = true;
+                }
+            }
+        });
+    }
+    Ok(found.then(|| best.sqrt()))
+}

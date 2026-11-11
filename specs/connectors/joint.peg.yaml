@@ -1,0 +1,51 @@
+id: joint.peg
+version: 1
+summary: "A peg across a cut: attached to the piece it was placed on, fitting a hole in the other piece."
+geometry_kinds: [mesh]
+# Local frame: see joint.dowel.yaml.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "Diameter of the hole in the other piece (the peg is the clearance thinner)"
+  - name: depth_on
+    type: float
+    default: 3.0
+    min: 0.1
+    unit: mm
+    description: "How far the peg is sunk into the piece it's attached to (so it joins it solidly)"
+  - name: depth_other
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "How deep the hole goes into the other piece; the peg sticks out this far less the length allowance"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    description: "The peg is this much thinner than its hole (diametral)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    description: "Room left at the hole's floor"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions:
+  - the clearance is less than the diameter
+  - the hole is deeper than the length allowance
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

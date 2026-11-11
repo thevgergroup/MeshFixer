@@ -77,6 +77,14 @@ const SOURCES: &[(&str, &str)] = &[
         "connector.join.yaml",
         include_str!("../../../specs/operations/connector.join.yaml"),
     ),
+    (
+        "mesh.split_box.yaml",
+        include_str!("../../../specs/operations/mesh.split_box.yaml"),
+    ),
+    (
+        "split.place_connectors.yaml",
+        include_str!("../../../specs/operations/split.place_connectors.yaml"),
+    ),
     #[cfg(feature = "test-kinds")]
     (
         "test.consume_tool.yaml",

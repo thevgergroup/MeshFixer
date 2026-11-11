@@ -1,0 +1,43 @@
+id: joint.magnet
+version: 1
+summary: "Magnet pockets across a cut: a round pocket in both pieces at the same place, for a bought disc magnet each."
+geometry_kinds: [mesh]
+# Local frame: see joint.dowel.yaml.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "Diameter of the magnet (the pockets are the clearance wider)"
+  - name: depth_on
+    type: float
+    default: 3.0
+    min: 0.1
+    unit: mm
+    description: "Depth of the pocket in the piece it was placed on (the magnet's thickness)"
+  - name: depth_other
+    type: float
+    default: 3.0
+    min: 0.1
+    unit: mm
+    description: "Depth of the pocket in the other piece"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    description: "The pockets are this much wider than the magnet (diametral)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

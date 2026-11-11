@@ -6,6 +6,7 @@
 pub mod clasp;
 pub mod flap;
 pub mod hinge;
+pub mod joint;
 pub mod thread;
 
 use mf_geometry::Mesh;
@@ -21,6 +22,11 @@ pub fn connectors() -> Vec<&'static dyn Connector> {
         &clasp::SnapClasp,
         &flap::FlapHinge,
         &thread::Thread,
+        &joint::Dowel,
+        &joint::Peg,
+        &joint::Dovetail,
+        &joint::Magnet,
+        &joint::Insert,
     ]
 }
 

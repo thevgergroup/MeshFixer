@@ -43,9 +43,15 @@ mod test_consume_tool;
 mod test_unit_conversion;
 mod transform;
 
+pub use split::joints::{
+    CapRegion, Check, CheckKind, CheckSettings, JointFrame, JointSide, Piece, PlacedPart,
+    Placement, cap_middle, cap_region, check_placement, fix, footprint_2d, placed_parts,
+    placement_params, placement_to_world, wanted_clearance,
+};
 pub use split::pegs::{
     HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
 };
+pub use split::volume::{BOX_FACES, inside_name, outside_name};
 pub use split::{SPLIT_STAGES, split_names};
 pub use transform::{world_min_z, world_min_z_with};
 
@@ -318,6 +324,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &split::SplitPlane,
     &split::region::SplitRegion,
     &split::region::DeleteFaces,
+    &split::volume::SplitBox,
+    &split::joints::PlaceConnectors,
     &sculpt::SculptStroke,
     &add_part::AddPart,
     &connector_ops::ConnectorJoin,

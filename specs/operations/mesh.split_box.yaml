@@ -1,0 +1,40 @@
+id: mesh.split_box
+version: 1
+summary: Cut every selected object along the faces of a box (a printer's build volume) and close each cut with a flat cap.
+geometry_kinds: [mesh]
+# The Split workflow's Print-volume mode (owner 2026-11-11). The box is
+# world axis-aligned; its faces are cut in the order -X, +X, -Y, +Y, -Z,
+# +Z, each through the piece still inside the box. One command, one undo
+# step.
+target:
+  whole_object: true
+  kinds: []
+  many: true
+parameters:
+  - name: box_min
+    type: vec3
+    default: [-128, -128, 0]
+    description: "The box's lowest corner, in world space and document units: x,y,z"
+  - name: box_max
+    type: vec3
+    default: [128, 128, 256]
+    description: "The box's highest corner, in world space and document units: x,y,z"
+  - name: cut_gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Thickness of the slab removed at each cut face, centred on it, so the pieces don't touch (0 cuts without a gap)"
+preconditions:
+  - every target is a whole, closed, manifold object
+  - the box reaches at least one target and at least one of its faces crosses it
+postconditions:
+  - the piece inside the box keeps the target's id, renamed "<name> (in box)"; it fits inside the box
+  - each face of the box that crosses the piece still inside makes the part beyond it a new object "<name> (outside <face>)", with the target's transform, and isn't cut again
+  - every piece is closed; each cut is capped flat on the face's plane (offset by half the cut gap)
+  - the report lists every piece with its world size, and every cut as a joint (the inside piece a, the outside piece b, the face's centre, its outward normal from a to b, and the gap)
+  - a target the box misses is listed in missed, one wholly inside it in inside
+effects: [geometry_changes, topology_changes, creates_objects]
+runtime:
+  cancellable: true
+  progress: true

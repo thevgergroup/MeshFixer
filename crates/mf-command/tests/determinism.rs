@@ -44,6 +44,15 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                         ("cut_gap".to_string(), "0.05".to_string()),
                     ]),
                 )
+            } else if op.id() == "mesh.split_box" {
+                (
+                    uv_sphere(48, 96),
+                    BTreeMap::from([
+                        ("box_min".to_string(), "-0.5137,-0.6171,-0.4373".to_string()),
+                        ("box_max".to_string(), "0.5531,0.4713,0.5231".to_string()),
+                        ("cut_gap".to_string(), "0.02".to_string()),
+                    ]),
+                )
             } else if op.id() == "object.add_part" {
                 (
                     mesh.clone(),

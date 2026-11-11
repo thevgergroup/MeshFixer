@@ -1,0 +1,49 @@
+id: joint.insert
+version: 1
+summary: "A threaded insert across a cut: a pocket for a heat-set insert in the piece it was placed on, and a clearance hole for its screw through the other piece."
+geometry_kinds: [mesh]
+# Local frame: see joint.dowel.yaml.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 4.0
+    min: 0.5
+    unit: mm
+    description: "Diameter of the insert's pocket (from the insert's packet, for example 4.0 for an M3 heat-set insert)"
+  - name: screw_diameter
+    type: float
+    default: 3.0
+    min: 0.5
+    unit: mm
+    description: "The screw's diameter (the hole in the other piece is the clearance wider)"
+  - name: depth_on
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "Depth of the insert's pocket"
+  - name: depth_other
+    type: float
+    default: 8.0
+    min: 0.5
+    unit: mm
+    description: "Depth of the screw's clearance hole in the other piece"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    description: "The screw's hole is this much wider than the screw (diametral)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

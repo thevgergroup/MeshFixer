@@ -26,7 +26,7 @@ pub use bvh::{Bvh, LEAF_MAX};
 pub use chunked::{CHUNK, STORAGE_CHUNK, chunk_hashes_computed};
 pub use compare::{Equivalence, equivalent};
 pub use diagnostics::{Diagnostics, LoopSummary, VolumeStatus, inspect, inspect_with};
-pub use distance::minimum_distance;
+pub use distance::{minimum_distance, minimum_distance_within};
 pub use edit::MeshEdit;
 pub use hash::ContentHash;
 pub use ids::{FaceId, Provenance, SlotRemap, Sources, VertexId};

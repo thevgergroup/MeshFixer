@@ -1,0 +1,59 @@
+id: joint.dowel
+version: 1
+summary: "A loose dowel across a cut: a hole in both pieces at the same place, and the dowel itself printed as its own object."
+geometry_kinds: [mesh]
+# Local frame (every joint.* connector): z is the cut's normal, from the
+# piece the connector was placed on (side A) into the other piece (side
+# B); side A's cap is at z = -gap/2, side B's at z = +gap/2; the
+# connector's centre is at x = y = 0.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "Diameter of the holes"
+  - name: depth_on
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "How deep the hole goes into the piece the dowel was placed on"
+  - name: depth_other
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "How deep the hole goes into the other piece"
+  - name: dowel_length
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Length of the dowel; 0 makes it the two depths plus the gap, less the length allowance"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    description: "The dowel is this much thinner than its holes (diametral: the chosen Fit class plus the Machine profile's hole compensation)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    description: "Room left at the holes' floors (for glue and the print's tolerance)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions:
+  - the clearance is less than the diameter
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

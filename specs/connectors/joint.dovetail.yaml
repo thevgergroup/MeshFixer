@@ -1,0 +1,63 @@
+id: joint.dovetail
+version: 1
+summary: "A dovetail across a cut: a tail on the piece it was placed on, sliding into a groove in the other piece, flanks at 15 degrees."
+geometry_kinds: [mesh]
+# Local frame: see joint.dowel.yaml; the tail runs along x.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 8.0
+    min: 0.5
+    unit: mm
+    description: "Width of the groove at the cut (the tail is the clearance narrower); both widen by tan 15 degrees per side with depth"
+  - name: length
+    type: float
+    default: 16.0
+    min: 0.5
+    unit: mm
+    description: "Length of the tail along its direction"
+  - name: groove_length
+    type: float
+    default: 200.0
+    min: 0.5
+    unit: mm
+    description: "Length of the groove along the tail's direction (long enough to run out of the piece, so the tail slides in from the side)"
+  - name: depth_on
+    type: float
+    default: 3.0
+    min: 0.1
+    unit: mm
+    description: "How far the tail's root is sunk into the piece it's attached to"
+  - name: depth_other
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "How deep the groove goes into the other piece"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    description: "The tail is this much narrower than the groove across its flanks (both sides together)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    description: "Room left at the groove's floor"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions:
+  - the clearance is less than the width
+  - the groove is deeper than the length allowance
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

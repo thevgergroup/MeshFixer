@@ -41,8 +41,10 @@ use crate::affine::{apply, apply_linear, inverse};
 use crate::layout::{Footprint, Plate, layout_on_plate};
 
 pub mod dovetail;
+pub mod joints;
 pub mod pegs;
 pub mod region;
+pub mod volume;
 use crate::{
     DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
     needs_document, unsupported_target,
@@ -183,9 +185,31 @@ impl Operation for SplitPlane {
         let mut changes = Vec::new();
         let mut cut = Vec::new();
         let mut missed = Vec::new();
+        // Each cut's joint (the Split workflow's step 3): the bottom part
+        // (`a`, created) and the top part (`b`, the target), across the
+        // plane, normal from `a` into `b`.
+        let mut joints = Vec::new();
+        let mut created = 0usize;
+        let both = params.get_choice("keep")? == "both";
+        let normal = params.get_vec3("plane_normal")?;
+        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         for (k, target) in inputs.iter().enumerate() {
             match split_one(k, target, &scene, params, ctx) {
                 Ok(one) => {
+                    if both && len > 0.0 {
+                        joints.push(serde_json::json!({
+                            "a": { "created": created },
+                            "b": { "operand": k },
+                            "point": params.get_vec3("plane_point")?,
+                            "normal": normal.map(|c| c / len),
+                            "gap": params.get_float("cut_gap")?,
+                        }));
+                    }
+                    created += one
+                        .changes
+                        .iter()
+                        .filter(|c| matches!(c, ObjectChange::Create { .. }))
+                        .count();
                     for c in &one.changes {
                         if let ObjectChange::Create {
                             mesh, transform, ..
@@ -235,6 +259,7 @@ impl Operation for SplitPlane {
         report["parts"] = serde_json::Value::Array(parts);
         report["objects"] = serde_json::Value::Array(cut);
         report["missed"] = serde_json::json!(missed);
+        report["joints"] = serde_json::Value::Array(joints);
         Ok(DocOutput { changes, report })
     }
 }
