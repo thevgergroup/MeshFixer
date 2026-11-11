@@ -9,10 +9,24 @@
 //! written to the file and can't be edited, renamed or deleted; users
 //! duplicate it. A file that doesn't exist yet means "only the built-in";
 //! a file that can't be read or parsed is a named error, never ignored.
+//!
+//! **D20 restructuring (owner requirements 2026-11-11):** [`FitProfile`]
+//! mixed two different properties. Tolerance (how far a print deviates
+//! from the design) belongs to the *machine*: see [`crate::MachineProfile`].
+//! Clearance (the gap between mating parts the design wants) belongs to
+//! the *design intent*: [`FitClass`], below. [`FitProfile`] stays, byte-
+//! compatible, as the legacy all-in-one shape every Phase 1 task before
+//! this one already wrote specs and tests against; new connector work
+//! (Tasks 25-28) uses [`FitClass`] plus a [`crate::MachineProfile`],
+//! resolved by [`resolve`]. Both kinds of value are recorded on the
+//! operation that used them, so replay never reads either profile, and
+//! an old log (recorded before this split) replays unchanged.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+
+use crate::MachineProfile;
 
 /// The profiles file's name in the MeshFixer settings folder.
 pub const FIT_PROFILES_FILE: &str = "fit-profiles.yaml";
@@ -286,4 +300,174 @@ impl FitProfiles {
             .find(|p| p.name == name)
             .ok_or_else(|| FitError::NoSuchProfile(name.into()))
     }
+}
+
+/// A fit class (design intent, owner requirements 2026-11-11): the gap
+/// between mating parts a design wants, independent of any one printer's
+/// tolerance. `clearance` is a radial/linear gap in mm; negative means
+/// interference (a press fit).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FitClass {
+    pub name: String,
+    /// The gap (mm) between mating surfaces this class wants, before any
+    /// machine tolerance compensation. Negative is interference (press
+    /// fit); near 0 is snug/transition; positive is sliding or free
+    /// running.
+    pub clearance: f64,
+}
+
+impl FitClass {
+    /// The four classes `connectors-fits-requirements.md` names, in
+    /// increasing clearance.
+    pub fn builtins() -> [FitClass; 4] {
+        [
+            FitClass {
+                name: "Press".into(),
+                clearance: -0.1,
+            },
+            FitClass {
+                name: "Snug".into(),
+                clearance: 0.0,
+            },
+            FitClass {
+                name: "Sliding".into(),
+                clearance: 0.15,
+            },
+            FitClass {
+                name: "Free running".into(),
+                clearance: 0.3,
+            },
+        ]
+    }
+
+    fn check(&self) -> Result<(), String> {
+        if self.name.trim().is_empty() {
+            return Err("a fit class has an empty name".into());
+        }
+        if !self.clearance.is_finite() {
+            return Err(format!(
+                "fit class '{}': clearance {} must be a finite length in mm",
+                self.name, self.clearance
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Every fit class, the built-ins first, and which one is active
+/// (per-use, not global: a hinge and a clasp in the same document can
+/// use different classes).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FitClasses {
+    pub classes: Vec<FitClass>,
+}
+
+impl Default for FitClasses {
+    fn default() -> Self {
+        FitClasses {
+            classes: FitClass::builtins().into(),
+        }
+    }
+}
+
+const FIT_CLASSES_FILE: &str = "fit-classes.yaml";
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClassesFile {
+    #[serde(default)]
+    classes: Vec<FitClass>,
+}
+
+impl FitClasses {
+    /// Built-ins plus the user's own, from `dir/fit-classes.yaml`. No
+    /// file yet: only the built-ins.
+    pub fn load(dir: &Path) -> Result<FitClasses, FitError> {
+        let path = dir.join(FIT_CLASSES_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(FitClasses::default());
+            }
+            Err(e) => {
+                return Err(FitError::Unreadable {
+                    path,
+                    reason: e.to_string(),
+                });
+            }
+        };
+        let malformed = |reason: String| FitError::Malformed {
+            path: path.clone(),
+            reason,
+        };
+        let file: ClassesFile =
+            serde_saphyr::from_str(&text).map_err(|e| malformed(e.to_string()))?;
+        let mut out = FitClasses::default();
+        let builtin_names: Vec<String> = out.classes.iter().map(|c| c.name.clone()).collect();
+        for c in file.classes {
+            c.check().map_err(malformed)?;
+            if builtin_names.contains(&c.name) || out.get(&c.name).is_some() {
+                return Err(malformed(format!("two fit classes are named '{}'", c.name)));
+            }
+            out.classes.push(c);
+        }
+        Ok(out)
+    }
+
+    pub fn save(&self, dir: &Path) -> Result<(), FitError> {
+        let path = dir.join(FIT_CLASSES_FILE);
+        let unwritable = |reason: String| FitError::Unwritable {
+            path: path.clone(),
+            reason,
+        };
+        let builtins = FitClass::builtins();
+        let file = ClassesFile {
+            classes: self
+                .classes
+                .iter()
+                .filter(|c| !builtins.iter().any(|b| b.name == c.name))
+                .cloned()
+                .collect(),
+        };
+        let text = serde_saphyr::to_string(&file).map_err(|e| unwritable(e.to_string()))?;
+        std::fs::create_dir_all(dir).map_err(|e| unwritable(e.to_string()))?;
+        std::fs::write(&path, text).map_err(|e| unwritable(e.to_string()))
+    }
+
+    pub fn get(&self, name: &str) -> Option<&FitClass> {
+        self.classes.iter().find(|c| c.name == name)
+    }
+}
+
+/// A feature dimension resolved from design intent plus measured
+/// tolerance (owner requirements 2026-11-11): `fit_class`'s clearance,
+/// compensated by `machine`'s relevant tolerance. `compensation` picks
+/// which of the machine's measured deviations applies (a radial gap
+/// around a bore widens by the hole's undersize; an axial/Z gap widens
+/// by the Z deviation; a plain XY gap by the outer XY deviation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compensation {
+    /// A gap formed by a hole/bore (widen by `hole_undersize`).
+    Hole,
+    /// A gap along Z (widen by `z`).
+    Z,
+    /// A plain XY gap between two outer surfaces (widen by `outer_xy`).
+    OuterXy,
+    /// No machine compensation (the clearance is used as designed).
+    None,
+}
+
+/// The resolved gap (mm) a generated feature should use: the fit class's
+/// clearance plus the machine profile's relevant measured deviation.
+/// Both source values are what the caller should record (D20's "the
+/// values used are recorded in each operation's parameters").
+pub fn resolve(fit_class: &FitClass, machine: &MachineProfile, compensation: Compensation) -> f64 {
+    let tolerance = match compensation {
+        Compensation::Hole => machine.hole_undersize,
+        Compensation::Z => machine.z,
+        Compensation::OuterXy => machine.outer_xy,
+        Compensation::None => 0.0,
+    };
+    fit_class.clearance + tolerance
 }
