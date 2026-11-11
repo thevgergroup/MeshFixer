@@ -2745,12 +2745,14 @@ name = "mf-command"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
  "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-operations",
+ "mf-parts",
  "mf-runtime",
  "mf-selection",
  "mf-spec",

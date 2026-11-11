@@ -280,6 +280,20 @@ fn fs_hole_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @locat
     return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
 }
 
+// A see-through object (the Split workflow's transparent piece): lit like
+// a solid but about 25% opaque, a little more where it turns edge-on so
+// its outline reads, and no hatch (it isn't a hole), so the other piece's
+// cut face and the connectors' counterparts show through it.
+@fragment
+fn fs_ghost_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    let base = base_color(front, in.state);
+    let rgb = lit(base, in.normal);
+    let v = normalize(scene.eye_dir.xyz);
+    let edge_on = pow(1.0 - abs(dot(normalize(in.normal), v)), 2.0);
+    let a = clamp(0.22 + 0.3 * edge_on, 0.0, 0.6);
+    return vec4<f32>(select(rgb, inactive(rgb), draw.params.x > 0.5), a);
+}
+
 // How much of this fragment the hole's hatch stripes cover (0–1), from its
 // clip-space position (screen-constant ~8 pt period, `draw.params.w`
 // physical pixels per point).

@@ -148,6 +148,7 @@ pub fn orbit(mesh: &Mesh, spec: OrbitSpec, ctx: &RunContext) -> Result<OrbitRun,
 
     let items = [DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model: glam::DMat4::IDENTITY,
         inactive: false,

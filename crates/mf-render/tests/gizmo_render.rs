@@ -133,6 +133,7 @@ fn gizmo_draws_over_geometry() {
     let gpu = GpuMesh::upload(&device, &mesh);
     let items = [DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
@@ -195,6 +196,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
     let gpu = GpuMesh::upload(&device, &mesh);
     let items = [DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,

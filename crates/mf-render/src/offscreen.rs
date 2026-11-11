@@ -95,6 +95,7 @@ pub fn render_image_with_chunk_limit(
     let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
     let items = [DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
@@ -165,6 +166,7 @@ pub fn render_roles_xray(
         .zip(objects)
         .map(|(gpu, (_, model, hole))| DrawItem {
             hole: *hole,
+            ghost: false,
             mesh: gpu,
             model: *model,
             inactive: false,

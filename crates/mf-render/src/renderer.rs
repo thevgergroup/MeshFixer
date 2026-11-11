@@ -215,6 +215,10 @@ pub struct DrawItem<'a> {
     /// diagonal hatch (a pattern, not a colour), after every solid so
     /// they show through it.
     pub hole: bool,
+    /// Drawn see-through (about 25% opaque, lit, no hatch) after every
+    /// solid, so what's behind or inside it shows: the Split workflow's
+    /// transparent piece, with the other piece's cut face solid behind it.
+    pub ghost: bool,
 }
 
 /// One line overlay on an object (selected loops, cracks, tangled edges,
@@ -283,6 +287,9 @@ pub struct MeshRenderer {
     /// solids").
     hole_xray_pipeline_ccw: wgpu::RenderPipeline,
     hole_xray_pipeline_cw: wgpu::RenderPipeline,
+    /// A see-through object ([`DrawItem::ghost`]).
+    ghost_pipeline_ccw: wgpu::RenderPipeline,
+    ghost_pipeline_cw: wgpu::RenderPipeline,
     background_pipeline: wgpu::RenderPipeline,
     shading: Shading,
     split_preview: Option<(DVec3, DVec3)>,
@@ -377,6 +384,10 @@ impl MeshRenderer {
             /// pass), writing no depth — the ghost that shows a buried or
             /// backside hole through a solid.
             HoleXRay,
+            /// A see-through object: as `Translucent`, pushed slightly
+            /// back so where it lies on a solid's face (a cut's two caps)
+            /// the solid face wins cleanly instead of shimmering.
+            Ghost,
         }
         let blend_state = wgpu::BlendState {
             color: wgpu::BlendComponent {
@@ -405,12 +416,23 @@ impl MeshRenderer {
                 depth_compare: Some(match depth_mode {
                     DepthMode::XRay | DepthMode::HoleXRay => wgpu::CompareFunction::Greater,
                     DepthMode::NoTest | DepthMode::Glass => wgpu::CompareFunction::Always,
-                    DepthMode::Opaque | DepthMode::Blended | DepthMode::Translucent => {
-                        wgpu::CompareFunction::LessEqual
-                    }
+                    DepthMode::Opaque
+                    | DepthMode::Blended
+                    | DepthMode::Translucent
+                    | DepthMode::Ghost => wgpu::CompareFunction::LessEqual,
                 }),
                 stencil: Default::default(),
-                bias: Default::default(),
+                bias: if depth_mode == DepthMode::Ghost {
+                    // Depth runs 0 near to 1 far: a positive bias pushes
+                    // it away from the eye.
+                    wgpu::DepthBiasState {
+                        constant: 4,
+                        slope_scale: 2.0,
+                        clamp: 0.0,
+                    }
+                } else {
+                    Default::default()
+                },
             });
             let blend = matches!(
                 depth_mode,
@@ -419,6 +441,7 @@ impl MeshRenderer {
                     | DepthMode::Glass
                     | DepthMode::Translucent
                     | DepthMode::HoleXRay
+                    | DepthMode::Ghost
             )
             .then_some(blend_state);
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -570,6 +593,19 @@ impl MeshRenderer {
         };
         let hole_xray_pipeline_ccw = hole_xray("mf hole x-ray ccw", wgpu::FrontFace::Ccw);
         let hole_xray_pipeline_cw = hole_xray("mf hole x-ray cw", wgpu::FrontFace::Cw);
+        let ghost = |label: &str, front_face| {
+            pipeline_with(
+                label,
+                &surface_layout,
+                "vs_surface",
+                "fs_ghost_surface",
+                &surface_buffers,
+                front_face,
+                DepthMode::Ghost,
+            )
+        };
+        let ghost_pipeline_ccw = ghost("mf ghost ccw", wgpu::FrontFace::Ccw);
+        let ghost_pipeline_cw = ghost("mf ghost cw", wgpu::FrontFace::Cw);
         // The stage's background gradient: one full-screen triangle, drawn
         // first, testing and writing no depth.
         let background_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -693,6 +729,8 @@ impl MeshRenderer {
             hole_pipeline_cw,
             hole_xray_pipeline_ccw,
             hole_xray_pipeline_cw,
+            ghost_pipeline_ccw,
+            ghost_pipeline_cw,
             background_pipeline,
             shading: Shading::default(),
             split_preview: None,
@@ -946,16 +984,24 @@ impl MeshRenderer {
         pass.set_bind_group(0, &self.scene_bind_group, &[]);
         let glass = self.shading.preset == ShadingPreset::XRay;
         // Solids first, then Holes over them (blended, so what's behind or
-        // inside a hole shows through).
+        // inside a hole shows through), then see-through objects.
         let drawn = self
             .draw_slots
             .iter()
             .zip(items)
-            .filter(|(_, i)| !i.hole)
-            .chain(self.draw_slots.iter().zip(items).filter(|(_, i)| i.hole));
+            .filter(|(_, i)| !i.hole && !i.ghost)
+            .chain(
+                self.draw_slots
+                    .iter()
+                    .zip(items)
+                    .filter(|(_, i)| i.hole && !i.ghost),
+            )
+            .chain(self.draw_slots.iter().zip(items).filter(|(_, i)| i.ghost));
         for (slot, item) in drawn {
             let mirrored = item.model.determinant() < 0.0;
             let pipeline = match (item.hole, glass, mirrored) {
+                _ if item.ghost && mirrored => &self.ghost_pipeline_cw,
+                _ if item.ghost => &self.ghost_pipeline_ccw,
                 (true, _, true) => &self.hole_pipeline_cw,
                 (true, _, false) => &self.hole_pipeline_ccw,
                 (false, true, true) => &self.glass_pipeline_cw,

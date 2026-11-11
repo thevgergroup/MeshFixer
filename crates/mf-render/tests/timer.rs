@@ -52,6 +52,7 @@ fn timed_draws_report_a_gpu_time_per_frame() {
     let camera = OrbitCamera::fit(&mesh.bounding_box().unwrap());
     let items = [DrawItem {
         hole: false,
+        ghost: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
