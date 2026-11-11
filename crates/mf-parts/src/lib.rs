@@ -33,6 +33,7 @@ pub use library::{
     save_object_as_part, user_parts_dir,
 };
 pub use machine::{
-    MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, UNCALIBRATED_NAME,
+    MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, PRINT_VOLUME_PRESETS,
+    UNCALIBRATED_NAME,
 };
 pub use manifest::{Attach, PartKind, PartManifest};

@@ -652,6 +652,7 @@ fn alignment(
                 outer_xy: 0.0,
                 hole_undersize: machine_tolerance / 2.0,
                 z: 0.0,
+                print_volume_mm: MachineProfile::uncalibrated().print_volume_mm,
             };
             let check = check_fit(
                 "Peg to hole",

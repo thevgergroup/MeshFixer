@@ -351,3 +351,40 @@ fn settings_pages_list_machine_profiles_and_fit_classes() {
     assert!(h.query_by_label("Fit classes").is_some());
     still(&mut h, "settings");
 }
+
+/// A machine profile's print volume (Split's "Print volume" cut mode,
+/// owner 2026-11-11, stored with the Machine profiles): the built-in's
+/// shows read-only, a new profile defaults to it and is editable, and
+/// picking a preset writes its exact W×D×H and persists under the temp
+/// settings dir.
+#[test]
+fn a_machine_profiles_print_volume_shows_and_a_preset_can_be_picked() {
+    require_gpu!("a_machine_profiles_print_volume_shows_and_a_preset_can_be_picked");
+    let (mut h, settings_dir) = opened(vec![("body", cube(40.0), IDENTITY)]);
+    h.state_mut().show_settings = true;
+    settle(&mut h);
+
+    // The built-in profile's volume shows, read-only, as its default.
+    let default = mf_parts::MachineProfile::uncalibrated().print_volume_mm;
+    let [dw, dd, dh] = default;
+    h.get_by_label(format!("{dw:.0} × {dd:.0} × {dh:.0} mm").as_str());
+    still(&mut h, "print-volume-builtin");
+
+    // A new profile starts on the same default, editable.
+    scroll_and_click(&mut h, "New machine profile…");
+    settle(&mut h);
+    assert_eq!(
+        h.state().connectors.machine_profile,
+        "My printer",
+        "the new profile becomes the active pick"
+    );
+
+    // Picking "Voron 2.4" writes its exact volume and persists it.
+    scroll_and_click(&mut h, "Voron 2.4");
+    settle(&mut h);
+    still(&mut h, "print-volume-preset");
+
+    let profiles = mf_parts::MachineProfiles::load(settings_dir.path()).unwrap();
+    let p = profiles.get("My printer").unwrap();
+    assert_eq!(p.print_volume_mm, [350.0, 350.0, 340.0]);
+}

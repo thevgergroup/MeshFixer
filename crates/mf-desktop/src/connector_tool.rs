@@ -705,6 +705,49 @@ fn save_connector_to_library(app: &mut MeshFixerApp, placed: &PlacedConnector) {
 // Settings: Machine profiles and Fit classes.
 // ---------------------------------------------------------------------
 
+/// "Custom" (typed W×D×H) in the print-volume preset picker, alongside
+/// [`mf_parts::PRINT_VOLUME_PRESETS`]' named printers (Split's "Print
+/// volume" cut mode, owner 2026-11-11): shown only as the picker's own
+/// state when `volume` isn't one of the presets, never a selectable
+/// button of its own (typing W×D×H below already gets there).
+const CUSTOM_PRINT_VOLUME: &str = "Custom";
+
+/// A profile's print-volume row: a preset picker (one toggle button per
+/// printer, same house style as Split's plane-orientation presets in
+/// `shape_tools.rs`) and the W×D×H fields themselves, always editable
+/// (picking a preset is just a shortcut to typing the same numbers).
+/// Returns true if `volume` changed.
+fn print_volume_row(ui: &mut egui::Ui, volume: &mut [f64; 3]) -> bool {
+    let mut changed = false;
+    let current = mf_parts::PRINT_VOLUME_PRESETS
+        .iter()
+        .find(|(_, v)| *v == *volume)
+        .map_or(CUSTOM_PRINT_VOLUME, |(name, _)| name);
+    ui.label(format!("{}:", t!("settings.print_volume")));
+    ui.horizontal_wrapped(|ui| {
+        for &(name, preset) in mf_parts::PRINT_VOLUME_PRESETS {
+            if ui.selectable_label(current == name, name).clicked() && *volume != preset {
+                *volume = preset;
+                changed = true;
+            }
+        }
+    });
+    ui.horizontal(|ui| {
+        for (axis, v) in ["W", "D", "H"].into_iter().zip(volume.iter_mut()) {
+            ui.label(axis);
+            changed |= ui
+                .add(
+                    egui::DragValue::new(v)
+                        .speed(1.0)
+                        .range(1.0..=2000.0)
+                        .suffix(" mm"),
+                )
+                .changed();
+        }
+    });
+    changed
+}
+
 fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     widgets::body(ui, t!("settings.machine_profiles.help"));
     let Some(dir) = app.settings_dir() else {
@@ -750,9 +793,14 @@ fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 }
                 if changed {
                     edited.calibrated = true;
-                    if profiles.update(edited).is_ok() {
-                        let _ = profiles.save(&dir); // allow-swallow: a failed save leaves the in-memory edit for this session; the next edit retries the write
-                    }
+                }
+                if print_volume_row(ui, &mut edited.print_volume_mm) {
+                    changed = true;
+                }
+                if changed
+                    && profiles.update(edited).is_ok()
+                {
+                    let _ = profiles.save(&dir); // allow-swallow: a failed save leaves the in-memory edit for this session; the next edit retries the write
                 }
             } else {
                 for (_, value, meaning) in p.fields() {
@@ -761,6 +809,11 @@ fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                         ui.label(format!("{value:+.3} mm"));
                     });
                 }
+                let [x, y, z] = p.print_volume_mm;
+                ui.horizontal(|ui| {
+                    ui.label(format!("{}:", t!("settings.print_volume")));
+                    ui.label(format!("{x:.0} × {y:.0} × {z:.0} mm"));
+                });
             }
         });
     }

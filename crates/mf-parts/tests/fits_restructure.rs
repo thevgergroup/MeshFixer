@@ -47,6 +47,7 @@ fn resolve_combines_clearance_and_the_relevant_tolerance() {
         outer_xy: 0.05,
         hole_undersize: 0.15,
         z: -0.02,
+        ..MachineProfile::uncalibrated()
     };
     assert_eq!(resolve(&snug, &calibrated, Compensation::Hole), 0.15);
     assert_eq!(resolve(&snug, &calibrated, Compensation::OuterXy), 0.05);
@@ -74,6 +75,7 @@ fn machine_profiles_round_trip_and_the_builtin_is_read_only() {
             outer_xy: 0.1,
             hole_undersize: 0.15,
             z: 0.05,
+            ..MachineProfile::uncalibrated()
         })
         .unwrap();
     profiles.set_active("Prusa MK4").unwrap();
@@ -93,9 +95,69 @@ fn machine_profiles_round_trip_and_the_builtin_is_read_only() {
             outer_xy: 1.0,
             hole_undersize: 1.0,
             z: 1.0,
+            ..MachineProfile::uncalibrated()
         })
         .unwrap_err();
     assert!(matches!(err, mf_parts::MachineError::BuiltinIsReadOnly));
+}
+
+/// Split's "Print volume" cut mode presets (owner 2026-11-11): every
+/// printer the brief lists, by name, with its exact W×D×H in mm.
+#[test]
+fn print_volume_presets_match_the_owners_table() {
+    let table: &[(&str, [f64; 3])] = &[
+        ("Prusa MK4", [250.0, 210.0, 220.0]),
+        ("Prusa Mini", [180.0, 180.0, 180.0]),
+        ("Prusa XL", [360.0, 360.0, 360.0]),
+        ("Bambu X1/P1", [256.0, 256.0, 256.0]),
+        ("Bambu A1", [256.0, 256.0, 256.0]),
+        ("Bambu A1 mini", [180.0, 180.0, 180.0]),
+        ("Creality Ender-3 V3", [220.0, 220.0, 250.0]),
+        ("Elegoo Neptune 4 Pro", [225.0, 225.0, 265.0]),
+        ("Voron 2.4", [350.0, 350.0, 340.0]),
+    ];
+    assert_eq!(mf_parts::PRINT_VOLUME_PRESETS, table);
+}
+
+/// A machine profile saved before `print_volume_mm` existed (no such key
+/// in the file) still loads: it defaults rather than failing, same as
+/// every other field here (D4: no silent assumption of a real
+/// measurement, but a structural default is fine).
+#[test]
+fn a_machine_profile_saved_before_print_volume_existed_still_loads() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join(mf_parts::MACHINE_PROFILES_FILE),
+        "active: Prusa MK4\n\
+         profiles:\n\
+         - name: Prusa MK4\n  \
+           calibrated: true\n  \
+           outer_xy: 0.1\n  \
+           hole_undersize: 0.15\n  \
+           z: 0.05\n",
+    )
+    .unwrap();
+    let profiles = MachineProfiles::load(dir.path()).unwrap();
+    let p = profiles.get("Prusa MK4").unwrap();
+    assert!(p.calibrated);
+    assert_eq!(p.print_volume_mm, MachineProfile::uncalibrated().print_volume_mm);
+}
+
+/// A machine profile's print volume must be positive and finite, same
+/// discipline as its tolerance fields.
+#[test]
+fn a_non_positive_print_volume_is_invalid() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut profiles = MachineProfiles::load(dir.path()).unwrap();
+    profiles.duplicate(UNCALIBRATED_NAME, "Broken").unwrap();
+    let err = profiles
+        .update(MachineProfile {
+            name: "Broken".into(),
+            print_volume_mm: [0.0, 100.0, 100.0],
+            ..MachineProfile::uncalibrated()
+        })
+        .unwrap_err();
+    assert!(matches!(err, mf_parts::MachineError::Invalid(_)), "{err:?}");
 }
 
 #[test]
@@ -188,6 +250,7 @@ fn fit_check_warns_when_the_measured_gap_is_well_under_what_the_fit_class_expect
         outer_xy: 0.0,
         hole_undersize: 0.1,
         z: 0.0,
+        ..MachineProfile::uncalibrated()
     };
     let check = check_fit(
         "Hinge pin to knuckle",

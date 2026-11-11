@@ -494,6 +494,7 @@ static CATALOGUE: &[(&str, &str)] = &[
         "A machine profile is how far your printer's own output deviates from the design (measured tolerance), not what gap your design wants. Defaults are \"not calibrated\" until you measure a calibration print.",
     ),
     ("settings.machine_profiles.new", "New machine profile…"),
+    ("settings.print_volume", "Print volume"),
     ("settings.title", "Settings"),
     ("solid.apply", "Make it solid"),
     (

@@ -25,6 +25,17 @@ pub const MACHINE_PROFILES_FILE: &str = "machine-profiles.yaml";
 /// The built-in, uncalibrated profile's name.
 pub const UNCALIBRATED_NAME: &str = "Uncalibrated";
 
+/// The printer's build volume, X×Y×Z in mm (Split's "Print volume" cut
+/// mode, owner 2026-11-11): absent any calibration, the uncalibrated
+/// profile's own volume (a generous default; nothing is assumed about a
+/// real printer until the user says so, same spirit as the tolerances
+/// above).
+const DEFAULT_VOLUME_MM: [f64; 3] = [220.0, 220.0, 250.0];
+
+fn default_volume_mm() -> [f64; 3] {
+    DEFAULT_VOLUME_MM
+}
+
 /// One printer's measured tolerances, in mm. Each is a signed deviation
 /// of the printed dimension from the design: positive means the print
 /// comes out larger than designed (so a hole needs widening by this much
@@ -45,6 +56,12 @@ pub struct MachineProfile {
     pub hole_undersize: f64,
     /// Z (layer-stacking direction): printed size minus designed size, mm.
     pub z: f64,
+    /// The printer's build volume, X×Y×Z mm (Split's "Print volume" cut
+    /// mode: the box's faces become the cut planes). Defaulted for
+    /// profiles saved before this field existed, so an older
+    /// `machine-profiles.yaml` still loads.
+    #[serde(default = "default_volume_mm")]
+    pub print_volume_mm: [f64; 3],
 }
 
 impl MachineProfile {
@@ -57,6 +74,7 @@ impl MachineProfile {
             outer_xy: 0.0,
             hole_undersize: 0.0,
             z: 0.0,
+            print_volume_mm: DEFAULT_VOLUME_MM,
         }
     }
 
@@ -90,9 +108,34 @@ impl MachineProfile {
                 ));
             }
         }
+        for (axis, v) in ["X", "Y", "Z"].into_iter().zip(self.print_volume_mm) {
+            if !(v.is_finite() && v > 0.0) {
+                return Err(format!(
+                    "machine profile '{}': print volume {axis} is {v}; it must be a positive \
+                     length in mm",
+                    self.name
+                ));
+            }
+        }
         Ok(())
     }
 }
+
+/// A printer's name and build volume (X×Y×Z mm): Split's "Print volume"
+/// cut mode presets (owner 2026-11-11), editable and otherwise stored
+/// with the Machine profiles. "Custom" isn't listed: it's the GUI typing
+/// its own W×D×H instead of picking one of these.
+pub const PRINT_VOLUME_PRESETS: &[(&str, [f64; 3])] = &[
+    ("Prusa MK4", [250.0, 210.0, 220.0]),
+    ("Prusa Mini", [180.0, 180.0, 180.0]),
+    ("Prusa XL", [360.0, 360.0, 360.0]),
+    ("Bambu X1/P1", [256.0, 256.0, 256.0]),
+    ("Bambu A1", [256.0, 256.0, 256.0]),
+    ("Bambu A1 mini", [180.0, 180.0, 180.0]),
+    ("Creality Ender-3 V3", [220.0, 220.0, 250.0]),
+    ("Elegoo Neptune 4 Pro", [225.0, 225.0, 265.0]),
+    ("Voron 2.4", [350.0, 350.0, 340.0]),
+];
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum MachineError {
