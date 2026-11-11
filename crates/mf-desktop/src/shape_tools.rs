@@ -69,9 +69,11 @@ pub struct SplitState {
     /// "both", "above" or "below".
     pub keep: String,
     pub gap: f64,
-    /// The object the plane was placed for (a new active object places it
-    /// again).
-    pub placed_for: Option<ObjectId>,
+    /// The targets ([`MeshFixerApp::selected_objects`]) the plane was last
+    /// placed for (owner 2026-11-11: centred on the whole selection, not
+    /// just the active object — `mesh.split_plane` cuts every selected
+    /// object in one command). A different selection places it again.
+    pub placed_for: Option<Vec<ObjectId>>,
     /// The section view (on by default): the part above the plane
     /// ghosted, the part below shaded, the cut drawn at the plane.
     pub section: bool,
@@ -314,6 +316,56 @@ fn active_closed(app: &MeshFixerApp) -> Option<bool> {
     app.current_analysis().map(|a| a.diagnostics.is_closed)
 }
 
+/// A quick, exact reject: true if `(point, normal)` (widened by the
+/// cut-gap slab, as `mesh.split_plane` cuts it) can't possibly cross the
+/// world box `(lo, hi)` at all, because every corner is strictly on one
+/// side of it. Cheap (8 corners, however big the mesh), so it runs every
+/// frame while the gizmo moves; it's a one-sided test (never a false
+/// "misses" — a plane that crosses the box may still miss the actual
+/// surface inside it, same as `mf_boolean::cut_half`'s own check, which is
+/// what actually runs at Apply and has the final say).
+fn plane_misses_world_box(point: DVec3, normal: DVec3, gap: f64, lo: DVec3, hi: DVec3) -> bool {
+    let Some(n) = normal.try_normalize() else {
+        return false;
+    };
+    let half = gap * 0.5;
+    let mut min_d = f64::MAX;
+    let mut max_d = f64::MIN;
+    for i in 0..8 {
+        let c = DVec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let d = n.dot(c - point);
+        min_d = min_d.min(d);
+        max_d = max_d.max(d);
+    }
+    // Both sides of the gap slab must have a corner for the plane to be
+    // able to split the box at all; `max_d < half` or `min_d > -half`
+    // alone means every corner is above (or below) the whole slab.
+    max_d < half || min_d > -half
+}
+
+/// Owner (2026-11-11): the plane's default used to be the world origin,
+/// so it silently missed (or grazed) an object placed away from it — the
+/// common case for an imported scan. True while the plane, as currently
+/// placed, can't cross any of `mesh.split_plane`'s targets at all: shown
+/// in the preview before Apply, not only as a refusal after it fails.
+fn split_plane_misses_selection(app: &MeshFixerApp) -> bool {
+    let selected = app.selected_objects();
+    if selected.is_empty() {
+        return false;
+    }
+    let point = app.split.point();
+    let normal = app.split.normal();
+    let gap = app.split.gap;
+    selected.iter().all(|&id| {
+        world_bounds(app, id)
+            .is_some_and(|(lo, hi)| plane_misses_world_box(point, normal, gap, lo, hi))
+    })
+}
+
 /// The refusal card: what went wrong in plain words, and the next action
 /// as a button where there is one. Returns true if it was shown.
 fn refusal_card(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
@@ -358,6 +410,36 @@ fn show_refusal(app: &mut MeshFixerApp, ui: &mut egui::Ui, code: &str, message: 
             app.refusal = None;
             app.open_rail_tool(tool);
         }
+    });
+    ui.add_space(theme::SPACE_S);
+}
+
+/// The live "the plane misses the model" warning, shown in the preview
+/// before Apply can ever refuse it (owner 2026-11-11): the same plain-
+/// language, warning-icon card as a refusal, but driven by
+/// [`split_plane_misses_selection`] every frame the plane moves, not by a
+/// run that already failed.
+fn plane_miss_warning(app: &MeshFixerApp, ui: &mut egui::Ui) {
+    if !split_plane_misses_selection(app) {
+        return;
+    }
+    let doc = app.session.document();
+    let name = app
+        .selected_objects()
+        .first()
+        .and_then(|&id| doc.object(id))
+        .map_or_else(|| t!("split.the_model"), |o| o.name.clone());
+    let message = t!("split.misses_warning", name = name);
+    widgets::card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(icons::WARNING)
+                    .font(icons::font(theme::ICON_SIZE))
+                    .color(theme::TEXT),
+            );
+            ui.label(RichText::new(t!("refusal.title")).color(theme::TEXT_STRONG));
+        });
+        widgets::body(ui, &message);
     });
     ui.add_space(theme::SPACE_S);
 }
@@ -424,16 +506,38 @@ fn vec3(v: DVec3) -> String {
 // Split.
 // ---------------------------------------------------------------------
 
-/// Place the plane through the active object's centre, horizontal (when
-/// Split opens on another object than last time, or `force`).
+/// Place the plane through the world bounding-box centre of every target
+/// `mesh.split_plane` would cut ([`MeshFixerApp::selected_objects`]:
+/// usually just the active object, but every object picked together when
+/// there's more than one), horizontal (when the selection differs from
+/// last time, or `force`).
+///
+/// Owner (2026-11-11): the plane used to default through the world
+/// origin, so an object placed away from it (the common case: an
+/// imported scan) was missed or grazed by the default cut — "Split
+/// looked broken". Centring it on the selection's own bounds instead
+/// means Apply with the defaults always crosses the model.
 fn place_plane(app: &mut MeshFixerApp, force: bool) {
-    let Some(id) = app.active else { return };
-    if !force && app.split.placed_for == Some(id) {
+    let selected = app.selected_objects();
+    if selected.is_empty() {
         return;
     }
-    if let Some((lo, hi)) = world_bounds(app, id) {
+    if !force && app.split.placed_for.as_deref() == Some(selected.as_slice()) {
+        return;
+    }
+    let mut bounds: Option<(DVec3, DVec3)> = None;
+    for &id in &selected {
+        let Some((lo, hi)) = world_bounds(app, id) else {
+            continue;
+        };
+        bounds = Some(match bounds {
+            Some((blo, bhi)) => (blo.min(lo), bhi.max(hi)),
+            None => (lo, hi),
+        });
+    }
+    if let Some((lo, hi)) = bounds {
         app.split.set((lo + hi) * 0.5, (0.0, 0.0));
-        app.split.placed_for = Some(id);
+        app.split.placed_for = Some(selected);
     }
 }
 
@@ -534,6 +638,11 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     } else {
         refusal_card(app, ui, "mesh.split_plane");
     }
+    // Before Apply can ever refuse it: the plane misses or grazes
+    // (owner 2026-11-11, "Also"). `plane_miss_warning` re-checks every
+    // frame the gizmo moves, so dragging the plane into the model clears
+    // it live, not only after a failed Apply.
+    plane_miss_warning(app, ui);
     section(ui, &t!("split.section.plane"));
     widgets::caption(ui, t!("split.plane_help"));
     ui.add_space(theme::SPACE_XS);

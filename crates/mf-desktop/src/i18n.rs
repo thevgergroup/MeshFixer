@@ -528,6 +528,10 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("split.keep.above", "Above"),
     ("split.keep.below", "Below"),
     ("split.keep.both", "Both"),
+    (
+        "split.misses_warning",
+        "The plane doesn't cross {name}; drag it into the model",
+    ),
     ("split.move", "Move"),
     (
         "split.plane_help",
@@ -553,6 +557,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("split.targets.one", "Cuts {n} selected object"),
     ("split.targets.other", "Cuts {n} selected objects"),
+    ("split.the_model", "the model"),
     ("split.tilt", "Tilt"),
     ("split.vertical_x", "Vertical X"),
     ("split.vertical_y", "Vertical Y"),

@@ -1119,3 +1119,66 @@ fn alignment_dowels_show_a_live_preview_and_apply_creates_dowel_objects() {
         "a dowel object is on the plate: {names:?}"
     );
 }
+
+/// Owner (2026-11-11): "why the owner saw Split 'broken' in the GUI" —
+/// the plane used to default through the world origin, so an object
+/// placed away from it (any imported scan, not just a contrived test
+/// case) was missed by the default cut. Opening Split on an object far
+/// from the origin and applying with the defaults must still split it,
+/// and the live "doesn't cross" warning must track the plane as it's
+/// dragged, not just appear once after a failed Apply.
+#[test]
+fn split_defaults_cross_an_object_far_from_the_origin() {
+    require_gpu!("split_defaults_cross_an_object_far_from_the_origin");
+    let far = [500.0, 0.0, 500.0];
+    let mut h = opened(WINDOW, vec![("scan", ball(), at(far))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "split");
+
+    // The default plane must already be centred on the object, not the
+    // origin: no miss warning up front.
+    assert!(
+        h.query_all_by_label("The plane doesn't cross scan; drag it into the model")
+            .next()
+            .is_none(),
+        "the default plane must already cross the object, far from the origin as it is"
+    );
+    let n = h.state().split.point();
+    assert!(
+        (n - glam::DVec3::from(far)).length() < 1e-6,
+        "the plane defaults through the object's own centre: {n:?}"
+    );
+    still(&mut h, "split-far-default");
+
+    // Move the plane well clear of the object: the warning must appear
+    // live, before any Apply is clicked.
+    h.state_mut().split.plane[11] += 1000.0;
+    settle(&mut h);
+    h.get_by_label("The plane doesn't cross scan; drag it into the model");
+    still(&mut h, "split-far-miss-warning");
+
+    // Drag it back into the model (off the seam, as the other Split
+    // tests do): the warning clears live.
+    h.state_mut().split.plane[11] = far[2] + 1.3;
+    settle(&mut h);
+    assert!(
+        h.query_all_by_label("The plane doesn't cross scan; drag it into the model")
+            .next()
+            .is_none(),
+        "back inside the model, the warning must clear"
+    );
+
+    // And applying the (re-centred) default actually splits it.
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut in two").click();
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert!(names.contains(&"scan (top)".to_owned()), "{names:?}");
+    assert!(names.contains(&"scan (bottom)".to_owned()), "{names:?}");
+    still(&mut h, "split-far-after");
+}
