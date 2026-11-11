@@ -1463,6 +1463,17 @@ impl MeshFixerApp {
             .is_some_and(|(m, _)| Mesh::ptr_eq(m, mesh))
     }
 
+    /// Object `id`'s picking BVH, if it's built for its current revision
+    /// (Sculpt reuses it for dab targeting and [`mf_operations::sculpt::SculptIndex`],
+    /// rather than building its own).
+    pub fn picking_bvh(&self, id: ObjectId) -> Option<Arc<Bvh>> {
+        let mesh = self.session.document().object(id)?.mesh()?;
+        self.bvhs
+            .get(&id)
+            .filter(|(m, _)| Mesh::ptr_eq(m, mesh))
+            .map(|(_, b)| b.clone())
+    }
+
     /// Ask for the BVH of every object revision that lacks one (the active
     /// object first), and let go of those for revisions no longer current.
     /// O(objects) on the UI thread; the builds run on the background pool.

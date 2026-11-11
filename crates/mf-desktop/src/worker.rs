@@ -179,6 +179,24 @@ impl RenderMesh {
         }
         render
     }
+
+    /// A live revision shown mid-stroke (Task 19: a sculpt dab), on the UI
+    /// thread: `gpu_mesh` is `vertices`' GPU side already synced (only the
+    /// dab's touched chunks uploaded, MF-RENDER-003, MF-SCULPT-004).
+    /// Unlike [`RenderMesh::build`], there is no priming draw (one per dab
+    /// would cost a GPU round trip for no benefit: this revision is shown
+    /// for a frame, not cached), and no face-state request is kept (a
+    /// stroke in progress draws no overlay).
+    pub fn from_live(mesh: &Mesh, vertices: &mf_render::MeshVertices, gpu_mesh: GpuMesh) -> RenderMesh {
+        RenderMesh {
+            mesh: mesh.clone(),
+            bounds: vertices.bounds,
+            origin: vertices.origin,
+            gpu: gpu_mesh,
+            requested_states: Mutex::new(None),
+            written_states: Mutex::new(0),
+        }
+    }
 }
 
 impl RenderMesh {
