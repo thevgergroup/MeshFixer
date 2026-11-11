@@ -1011,3 +1011,111 @@ fn a_hole_overlapping_a_solid_shows_the_intersection_outline_and_updates_after_a
     settle(&mut h);
     still(&mut h, "intersection-outline-after-move");
 }
+
+// ---------------------------------------------------------------------
+// Alignment (Phase 1 Task 13, D12): holes and dowels at the Split cut.
+// ---------------------------------------------------------------------
+
+/// Scrolls the tool dock (the wheel over it) until the node labelled
+/// `label` is inside the window, then clicks it. The Alignment section
+/// makes the Split panel taller than the test window, so the Apply
+/// button can start out below the visible area (its rect still reports
+/// a position, but a click there lands on nothing: fix round 1, N/A).
+fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
+    // The tool dock (left rail + its panel, `tool_panels::DOCK_WIDTH`):
+    // roughly x 64..344.
+    let over = egui::pos2(200.0, WINDOW.1 * 0.5);
+    h.event(egui::Event::PointerMoved(over));
+    h.step();
+    let mut tries = 0;
+    loop {
+        let rect = h.get_by_label(label).rect();
+        if rect.bottom() <= WINDOW.1 - 4.0 {
+            break;
+        }
+        tries += 1;
+        assert!(tries < 400, "scrolled to {label:?}");
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, -1.0),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    h.get_by_label(label).click();
+}
+
+/// Split's Alignment section: switching to Dowels shows the shape,
+/// diameter and depth controls, the dowel size computed live, and a
+/// preview of the hole placements; after Apply the dowels are their own
+/// objects on the plate.
+#[test]
+fn alignment_dowels_show_a_live_preview_and_apply_creates_dowel_objects() {
+    require_gpu!("alignment_dowels_show_a_live_preview_and_apply_creates_dowel_objects");
+    // A bigger sphere than the other Split tests' 20 mm ball: the
+    // default 5 mm, 6+6 mm deep holes need more room around them than a
+    // 20 mm ball has (mf-operations/tests/pegs.rs's dowel tests use the
+    // same 60 mm sphere).
+    let sphere = mf_fixtures::scaled(&mf_fixtures::uv_sphere(48, 96), 30.0);
+    let mut h = opened(WINDOW, vec![("ball", sphere, at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "split");
+    // Off the ball's seam of vertices, as the other Split tests do
+    // (horizontal is the default orientation: z is the plane's offset).
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    assert_eq!(h.state().alignment.pegs, "none", "pegs are off by default");
+    still(&mut h, "alignment-none");
+
+    h.get_by_label("Dowels").click();
+    settle(&mut h);
+    assert_eq!(h.state().alignment.pegs, "dowels");
+    // The shape, diameter and depth controls are now shown.
+    h.get_by_label("Round");
+    h.get_by_label("Hole diameter (mm)");
+    // D12: default holes 5 mm, depths 6+6 mm, allowance 0.4 mm -> an
+    // 11.6 mm long dowel; clearance 0.2 mm -> a 4.8 mm diameter.
+    assert_eq!(h.state().alignment.hole_diameter, 5.0);
+    assert_eq!(h.state().alignment.hole_depth_above, 6.0);
+    assert_eq!(h.state().alignment.hole_depth_below, 6.0);
+    let (d, len) = mf_operations::dowel_size(5.0, 6.0, 6.0, 0.2, 0.4);
+    assert!((d - 4.8).abs() < 1e-9, "{d}");
+    assert!((len - 11.6).abs() < 1e-9, "{len}");
+    // The panel shows this exact size, computed live from the same
+    // formula (`alignment_section`'s "Dowel {diameter} x {length} {unit}").
+    settle(&mut h);
+    h.get_by_label("Dowel 4.80 × 11.6 mm");
+    wait_until(&mut h, "the hole preview", |a| {
+        a.peg_preview()
+            .is_some_and(|p| p.refusal.is_none() && !p.holes.is_empty())
+    });
+    settle(&mut h);
+    still(&mut h, "alignment-dowels-preview");
+
+    let history = h.state().session.history_labels().len();
+    let before = h.state().session.document().objects().len();
+    scroll_and_click(&mut h, "Cut in two");
+    wait_until(&mut h, "the split", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    still(&mut h, "alignment-dowels-after");
+    // Two parts and at least one dowel: more objects than just the split.
+    let after = h.state().session.document().objects().len();
+    assert!(
+        after >= before + 2,
+        "expected the split parts and at least one dowel object: {before} -> {after}"
+    );
+    let names = objects(&h);
+    assert!(names.contains(&"ball (top)".to_owned()), "{names:?}");
+    assert!(names.contains(&"ball (bottom)".to_owned()), "{names:?}");
+    assert!(
+        names.iter().any(|n| n.contains("dowel")),
+        "a dowel object is on the plate: {names:?}"
+    );
+}

@@ -117,6 +117,59 @@ pub struct CombineState {
     pub keep_holes: bool,
 }
 
+/// Split's Alignment section (Phase 1 Task 13, D12): holes and dowels at
+/// the cut, from the fit profile's defaults.
+#[derive(Debug, Clone)]
+pub struct AlignmentState {
+    /// "none", "dowels", "attached" or "dovetail" (the spec's words).
+    pub pegs: String,
+    pub peg_shape: mf_operations::PegShape,
+    pub hole_diameter: f64,
+    pub hole_depth_above: f64,
+    pub hole_depth_below: f64,
+    /// 0: automatic (the operation places as many as fit).
+    pub peg_count: u32,
+    pub peg_clearance: f64,
+    pub length_allowance: f64,
+    pub min_wall: f64,
+}
+
+impl Default for AlignmentState {
+    fn default() -> AlignmentState {
+        AlignmentState {
+            pegs: "none".into(),
+            peg_shape: mf_operations::PegShape::Round,
+            hole_diameter: 5.0,
+            hole_depth_above: 6.0,
+            hole_depth_below: 6.0,
+            peg_count: 0,
+            peg_clearance: 0.2,
+            length_allowance: 0.4,
+            min_wall: 1.5,
+        }
+    }
+}
+
+/// What the Alignment preview was last asked for: everything
+/// [`crate::worker::PegPreviewRequest`] carries but the `Mesh` (no
+/// `PartialEq`, MF-DOC-001), so a frame with nothing new to ask doesn't
+/// resubmit it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PegPreviewKey {
+    pub object: ObjectId,
+    pub transform: [f64; 12],
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+    pub shape: mf_operations::PegShape,
+    pub diameter: f64,
+    pub depth_above: f64,
+    pub depth_below: f64,
+    pub clearance: f64,
+    pub allowance: f64,
+    pub count: u32,
+    pub min_wall: f64,
+}
+
 /// Make solid's settings: the cell size (mm; `None` until the object's
 /// default is known: 1/256 of its diagonal, as the operation chooses),
 /// the offset, and whether to keep the surface where the grid puts it.
@@ -570,6 +623,7 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .max_decimals(2),
     )
     .on_hover_text(t!("split.gap_help"));
+    alignment_section(app, ui, units);
     widgets::caption(ui, t!("split.result"));
     let n = app.selected_objects().len();
     if n > 1 {
@@ -585,12 +639,13 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .clicked()
     {
         let s = &app.split;
-        let params = BTreeMap::from([
+        let mut params = BTreeMap::from([
             ("plane_point".to_owned(), vec3(s.point())),
             ("plane_normal".to_owned(), vec3(s.normal())),
             ("keep".to_owned(), s.keep.clone()),
             ("cut_gap".to_owned(), s.gap.to_string()),
         ]);
+        params.extend(alignment_params(&app.alignment));
         // Every selected object, in one command: the first is the target,
         // the rest more targets.
         let selected = app.selected_objects();
@@ -609,6 +664,165 @@ fn split_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             params,
             more,
         );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Alignment (Phase 1 Task 13, D12): holes and dowels at the Split cut.
+// ---------------------------------------------------------------------
+
+fn peg_shape_word(s: mf_operations::PegShape) -> &'static str {
+    match s {
+        mf_operations::PegShape::Round => "round",
+        mf_operations::PegShape::Square => "square",
+        mf_operations::PegShape::Keyed => "keyed",
+    }
+}
+
+fn peg_shape_label(s: mf_operations::PegShape) -> String {
+    match s {
+        mf_operations::PegShape::Round => t!("alignment.shape.round"),
+        mf_operations::PegShape::Square => t!("alignment.shape.square"),
+        mf_operations::PegShape::Keyed => t!("alignment.shape.keyed"),
+    }
+}
+
+/// The Alignment settings as `mesh.split_plane`'s raw params.
+fn alignment_params(a: &AlignmentState) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("pegs".to_owned(), a.pegs.clone()),
+        (
+            "peg_shape".to_owned(),
+            peg_shape_word(a.peg_shape).to_owned(),
+        ),
+        ("hole_diameter".to_owned(), a.hole_diameter.to_string()),
+        (
+            "hole_depth_above".to_owned(),
+            a.hole_depth_above.to_string(),
+        ),
+        (
+            "hole_depth_below".to_owned(),
+            a.hole_depth_below.to_string(),
+        ),
+        ("peg_count".to_owned(), a.peg_count.to_string()),
+        ("peg_clearance".to_owned(), a.peg_clearance.to_string()),
+        (
+            "length_allowance".to_owned(),
+            a.length_allowance.to_string(),
+        ),
+        ("min_wall".to_owned(), a.min_wall.to_string()),
+    ])
+}
+
+/// The Alignment section of the Split panel: pegs mode, shape, sizes, the
+/// dowel size computed live, and the hole-placement refusal (if any) in
+/// the same words `mesh.split_plane` would give.
+fn alignment_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
+    section(ui, &t!("alignment.section.pegs"));
+    let modes = [
+        ("none", t!("alignment.pegs.none")),
+        ("dowels", t!("alignment.pegs.dowels")),
+        ("attached", t!("alignment.pegs.attached")),
+        ("dovetail", t!("alignment.pegs.dovetail")),
+    ];
+    let options: Vec<(&str, &str, bool)> = modes
+        .iter()
+        .map(|(_, l)| (l.as_str(), l.as_str(), true))
+        .collect();
+    let current = modes
+        .iter()
+        .position(|(k, _)| *k == app.alignment.pegs)
+        .unwrap_or(0);
+    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
+        app.alignment.pegs = modes[i].0.into();
+    }
+    if app.alignment.pegs == "none" {
+        return;
+    }
+    section(ui, &t!("alignment.section.shape"));
+    let shapes = [
+        mf_operations::PegShape::Round,
+        mf_operations::PegShape::Square,
+        mf_operations::PegShape::Keyed,
+    ];
+    let labels: Vec<String> = shapes.iter().map(|&s| peg_shape_label(s)).collect();
+    let options: Vec<(&str, &str, bool)> = labels
+        .iter()
+        .map(|l| (l.as_str(), l.as_str(), true))
+        .collect();
+    let current = shapes
+        .iter()
+        .position(|&s| s == app.alignment.peg_shape)
+        .unwrap_or(0);
+    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
+        app.alignment.peg_shape = shapes[i];
+    }
+    section(ui, &t!("alignment.section.diameter", unit = units));
+    ui.add(
+        egui::Slider::new(&mut app.alignment.hole_diameter, 0.5..=50.0)
+            .suffix(format!(" {units}"))
+            .max_decimals(2),
+    );
+    section(ui, &t!("alignment.section.depth", unit = units));
+    ui.horizontal(|ui| {
+        ui.vertical(|ui| {
+            widgets::caption(ui, t!("alignment.depth.above"));
+            ui.add(
+                egui::DragValue::new(&mut app.alignment.hole_depth_above)
+                    .speed(0.1)
+                    .range(0.0..=100.0)
+                    .suffix(format!(" {units}"))
+                    .max_decimals(2),
+            );
+        });
+        ui.vertical(|ui| {
+            widgets::caption(ui, t!("alignment.depth.below"));
+            ui.add(
+                egui::DragValue::new(&mut app.alignment.hole_depth_below)
+                    .speed(0.1)
+                    .range(0.0..=100.0)
+                    .suffix(format!(" {units}"))
+                    .max_decimals(2),
+            );
+        });
+    });
+    if app.alignment.pegs == "dowels" || app.alignment.pegs == "attached" {
+        let (d, len) = mf_operations::dowel_size(
+            app.alignment.hole_diameter,
+            app.alignment.hole_depth_above,
+            app.alignment.hole_depth_below,
+            app.alignment.peg_clearance,
+            app.alignment.length_allowance,
+        );
+        if len > 0.0 {
+            widgets::caption(
+                ui,
+                t!(
+                    "alignment.dowel_size",
+                    diameter = crate::defects::measure(d),
+                    length = crate::defects::measure(len),
+                    unit = units
+                ),
+            );
+        } else {
+            widgets::caption(ui, t!("alignment.dowel_too_short"));
+        }
+    }
+    if let Some(preview) = app.peg_preview() {
+        if let Some(refusal) = &preview.refusal {
+            widgets::caption(ui, refusal.clone());
+        } else {
+            widgets::caption(
+                ui,
+                crate::tp!("alignment.holes_placed", preview.holes.len()),
+            );
+            if preview.skipped_regions > 0 {
+                widgets::caption(
+                    ui,
+                    crate::tp!("alignment.regions_skipped", preview.skipped_regions),
+                );
+            }
+        }
     }
 }
 
@@ -897,6 +1111,37 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
                 pts,
                 egui::Stroke::new(1.0, theme::HOVER.gamma_multiply(0.55)),
             ));
+        }
+    }
+    // Alignment's hole placements (Task 13), a circle per hole at the
+    // size the operation would cut, on the cut plane.
+    if app.active_tool == SPLIT
+        && app.alignment.pegs != "none"
+        && let Some(preview) = app.peg_preview()
+    {
+        let radius = preview.dowel.0.max(0.0) / 2.0 + app.alignment.peg_clearance / 2.0;
+        for hole in &preview.holes {
+            let c = DVec3::from(hole.center);
+            let axis = DVec3::from(hole.axis);
+            let normal = split_preview(app).map_or(DVec3::Z, |(_, n)| n);
+            let u = if axis.length() > 1e-9 {
+                axis.normalize()
+            } else {
+                normal.any_orthonormal_vector()
+            };
+            let v = normal.cross(u);
+            let pts: Vec<egui::Pos2> = (0..32)
+                .filter_map(|i| {
+                    let a = std::f64::consts::TAU * i as f64 / 32.0;
+                    at(c + (u * a.cos() + v * a.sin()) * radius.max(0.1))
+                })
+                .collect();
+            if pts.len() == 32 {
+                painter.add(egui::Shape::closed_line(
+                    pts,
+                    egui::Stroke::new(1.5, theme::ACCENT),
+                ));
+            }
         }
     }
 }

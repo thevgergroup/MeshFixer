@@ -25,6 +25,7 @@ mf-io.workspace = true
 mf-spec.workspace = true
 mf-command.workspace = true
 mf-operations.workspace = true
+mf-boolean.workspace = true
 mf-render.workspace = true
 eframe.workspace = true
 

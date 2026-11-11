@@ -122,6 +122,34 @@ macro_rules! tp {
 /// The English catalogue, sorted by id (a unit test checks the order, so
 /// lookups can binary-search).
 static CATALOGUE: &[(&str, &str)] = &[
+    ("alignment.depth.above", "Above"),
+    ("alignment.depth.below", "Below"),
+    ("alignment.dowel_size", "Dowel {diameter} × {length} {unit}"),
+    (
+        "alignment.dowel_too_short",
+        "These depths and allowance leave no dowel length; deepen the holes or shrink the allowance",
+    ),
+    ("alignment.holes_placed.one", "{n} hole placed"),
+    ("alignment.holes_placed.other", "{n} holes placed"),
+    ("alignment.pegs.attached", "Pegs"),
+    ("alignment.pegs.dovetail", "Dovetail"),
+    ("alignment.pegs.dowels", "Dowels"),
+    ("alignment.pegs.none", "None"),
+    (
+        "alignment.regions_skipped.one",
+        "{n} sliver region left without a hole",
+    ),
+    (
+        "alignment.regions_skipped.other",
+        "{n} sliver regions left without a hole",
+    ),
+    ("alignment.section.depth", "Hole depth ({unit})"),
+    ("alignment.section.diameter", "Hole diameter ({unit})"),
+    ("alignment.section.pegs", "Alignment"),
+    ("alignment.section.shape", "Shape"),
+    ("alignment.shape.keyed", "Keyed"),
+    ("alignment.shape.round", "Round"),
+    ("alignment.shape.square", "Square"),
     (
         "browser.empty",
         "Open a mesh to see its objects and defects here",

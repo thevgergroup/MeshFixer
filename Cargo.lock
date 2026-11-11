@@ -2768,6 +2768,7 @@ dependencies = [
  "eframe",
  "egui_kittest",
  "glam",
+ "mf-boolean",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",

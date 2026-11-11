@@ -326,6 +326,16 @@ pub struct MeshFixerApp {
     /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
+    /// Split's Alignment section (Task 13): pegs mode, shape, sizes.
+    pub alignment: crate::shape_tools::AlignmentState,
+    /// The Alignment panel's hole preview for the plane and settings last
+    /// asked for ([`worker::peg_preview`]); `None` before the first answer,
+    /// or once pegs are off.
+    peg_preview: Option<Arc<worker::PegPreview>>,
+    peg_preview_worker: LatestWorker<worker::PegPreviewRequest>,
+    /// What was last asked for (everything a `PegPreviewRequest` carries
+    /// but the `Mesh`, which has no `PartialEq`: MF-DOC-001).
+    peg_preview_asked: Option<crate::shape_tools::PegPreviewKey>,
     pub combine: crate::shape_tools::CombineState,
     /// Objects selected together (Shift-click in the view or the
     /// Browser), in the order they were picked; the active object is one
@@ -608,6 +618,14 @@ impl MeshFixerApp {
                 },
             )
         };
+        let peg_preview_worker = {
+            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
+            LatestWorker::new(workers.background(), worker::peg_preview, move |msg| {
+                // allow-swallow: the receiver only disappears while the app is closing
+                let _ = tx.send(msg);
+                ctx.request_repaint();
+            })
+        };
         let mut app = MeshFixerApp {
             session: Session::new(),
             active: None,
@@ -678,6 +696,10 @@ impl MeshFixerApp {
             first_use_hint: true,
             shading: mf_render::Shading::default(),
             split: Default::default(),
+            alignment: Default::default(),
+            peg_preview: None,
+            peg_preview_worker,
+            peg_preview_asked: None,
             combine: Default::default(),
             picked: Vec::new(),
             solid: Default::default(),
@@ -2421,6 +2443,19 @@ impl MeshFixerApp {
                     self.intersections = Some((key, curves));
                 }
             }
+            Message::PegPreview(preview) => {
+                // The latest request only (a slower, older one finishing
+                // after a newer must not overwrite it): compared by the
+                // object and settings asked for, since `PegPreview` holds
+                // a `Mesh` with no `PartialEq` (MF-DOC-001).
+                if self
+                    .peg_preview_asked
+                    .as_ref()
+                    .is_some_and(|k| k.object == preview.object)
+                {
+                    self.peg_preview = Some(Arc::new(preview));
+                }
+            }
             Message::Analyzed { mesh, analysis } => {
                 // The object's numbering grows with each analysis.
                 let object = self
@@ -4047,6 +4082,79 @@ impl MeshFixerApp {
             .unwrap_or_default()
     }
 
+    /// The Alignment panel's hole preview, kept matching the Split plane
+    /// and peg settings while Split is open with pegs on: cuts the active
+    /// object on a worker ([`worker::peg_preview`]) and places holes,
+    /// same as Apply will (minus creating anything). Cleared once pegs
+    /// are off, or Split closes.
+    fn refresh_peg_preview(&mut self) {
+        let open = self.active_tool == crate::shape_tools::SPLIT;
+        let Some(id) = self.active.filter(|_| open) else {
+            self.peg_preview = None;
+            self.peg_preview_asked = None;
+            return;
+        };
+        let a = &self.alignment;
+        if a.pegs == "none" {
+            self.peg_preview = None;
+            self.peg_preview_asked = None;
+            return;
+        }
+        let Some(mesh) = self.active_mesh().cloned() else {
+            return;
+        };
+        let transform = self
+            .session
+            .document()
+            .object(id)
+            .map(|o| o.transform)
+            .unwrap_or_default();
+        let key = crate::shape_tools::PegPreviewKey {
+            object: id,
+            transform,
+            plane_point: self.split.point().to_array(),
+            plane_normal: self.split.normal().to_array(),
+            shape: a.peg_shape,
+            diameter: a.hole_diameter,
+            depth_above: a.hole_depth_above,
+            depth_below: a.hole_depth_below,
+            clearance: a.peg_clearance,
+            allowance: a.length_allowance,
+            count: a.peg_count,
+            min_wall: a.min_wall,
+        };
+        if self.peg_preview_asked.as_ref() == Some(&key) {
+            return;
+        }
+        self.peg_preview_asked = Some(key.clone());
+        self.peg_preview_worker.submit(worker::PegPreviewRequest {
+            object: id,
+            mesh,
+            transform: key.transform,
+            plane_point: key.plane_point,
+            plane_normal: key.plane_normal,
+            shape: key.shape,
+            diameter: key.diameter,
+            depth_above: key.depth_above,
+            depth_below: key.depth_below,
+            clearance: key.clearance,
+            allowance: key.allowance,
+            count: key.count,
+            min_wall: key.min_wall,
+        });
+    }
+
+    /// The Alignment panel's current hole preview, for the active
+    /// object's current revision only.
+    pub fn peg_preview(&self) -> Option<&worker::PegPreview> {
+        let preview = self.peg_preview.as_deref()?;
+        (Some(preview.object) == self.active
+            && self
+                .active_mesh()
+                .is_some_and(|m| Mesh::ptr_eq(m, &preview.mesh)))
+        .then_some(preview)
+    }
+
     /// A box drawn in the view (Select mode, or B): select the visible
     /// listed holes whose centre is inside it (on a worker).
     fn box_select(&mut self, b: crate::viewport::BoxSelect) {
@@ -4729,6 +4837,7 @@ impl MeshFixerApp {
         self.refresh_states();
         self.refresh_markers();
         self.refresh_intersections();
+        self.refresh_peg_preview();
 
         let objects = self.object_views();
         let empty = crate::panels::empty_state();

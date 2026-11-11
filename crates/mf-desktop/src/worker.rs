@@ -18,9 +18,11 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use glam::DMat4;
+use mf_boolean::{Plane, plane_cut};
 use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
+use mf_operations::{PegShape, dowel_size, place_holes};
 use mf_render::{
     Bvh, FaceStates, GpuLines, GpuMesh, UploadStats, edge_line_vertices, loop_line_vertices,
 };
@@ -187,7 +189,11 @@ impl RenderMesh {
     /// would cost a GPU round trip for no benefit: this revision is shown
     /// for a frame, not cached), and no face-state request is kept (a
     /// stroke in progress draws no overlay).
-    pub fn from_live(mesh: &Mesh, vertices: &mf_render::MeshVertices, gpu_mesh: GpuMesh) -> RenderMesh {
+    pub fn from_live(
+        mesh: &Mesh,
+        vertices: &mf_render::MeshVertices,
+        gpu_mesh: GpuMesh,
+    ) -> RenderMesh {
         RenderMesh {
             mesh: mesh.clone(),
             bounds: vertices.bounds,
@@ -511,6 +517,9 @@ pub enum Message {
     /// Every overlapping Solid/Hole pair's crossing curve, for the latest
     /// request ([`IntersectionCurves`]).
     IntersectionsFound(IntersectionCurves),
+    /// The Alignment panel's hole preview for the latest plane and peg
+    /// settings ([`peg_preview`]).
+    PegPreview(PegPreview),
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -1092,6 +1101,171 @@ pub fn remeasure(request: RemeasureRequest, ctx: &RunContext) -> Result<Message,
         defects: Arc::new(defects),
         hole_view,
     })
+}
+
+/// Split's Alignment panel: the cut plane, which peg shape and sizes, and
+/// how holes should be placed. World space (the plane; the result's
+/// placements are converted back to world so the panel can draw them
+/// without knowing the object's transform again).
+#[derive(Debug, Clone)]
+pub struct PegPreviewRequest {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub transform: [f64; 12],
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+    pub shape: PegShape,
+    pub diameter: f64,
+    pub depth_above: f64,
+    pub depth_below: f64,
+    pub clearance: f64,
+    pub allowance: f64,
+    pub count: u32,
+    pub min_wall: f64,
+}
+
+/// One hole's placement, in world space, for the Alignment panel's
+/// preview overlay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PegPreviewHole {
+    pub center: [f64; 3],
+    pub axis: [f64; 3],
+    pub shape: PegShape,
+}
+
+/// What the Alignment panel shows for the current plane and peg settings:
+/// every hole [`place_holes`] would put ("Cut in two" cuts for real), the
+/// dowel's size, and a refusal in the same words the command would give.
+#[derive(Debug, Clone)]
+pub struct PegPreview {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub transform: [f64; 12],
+    pub holes: Vec<PegPreviewHole>,
+    pub dowel: (f64, f64),
+    pub skipped_regions: usize,
+    pub refusal: Option<String>,
+}
+
+/// Cuts `request.mesh` through its plane (same engine `mesh.split_plane`
+/// uses) and places holes on the cut's section regions: what the
+/// Alignment panel shows while the Split tool is open, before Apply runs
+/// the real command. O(n) like the cut itself, so it runs on a worker
+/// ([`crate::analysis::LatestWorker`]), debounced to only the plane and
+/// peg settings that actually changed.
+pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Message, Cancelled> {
+    let world_to_object = |p: [f64; 3]| {
+        let m = mf_render::model_matrix(&request.transform).inverse();
+        m.transform_point3(glam::DVec3::from(p)).to_array()
+    };
+    let object_to_world = |p: [f64; 3]| {
+        let m = mf_render::model_matrix(&request.transform);
+        m.transform_point3(glam::DVec3::from(p)).to_array()
+    };
+    let direction_to_world = |d: [f64; 2], frame_u: glam::DVec3, frame_v: glam::DVec3| {
+        let m = mf_render::model_matrix(&request.transform);
+        let local = frame_u * d[0] + frame_v * d[1];
+        m.transform_vector3(local).normalize_or_zero().to_array()
+    };
+    let point_obj = world_to_object(request.plane_point);
+    let normal_obj = {
+        let m = mf_render::model_matrix(&request.transform).inverse();
+        m.transform_vector3(glam::DVec3::from(request.plane_normal))
+            .normalize_or_zero()
+            .to_array()
+    };
+    let plane = Plane {
+        point: point_obj,
+        normal: normal_obj,
+    };
+    let base = || {
+        Message::PegPreview(PegPreview {
+            object: request.object,
+            mesh: request.mesh.clone(),
+            transform: request.transform,
+            holes: Vec::new(),
+            dowel: (0.0, 0.0),
+            skipped_regions: 0,
+            refusal: None,
+        })
+    };
+    ctx.checkpoint()?;
+    let cut = match plane_cut(&request.mesh, plane, ctx) {
+        Ok(cut) => cut,
+        Err(mf_boolean::CutError::Cancelled) => return Err(Cancelled),
+        Err(e) => {
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.refusal = Some(e.to_string());
+            return Ok(Message::PegPreview(preview));
+        }
+    };
+    let dowel = dowel_size(
+        request.diameter,
+        request.depth_above,
+        request.depth_below,
+        request.clearance,
+        request.allowance,
+    );
+    ctx.checkpoint()?;
+    match place_holes(
+        &cut.section_regions,
+        request.shape,
+        request.diameter,
+        request.count,
+        request.min_wall,
+    ) {
+        Ok((placements, skipped)) => {
+            let holes = placements
+                .iter()
+                .map(|h| {
+                    let region = &cut.section_regions[h.region];
+                    let center3 = [
+                        region.frame.origin[0]
+                            + h.center[0] * region.frame.u[0]
+                            + h.center[1] * region.frame.v[0],
+                        region.frame.origin[1]
+                            + h.center[0] * region.frame.u[1]
+                            + h.center[1] * region.frame.v[1],
+                        region.frame.origin[2]
+                            + h.center[0] * region.frame.u[2]
+                            + h.center[1] * region.frame.v[2],
+                    ];
+                    PegPreviewHole {
+                        center: object_to_world(center3),
+                        axis: direction_to_world(
+                            h.axis,
+                            glam::DVec3::from(region.frame.u),
+                            glam::DVec3::from(region.frame.v),
+                        ),
+                        shape: h.shape,
+                    }
+                })
+                .collect();
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.holes = holes;
+            preview.dowel = dowel;
+            preview.skipped_regions = skipped.len();
+            Ok(Message::PegPreview(preview))
+        }
+        Err(mf_operations::PegError::DoesNotFit {
+            region,
+            widest_fit_mm,
+        }) => {
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.dowel = dowel;
+            preview.refusal = Some(format!(
+                "Section region {region} is too thin for a {:.2} mm hole: the widest that fits is {widest_fit_mm:.2} mm.",
+                request.diameter
+            ));
+            Ok(Message::PegPreview(preview))
+        }
+    }
 }
 
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).
