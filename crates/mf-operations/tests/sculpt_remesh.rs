@@ -200,7 +200,7 @@ fn stroke_with_detail_refines_under_the_brush() {
             .unwrap()
             .0
     };
-    let mut s = StrokeState::new(&sphere, &index, params);
+    let mut s = StrokeState::new(&sphere, index, params);
     for y in [-0.2, -0.1, 0.0] {
         let dab = DabSample {
             face: near([1.0, y, 0.0]),

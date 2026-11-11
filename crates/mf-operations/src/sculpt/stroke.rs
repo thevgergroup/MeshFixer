@@ -83,10 +83,14 @@ fn mirror_vec(d: V3, mask: u8) -> V3 {
 }
 
 /// One stroke in progress. See the module docs.
-pub struct StrokeState<'a> {
+pub struct StrokeState {
     /// The stroke's input revision.
     base: Mesh,
-    index: &'a SculptIndex,
+    /// Cheap to hold by value: just an `Arc` clone of the revision's BVH
+    /// (`SculptIndex::from_bvh`), so a stroke can own it for as long as it
+    /// runs (a live UI-thread preview included) with no borrow to thread
+    /// through.
+    index: SculptIndex,
     params: BrushParams,
     edit: MeshEdit,
     /// An upper bound on how far any vertex has moved in this stroke, so
@@ -114,9 +118,9 @@ struct Local {
     incident: HashMap<u32, Vec<usize>>,
 }
 
-impl<'a> StrokeState<'a> {
+impl StrokeState {
     /// A stroke on `base`, whose faces `index` holds.
-    pub fn new(base: &Mesh, index: &'a SculptIndex, params: BrushParams) -> StrokeState<'a> {
+    pub fn new(base: &Mesh, index: SculptIndex, params: BrushParams) -> StrokeState {
         let limit = params
             .limit_to
             .as_ref()

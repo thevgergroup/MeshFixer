@@ -110,7 +110,7 @@ pub fn run_stroke(
 ) -> Result<(Mesh, mf_geometry::Provenance), OpError> {
     ctx.progress.report(INDEXING, 0.0);
     let index = SculptIndex::build(mesh, ctx)?;
-    let mut stroke = StrokeState::new(mesh, &index, brush);
+    let mut stroke = StrokeState::new(mesh, index, brush);
     for s in samples {
         stroke.check_sample(s)?;
     }

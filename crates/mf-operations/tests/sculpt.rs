@@ -84,7 +84,7 @@ fn path() -> Vec<[f64; 3]> {
 
 fn stroke(mesh: &Mesh, p: BrushParams, samples: &[DabSample]) -> (Mesh, Vec<[f64; 3]>) {
     let index = SculptIndex::build(mesh, &RunContext::none()).unwrap();
-    let mut s = StrokeState::new(mesh, &index, p);
+    let mut s = StrokeState::new(mesh, index, p);
     for d in samples {
         s.apply(d, &RunContext::none()).unwrap();
     }
@@ -232,7 +232,7 @@ fn live_stroke_equals_replayed_stroke_hash() {
     let mesh = symmetric_sphere();
     let samples = dabs(&mesh, &path());
     let index = SculptIndex::build(&mesh, &RunContext::none()).unwrap();
-    let mut live = StrokeState::new(&mesh, &index, params(BrushKind::Inflate));
+    let mut live = StrokeState::new(&mesh, index, params(BrushKind::Inflate));
     for d in &samples {
         let delta = live.apply(d, &RunContext::none()).unwrap();
         assert!(!delta.face_chunks.is_empty());
@@ -323,7 +323,7 @@ fn samples_remap_across_an_upstream_fill() {
     e.remove_face(samples[0].face).unwrap();
     let gone = e.finish().unwrap().0;
     let index = SculptIndex::build(&gone, &RunContext::none()).unwrap();
-    let s = StrokeState::new(&gone, &index, params(BrushKind::Inflate));
+    let s = StrokeState::new(&gone, index, params(BrushKind::Inflate));
     match s.check_sample(&samples[0]) {
         Err(mf_operations::OpError::Failed { code, .. }) => assert_eq!(code, "bad_sample"),
         other => panic!("{other:?}"),
