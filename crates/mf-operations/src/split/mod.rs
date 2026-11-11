@@ -26,8 +26,10 @@
 //!   pegs onto the top part and subtracts the holes from the bottom one.
 //!   `dovetail` is Task 14 and is refused by name for now.
 
+use glam::DMat4;
 use mf_boolean::{CutError, HalfCut, Plane, Side};
-use mf_geometry::{Mesh, Provenance, Sources};
+use mf_geometry::{Bvh, Mesh, Provenance, Sources};
+use mf_parts::{Compensation, FitClass, FitExpectation, MachineProfile, MatingSurfaces, check_fit};
 use mf_spec::Params;
 
 use crate::affine::{apply, apply_linear, inverse};
@@ -352,7 +354,16 @@ fn alignment(
     let depth_above = params.get_float("hole_depth_above")?;
     let depth_below = params.get_float("hole_depth_below")?;
     let count = params.get_int("peg_count")?.max(0) as u32;
+    // D20 migration: `peg_clearance` is what sizes the hole and dowel
+    // (unchanged, so an old log that only recorded `peg_clearance`
+    // replays identically). `fit_clearance` and `machine_tolerance` are
+    // the new, separately recorded breakdown (Fit class clearance plus
+    // Machine profile hole-undersize compensation); a frontend on the
+    // new path fills `peg_clearance` from their sum before this runs, so
+    // execution always reads one number but the record keeps both.
     let clearance = params.get_float("peg_clearance")?;
+    let fit_clearance = params.get_float("fit_clearance")?;
+    let machine_tolerance = params.get_float("machine_tolerance")?;
     let allowance = params.get_float("length_allowance")?;
     let min_wall = params.get_float("min_wall")?;
     let plate = Plate {
@@ -431,6 +442,10 @@ fn alignment(
     let mut tools_below = Vec::new();
     let mut tools_above = Vec::new();
     let mut pegs_above = Vec::new();
+    // The first hole's mating pair, in world space, for the exact fit
+    // check below: (hole tool mesh, dowel-or-peg mesh at the hole's own
+    // clearance). Captured before the boolean consumes the tool meshes.
+    let mut fit_pair: Option<(Mesh, Mesh)> = None;
     for h in &holes {
         let frame = regions[h.region].frame;
         let p_obj = frame.to_3d(h.center);
@@ -491,35 +506,100 @@ fn alignment(
             continue;
         }
         let hole = pegs::profile(h.shape, d, chord_tol);
-        tools_below.push(pegs::prism_at(
-            base_below,
-            world_n,
-            key,
-            &hole,
-            -depth_below,
-            over,
-        ));
+        let hole_tool = pegs::prism_at(base_below, world_n, key, &hole, -depth_below, over);
         if pegs == "attached" {
             let peg = pegs::dowel_profile(h.shape, d, clearance, chord_tol);
-            pegs_above.push(pegs::prism_at(
+            let peg_mesh = pegs::prism_at(
                 base_above,
                 world_n,
                 key,
                 &peg,
                 -attached_len,
                 d.min(depth_above),
-            ));
+            );
+            if fit_pair.is_none() {
+                fit_pair = Some((hole_tool.clone(), peg_mesh.clone()));
+            }
+            pegs_above.push(peg_mesh);
         } else {
-            tools_above.push(pegs::prism_at(
-                base_above,
-                world_n,
-                key,
-                &hole,
-                -over,
-                depth_above,
-            ));
+            let top_hole = pegs::prism_at(base_above, world_n, key, &hole, -over, depth_above);
+            if fit_pair.is_none() {
+                // Inset from the hole's own z-range (`-depth_below..over`)
+                // so only the cylindrical wall is compared: a probe
+                // flush with the hole's mouth and floor would touch
+                // there regardless of the radial clearance, which isn't
+                // what this check means to measure (a real dowel sits
+                // `length_allowance` short of the hole's floor, D12).
+                let margin = (depth_below * 0.1).min(allowance.max(1e-6));
+                let dowel_profile = pegs::dowel_profile(h.shape, d, clearance, chord_tol);
+                let dowel_mesh = pegs::prism_at(
+                    base_below,
+                    world_n,
+                    key,
+                    &dowel_profile,
+                    -depth_below + margin,
+                    over - margin,
+                );
+                fit_pair = Some((hole_tool.clone(), dowel_mesh));
+            }
+            tools_above.push(top_hole);
         }
+        tools_below.push(hole_tool);
     }
+    // The exact fit check (owner requirements 2026-11-11): measure the
+    // real gap between the hole and its dowel/peg with the BVH minimum
+    // distance, before the boolean consumes the tool meshes, and report
+    // it in plain language against the Fit class and Machine profile
+    // numbers recorded above. Never assumed: this always measures the
+    // meshes as built, not the parameters that were meant to produce
+    // them.
+    let fit_report = fit_pair
+        .map(|(hole_tool, peg)| -> Result<serde_json::Value, OpError> {
+            let bvh = Bvh::build(&hole_tool, ctx).map_err(|_| OpError::Cancelled)?;
+            // peg_clearance is diametral (it shrinks the dowel's whole
+            // diameter); minimum_distance measures the radial gap, so
+            // the fit class and machine numbers compared against it are
+            // halved here, not at the source (the recorded values stay
+            // the diametral ones the rest of this operation uses).
+            let fit_class = FitClass {
+                name: "Recorded".into(),
+                clearance: fit_clearance / 2.0,
+            };
+            let machine = MachineProfile {
+                name: "Recorded".into(),
+                calibrated: machine_tolerance != 0.0,
+                outer_xy: 0.0,
+                hole_undersize: machine_tolerance / 2.0,
+                z: 0.0,
+            };
+            let check = check_fit(
+                "Peg to hole",
+                MatingSurfaces {
+                    a: &hole_tool,
+                    a_bvh: &bvh,
+                    b: &peg,
+                    b_to_a: &DMat4::IDENTITY,
+                },
+                FitExpectation {
+                    fit_class: &fit_class,
+                    machine: &machine,
+                    compensation: Compensation::Hole,
+                },
+                ctx,
+            )
+            .map_err(|_| OpError::Cancelled)?;
+            Ok(check.map_or(serde_json::Value::Null, |c| {
+                serde_json::json!({
+                    "pair": c.pair,
+                    "measured_gap": c.measured_gap,
+                    "expected_gap": c.expected_gap,
+                    "may_fuse": c.may_fuse,
+                    "message": c.message(),
+                })
+            }))
+        })
+        .transpose()?
+        .unwrap_or(serde_json::Value::Null);
     let into_object = |tools: &[Mesh]| -> Result<Mesh, OpError> {
         mf_boolean::operand_in_frame(
             &pegs::merged(tools),
@@ -608,6 +688,9 @@ fn alignment(
             "off_plate": off_plate,
             "off_plate_message": message,
             "skipped_regions": skipped,
+            "fit_clearance": fit_clearance,
+            "machine_tolerance": machine_tolerance,
+            "fit_check": fit_report,
         }),
     ))
 }

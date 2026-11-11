@@ -2860,6 +2860,7 @@ name = "mf-operations"
 version = "0.0.1"
 dependencies = [
  "faer",
+ "glam",
  "jsonschema",
  "mf-boolean",
  "mf-document",

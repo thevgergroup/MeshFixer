@@ -68,7 +68,7 @@ parameters:
     min: 0.0
     unit: mm
     default_from: fit.peg_clearance
-    description: "The dowel is this much thinner than its hole (from the print fit profile)"
+    description: "The dowel is this much thinner than its hole. Legacy single value (D20); a frontend on the Machine profile/Fit class path fills this from fit_clearance + machine_tolerance and records both below. Old logs that only set this keep working unchanged"
   - name: length_allowance
     type: float
     default: 0.4
@@ -76,6 +76,17 @@ parameters:
     unit: mm
     default_from: fit.length_allowance
     description: "The dowel is this much shorter than the two holes together (from the print fit profile)"
+  - name: fit_clearance
+    type: float
+    default: 0.2
+    min: -10.0
+    unit: mm
+    description: "D20 migration: the chosen Fit class's clearance (design intent), before machine tolerance. Recorded for audit; peg_clearance is what's actually used to size the hole and dowel. Negative is interference (a press fit)"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    description: "D20 migration: the active Machine profile's hole-undersize compensation added to fit_clearance to make peg_clearance. 0 on an uncalibrated machine. Recorded for audit alongside fit_clearance"
   - name: min_wall
     type: float
     default: 1.5
