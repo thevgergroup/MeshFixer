@@ -54,7 +54,7 @@ pub use split::pegs::{
     HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
 };
 pub use split::volume::{BOX_FACES, inside_name, outside_name};
-pub use split::{SPLIT_STAGES, split_names};
+pub use split::{AXIS_ALIGN_DEGREES, SPLIT_STAGES, SideNames, split_names};
 pub use transform::{world_min_z, world_min_z_with};
 
 pub use remove_small::{ComponentSizes, RemovalPreview, removal_preview};

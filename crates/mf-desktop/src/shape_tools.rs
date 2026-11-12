@@ -131,6 +131,32 @@ impl SplitState {
             DVec3::ZERO,
         );
     }
+
+    /// The names a cut at this orientation gives its two sides (owner
+    /// 2026-11-12: "above"/"below" means nothing for a vertical or
+    /// tilted cut — the side "the normal points to" isn't what either
+    /// word promises). Side A is always the side the plane's normal
+    /// points to (`keep: above`'s side in `mesh.split_plane`); side B is
+    /// the other (`keep: below`'s side). The words only change; the
+    /// engine's `keep` values and their meaning (which side the normal
+    /// points to) don't. The same orientation rule names the parts
+    /// `mesh.split_plane` creates ([`mf_operations::split_names`]), so a
+    /// part's name always matches the button that kept it.
+    pub fn side_names(&self) -> mf_operations::SideNames {
+        mf_operations::SideNames::for_normal(self.normal().to_array())
+    }
+}
+
+/// The i18n keys for [`mf_operations::SideNames`]'s two sides: `(side
+/// a's label key, side b's label key)`, for `i18n::tr`.
+pub fn side_name_labels(sides: mf_operations::SideNames) -> (&'static str, &'static str) {
+    use mf_operations::SideNames;
+    match sides {
+        SideNames::TopBottom => ("split.side.top", "split.side.bottom"),
+        SideNames::LeftRight => ("split.side.right", "split.side.left"),
+        SideNames::FrontBack => ("split.side.back", "split.side.front"),
+        SideNames::SideAB => ("split.side.a", "split.side.b"),
+    }
 }
 
 /// Combine's settings: whether the holes are kept (Combine acts on the
@@ -623,7 +649,24 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
                 app.split.drag = None;
             }
         }
-        Some(ToolPointer::Click(_)) | None => {}
+        Some(ToolPointer::Click(px)) => {
+            // Off the gizmo, on a target's own surface: read it as
+            // "keep this side" (owner 2026-11-12), the side classified
+            // the same way the preview shades it (which side of the
+            // plane the clicked point is on).
+            if g.hit(&cam, view, px).is_none()
+                && let Some(world) = surface_click_point(app, &cam, view, px)
+            {
+                let point = app.split.point();
+                let normal = app.split.normal();
+                app.split.keep = if normal.dot(world - point) > 0.0 {
+                    "above".into()
+                } else {
+                    "below".into()
+                };
+            }
+        }
+        None => {}
     }
     app.split.hover = if app.split.drag.is_some() {
         None
@@ -631,6 +674,38 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
         input.hover.and_then(|px| g.hit(&cam, view, px))
     };
     Input::Consumed
+}
+
+/// The world-space point where a screen click lands on the nearest
+/// selected target's surface, if any (Split's "click a side to keep
+/// it").
+fn surface_click_point(
+    app: &MeshFixerApp,
+    cam: &mf_render::OrbitCamera,
+    view: (f64, f64),
+    px: (f64, f64),
+) -> Option<DVec3> {
+    let (origin, dir) = cam.ray(cam.target, view, px);
+    let (origin, dir) = (DVec3::from(origin), DVec3::from(dir));
+    app.selected_objects()
+        .into_iter()
+        .filter_map(|id| {
+            let bvh = app.picking_bvh(id)?;
+            let mesh = app.session.document().object(id)?.mesh()?;
+            let transform = app.shown_transform(id).unwrap_or_else(|| {
+                app.session
+                    .document()
+                    .object(id)
+                    .map(|o| o.transform)
+                    // allow-swallow: id just came from selected_objects, which only names live objects; a vanished one falls back to identity rather than panicking this frame.
+                    .unwrap_or_default()
+            });
+            let model = mf_render::model_matrix(&transform);
+            let (_, t) = bvh.ray_pick(mesh, origin.to_array(), dir.to_array(), &model)?;
+            Some(t)
+        })
+        .min_by(f64::total_cmp)
+        .map(|t| origin + dir * t)
 }
 
 /// An open model can't be cut (the operation refuses it by name): say so
@@ -740,20 +815,35 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .on_hover_text(t!("split.section_view.tip"));
     // Settings.
     section(ui, &t!("split.section.keep"));
+    // "Above"/"below" means nothing for a vertical or tilted plane (owner
+    // 2026-11-12): the two Keep buttons are named, and coloured, by the
+    // plane's actual orientation; "both" always stays plain. The engine's
+    // `keep` values ("both"/"above"/"below") don't change — "above" is
+    // still side A (the normal's side), "below" still side B.
+    let sides = app.split.side_names();
+    let (label_a, label_b) = side_name_labels(sides);
     let keeps = [
-        ("both", t!("split.keep.both")),
-        ("above", t!("split.keep.above")),
-        ("below", t!("split.keep.below")),
+        ("both", t!("split.keep.both"), None),
+        (
+            "above",
+            crate::i18n::tr(label_a, &[]),
+            Some(theme::SPLIT_SIDE_A),
+        ),
+        (
+            "below",
+            crate::i18n::tr(label_b, &[]),
+            Some(theme::SPLIT_SIDE_B),
+        ),
     ];
-    let options: Vec<(&str, &str, bool)> = keeps
+    let options: Vec<(&str, &str, bool, Option<egui::Color32>)> = keeps
         .iter()
-        .map(|(_, l)| (l.as_str(), l.as_str(), true))
+        .map(|(_, l, c)| (l.as_str(), l.as_str(), true, *c))
         .collect();
     let current = keeps
         .iter()
-        .position(|(k, _)| *k == app.split.keep)
+        .position(|(k, _, _)| *k == app.split.keep)
         .expect("the keep choice is listed");
-    if let (Some(i), _) = widgets::segmented(ui, &options, current) {
+    if let (Some(i), _) = widgets::segmented_colored(ui, &options, current) {
         app.split.keep = keeps[i].0.into();
     }
     section(ui, &t!("split.section.gap", unit = units));

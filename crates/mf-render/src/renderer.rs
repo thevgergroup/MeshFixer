@@ -48,6 +48,11 @@ pub struct Palette {
     /// solid — drawn as a ghost (Tinkercad-style "show holes through
     /// solids"; about 20%, well under the ~35% of its visible part).
     pub hole_xray_opacity: f32,
+    /// Split's preview (owner 2026-11-12): side A's tint (the plane
+    /// normal's side, "above") and side B's, matching the Keep buttons'
+    /// colours (`theme::SPLIT_SIDE_A`/`B`).
+    pub split_tint_a: [f32; 4],
+    pub split_tint_b: [f32; 4],
 }
 
 /// How the model's surface is shaded (UI plan §4 "Shaders").
@@ -131,6 +136,8 @@ impl Palette {
         },
         xray_opacity: 0.55,
         hole_xray_opacity: 0.2,
+        split_tint_a: [1.0, 0.69, 0.23, 1.0],
+        split_tint_b: [0.18, 0.77, 0.74, 1.0],
     };
 }
 
@@ -176,6 +183,11 @@ struct SceneUniforms {
     light_key: [f32; 4],
     light_fill: [f32; 4],
     light_half: [f32; 4],
+    /// Split's preview (owner 2026-11-12): side A's (the plane normal's
+    /// side, "above") and side B's tint, matching the Keep buttons'
+    /// colours. rgb only; a unused.
+    split_tint_a: [f32; 4],
+    split_tint_b: [f32; 4],
 }
 
 #[repr(C)]
@@ -898,6 +910,8 @@ impl MeshRenderer {
                 }
                 None => [0.0; 4],
             },
+            split_tint_a: p.split_tint_a,
+            split_tint_b: p.split_tint_b,
         };
         queue.write_buffer(&self.scene_uniforms, 0, bytemuck::bytes_of(&u));
     }

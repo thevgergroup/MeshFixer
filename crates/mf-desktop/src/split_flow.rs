@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 use mf_command::{Invocation, ObjectId, RevisionId};
 use mf_geometry::{Aabb, Bvh, Mesh};
 use mf_operations::{Check, JointFrame, JointSide, Placement};
@@ -1361,7 +1361,37 @@ pub fn claims(app: &MeshFixerApp) -> Option<Claims> {
     } else {
         let (g, _) = crate::shape_tools::split_gizmo(app)?;
         let (cam, size) = view(app)?;
-        Some(Box::new(move |px: (f64, f64)| g.hit(&cam, size, px).is_some()) as Claims)
+        // Also claim a click that lands on a target's own surface (not
+        // just the gizmo): Split reads it as "keep this side" rather
+        // than letting it fall through to the ordinary pick/select
+        // (owner 2026-11-12, "clicking a side in the view selects it to
+        // keep").
+        let targets: Vec<(Arc<Bvh>, Mesh, DMat4)> = app
+            .selected_objects()
+            .into_iter()
+            .filter_map(|id| {
+                let bvh = app.picking_bvh(id)?;
+                let mesh = app.session.document().object(id)?.mesh()?.clone();
+                let transform = app.shown_transform(id).unwrap_or_else(|| {
+                    app.session
+                        .document()
+                        .object(id)
+                        .map(|o| o.transform)
+                        // allow-swallow: id just came from selected_objects, which only names live objects; a vanished one falls back to identity rather than panicking this frame.
+                        .unwrap_or_default()
+                });
+                Some((bvh, mesh, mf_render::model_matrix(&transform)))
+            })
+            .collect();
+        Some(Box::new(move |px: (f64, f64)| {
+            if g.hit(&cam, size, px).is_some() {
+                return true;
+            }
+            let (origin, dir) = cam.ray(cam.target, size, px);
+            targets
+                .iter()
+                .any(|(bvh, mesh, model)| bvh.ray_pick(mesh, origin, dir, model).is_some())
+        }) as Claims)
     }
 }
 

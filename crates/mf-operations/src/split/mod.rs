@@ -59,9 +59,84 @@ pub const SPLIT_STAGES: &[&str] = &[
     mf_boolean::CAPPING,
 ];
 
-/// The names a split gives its parts: `(top, bottom)`.
-pub fn split_names(name: &str) -> (String, String) {
-    (format!("{name} (top)"), format!("{name} (bottom)"))
+/// The two sides a split's plane divides the model into, named by
+/// orientation rather than by the raw "above"/"below" the normal points
+/// to, which means nothing for a vertical or tilted cut (owner
+/// 2026-11-12). `SideA` is always the side the plane's normal points to
+/// (`keep: above`'s side); `SideB` is the other (`keep: below`'s side).
+/// `keep`'s values and their meaning don't change — only the words a
+/// part's name and the Keep buttons show.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SideNames {
+    /// Normal within [`AXIS_ALIGN_DEGREES`] of +-Z: "top" (the side it
+    /// points to, +Z-ish) and "bottom".
+    TopBottom,
+    /// A vertical plane (normal within [`AXIS_ALIGN_DEGREES`] of the XY
+    /// plane) leaning more on X than Y: "right" (+X-ish, the front
+    /// view's right, looking from -Y toward +Y) and "left".
+    LeftRight,
+    /// A vertical plane leaning more on Y than X: "back" (+Y-ish) and
+    /// "front".
+    FrontBack,
+    /// Any other tilt: "side a" (the normal's side) / "side b".
+    SideAB,
+}
+
+/// Within this many degrees of an axis (or the horizontal plane), a cut
+/// counts as aligned with it rather than tilted (owner 2026-11-12: 20
+/// degrees either side of +-Z is "horizontal", not "a bit tilted").
+pub const AXIS_ALIGN_DEGREES: f64 = 20.0;
+
+impl SideNames {
+    /// [`SideNames`] for a plane with this world `normal` (any length
+    /// but zero): horizontal (its angle from +-Z is within
+    /// [`AXIS_ALIGN_DEGREES`]) is `TopBottom`; vertical (its angle from
+    /// the horizontal XY plane is within that same tolerance) is
+    /// `LeftRight` or `FrontBack`, by whichever of X or Y it leans on
+    /// more; anything else (a genuine tilt, between the two) is
+    /// `SideAB`.
+    pub fn for_normal(normal: [f64; 3]) -> SideNames {
+        let n = glam::DVec3::from(normal).normalize_or(glam::DVec3::Z);
+        let angle_from_z = n.z.abs().clamp(0.0, 1.0).acos().to_degrees();
+        if angle_from_z <= AXIS_ALIGN_DEGREES {
+            SideNames::TopBottom
+        } else if angle_from_z >= 90.0 - AXIS_ALIGN_DEGREES {
+            if n.x.abs() >= n.y.abs() {
+                SideNames::LeftRight
+            } else {
+                SideNames::FrontBack
+            }
+        } else {
+            SideNames::SideAB
+        }
+    }
+
+    /// The lowercase suffix a kept part's name takes ("scan (top)",
+    /// "scan (left)"...), for side a (`keep: above`) or side b
+    /// (`keep: below`).
+    pub fn suffix(&self, side_a: bool) -> &'static str {
+        match (self, side_a) {
+            (SideNames::TopBottom, true) => "top",
+            (SideNames::TopBottom, false) => "bottom",
+            (SideNames::LeftRight, true) => "right",
+            (SideNames::LeftRight, false) => "left",
+            (SideNames::FrontBack, true) => "back",
+            (SideNames::FrontBack, false) => "front",
+            (SideNames::SideAB, true) => "side a",
+            (SideNames::SideAB, false) => "side b",
+        }
+    }
+}
+
+/// The names a split gives its parts by the plane's `normal` (world
+/// space): `(side a's name, side b's name)`, i.e. `(keep: above`'s name,
+/// `keep: below`'s name)`.
+pub fn split_names(name: &str, normal: [f64; 3]) -> (String, String) {
+    let sides = SideNames::for_normal(normal);
+    (
+        format!("{name} ({})", sides.suffix(true)),
+        format!("{name} ({})", sides.suffix(false)),
+    )
 }
 
 pub struct SplitPlane;
@@ -351,7 +426,7 @@ fn split_one(
         created_dowels = out.0;
         peg_report = out.1;
     }
-    let (top_name, bottom_name) = split_names(target.name);
+    let (top_name, bottom_name) = split_names(target.name, unit);
     let mut changes = Vec::new();
     let mut parts = Vec::new();
     let regions = below

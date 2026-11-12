@@ -299,6 +299,26 @@ pub fn segmented(
     options: &[(&str, &str, bool)],
     current: usize,
 ) -> (Option<usize>, Vec<egui::Response>) {
+    segmented_colored(
+        ui,
+        &options
+            .iter()
+            .map(|&(text, label, enabled)| (text, label, enabled, None))
+            .collect::<Vec<_>>(),
+        current,
+    )
+}
+
+/// As [`segmented`], with each option's "on" fill colour given (its 4th
+/// field): `None` for the usual accent, `Some(c)` for a segment that
+/// means a particular side or role, so its colour carries that meaning
+/// wherever it's picked (Split's Keep buttons, coloured to match the
+/// side they keep in the preview, D-owner 2026-11-12).
+pub fn segmented_colored(
+    ui: &mut egui::Ui,
+    options: &[(&str, &str, bool, Option<egui::Color32>)],
+    current: usize,
+) -> (Option<usize>, Vec<egui::Response>) {
     let width = ui.available_width();
     let (track, _) = ui.allocate_exact_size(
         egui::vec2(width, theme::CONTROL_HEIGHT),
@@ -309,7 +329,8 @@ pub fn segmented(
     let seg = (track.width() - 4.0) / n;
     let mut clicked = None;
     let mut responses = Vec::new();
-    for (i, &(text, label, enabled)) in options.iter().enumerate() {
+    for (i, &(text, label, enabled, accent)) in options.iter().enumerate() {
+        let accent = accent.unwrap_or(theme::ACCENT);
         let rect = egui::Rect::from_min_size(
             track.min + egui::vec2(2.0 + i as f32 * seg, 2.0),
             egui::vec2(seg, track.height() - 4.0),
@@ -323,7 +344,7 @@ pub fn segmented(
         let r = ui.interact(rect, id, sense);
         let on = i == current && enabled;
         let fill = if on {
-            theme::ACCENT
+            accent
         } else if r.hovered() && enabled {
             theme::CONTROL_HOVER
         } else {

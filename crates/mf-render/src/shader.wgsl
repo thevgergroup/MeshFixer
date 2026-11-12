@@ -43,6 +43,11 @@ struct Scene {
     light_key: vec4<f32>,
     light_fill: vec4<f32>,
     light_half: vec4<f32>,
+    // Split's preview (owner 2026-11-12): side A (the plane normal's
+    // side, "above") and side B's tint, so the Keep buttons' colours
+    // match what the preview shows. rgb only; a unused.
+    split_tint_a: vec4<f32>,
+    split_tint_b: vec4<f32>,
 };
 
 struct Draw {
@@ -267,11 +272,15 @@ fn fs_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @location(0
     if (scene.shading.y > 0.5) {
         rgb = mix(rgb, rgb * 0.45, wire(in.bary));
     }
-    // Split's preview: the top part a little lighter, the bottom a little
-    // darker, and the cut drawn where the plane crosses the surface.
+    // Split's preview: side A (the plane normal's side) tinted towards
+    // its Keep colour, side B towards its own, and the cut drawn where
+    // the plane crosses the surface (owner 2026-11-12: coloured sides,
+    // matching the Keep buttons, so which part a colour means never
+    // depends on reading "above"/"below" against the plane's tilt).
     if (scene.shading.z > 0.5) {
         let s = dot(scene.split_plane.xyz, in.world) + scene.split_plane.w;
-        rgb = rgb * select(0.72, 1.08, s > 0.0);
+        let tint = select(scene.split_tint_b.rgb, scene.split_tint_a.rgb, s > 0.0);
+        rgb = mix(rgb * select(0.72, 1.08, s > 0.0), tint, 0.3);
         let line = 1.0 - smoothstep(0.0, fwidth(s) * 1.5, abs(s));
         rgb = mix(rgb, vec3<f32>(1.0), line * 0.85);
     }
@@ -289,16 +298,18 @@ fn fs_glass_surface(in: SurfaceOut, @builtin(front_facing) front: bool) -> @loca
     let w = wire(in.bary);
     var rgb = mix(base, base * 0.5, w);
     var a = clamp(0.10 + 0.45 * edge_on + 0.5 * w, 0.0, 1.0);
-    // Split's section view: the part above the plane a faint ghost, the
-    // part below shaded and nearly solid, and the cut drawn at the plane,
-    // so the inside of the cut shows.
+    // Split's section view: side A (the plane normal's side) a faint
+    // ghost tinted towards its Keep colour, side B shaded, nearly solid
+    // and tinted towards its own, and the cut drawn at the plane, so the
+    // inside of the cut shows (owner 2026-11-12: coloured sides).
     if (scene.shading.z > 0.5) {
         let s = dot(scene.split_plane.xyz, in.world) + scene.split_plane.w;
         let line = 1.0 - smoothstep(0.0, fwidth(s) * 1.5, abs(s));
         if (s > 0.0) {
+            rgb = mix(base, scene.split_tint_a.rgb, 0.35);
             a = 0.06 + 0.2 * edge_on;
         } else {
-            rgb = lit(base, in.normal);
+            rgb = mix(lit(base, in.normal), scene.split_tint_b.rgb, 0.3);
             a = 0.8;
         }
         rgb = mix(rgb, vec3<f32>(1.0), line);

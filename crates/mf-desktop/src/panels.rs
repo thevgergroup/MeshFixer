@@ -1302,6 +1302,10 @@ fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
 /// The width `object_row` reserves for its Solid/Hole toggle.
 const ROLE_TOGGLE_WIDTH: f32 = 26.0;
+/// The width it reserves for its Delete (trash) button, right of the
+/// role toggle (owner 2026-11-12: "Delete a split part... using both
+/// the Backspace key and the trash button").
+const DELETE_BUTTON_WIDTH: f32 = 26.0;
 
 /// An object row (the tree row plus, at its right end, a Solid/Hole
 /// toggle): the toggle only shows while the row (or the toggle itself) is
@@ -1325,7 +1329,7 @@ fn object_row(
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.scope(|ui| {
-            ui.set_width(full_width - ROLE_TOGGLE_WIDTH);
+            ui.set_width(full_width - ROLE_TOGGLE_WIDTH - DELETE_BUTTON_WIDTH);
             tree_row(
                 app,
                 ui,
@@ -1375,6 +1379,21 @@ fn object_row(
             } else {
                 // Reserve the space even when hidden, so the row's width
                 // (and the name column it truncates to) never shifts.
+                ui.allocate_space(egui::vec2(22.0, 22.0));
+            }
+        });
+        let delete_label = format!("Delete {name}");
+        ui.scope(|ui| {
+            ui.set_width(DELETE_BUTTON_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                if widgets::icon_button(ui, icons::TRASH, &delete_label, None, 22.0)
+                    .on_hover_text("Delete (Backspace)")
+                    .clicked()
+                {
+                    app.delete_object(id);
+                }
+            } else {
                 ui.allocate_space(egui::vec2(22.0, 22.0));
             }
         });

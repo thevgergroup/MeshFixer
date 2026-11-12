@@ -2357,6 +2357,27 @@ impl MeshFixerApp {
         });
     }
 
+    /// Delete `id`, named explicitly (the Browser row's own trash button,
+    /// owner 2026-11-12: Delete a split part either with the Backspace/
+    /// Delete key, which only ever acts on the active object, or this
+    /// button, which acts on the row it's on regardless of which object
+    /// is active): the same `object.delete` command, undoable.
+    pub fn delete_object(&mut self, id: ObjectId) {
+        if self.busy.is_some() {
+            return;
+        }
+        self.run_invocation(
+            Invocation {
+                op_id: "object.delete".into(),
+                target: id,
+                selection: None,
+                operands: Vec::new(),
+                raw_params: BTreeMap::new(),
+            },
+            "Delete object".into(),
+        );
+    }
+
     /// Keep `active` pointing at an object that exists in the current document.
     fn sync_active(&mut self) {
         let doc = self.session.document();

@@ -155,9 +155,12 @@ fn split_cuts_a_closed_object_in_two_and_refuses_an_open_one() {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
     settle(&mut h);
+    // "Vertical X" (D-owner 2026-11-12: orientation-named sides): the
+    // normal is +X, so the kept part is named by Left/Right, not
+    // Top/Bottom.
     let names = objects(&h);
-    assert!(names.contains(&"ball (top)".to_owned()), "{names:?}");
-    assert!(names.contains(&"ball (bottom)".to_owned()), "{names:?}");
+    assert!(names.contains(&"ball (right)".to_owned()), "{names:?}");
+    assert!(names.contains(&"ball (left)".to_owned()), "{names:?}");
     still(&mut h, "split-after");
 
     // An open model: the refusal, and the way on.

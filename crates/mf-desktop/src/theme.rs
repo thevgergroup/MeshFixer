@@ -33,6 +33,16 @@ pub const SCULPT_CHANGED: Color32 = Color32::from_rgb(180, 244, 52);
 /// open: a violet, apart from the accent's indigo and `CRACK`'s magenta.
 pub const INTERSECTION: Color32 = Color32::from_rgb(0xB3, 0x6B, 0xFF);
 
+/// Split's preview and Keep buttons (owner 2026-11-12): the side the cut
+/// plane's normal points to (`keep: above`'s side; "Top"/"Right"/"Back"/
+/// "Side A" depending on orientation) — a warm amber, apart from every
+/// defect/overlay hue above and from `SPLIT_SIDE_B`.
+pub const SPLIT_SIDE_A: Color32 = Color32::from_rgb(255, 176, 59);
+/// Split's other side (`keep: below`'s side; "Bottom"/"Left"/"Front"/
+/// "Side B") — a cool teal, apart from `SPLIT_SIDE_A` and the accent's
+/// indigo.
+pub const SPLIT_SIDE_B: Color32 = Color32::from_rgb(45, 197, 188);
+
 /// The gizmo's X handle only (D8): the conventional axis colour, familiar
 /// from Meshmixer, Fusion and Blender. Never used for anything else, so a
 /// colour still has one meaning while the Transform tool is open.
@@ -205,6 +215,8 @@ pub fn palette() -> mf_render::Palette {
         },
         xray_opacity: XRAY_OPACITY,
         hole_xray_opacity: HOLE_XRAY_OPACITY,
+        split_tint_a: rgba(SPLIT_SIDE_A),
+        split_tint_b: rgba(SPLIT_SIDE_B),
     }
 }
 
