@@ -1307,6 +1307,38 @@ const ROLE_TOGGLE_WIDTH: f32 = 26.0;
 /// the Backspace key and the trash button").
 const DELETE_BUTTON_WIDTH: f32 = 26.0;
 
+/// `id`'s row while it is being renamed (double-click, F2, or Cmd+G's
+/// opposite number): a text field at the row's height, pre-filled with
+/// its current name, committing on Enter or losing focus
+/// (`MeshFixerApp::rename_object`) and cancelling on Esc.
+fn rename_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::ObjectId) {
+    let mut text = app
+        .renaming
+        .as_ref()
+        .filter(|(o, _)| *o == id)
+        .map_or_else(String::new, |(_, t)| t.clone());
+    let text_id = egui::Id::unique(("browser rename field", id));
+    ui.set_height(theme::ROW_HEIGHT);
+    let r = ui.add_sized(
+        egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+        egui::TextEdit::singleline(&mut text).id(text_id),
+    );
+    if r.changed() {
+        app.renaming = Some((id, text.clone()));
+    }
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let committed = r.lost_focus() && !escaped;
+    if !r.has_focus() && !committed {
+        ui.memory_mut(|m| m.request_focus(text_id));
+    }
+    if committed {
+        app.renaming = None;
+        app.rename_object(id, text);
+    } else if escaped {
+        app.renaming = None;
+    }
+}
+
 /// An object row (the tree row plus, at its right end, a Solid/Hole
 /// toggle): the toggle only shows while the row (or the toggle itself) is
 /// hovered, so rows stay clean otherwise. One click is one undo step
@@ -1326,29 +1358,34 @@ fn object_row(
     let row_rect =
         egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
     let row_hovered = ui.rect_contains_pointer(row_rect);
+    let renaming = app.renaming.as_ref().is_some_and(|(o, _)| *o == id);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.scope(|ui| {
             ui.set_width(full_width - ROLE_TOGGLE_WIDTH - DELETE_BUTTON_WIDTH);
-            tree_row(
-                app,
-                ui,
-                &TreeItem::Object(id),
-                Row {
-                    // A Hole's row says so with its own icon.
-                    icon: Some(if hole {
-                        (icons::HOLE_ROLE, theme::TEXT_MUTED)
-                    } else {
-                        (icons::OBJECT, theme::TEXT_MUTED)
-                    }),
-                    text,
-                    size: None,
-                    label,
-                },
-                |ui| {
-                    ui.label(tip);
-                },
-            );
+            if renaming {
+                rename_row(app, ui, id);
+            } else {
+                tree_row(
+                    app,
+                    ui,
+                    &TreeItem::Object(id),
+                    Row {
+                        // A Hole's row says so with its own icon.
+                        icon: Some(if hole {
+                            (icons::HOLE_ROLE, theme::TEXT_MUTED)
+                        } else {
+                            (icons::OBJECT, theme::TEXT_MUTED)
+                        }),
+                        text,
+                        size: None,
+                        label,
+                    },
+                    |ui| {
+                        ui.label(tip);
+                    },
+                );
+            }
         });
         let action = if hole {
             t!("role.make_solid")
@@ -1499,7 +1536,14 @@ fn tree_row(
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(last_click, response.id));
     }
-    if twice || (response.clicked() && enter) {
+    // Double-click an object row renames it in place (Task "Project
+    // organisation" step 1); every other row kind still frames (M4 Task
+    // 8a). Enter still frames any row (it has no text to edit).
+    if twice && let TreeItem::Object(id) = *item {
+        if let Some(doc_name) = app.session.document().object(id).map(|o| o.name.clone()) {
+            app.renaming = Some((id, doc_name));
+        }
+    } else if twice || (response.clicked() && enter) {
         app.tree_find(item);
     } else if response.clicked() && ui.input(|i| i.modifiers.shift) {
         app.tree_select_add(item);

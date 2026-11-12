@@ -5,6 +5,7 @@
 //! actions; the first-use hint; and the Developer settings page.
 
 use eframe::egui::{self, RichText};
+use mf_command::ObjectId;
 use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
 
@@ -744,6 +745,55 @@ fn empty_card(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 }
 
+/// The object's name, editable in place (the selection panel's name
+/// field, Task "Project organisation" step 1): shows as a title until
+/// clicked, then a text field that commits on Enter or losing focus
+/// (`object.rename`) and cancels on Esc.
+fn name_field(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: ObjectId, name: &str) {
+    let editing = app.renaming.as_ref().filter(|(o, _)| *o == id).is_some();
+    if !editing {
+        let r = ui.add(
+            egui::Label::new(
+                RichText::new(name)
+                    .size(theme::TYPE_TITLE)
+                    .color(theme::TEXT_STRONG),
+            )
+            .truncate()
+            .sense(egui::Sense::click()),
+        );
+        if r.clicked() {
+            app.renaming = Some((id, name.to_owned()));
+        }
+        r.on_hover_text("Click to rename");
+        return;
+    }
+    let mut text = app
+        .renaming
+        .as_ref()
+        .map_or_else(|| name.to_owned(), |(_, t)| t.clone());
+    let text_id = egui::Id::unique(("rename field", id));
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(text_id)
+            .font(egui::FontId::proportional(theme::TYPE_TITLE))
+            .desired_width(ui.available_width()),
+    );
+    if r.changed() {
+        app.renaming = Some((id, text.clone()));
+    }
+    let committed = r.lost_focus() && !ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let cancelled = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    if !r.has_focus() {
+        ui.memory_mut(|m| m.request_focus(text_id));
+    }
+    if committed {
+        app.renaming = None;
+        app.rename_object(id, text);
+    } else if cancelled {
+        app.renaming = None;
+    }
+}
+
 /// The object's name, size and triangle count.
 fn inspector_summary(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let Some(id) = app.active else { return };
@@ -756,7 +806,7 @@ fn inspector_summary(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .font(icons::font(theme::ICON_SIZE))
                 .color(theme::TEXT_MUTED),
         );
-        widgets::title(ui, &name);
+        name_field(app, ui, id, &name);
     });
     role_segmented(app, ui);
     let units = app.session.document().units();

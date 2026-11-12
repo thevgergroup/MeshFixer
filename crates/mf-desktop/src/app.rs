@@ -580,6 +580,10 @@ pub struct MeshFixerApp {
     /// The latest curves found (request number, one entry per overlapping
     /// pair: a pair that doesn't cross has none).
     intersections: Option<(u64, Vec<worker::IntersectionCurve>)>,
+    /// A name edit in progress (the selection panel's name field, or a
+    /// Browser row's F2/double-click): which object, and the text so far.
+    /// Committed on Enter or losing focus; Esc cancels it.
+    pub renaming: Option<(ObjectId, String)>,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -887,6 +891,7 @@ impl MeshFixerApp {
             intersection_worker,
             intersection_query: None,
             intersections: None,
+            renaming: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -2376,6 +2381,34 @@ impl MeshFixerApp {
                 raw_params: BTreeMap::new(),
             },
             "Delete object".into(),
+        );
+    }
+
+    /// Rename `id` to `name` (the Browser row's F2/double-click, or the
+    /// selection panel's name field): the `object.rename` command, one
+    /// undo step. Blank or unchanged names are left alone (no revision).
+    pub fn rename_object(&mut self, id: ObjectId, name: String) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || self.busy.is_some() {
+            return;
+        }
+        if self
+            .session
+            .document()
+            .object(id)
+            .is_some_and(|o| o.name == trimmed)
+        {
+            return;
+        }
+        self.run_invocation(
+            Invocation {
+                op_id: "object.rename".into(),
+                target: id,
+                selection: None,
+                operands: Vec::new(),
+                raw_params: BTreeMap::from([("name".to_owned(), trimmed.to_owned())]),
+            },
+            "Rename object".into(),
         );
     }
 
@@ -5400,6 +5433,17 @@ impl MeshFixerApp {
         if role {
             let ids = self.selected_objects();
             self.toggle_role(&ids);
+        }
+        // F2: rename the active object in the Browser (Task "Project
+        // organisation" step 1), same as double-clicking its row.
+        let f2 = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2));
+        if f2
+            && let Some(id) = self.active
+            && let Some(name) = self.session.document().object(id).map(|o| o.name.clone())
+        {
+            self.renaming = Some((id, name));
         }
         if !typing && !ctx.egui_wants_keyboard_input() {
             self.tool_keys(&ctx);
