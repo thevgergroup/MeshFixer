@@ -70,14 +70,34 @@ fn at(t: [f64; 3]) -> [f64; 12] {
     ]
 }
 
+/// A fresh, isolated settings directory for one test's harness (a
+/// `TempDir` leaked for the test binary's lifetime, same idea as
+/// `connectors.rs`'s own per-harness tempdir): without this,
+/// `Settings::default()`'s `config_dir: None` falls back to the real
+/// user's `meshfixer_dir()` on disk (`settings_dir`'s documented
+/// behaviour for "no settings folder"), so two test runs — or two
+/// concurrent sessions on the same machine — would read and write the
+/// same real Fit classes, Machine profiles and user parts library,
+/// leaking state between runs (a stale saved part literally named
+/// "Box" from an earlier run once made the Parts library list two
+/// "Box" entries, failing `parametric_shape_edit_param_then_undo`'s
+/// exact-match lookup).
+fn isolated_settings_dir() -> &'static std::path::Path {
+    static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| tempfile::tempdir().expect("a temp dir for test settings"))
+        .path()
+}
+
 fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerApp> {
+    let settings = Settings {
+        config_dir: Some(isolated_settings_dir().to_owned()),
+        ..Settings::default()
+    };
     let mut h = Harness::builder()
         .with_size(WINDOW)
         .with_step_dt(1.0 / 60.0)
         .wgpu()
-        .build_eframe(move |cc| {
-            MeshFixerApp::with_settings(cc, None, Settings::default()).unwrap()
-        });
+        .build_eframe(move |cc| MeshFixerApp::with_settings(cc, None, settings).unwrap());
     h.state_mut().import_model(ImportedModel {
         objects: objects
             .into_iter()
@@ -817,8 +837,16 @@ fn placements(h: &Harness<'_, MeshFixerApp>) -> Vec<mf_operations::Placement> {
         .unwrap_or_default()
 }
 
-/// Scrolls the tool panel until `label` is inside the window, then
-/// clicks it (Connect's panel is taller than the window).
+/// How much of the window's bottom edge the status bar covers (its own
+/// text row): a node whose rect's bottom falls within this band is
+/// visually hidden behind it even though it's within the window's own
+/// pixel bounds, so [`scroll_and_click`] keeps scrolling past it rather
+/// than treating it as "on screen" and clicking through the status bar.
+const STATUS_BAR_HEIGHT: f32 = 36.0;
+
+/// Scrolls the tool panel until `label` is inside the window (clear of
+/// the status bar at the bottom), then clicks it (Connect's panel is
+/// taller than the window).
 fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     let over = egui::pos2(200.0, WINDOW.1 * 0.5);
     h.event(egui::Event::PointerMoved(over));
@@ -826,12 +854,12 @@ fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     let mut tries = 0;
     loop {
         let rect = h.get_by_label(label).rect();
-        if rect.bottom() <= WINDOW.1 - 4.0 && rect.top() >= 40.0 {
+        if rect.bottom() <= WINDOW.1 - STATUS_BAR_HEIGHT && rect.top() >= 40.0 {
             break;
         }
         tries += 1;
         assert!(tries < 400, "scrolled to {label:?}");
-        let down = rect.bottom() > WINDOW.1 - 4.0;
+        let down = rect.bottom() > WINDOW.1 - STATUS_BAR_HEIGHT;
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(0.0, if down { -1.0 } else { 1.0 }),
@@ -1216,11 +1244,11 @@ fn parametric_shape_edit_param_then_undo() {
 /// The dovetail tail object in the document (its name ends "(tail)",
 /// `connector_tool::group_members`'s naming).
 fn tail_id(h: &Harness<'_, MeshFixerApp>) -> mf_command::ObjectId {
-    id_of(&h, "Dovetail (tail)")
+    id_of(h, "Dovetail (tail)")
 }
 
 fn groove_id(h: &Harness<'_, MeshFixerApp>) -> mf_command::ObjectId {
-    id_of(&h, "Dovetail (groove)")
+    id_of(h, "Dovetail (groove)")
 }
 
 /// A 90°-about-Z rotation of `t`'s linear part, same translation.
