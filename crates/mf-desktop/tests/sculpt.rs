@@ -264,6 +264,17 @@ fn stroke_and_release_never_flicker() {
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 20.0]))]);
     h.get_by_label("Sculpt").click();
     settle(&mut h);
+    // A stronger stroke than the panel's default: a radially-symmetric
+    // inflate bump moves its very apex (where this test samples) mostly
+    // *outward*, not sideways, so the apex's own shading changes less
+    // than its slopes do (parallax and the rim's terminator shift, not
+    // the centre's). A bigger radius alone doesn't fix that; enough
+    // strength to move the apex perceptibly does. "Stay on this
+    // surface" (on by default) also measures its radius along the
+    // surface, which reaches a little less far in screen-space terms
+    // than the old straight-line brush did at the same nominal radius.
+    h.state_mut().sculpt.radius = 10.0;
+    h.state_mut().sculpt.strength = 1.0;
 
     let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
     let pixel_at = |h: &mut Harness<'_, MeshFixerApp>| -> [u8; 4] {
@@ -382,4 +393,15 @@ fn brush_panel_controls_change_the_settings() {
         mf_operations::sculpt::BrushKind::Carve
     );
     still(&mut h, "brush-picker");
+
+    assert!(
+        h.state().sculpt.stay_on_surface,
+        "\"Stay on this surface\" is on by default"
+    );
+    h.get_by_label("Stay on this surface").click();
+    settle(&mut h);
+    assert!(
+        !h.state().sculpt.stay_on_surface,
+        "the checkbox should turn it off"
+    );
 }

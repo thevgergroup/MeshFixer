@@ -115,17 +115,21 @@ pub fn rgba(c: Color32) -> [f32; 4] {
 /// colours (`HOLE`'s orange, `CRACK`'s magenta, `SELECTED`'s cyan…) stay
 /// readable over it and the model still reads apart from the dark chrome.
 /// Nine hues spread evenly, at the same lightness so no object reads as
-/// "more important" just from its slot.
+/// "more important" just from its slot. Kept light enough (~70%
+/// lightness) that even the darkest hue's (violet's) desaturated,
+/// `INACTIVE_BRIGHTNESS`-dimmed grey still clears the stage background
+/// by a comfortable margin — an inactive object must never blend into
+/// the chrome (MF-ISSUE: a too-dark hue nearly vanished there).
 pub const OBJECT_PALETTE: [Color32; 9] = [
-    Color32::from_rgb(121, 158, 195), // blue
-    Color32::from_rgb(195, 152, 121), // clay orange
-    Color32::from_rgb(121, 195, 158), // green
-    Color32::from_rgb(170, 121, 195), // violet
-    Color32::from_rgb(195, 183, 121), // ochre
-    Color32::from_rgb(195, 121, 146), // rose
-    Color32::from_rgb(121, 183, 195), // teal
-    Color32::from_rgb(152, 195, 121), // moss
-    Color32::from_rgb(195, 140, 121), // terracotta
+    Color32::from_rgb(156, 184, 211), // blue
+    Color32::from_rgb(211, 179, 156), // clay orange
+    Color32::from_rgb(156, 211, 184), // green
+    Color32::from_rgb(193, 156, 211), // violet
+    Color32::from_rgb(211, 202, 156), // ochre
+    Color32::from_rgb(211, 156, 175), // rose
+    Color32::from_rgb(156, 202, 211), // teal
+    Color32::from_rgb(179, 211, 156), // moss
+    Color32::from_rgb(211, 170, 156), // terracotta
 ];
 
 /// A shade of `OBJECT_PALETTE[index]`, lightened or darkened by `variant`
@@ -454,5 +458,28 @@ mod tests {
     fn object_shade_for_test(base: Color32, variant: u32) -> Color32 {
         let index = OBJECT_PALETTE.iter().position(|&c| c == base).expect("test base is in the palette");
         object_shade(index, variant)
+    }
+
+    /// An inactive object is desaturated to its own luminance, then dimmed
+    /// by `INACTIVE_BRIGHTNESS`: every palette colour's result must still
+    /// clear the stage background by a real margin, or an object with
+    /// that hue nearly vanishes against the chrome the moment it isn't
+    /// active (a real bug this regression test catches: an earlier,
+    /// darker palette let a violet-hued object's inactive grey land
+    /// right at the background's own brightness).
+    #[test]
+    fn every_palette_colour_stays_visible_when_inactive_and_dimmed() {
+        let luma = |c: Color32| {
+            0.299 * f32::from(c.r()) + 0.587 * f32::from(c.g()) + 0.114 * f32::from(c.b())
+        };
+        let bg_luma = luma(VIEWPORT_BACKGROUND).max(luma(VIEWPORT_BACKGROUND_TOP));
+        for (i, &c) in OBJECT_PALETTE.iter().enumerate() {
+            let inactive_luma = luma(c) * INACTIVE_BRIGHTNESS;
+            assert!(
+                inactive_luma > bg_luma + 20.0,
+                "palette colour {i} ({c:?}) only reaches {inactive_luma} when inactive, \
+                 too close to the background's {bg_luma}"
+            );
+        }
     }
 }
