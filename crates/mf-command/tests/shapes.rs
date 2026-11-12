@@ -115,6 +115,9 @@ fn editing_a_param_regenerates_undoes_redoes_and_replays_exact() {
             generator: boxed.clone(),
             name: "Box".into(),
             hole: false,
+            attach_to: None,
+            transform: None,
+            group: None,
         }],
         "",
     );
@@ -167,11 +170,17 @@ fn combine_bakes_a_shape_into_a_mesh() {
                 generator: record("shape.box", &[]),
                 name: "Box".into(),
                 hole: false,
+                attach_to: None,
+                transform: None,
+                group: None,
             },
             ShapeToAdd {
                 generator: record("shape.cylinder", &[("diameter", "6"), ("height", "40")]),
                 name: "Cylinder".into(),
                 hole: true,
+                attach_to: None,
+                transform: None,
+                group: None,
             },
         ],
         "",
@@ -234,11 +243,17 @@ fn a_group_is_regenerated_by_one_edit() {
                 generator: member("peg", &params),
                 name: "Peg".into(),
                 hole: false,
+                attach_to: None,
+                transform: None,
+                group: None,
             },
             ShapeToAdd {
                 generator: member("counterpart hole", &params),
                 name: "Peg hole".into(),
                 hole: true,
+                attach_to: None,
+                transform: None,
+                group: None,
             },
         ],
         "g1",
@@ -267,4 +282,153 @@ fn a_group_is_regenerated_by_one_edit() {
             9.0
         );
     }
+}
+
+fn volume(s: &Session, id: ObjectId) -> f64 {
+    let (p, t) = s.document().object(id).unwrap().mesh().unwrap().to_arrays();
+    t.iter()
+        .map(|tri| {
+            let [a, b, c] = tri.map(|i| glam::DVec3::from(p[i as usize]));
+            a.dot(b.cross(c)) / 6.0
+        })
+        .sum()
+}
+
+/// A linked peg-and-hole pair moves as one (`object.move_group`) and
+/// attaches onto its two pieces in one step (`object.attach`): the peg
+/// joins side A, its hole is cut from side B, both members are removed,
+/// and the whole thing replays Exact.
+#[test]
+fn a_linked_pair_moves_together_and_attaches_to_its_two_pieces() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("two.3mf");
+    let model = Model {
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                metadata: Default::default(),
+                name: "bottom".into(),
+                mesh: mf_fixtures::translated(
+                    &mf_fixtures::scaled(&cube(1.0), 30.0),
+                    [-15.0, -15.0, -30.0],
+                ),
+                transform: IDENTITY,
+            },
+            ModelObject {
+                metadata: Default::default(),
+                name: "top".into(),
+                mesh: mf_fixtures::translated(
+                    &mf_fixtures::scaled(&cube(1.0), 30.0),
+                    [-15.0, -15.0, 0.0],
+                ),
+                transform: IDENTITY,
+            },
+        ],
+    };
+    write_model_path(&model, &path).unwrap();
+    let mut s = Session::new();
+    let (ids, _) = s.import_model(read_model(&path).unwrap());
+    let (bottom, top) = (ids[0], ids[1]);
+    let peg = mf_parts::connectors()
+        .into_iter()
+        .find(|c| c.id() == "joint.peg")
+        .unwrap();
+    let params = peg.spec().validate(&BTreeMap::new()).unwrap();
+    let member = |part: &str| GeneratorRecord {
+        id: "joint.peg".into(),
+        version: peg.version(),
+        params: params.clone(),
+        part: Some(part.into()),
+    };
+    let pair = add(
+        &mut s,
+        bottom,
+        &[
+            ShapeToAdd {
+                generator: member("peg"),
+                name: "Peg".into(),
+                hole: false,
+                attach_to: Some(bottom.0),
+                transform: Some(IDENTITY),
+                group: None,
+            },
+            ShapeToAdd {
+                generator: member("counterpart hole"),
+                name: "Peg hole".into(),
+                hole: true,
+                attach_to: Some(top.0),
+                transform: Some(IDENTITY),
+                group: None,
+            },
+        ],
+        "pair",
+    );
+    assert_eq!(
+        s.document().object(pair[0]).unwrap().properties[mf_operations::shapes::ATTACH_TO],
+        bottom.0.to_string()
+    );
+    // Move both by 2 mm along x and back: one step each, both together.
+    let mut moved = IDENTITY;
+    moved[9] = 2.0;
+    for t in [moved, IDENTITY] {
+        let steps = s.history_labels().len();
+        s.execute(Invocation {
+            op_id: "object.move_group".into(),
+            target: pair[0],
+            selection: None,
+            operands: vec![("target".to_owned(), pair[1], None)],
+            raw_params: BTreeMap::from([(
+                "transforms".to_owned(),
+                mf_operations::shapes::transforms_param(&[t, t]),
+            )]),
+        })
+        .unwrap();
+        assert_eq!(s.history_labels().len(), steps + 1);
+        for &m in &pair {
+            assert_eq!(s.document().object(m).unwrap().transform, t);
+        }
+    }
+    let (v_bottom, v_top) = (volume(&s, bottom), volume(&s, top));
+    let roles = [
+        mf_operations::shapes::AttachMember {
+            side: 'a',
+            hole: false,
+        },
+        mf_operations::shapes::AttachMember {
+            side: 'b',
+            hole: true,
+        },
+    ];
+    s.execute(Invocation {
+        op_id: "object.attach".into(),
+        target: bottom,
+        selection: None,
+        operands: vec![
+            ("side_b".to_owned(), top, None),
+            ("members".to_owned(), pair[0], None),
+            ("members".to_owned(), pair[1], None),
+        ],
+        raw_params: BTreeMap::from([(
+            "members".to_owned(),
+            mf_operations::shapes::attach_param(&roles),
+        )]),
+    })
+    .unwrap();
+    assert!(
+        volume(&s, bottom) > v_bottom + 1.0,
+        "the peg joined the bottom"
+    );
+    assert!(
+        volume(&s, top) < v_top - 1.0,
+        "its hole was cut from the top"
+    );
+    assert!(s.document().object(pair[0]).is_none() && s.document().object(pair[1]).is_none());
+    let log = dir.path().join("attach.mfx.log");
+    s.save_log(&log).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        report.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        report.results
+    );
 }

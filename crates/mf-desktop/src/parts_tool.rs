@@ -261,6 +261,9 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
         generator: record,
         name: shape.name().to_owned(),
         hole: shape.role() == mf_parts::ShapeRole::Hole,
+        attach_to: None,
+        transform: None,
+        group: None,
     }];
     let params = BTreeMap::from([
         (

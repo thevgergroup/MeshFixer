@@ -19,6 +19,12 @@
 //! - **Apply** runs `split.place_connectors` once for every connector
 //!   on the joint; a joint can be reopened and applied again (from the
 //!   revision before its connectors).
+//! - **Add as editable shapes** is Connect as a placement helper
+//!   (parametric-shapes brief): each connector becomes a linked group of
+//!   editable shapes, aligned across the cut (a solid peg on the piece
+//!   it was placed on, its hole on the other, each marked with the piece
+//!   it joins), so it can still be resized, moved as one, and attached
+//!   later (`object.attach`). The same as placing them by hand.
 //! - **With no joints**, the panel says so and offers a button that
 //!   opens Split.
 //!
@@ -75,7 +81,13 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             app.split_flow.drag = None;
             app.split_flow.hover = None;
         },
-        ..T::new(CONNECT, "tool.connect.name", icons::CONNECT, Category::Shape, 1)
+        ..T::new(
+            CONNECT,
+            "tool.connect.name",
+            icons::CONNECT,
+            Category::Shape,
+            1,
+        )
     })
 }
 
@@ -234,7 +246,10 @@ pub fn add_dovetail(app: &mut MeshFixerApp, start: [f64; 2], end: [f64; 2]) {
     let angle = dir[1].atan2(dir[0]).to_degrees();
     let clearance = mf_operations::wanted_clearance(&split_flow::settings(app));
     let params = BTreeMap::from([
-        ("clearance".to_owned(), (clearance * 1000.0).round() / 1000.0),
+        (
+            "clearance".to_owned(),
+            (clearance * 1000.0).round() / 1000.0,
+        ),
         ("groove_a".to_owned(), (reach_a * 10.0).round() / 10.0),
         ("groove_b".to_owned(), (reach_b * 10.0).round() / 10.0),
         ("open_a".to_owned(), if open_a { 1.0 } else { 0.0 }),
@@ -267,6 +282,7 @@ fn push_placement(
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     split_flow::refresh(app);
     crate::shape_tools::refusal_card_for(app, ui, "split.place_connectors");
+    crate::shape_tools::refusal_card_for(app, ui, "object.add_shape");
     // The joints.
     section(ui, &t!("connect.section.joints"));
     let rows: Vec<(usize, String, String)> = app
@@ -298,8 +314,13 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if rows.is_empty() {
         widgets::caption(ui, t!("connect.joints.none"));
         ui.add_space(theme::SPACE_S);
-        if widgets::wide_button(ui, Kind::Secondary, Some(icons::SPLIT), &t!("connect.joints.open_split"))
-            .clicked()
+        if widgets::wide_button(
+            ui,
+            Kind::Secondary,
+            Some(icons::SPLIT),
+            &t!("connect.joints.open_split"),
+        )
+        .clicked()
         {
             app.open_rail_tool(crate::shape_tools::SPLIT);
         }
@@ -486,6 +507,109 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     {
         apply_connectors(app, j, label);
     }
+    ui.add_space(theme::SPACE_XS);
+    if ui
+        .add_enabled_ui(can && !applied, |ui| {
+            widgets::wide_button(
+                ui,
+                Kind::Secondary,
+                Some(icons::PARTS),
+                &t!("connect.as_shapes"),
+            )
+        })
+        .inner
+        .on_hover_text(t!("connect.as_shapes.tip"))
+        .clicked()
+    {
+        add_as_shapes(app, j);
+    }
+}
+
+/// The joint's connectors as linked groups of editable shapes, one group
+/// per connector, in one `object.add_shape` step: each part placed where
+/// `split.place_connectors` would cut or join it, marked with the piece
+/// it joins.
+pub fn add_as_shapes(app: &mut MeshFixerApp, j: usize) {
+    let Some(joint) = app.split_flow.joints.get(j).cloned() else {
+        return;
+    };
+    let mm = mm(app);
+    let gap_mm = joint.frame.gap / mm;
+    let mut shapes = Vec::new();
+    let first = crate::connector_tool::new_group_id(app, "connect");
+    let base: u64 = first
+        .rsplit('-')
+        .next()
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(1); // allow-swallow: new_group_id always ends in its number
+    for (i, p) in joint.placements.iter().enumerate() {
+        let params = match mf_operations::placement_params(p, gap_mm) {
+            Ok(params) => params,
+            Err(e) => return refuse_shapes(app, e.to_string()),
+        };
+        let world = mf_operations::placement_to_world(&joint.frame, p, mm);
+        let transform = [
+            world.x_axis.x,
+            world.x_axis.y,
+            world.x_axis.z,
+            world.y_axis.x,
+            world.y_axis.y,
+            world.y_axis.z,
+            world.z_axis.x,
+            world.z_axis.y,
+            world.z_axis.z,
+            world.w_axis.x,
+            world.w_axis.y,
+            world.w_axis.z,
+        ];
+        let json = serde_json::to_string(&params).unwrap_or_default(); // allow-swallow: Params is plain data; serializing it can't fail
+        let name = format!("{} {}", split_flow::kind_label(&p.connector), i + 1);
+        let sides = (joint.piece(p.on), joint.piece(p.on.other()));
+        let members = match crate::connector_tool::group_members(
+            &p.connector,
+            &name,
+            &json,
+            &transform,
+            Some(sides),
+        ) {
+            Ok(m) => m,
+            Err(e) => return refuse_shapes(app, e),
+        };
+        let group = format!("connect-{}", base + i as u64);
+        shapes.extend(members.into_iter().map(|mut m| {
+            m.transform = Some(transform);
+            m.group = Some(group.clone());
+            m
+        }));
+    }
+    if shapes.is_empty() {
+        return;
+    }
+    app.refusal = None;
+    app.run_invocation(
+        Invocation {
+            op_id: "object.add_shape".into(),
+            target: joint.a,
+            selection: None,
+            operands: Vec::new(),
+            raw_params: BTreeMap::from([
+                (
+                    "shapes".to_owned(),
+                    mf_operations::shapes::shapes_param(&shapes),
+                ),
+                ("group".to_owned(), String::new()),
+            ]),
+        },
+        t!("connect.shapes_label"),
+    );
+}
+
+fn refuse_shapes(app: &mut MeshFixerApp, message: String) {
+    app.refusal = Some(crate::shape_tools::Refusal {
+        op_id: "object.add_shape".into(),
+        code: "connector_failed".into(),
+        message,
+    });
 }
 
 fn warning_card(ui: &mut egui::Ui, message: &str) {
@@ -680,8 +804,10 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
                     t!("connect.shape.nsided"),
                     t!("connect.shape.keyed"),
                 ];
-                let options: Vec<(&str, &str, bool)> =
-                    labels.iter().map(|l| (l.as_str(), l.as_str(), true)).collect();
+                let options: Vec<(&str, &str, bool)> = labels
+                    .iter()
+                    .map(|l| (l.as_str(), l.as_str(), true))
+                    .collect();
                 let current = shape.code() as usize;
                 if let (Some(i), _) = widgets::segmented(ui, &options, current) {
                     edited.params.insert("shape".to_owned(), i as f64);
@@ -1223,7 +1349,8 @@ pub fn overlay(app: &MeshFixerApp, painter: &egui::Painter, rect: egui::Rect) {
         return;
     };
     let at = |p: DVec3| {
-        split_flow::screen(&cam, size, p).map(|(x, y)| rect.left_top() + egui::vec2(x as f32, y as f32))
+        split_flow::screen(&cam, size, p)
+            .map(|(x, y)| rect.left_top() + egui::vec2(x as f32, y as f32))
     };
     draw_connectors(app, painter, &at);
 }

@@ -1,0 +1,42 @@
+id: object.attach
+version: 1
+summary: Join a linked group's members onto the objects they connect (solids joined, holes cut), as one command.
+geometry_kinds: [mesh]
+# Side A: receives every member marked side 'a'.
+target:
+  whole_object: true
+  kinds: []
+operands:
+  # Side B: receives every member marked side 'b'.
+  - name: side_b
+    role: changed
+    kinds: [object]
+    required: false
+  # The members, in order, each removed once joined.
+  - name: members
+    role: consumed
+    kinds: [object]
+    required: true
+    many: true
+parameters:
+  - name: members
+    type: text
+    default: "[]"
+    description: "Each member's side and role, as JSON, in order: [{side: 'a' or 'b', hole: true or false}]"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Moving parts: the two sides must stay at least this far apart where they meet (0: don't check)"
+preconditions:
+  - one role per member
+  - every member and side is a closed mesh
+postconditions:
+  - each side is combined with its members exactly as mesh.combine does (solids joined, then holes cut, each step checked)
+  - the members are removed; undo restores them
+  - with a gap, the two sides are at least that far apart (otherwise moving_parts_fused, and nothing commits)
+effects: [geometry_changes, topology_changes, removes_objects]
+runtime:
+  cancellable: true
+  progress: false

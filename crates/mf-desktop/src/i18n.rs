@@ -238,6 +238,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "connect.apply.replaces",
         "Updating replaces the connectors added before.",
     ),
+    ("connect.as_shapes", "Add as editable shapes"),
+    (
+        "connect.as_shapes.tip",
+        "Place each connector as a linked group of editable shapes (the part on one piece, its hole on the other) instead of cutting them in now. Edit them, then Attach.",
+    ),
     ("connect.check", "Connector {n}: {message}"),
     ("connect.fit.class", "Fit: {name}"),
     ("connect.fit.machine", "Printer: {name}"),
@@ -336,11 +341,12 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("connect.shape.nsided", "N-sided"),
     ("connect.shape.round", "Round"),
     ("connect.shape.square", "Square"),
+    ("connect.shapes_label", "Add connectors as editable shapes"),
     ("connectors.add", "Add"),
     ("connectors.apply", "Add \"{name}\""),
     (
         "connectors.click_help",
-        "Click a connector to add it to the model",
+        "Click a connector to add it to the model as editable shapes, one per part",
     ),
     ("connectors.fit_check.fix", "Use a looser fit"),
     (
@@ -350,7 +356,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("connectors.fit_check.pair", "Connector mating parts"),
     ("connectors.fit_class", "Fit class"),
     ("connectors.machine_profile", "Machine profile"),
-    ("connectors.merge", "Merge"),
+    ("connectors.merge", "Attach"),
     ("connectors.not_calibrated", "{name} (not calibrated)"),
     (
         "connectors.save_failed",
@@ -366,7 +372,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("connectors.section.fit", "Fit"),
     ("connectors.section.fit_check", "Fit check"),
     ("connectors.section.library", "Library"),
-    ("connectors.section.merge", "Merge"),
+    ("connectors.section.merge", "Attach to the model"),
     ("connectors.side_a", "Side A"),
     ("connectors.side_a_option", "Side A: {name}"),
     ("connectors.side_b", "Side B"),
@@ -609,6 +615,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("settings.machine_profiles.new", "New machine profile…"),
     ("settings.print_volume", "Print volume"),
     ("settings.title", "Settings"),
+    ("shape.attach", "Attach to {a} and {b}"),
+    (
+        "shape.attach.tip",
+        "Join each part onto the piece it belongs to: solids joined, holes cut, as one undo step",
+    ),
     ("shape.change", "Change \"{name}\""),
     ("shape.editable", "Editable shape · {name}"),
     (

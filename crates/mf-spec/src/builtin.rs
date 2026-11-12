@@ -86,6 +86,14 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/object.add_shape.yaml"),
     ),
     (
+        "object.attach.yaml",
+        include_str!("../../../specs/operations/object.attach.yaml"),
+    ),
+    (
+        "object.move_group.yaml",
+        include_str!("../../../specs/operations/object.move_group.yaml"),
+    ),
+    (
         "object.set_shape_params.yaml",
         include_str!("../../../specs/operations/object.set_shape_params.yaml"),
     ),

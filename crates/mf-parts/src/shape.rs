@@ -366,6 +366,26 @@ pub fn param_text(params: &Params, name: &str) -> Option<String> {
 
 pub use crate::builtin_shapes::{HOLE_OVERSHOOT, builtin_shapes, chosen_profile};
 
+/// For a connector group member: which side of the pair its part
+/// belongs to and how it joins it (`None` for a plain shape, or a part
+/// the connector doesn't make with these params).
+pub fn part_of(
+    record: &GeneratorRecord,
+    ctx: &RunContext,
+) -> Option<(crate::Side, crate::JoinKind)> {
+    let role = record.part.as_deref()?;
+    let c = crate::connectors()
+        .into_iter()
+        .find(|c| c.id() == record.id)?;
+    // allow-swallow: a part that no longer generates simply has no side; regenerating it reports why
+    let parts = c.generate(&record.params, ctx).ok()?;
+    parts
+        .parts
+        .iter()
+        .find(|p| p.role == role)
+        .map(|p| (p.side, p.join))
+}
+
 /// True if `record`'s params carry a hole profile (`hole_profile`,
 /// `profile`, `up_x`, `up_y`): a hole-like shape, or a connector part
 /// whose holes take one.

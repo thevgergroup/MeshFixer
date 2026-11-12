@@ -350,6 +350,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &add_part::AddPart,
     &shapes::AddShape,
     &shapes::SetShapeParams,
+    &shapes::Attach,
+    &shapes::MoveGroup,
     &connector_ops::ConnectorJoin,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,

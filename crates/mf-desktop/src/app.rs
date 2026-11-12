@@ -263,6 +263,8 @@ pub enum PendingPlacement {
         connector_id: String,
         connector_params_json: String,
         gap: f64,
+        /// The linked group its members were placed in.
+        group: String,
     },
 }
 
@@ -4744,6 +4746,9 @@ impl MeshFixerApp {
         if self.busy.is_some() || self.active != Some(object) {
             return;
         }
+        if self.move_group(object, transform, &status) {
+            return;
+        }
         self.preview = Some((object, transform));
         self.pending_status = Some(status);
         self.run_tool(&Tool {
@@ -4759,6 +4764,83 @@ impl MeshFixerApp {
             self.preview = None;
             self.pending_status = None;
         }
+    }
+
+    /// A member of a linked group (a connector placed as several
+    /// objects) moves with the rest of its group, so a peg and its hole
+    /// stay aligned: every member gets the same world move as `object`,
+    /// as one `object.move_group` step. False (nothing done) if `object`
+    /// isn't in a group of more than one.
+    fn move_group(&mut self, object: ObjectId, transform: [f64; 12], status: &str) -> bool {
+        let doc = self.session.document();
+        let Some(group) = doc
+            .object(object)
+            .and_then(|o| o.properties.get(mf_command::GROUP))
+            .cloned()
+        else {
+            return false;
+        };
+        let members: Vec<(ObjectId, [f64; 12])> = doc
+            .objects()
+            .iter()
+            .filter(|o| o.properties.get(mf_command::GROUP) == Some(&group))
+            .map(|o| (o.id, o.transform))
+            .collect();
+        let Some(from) = doc.object(object).map(|o| o.transform) else {
+            return false;
+        };
+        if members.len() < 2 {
+            return false;
+        }
+        let affine = |t: &[f64; 12]| {
+            glam::DAffine3::from_mat3_translation(
+                crate::shape_panel::rotation(t),
+                glam::DVec3::new(t[9], t[10], t[11]),
+            )
+        };
+        let delta = affine(&transform) * affine(&from).inverse();
+        let rows = |a: glam::DAffine3| {
+            let m = a.matrix3;
+            let t = a.translation;
+            [
+                m.x_axis.x, m.x_axis.y, m.x_axis.z, m.y_axis.x, m.y_axis.y, m.y_axis.z, m.z_axis.x,
+                m.z_axis.y, m.z_axis.z, t.x, t.y, t.z,
+            ]
+        };
+        let transforms: Vec<[f64; 12]> = members
+            .iter()
+            .map(|(m, t)| {
+                if *m == object {
+                    transform
+                } else {
+                    rows(delta * affine(t))
+                }
+            })
+            .collect();
+        let ids: Vec<ObjectId> = members.iter().map(|(m, _)| *m).collect();
+        self.preview = Some((object, transform));
+        self.pending_status = Some(status.to_owned());
+        self.run_invocation(
+            Invocation {
+                op_id: "object.move_group".into(),
+                target: ids[0],
+                selection: None,
+                operands: ids[1..]
+                    .iter()
+                    .map(|&o| ("target".to_owned(), o, None))
+                    .collect(),
+                raw_params: BTreeMap::from([(
+                    "transforms".to_owned(),
+                    mf_operations::shapes::transforms_param(&transforms),
+                )]),
+            },
+            "Move group".into(),
+        );
+        if self.busy.is_none() {
+            self.preview = None;
+            self.pending_status = None;
+        }
+        true
     }
 
     /// Drop to plate: the active object straight down (or up) until its
@@ -4912,9 +4994,11 @@ impl MeshFixerApp {
                         connector_id,
                         connector_params_json,
                         gap,
+                        group,
                     } => {
                         self.connectors.placed = Some(crate::connector_tool::PlacedConnector {
                             object: new_object,
+                            group,
                             connector_id,
                             connector_params_json,
                             gap,
@@ -5045,8 +5129,15 @@ impl MeshFixerApp {
             // has nothing picked (I1, owner 2026-11-11: deleting a
             // connector must never delete an object instead).
             let tool = self.active_tool_def();
-            let key = if delete { egui::Key::Delete } else { egui::Key::Backspace };
-            let owned = (tool.keys)(self).iter().find(|(k, _)| *k == key).map(|&(_, k)| k);
+            let key = if delete {
+                egui::Key::Delete
+            } else {
+                egui::Key::Backspace
+            };
+            let owned = (tool.keys)(self)
+                .iter()
+                .find(|(k, _)| *k == key)
+                .map(|&(_, k)| k);
             match owned {
                 Some(k) => (tool.on_key)(self, k),
                 None => self.delete_active_object(),
@@ -5583,7 +5674,11 @@ fn history_label(
         "mesh.split_plane" | "mesh.split_box" => {
             let name = before_name(session, rec, rec.target);
             let pieces = rec.outputs.iter().filter(|o| o.created).count() + 1;
-            Some(format!("Split {name} into {} piece{}", pieces, plural_s(pieces)))
+            Some(format!(
+                "Split {name} into {} piece{}",
+                pieces,
+                plural_s(pieces)
+            ))
         }
         "mesh.make_solid" => {
             let name = result_name(node, rec.target);
@@ -5654,9 +5749,9 @@ fn plural_s(n: usize) -> &'static str {
 /// Parameters the label itself already states (the transform, the
 /// connector list) are left out: they'd only repeat it.
 fn history_details(node: &mf_command::RevisionNode) -> String {
-    node.record
-        .as_ref()
-        .map_or_else(String::new, |rec| history_details_of(&rec.op_id, &rec.params))
+    node.record.as_ref().map_or_else(String::new, |rec| {
+        history_details_of(&rec.op_id, &rec.params)
+    })
 }
 
 /// [`history_details`], from an op id and its parameters directly (so it
@@ -5880,10 +5975,7 @@ mod tests {
             .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
             .collect();
         let mut raw = raw;
-        raw.insert(
-            "transform".into(),
-            "1,0,0,0,1,0,0,0,1,12,0,0".into(),
-        );
+        raw.insert("transform".into(), "1,0,0,0,1,0,0,0,1,12,0,0".into());
         let params = spec.validate(&raw).unwrap();
         assert_eq!(history_details_of("object.set_transform", &params), "");
 

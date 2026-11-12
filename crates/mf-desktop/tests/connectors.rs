@@ -3,7 +3,8 @@
 //! The Connectors tool on the rail (Phase 1 Task 29, MF-MODEL-005): the
 //! library (Pin hinge, Flap hinge, Snap clasp, Thread), the Fit class
 //! and Machine profile pickers, placing a connector with
-//! `object.add_part`, the fit check and Merge (`connector.join`).
+//! `object.add_shape` (a linked group of editable shapes, one per part),
+//! the fit check and Attach (`object.attach`).
 //!
 //! With `MF_ARTIFACTS` set, frames go to
 //! `<dir>/design/connectors-<scene>-<w>x<h>.png`.
@@ -191,7 +192,11 @@ fn clicking_a_connector_adds_it_and_opens_transform() {
     });
     settle(&mut h);
     let names = objects(&h);
-    assert!(names.contains(&"Pin hinge".to_owned()), "{names:?}");
+    assert!(
+        names.contains(&"Pin hinge (leaf a)".to_owned())
+            && names.contains(&"Pin hinge (leaf b)".to_owned()),
+        "one editable shape per part: {names:?}"
+    );
     assert_eq!(
         h.state().active_tool,
         "transform",
@@ -239,7 +244,7 @@ fn merge_folds_the_connector_into_its_two_sides() {
     settle(&mut h);
     scroll_and_click(&mut h, "Side B: lid");
     settle(&mut h);
-    scroll_and_click(&mut h, "Merge");
+    scroll_and_click(&mut h, "Attach");
     wait_until(&mut h, "the merge", |a| {
         a.busy.is_none() && a.session.history_labels().len() > after_move
     });
@@ -276,7 +281,7 @@ fn merge_disables_when_both_sides_are_the_same_object() {
     settle(&mut h);
     scroll_and_click(&mut h, "Side B: lid");
     settle(&mut h);
-    assert!(h.get_by_label("Merge").accesskit_node().is_disabled());
+    assert!(h.get_by_label("Attach").accesskit_node().is_disabled());
 }
 
 /// Placing a connector (or running Merge) shows a plain-language
@@ -295,7 +300,7 @@ fn placing_a_connector_shows_fit_settings_refusal_with_next_action() {
     settle(&mut h);
     assert!(h.state().refusal.is_some(), "a refusal is shown");
     let refusal = h.state().refusal.clone().unwrap();
-    assert_eq!(refusal.op_id, "object.add_part");
+    assert_eq!(refusal.op_id, "object.add_shape");
     assert_eq!(refusal.code, "fit_settings_unreadable");
     assert!(
         refusal.message.contains("Fit classes") || refusal.message.contains("Machine profiles"),

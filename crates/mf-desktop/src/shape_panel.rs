@@ -90,9 +90,44 @@ pub fn members(app: &MeshFixerApp, id: ObjectId) -> Vec<(ObjectId, GeneratorReco
         .collect()
 }
 
+/// For a group whose members know which objects they join (Connect's
+/// helper, a hinge placed between two objects): the group, side A's
+/// object, side B's, and the gap the two must keep (a hinge's moving
+/// parts; 0 for a fixed joint, where a peg sits closer than the cut).
+pub fn attach_sides(app: &MeshFixerApp, id: ObjectId) -> Option<(String, ObjectId, ObjectId, f64)> {
+    let doc = app.session.document();
+    let group = doc.object(id)?.properties.get(GROUP)?.clone();
+    let ctx = mf_runtime::RunContext::none();
+    let (mut a, mut b, mut gap) = (None, None, 0.0);
+    for (m, record) in members(app, id) {
+        let Some(to) = doc
+            .object(m)?
+            .properties
+            .get(mf_operations::shapes::ATTACH_TO)
+            .and_then(|t| t.parse::<u64>().ok())
+            .map(ObjectId)
+        else {
+            continue;
+        };
+        doc.object(to)?;
+        match mf_parts::shape::part_of(&record, &ctx).map(|(s, _)| s) {
+            Some(mf_parts::Side::B) => b = b.or(Some(to)),
+            _ => a = a.or(Some(to)),
+        }
+        if record.id.starts_with("hinge.") {
+            gap = record.params.get_float("gap").unwrap_or(0.0);
+        }
+    }
+    let (a, b) = (a?, b?);
+    (a != b).then_some((group, a, b, gap))
+}
+
 /// The display name of a recipe's generator: the shape's own, or the
 /// connector's library name for a group member.
 pub fn generator_name(record: &GeneratorRecord) -> String {
+    if record.id.starts_with("joint.") {
+        return crate::split_flow::kind_label(&record.id);
+    }
     if record.part.is_some() {
         let lib = mf_parts::Library::load(None, &mf_runtime::RunContext::none()).0;
         return lib
@@ -269,6 +304,21 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui,
             t!("shape.group", n = members.len(), names = names.join(", ")),
         );
+        if let Some((group, a, b, gap)) = attach_sides(app, id) {
+            let doc = app.session.document();
+            let name = |o: ObjectId| doc.object(o).map(|o| o.name.clone()).unwrap_or_default();
+            let label = t!("shape.attach", a = name(a), b = name(b));
+            if ui
+                .add_enabled_ui(app.busy.is_none(), |ui| {
+                    widgets::wide_button(ui, widgets::Kind::Primary, Some(icons::CONNECT), &label)
+                })
+                .inner
+                .on_hover_text(t!("shape.attach.tip"))
+                .clicked()
+            {
+                crate::connector_tool::attach_group(app, &group, a, b, gap, label);
+            }
+        }
     }
     let revision = app.session.current();
     let fresh = !matches!(&app.shape_edit, Some(d) if d.object == id && d.revision == revision);

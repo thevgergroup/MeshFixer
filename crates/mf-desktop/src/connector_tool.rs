@@ -9,10 +9,14 @@
 //! - **Fit class and Machine profile** pickers: the design-intent gap
 //!   and the measured print-tolerance compensation (owner requirements
 //!   2026-11-11); a profile the user hasn't calibrated says so.
-//! - **Placing** works like Parts: `object.add_part` with the
-//!   connector's library id, one undo step; the placement remembers
-//!   `connector_id`/`connector_params` so Merge (`connector.join`) can
-//!   run without reading the object's live state.
+//! - **Placing** adds the connector as a linked group of editable
+//!   shapes (parametric-shapes brief): one object per part (a hinge's
+//!   leaves, a clasp's catch and hook), each keeping its recipe and the
+//!   group id, so selecting any of them edits the whole connector
+//!   (`object.add_shape`, one undo step). Holes are placed as Holes.
+//! - **Attach** joins each member onto the side it belongs to, solids
+//!   joined and holes cut (`object.attach`, one undo step), checking the
+//!   two sides stay `gap` apart.
 //! - **The fit check**, in plain words with a one-click fix: the exact
 //!   gap between the connector's own generated mating parts (its first
 //!   `Side::A`/`Side::B` pair), measured against the chosen Fit class
@@ -40,7 +44,10 @@ pub const CONNECTORS: &str = "connectors";
 /// and the id of the two objects it's meant to join, once picked.
 #[derive(Debug, Clone)]
 pub struct PlacedConnector {
+    /// The group's first member (the object Transform opens on).
     pub object: ObjectId,
+    /// The linked group's id, on every member.
+    pub group: String,
     pub connector_id: String,
     pub connector_params_json: String,
     pub gap: f64,
@@ -268,7 +275,7 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         Ok(p) => p,
         Err(e) => {
             app.refusal = Some(crate::shape_tools::Refusal {
-                op_id: "object.add_part".into(),
+                op_id: "object.add_shape".into(),
                 code: "fit_settings_unreadable".into(),
                 message: format!(
                     "Couldn't read your Fit classes or Machine profiles: {e}. Fix the file in \
@@ -278,11 +285,24 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
             return;
         }
     };
-    // allow-swallow: a bad hash just skips the replay check; add_part reports the real reason
-    let hash = part.content_hash().unwrap_or_default();
+    let name = part.manifest.name.clone();
+    let shapes = match group_members(id, &name, &connector_params_json, &transform, None) {
+        Ok(s) => s,
+        Err(message) => {
+            app.refusal = Some(crate::shape_tools::Refusal {
+                op_id: "object.add_shape".into(),
+                code: "connector_failed".into(),
+                message,
+            });
+            return;
+        }
+    };
+    let group = new_group_id(app, id);
     let params = BTreeMap::from([
-        ("part_id".to_owned(), id.to_owned()),
-        ("part_hash".to_owned(), hash),
+        (
+            "shapes".to_owned(),
+            mf_operations::shapes::shapes_param(&shapes),
+        ),
         (
             "transform".to_owned(),
             transform
@@ -291,12 +311,13 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
                 .collect::<Vec<_>>()
                 .join(","),
         ),
+        ("group".to_owned(), group.clone()),
     ]);
     run_on(
         app,
         scan,
-        "object.add_part",
-        t!("connectors.apply", name = part.manifest.name.clone()),
+        "object.add_shape",
+        t!("connectors.apply", name = name),
         params,
         Vec::new(),
     );
@@ -305,13 +326,139 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
             connector_id: id.to_owned(),
             connector_params_json,
             gap,
+            group,
         });
     }
 }
 
+/// A fresh linked-group id for connector `id`: unique in the document
+/// (the next number after every group already there).
+pub(crate) fn new_group_id(app: &MeshFixerApp, id: &str) -> String {
+    let n = app
+        .session
+        .document()
+        .objects()
+        .iter()
+        .filter_map(|o| o.properties.get(mf_command::GROUP))
+        .filter_map(|g| g.rsplit('-').next()?.parse::<u64>().ok())
+        .max()
+        .map_or(1, |n| n + 1);
+    format!("{id}-{n}")
+}
+
+/// The objects connector `id` is placed as: one editable shape per part
+/// it generates with `params_json` (named "<name> (<role>)"), holes as
+/// Holes. `attach` names the object each side joins, when known (Connect
+/// knows both pieces; the Connectors tool picks them later).
+pub(crate) fn group_members(
+    id: &str,
+    name: &str,
+    params_json: &str,
+    transform: &[f64; 12],
+    attach: Option<(ObjectId, ObjectId)>,
+) -> Result<Vec<mf_operations::shapes::ShapeToAdd>, String> {
+    let connector = mf_parts::connectors()
+        .into_iter()
+        .find(|c| c.id() == id)
+        .ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
+    let raw: BTreeMap<String, mf_spec::ParamValue> =
+        serde_json::from_str(params_json).map_err(|e| format!("its parameters: {e}"))?;
+    let params = mf_spec::Params(raw);
+    let ctx = mf_runtime::RunContext::none();
+    let parts = connector
+        .generate(&params, &ctx)
+        .map_err(|e| e.to_string())?;
+    let rotation = crate::shape_panel::rotation(transform);
+    Ok(parts
+        .parts
+        .iter()
+        .map(|p| {
+            let record = mf_parts::GeneratorRecord {
+                id: id.to_owned(),
+                version: connector.version(),
+                params: params.clone(),
+                part: Some(p.role.to_owned()),
+            };
+            mf_operations::shapes::ShapeToAdd {
+                generator: mf_parts::shape::orient_hole(&record, rotation),
+                name: format!("{name} ({})", p.role.replace('_', " ")),
+                hole: p.join == mf_parts::JoinKind::Subtract,
+                attach_to: attach.and_then(|(a, b)| match p.side {
+                    mf_parts::Side::A => Some(a.0),
+                    mf_parts::Side::B => Some(b.0),
+                    mf_parts::Side::Neither => None,
+                }),
+                transform: None,
+                group: None,
+            }
+        })
+        .collect())
+}
+
+/// Attaches `group`'s members to `a` (side A) and `b` (side B): each
+/// member joins the side its part belongs to, solids joined and holes
+/// cut (`object.attach`, one undo step). A loose part (a separate pin, a
+/// dowel) stays its own object.
+pub(crate) fn attach_group(
+    app: &mut MeshFixerApp,
+    group: &str,
+    a: ObjectId,
+    b: ObjectId,
+    gap: f64,
+    label: String,
+) {
+    let ctx = mf_runtime::RunContext::none();
+    let doc = app.session.document();
+    let mut members = Vec::new();
+    let mut roles = Vec::new();
+    for o in doc.objects() {
+        if o.properties.get(mf_command::GROUP).map(String::as_str) != Some(group) {
+            continue;
+        }
+        let Some(record) = crate::shape_panel::recipe(app, o.id) else {
+            continue;
+        };
+        let side = match mf_parts::shape::part_of(&record, &ctx).map(|(s, _)| s) {
+            Some(mf_parts::Side::A) => 'a',
+            Some(mf_parts::Side::B) => 'b',
+            _ => match o.properties.get(mf_operations::shapes::ATTACH_TO) {
+                Some(to) if *to == a.0.to_string() => 'a',
+                Some(to) if *to == b.0.to_string() => 'b',
+                _ => continue,
+            },
+        };
+        members.push(o.id);
+        roles.push(mf_operations::shapes::AttachMember {
+            side,
+            hole: o.is_hole(),
+        });
+    }
+    if members.is_empty() {
+        return;
+    }
+    let mut operands = vec![("side_b".to_owned(), b, None)];
+    operands.extend(members.iter().map(|&m| ("members".to_owned(), m, None)));
+    run_on(
+        app,
+        a,
+        "object.attach",
+        label,
+        BTreeMap::from([
+            (
+                "members".to_owned(),
+                mf_operations::shapes::attach_param(&roles),
+            ),
+            ("gap".to_owned(), gap.max(0.0).to_string()),
+        ]),
+        operands,
+    );
+}
+
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "object.add_part");
+    crate::shape_tools::refusal_card_for(app, ui, "object.add_shape");
     crate::shape_tools::refusal_card_for(app, ui, "connector.join");
+    crate::shape_tools::refusal_card_for(app, ui, "object.attach");
     widgets::section(ui, &t!("connectors.section.library"));
     ui.add(
         egui::TextEdit::singleline(&mut app.connectors.search)
@@ -585,7 +732,7 @@ fn merge_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedConne
         .document()
         .objects()
         .iter()
-        .filter(|o| o.id != placed.object)
+        .filter(|o| o.properties.get(mf_command::GROUP) != Some(&placed.group))
         .map(|o| (o.id, o.name.clone()))
         .collect();
     let mut side_a = placed.side_a;
@@ -642,25 +789,7 @@ fn merge_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedConne
         .clicked()
         && let (Some(a), Some(b)) = (side_a, side_b)
     {
-        let params = BTreeMap::from([
-            ("connector_id".to_owned(), placed.connector_id.clone()),
-            (
-                "connector_params".to_owned(),
-                placed.connector_params_json.clone(),
-            ),
-            ("gap".to_owned(), placed.gap.to_string()),
-        ]);
-        run_on(
-            app,
-            placed.object,
-            "connector.join",
-            t!("connectors.merge"),
-            params,
-            vec![
-                ("side_a".to_owned(), a, None),
-                ("side_b".to_owned(), b, None),
-            ],
-        );
+        attach_group(app, &placed.group, a, b, placed.gap, t!("connectors.merge"));
         app.connectors.placed = None;
     }
     ui.add_space(theme::SPACE_L);

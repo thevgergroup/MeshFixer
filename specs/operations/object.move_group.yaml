@@ -1,0 +1,21 @@
+id: object.move_group
+version: 1
+summary: Place several objects at once (a linked group moved together), one absolute transform each.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+  many: true
+parameters:
+  - name: transforms
+    type: text
+    default: "[]"
+    description: "The new placements, as JSON: one list of 12 numbers (3x3 linear part row by row, then translation) per target, in order"
+preconditions:
+  - one transform per target, none of them flattening
+postconditions:
+  - each target's transform is exactly its given 12 values; geometry unchanged and shared
+effects: [transform_changes]
+runtime:
+  cancellable: true
+  progress: false

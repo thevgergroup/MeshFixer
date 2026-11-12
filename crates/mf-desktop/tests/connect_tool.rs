@@ -553,7 +553,10 @@ fn delete_never_falls_through_to_the_active_object() {
         "the object was never touched: {:?}",
         objects(&h)
     );
-    assert!(h.state().active.is_some(), "nothing was deleted from the tree");
+    assert!(
+        h.state().active.is_some(),
+        "nothing was deleted from the tree"
+    );
 }
 
 /// I2 (owner 2026-11-11): each row under "Connectors on this joint" has
@@ -583,7 +586,11 @@ fn rows_and_the_details_block_have_their_own_remove_button() {
     assert_eq!(h.state().split_flow.selected, Some(1));
     scroll_and_click(&mut h, "Remove connector");
     settle(&mut h);
-    assert_eq!(placements(&h).len(), 1, "the details block's button removed it");
+    assert_eq!(
+        placements(&h).len(),
+        1,
+        "the details block's button removed it"
+    );
     assert_eq!(placements(&h)[0].connector, "joint.dowel");
 
     // Row 1's own trash button removes it without selecting it first.
@@ -774,7 +781,11 @@ fn the_details_block_edits_each_dovetail_ends_reach_and_open_state() {
     click_at(&mut h, p);
     settle(&mut h);
     assert_eq!(placements(&h).len(), 1);
-    assert_eq!(placements(&h)[0].params["open_a"], 1.0, "through by default");
+    assert_eq!(
+        placements(&h)[0].params["open_a"],
+        1.0,
+        "through by default"
+    );
 
     // Unchecking the start end's "Through" box makes it stopped.
     scroll_and_click(&mut h, "Through (start end)");
@@ -837,8 +848,10 @@ fn a_single_round_dowel_warns_about_rotation_in_the_joint_summary() {
     assert_eq!(placements(&h).len(), 1);
     assert_eq!(placements(&h)[0].connector, "joint.dowel");
 
-    h.get_by_label("The parts can rotate around one round dowel. Add a second, or use a square \
-                    or keyed shape");
+    h.get_by_label(
+        "The parts can rotate around one round dowel. Add a second, or use a square \
+                    or keyed shape",
+    );
     still(&mut h, "rotation-warning");
 
     scroll_and_click(&mut h, "Make square");
@@ -853,4 +866,137 @@ fn a_single_round_dowel_warns_about_rotation_in_the_joint_summary() {
         "the fix cleared the warning"
     );
     still(&mut h, "rotation-fixed");
+}
+
+fn group_of(h: &Harness<'_, MeshFixerApp>, id: mf_command::ObjectId) -> Option<String> {
+    h.state()
+        .session
+        .document()
+        .object(id)?
+        .properties
+        .get(mf_command::GROUP)
+        .cloned()
+}
+
+fn size_x(h: &Harness<'_, MeshFixerApp>, id: mf_command::ObjectId) -> f64 {
+    let bb = h
+        .state()
+        .session
+        .document()
+        .object(id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .bounding_box()
+        .unwrap();
+    bb.max[0] - bb.min[0]
+}
+
+/// Connect as a placement helper (parametric-shapes brief): "Add as
+/// editable shapes" makes a linked pair (the peg on the solid piece,
+/// its hole on the other, aligned), editing one regenerates both in one
+/// step, and Attach joins each onto its own piece.
+#[test]
+fn connect_creates_a_linked_pair_that_edits_and_attaches_together() {
+    require_gpu!("connect_creates_a_linked_pair_that_edits_and_attaches_together");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let (a_id, b_id) = {
+        let j = h.state().split_flow.open_joint().unwrap();
+        (j.a, j.b)
+    };
+    h.get_by_label("Peg").click();
+    settle(&mut h);
+    let p = cap_point(&h, [0.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    let before: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    let history = h.state().session.history_labels().len();
+    scroll_and_click(&mut h, "Add as editable shapes");
+    wait_until(&mut h, "the linked pair", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let doc = h.state().session.document().clone();
+    let pair: Vec<&mf_command::Object> = doc
+        .objects()
+        .iter()
+        .filter(|o| !before.contains(&o.id))
+        .collect();
+    assert_eq!(pair.len(), 2, "a peg and its hole");
+    let peg = pair.iter().find(|o| !o.is_hole()).unwrap();
+    let hole = pair.iter().find(|o| o.is_hole()).unwrap();
+    assert!(peg.is_parametric() && hole.is_parametric());
+    assert_eq!(
+        group_of(&h, peg.id),
+        group_of(&h, hole.id),
+        "one linked group"
+    );
+    let to = |o: &mf_command::Object| o.properties[mf_operations::shapes::ATTACH_TO].clone();
+    assert_eq!(to(peg), a_id.0.to_string(), "the peg joins the solid piece");
+    assert_eq!(to(hole), b_id.0.to_string(), "its hole is cut in the other");
+    assert_eq!(peg.transform, hole.transform, "aligned across the cut");
+    let (peg, hole) = (peg.id, hole.id);
+    still(&mut h, "as-shapes");
+
+    // Editing one member regenerates both, as one step.
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(peg);
+    settle(&mut h);
+    let widths = (size_x(&h, peg), size_x(&h, hole));
+    let history = h.state().session.history_labels().len();
+    h.state_mut().set_active(peg);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "diameter", mf_spec::ParamValue::Float(8.0));
+    wait_until(&mut h, "the pair regenerated", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+    assert!(size_x(&h, peg) > widths.0 + 2.0, "the peg grew");
+    assert!(size_x(&h, hole) > widths.1 + 2.0, "and so did its hole");
+    still(&mut h, "pair-edited");
+
+    // Attach: the peg joins its piece, the hole is cut from the other.
+    let history = h.state().session.history_labels().len();
+    let label = {
+        let d = h.state().session.document();
+        format!(
+            "Attach to {} and {}",
+            d.object(a_id).unwrap().name,
+            d.object(b_id).unwrap().name
+        )
+    };
+    h.state_mut().set_active(peg);
+    settle(&mut h);
+    assert!(
+        mf_desktop::shape_panel::attach_sides(h.state(), peg).is_some(),
+        "the pair knows its two pieces"
+    );
+    assert!(
+        h.query_by_label_contains("Editable shape").is_some(),
+        "the shape section shows"
+    );
+    h.get_by_label(label.as_str()).click();
+    wait_until(&mut h, "the attach", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let doc = h.state().session.document();
+    assert!(doc.object(peg).is_none() && doc.object(hole).is_none());
+    assert!(doc.object(a_id).is_some() && doc.object(b_id).is_some());
+    still(&mut h, "pair-attached");
 }

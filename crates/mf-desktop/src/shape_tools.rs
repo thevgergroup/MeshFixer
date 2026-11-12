@@ -46,6 +46,7 @@ pub(crate) fn ops_of(tool: &str) -> &'static [&'static str] {
             "object.add_part",
             "object.add_shape",
             "connector.join",
+            "object.attach",
             "object.set_shape_params",
         ],
         crate::connect_tool::CONNECT => &["split.place_connectors", "object.add_shape"],
