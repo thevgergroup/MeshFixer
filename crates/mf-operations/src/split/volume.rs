@@ -72,7 +72,20 @@ impl Operation for SplitBox {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
+    }
+
+    fn upgrade_params(&self, recorded: u32, params: &mut Params) -> bool {
+        match recorded {
+            // Version 1 always capped every cut.
+            1 => {
+                params
+                    .0
+                    .insert("cap".to_owned(), mf_spec::ParamValue::Bool(true));
+                true
+            }
+            v => v == self.version(),
+        }
     }
 
     fn execute(
@@ -100,6 +113,7 @@ impl Operation for SplitBox {
         let lo = params.get_vec3("box_min")?;
         let hi = params.get_vec3("box_max")?;
         let gap = params.get_float("cut_gap")?;
+        let cap = params.get_bool("cap")?;
         if (0..3).any(|i| hi[i] <= lo[i] || !lo[i].is_finite() || !hi[i].is_finite()) {
             return Err(failed(
                 "invalid_box",
@@ -123,13 +137,14 @@ impl Operation for SplitBox {
                      reset its transform first.",
                 )
             })?;
-            mf_boolean::check_closed(target.mesh, ctx).map_err(|e| match refusal(e) {
-                OpError::Failed { code, message } if inputs.len() > 1 => OpError::Failed {
-                    code,
-                    message: format!("'{}': {message}", target.name),
-                },
-                e => e,
-            })?;
+            mf_boolean::check_closed(target.mesh, ctx)
+                .map_err(|e| match refusal(&target.transform, e) {
+                    OpError::Failed { code, message } if inputs.len() > 1 => OpError::Failed {
+                        code,
+                        message: format!("'{}': {message}", target.name),
+                    },
+                    e => e,
+                })?;
             // The piece still inside the box, with its provenance against
             // the target's input.
             let mut piece = target.mesh.clone();
@@ -169,15 +184,19 @@ impl Operation for SplitBox {
                     point: at(1.0),
                     normal: object_n,
                 };
-                let inner = mf_boolean::cut_half(&piece, &keep_in, Side::Below, ctx);
-                let outer = mf_boolean::cut_half(&piece, &keep_out, Side::Above, ctx);
+                let inner = mf_boolean::cut_half_with(&piece, &keep_in, Side::Below, cap, ctx);
+                let outer = mf_boolean::cut_half_with(&piece, &keep_out, Side::Above, cap, ctx);
                 let (inner, outer) = match (inner, outer) {
                     (Ok(i), Ok(o)) => (i, o),
                     // The plane crosses the box around the mesh but not
-                    // the mesh itself (or the gap swallows it): skip.
-                    (Err(CutError::MissesObject), _) | (_, Err(CutError::MissesObject)) => continue,
+                    // the mesh itself (or the gap swallows it), or lies
+                    // exactly on the piece's own surface there without
+                    // anything to cut away: skip.
+                    (Err(CutError::MissesObject { .. }), _) | (_, Err(CutError::MissesObject { .. })) => {
+                        continue;
+                    }
                     (Err(e), _) | (_, Err(e)) => {
-                        return Err(match refusal(e) {
+                        return Err(match refusal(&target.transform, e) {
                             OpError::Failed { code, message } => OpError::Failed {
                                 code,
                                 message: format!(
@@ -225,14 +244,18 @@ impl Operation for SplitBox {
                     k,
                     Some(created),
                 ));
-                joints.push(serde_json::json!({
-                    "a": { "operand": k },
-                    "b": { "created": created },
-                    "face": label,
-                    "point": centre,
-                    "normal": n,
-                    "gap": gap,
-                }));
+                // Uncapped (a vase or bowl), there's no cap face pair to
+                // place connectors against, so no joint is recorded.
+                if cap {
+                    joints.push(serde_json::json!({
+                        "a": { "operand": k },
+                        "b": { "created": created },
+                        "face": label,
+                        "point": centre,
+                        "normal": n,
+                        "gap": gap,
+                    }));
+                }
                 changes.push(ObjectChange::Create {
                     name,
                     mesh,

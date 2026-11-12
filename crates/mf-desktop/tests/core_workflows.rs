@@ -428,6 +428,135 @@ fn clicking_a_side_in_the_view_sets_keep() {
     assert_eq!(h.state().split.keep, "below", "the -X side is side b");
 }
 
+/// "Cap the cut" (owner 2026-11-12), on by default: the split's parts
+/// are closed, each with a cap, and the cut is recorded as a joint
+/// Connect can add connectors to.
+#[test]
+fn cap_on_by_default_closes_the_parts_and_records_a_joint() {
+    require_gpu!("cap_on_by_default_closes_the_parts_and_records_a_joint");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert!(h.state().split.cap, "on by default");
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let joints_before = h.state().split_flow.joints.len();
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["ball (top)", "ball (bottom)"], "{names:?}");
+    assert_eq!(
+        h.state().split_flow.joints.len(),
+        joints_before + 1,
+        "the cut is recorded as a joint"
+    );
+    for name in ["ball (top)", "ball (bottom)"] {
+        let id = id_of(&h, name);
+        let mesh = h.state().session.document().object(id).unwrap().mesh().unwrap().clone();
+        let topo = mesh
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert_eq!(topo.boundary_edges, 0, "{name}: closed, with a cap");
+    }
+}
+
+/// "Cap the cut", off: for a vase or bowl. Each kept part is left open
+/// at the cut (no cap faces, a real boundary there) and no joint is
+/// recorded for it.
+#[test]
+fn cap_off_leaves_the_parts_open_with_no_joint() {
+    require_gpu!("cap_off_leaves_the_parts_open_with_no_joint");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    h.state_mut().split.cap = false;
+    settle(&mut h);
+    let joints_before = h.state().split_flow.joints.len();
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["ball (top)", "ball (bottom)"], "{names:?}");
+    assert_eq!(
+        h.state().split_flow.joints.len(),
+        joints_before,
+        "no joint recorded when the cut isn't capped"
+    );
+    for name in ["ball (top)", "ball (bottom)"] {
+        let id = id_of(&h, name);
+        let mesh = h.state().session.document().object(id).unwrap().mesh().unwrap().clone();
+        let topo = mesh
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert!(topo.boundary_edges > 0, "{name}: left open at the cut");
+    }
+}
+
+/// Owner 2026-11-12: with only "ball" selected (a plain Browser click,
+/// not Shift), Split must cut only "ball", even though the plane also
+/// crosses "cube", which was never selected. The panel says so by name
+/// ("Cuts: ball" / "Not cut (not selected): cube"), and Apply leaves
+/// "cube" bit-for-bit untouched with no refusal — the plane crossing an
+/// object that isn't selected is not an error.
+#[test]
+fn split_targets_only_the_selected_object_and_names_the_rest() {
+    require_gpu!("split_targets_only_the_selected_object_and_names_the_rest");
+    let mut h = opened(vec![
+        ("cube", mf_fixtures::cube(40.0), at([-20.0, -20.0, 0.0])),
+        ("ball", ball(10.0), at([0.0, 0.0, 20.0])),
+    ]);
+    // A plain click: selects just "ball" (no Shift, no stale pick).
+    row(&h, "ball").click();
+    settle(&mut h);
+    assert_eq!(h.state().active, Some(id_of(&h, "ball")));
+    assert!(h.state().picked.len() <= 1, "{:?}", h.state().picked);
+    let cube_before = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "cube"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(
+        h.state().selected_objects(),
+        vec![id_of(&h, "ball")],
+        "Split must target only the selected object"
+    );
+    // The plane (through the ball's centre, z=20) also crosses the cube
+    // (which spans z=0..40): a plane that only ever touched "ball" would
+    // prove nothing about this bug.
+    assert!(h.state().split.point().z > 0.0 && h.state().split.point().z < 40.0);
+    h.get_by_label("Cuts: ball");
+    h.get_by_label("Not cut (not selected): cube");
+    let history = history_len(&h);
+    h.get_by_label("Cut").click();
+    wait_until(&mut h, "the cut", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert!(names.contains(&"ball (top)".to_string()), "{names:?}");
+    assert!(names.contains(&"ball (bottom)".to_string()), "{names:?}");
+    assert!(
+        names.contains(&"cube".to_string()),
+        "{names:?}: unchanged, so still named plainly \"cube\""
+    );
+    let cube_after = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "cube"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    assert!(
+        Mesh::ptr_eq(&cube_before, &cube_after),
+        "the cube must be bit-for-bit untouched"
+    );
+}
+
 // ---------------------------------------------------------------------
 // Combine: solid + solid + hole, with Undo.
 // ---------------------------------------------------------------------

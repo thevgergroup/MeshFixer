@@ -127,6 +127,39 @@ fn cut_cube_gives_two_closed_parts_with_exact_volumes() {
     }
 }
 
+/// Owner 2026-11-12: "Cap the cut", off — for a vase or bowl. Each kept
+/// part is left open at the cut: no cap faces, no joint recorded, and a
+/// real open boundary where the plane crossed it.
+#[test]
+fn cap_off_leaves_the_parts_open_with_no_joint() {
+    let mesh = cube(2.0);
+    let out = split_with(
+        &mesh,
+        IDENTITY,
+        &[("plane_point", "0,0,0.7"), ("cap", "false")],
+    )
+    .unwrap();
+    let (top, bottom) = parts(&out);
+    let (_, bottom, _) = bottom.unwrap();
+    for (k, part) in [&top, &bottom].into_iter().enumerate() {
+        let caps = out.report["parts"][k]["cap_faces"].as_array().unwrap();
+        assert!(caps.is_empty(), "{part:?}: no cap faces when cap is off");
+        let topo = part.topology_with(&RunContext::none()).unwrap();
+        assert!(
+            topo.boundary_edges > 0,
+            "part {k}: left open at the cut, a real boundary"
+        );
+    }
+    assert_eq!(
+        out.report["joints"].as_array().unwrap().len(),
+        0,
+        "no cap face pair to report as a joint"
+    );
+    // The pieces still partition the cube's volume exactly (only the
+    // closing cap is skipped, not the cut itself).
+    assert!(close(volume(&top) + volume(&bottom), 8.0, 1e-9));
+}
+
 /// An octahedron cut through its equator, and a cube cut diagonally
 /// through four of its corners: a vertex exactly on the plane is used by
 /// the faces either side and the cap, never doubled by a cut point.
@@ -360,8 +393,10 @@ fn refusals_are_named() {
         "operand_not_closed"
     );
     let c = cube(1.0);
+    // Genuinely past the cube's top face (not exactly on it, which must
+    // never be refused — see `plane_on_a_box_top_face_is_never_refused`).
     assert_eq!(
-        code(split_with(&c, IDENTITY, &[("plane_point", "0,0,1")])),
+        code(split_with(&c, IDENTITY, &[("plane_point", "0,0,2")])),
         "plane_misses_object"
     );
     assert_eq!(
@@ -383,6 +418,9 @@ fn refusals_are_named() {
     );
     // Two cubes touching along an edge, cut through that edge: the two
     // section squares touch at a point, which is refused, not guessed.
+    // Its own code, not `mesh.boolean`'s "section_self_intersects": the
+    // model here isn't self-overlapping, only this plane's section is
+    // ambiguous (Make solid wouldn't help, so it isn't offered).
     let touching = merge(&[cube(1.0), translated(&cube(1.0), [1.0, 1.0, 0.0])]);
     assert_eq!(
         code(split_with(
@@ -390,8 +428,104 @@ fn refusals_are_named() {
             IDENTITY,
             &[("plane_point", "0,0,0.5")]
         )),
-        "section_self_intersects"
+        "split_section_self_intersects"
     );
+}
+
+/// Owner 2026-11-12: a plane lying exactly on a box's top face must
+/// never be refused. The faces either side of the plane resolve by a
+/// fixed symbolic perturbation (simulation of simplicity), not by
+/// chance: the top face goes to the kept ("bottom") side, unchanged, no
+/// cap duplicating it, and the top ("above") side is empty — so `keep:
+/// both` quietly keeps just the one real part instead of refusing the
+/// whole cut.
+#[test]
+fn plane_on_a_box_top_face_is_never_refused() {
+    let c = cube(20.0);
+    let out = split_with(&c, IDENTITY, &[("plane_point", "0,0,20")]).unwrap();
+    let (bottom, created) = parts(&out);
+    assert!(created.is_none(), "nothing above the plane to create");
+    assert_solid(&bottom, "bottom");
+    assert!(close(volume(&bottom), 20.0f64.powi(3), 1e-9));
+    assert_eq!(bottom.face_count(), c.face_count(), "unchanged, bit for bit");
+    for (f, tri) in c.faces() {
+        assert_eq!(bottom.face(f), Some(tri), "face {f:?}");
+    }
+    assert!(
+        out.changes
+            .iter()
+            .any(|c| matches!(c, ObjectChange::Rename { name, .. } if name == "scan (bottom)"))
+    );
+    assert!(
+        !out.changes.iter().any(|c| matches!(c, ObjectChange::Create { .. })),
+        "no empty \"(top)\" object"
+    );
+
+    // The same plane, but keeping only "above" (genuinely empty): that
+    // is still refused by name, since asking for just the empty side
+    // is asking for nothing.
+    assert_eq!(
+        code(split_with(
+            &c,
+            IDENTITY,
+            &[("plane_point", "0,0,20"), ("keep", "above")]
+        )),
+        "plane_misses_object"
+    );
+}
+
+/// The bug report's own scenario (owner 2026-11-12): a cube and a sphere
+/// combined (unioned) so the cube's top face survives in the result,
+/// cut exactly along that coplanar face. Never refused; the report
+/// names the one part kept.
+#[test]
+fn combined_cube_and_sphere_at_the_coplanar_plane_is_never_refused() {
+    let cube_size = 20.0;
+    // Pokes out through the cube's -X side face, not its top, so their
+    // surfaces genuinely overlap (a real union, not two separate
+    // shells) while the top face stays untouched and purely coplanar
+    // with the cut — the bug report's own shape.
+    let sphere = translated(
+        &scaled(&uv_sphere(24, 48), 8.0),
+        [0.0, cube_size / 2.0, cube_size / 2.0],
+    );
+    let kernel = mf_boolean::ManifoldCpp::checked();
+    let combined = mf_boolean::boolean(
+        &cube(cube_size),
+        &sphere,
+        mf_boolean::BoolOp::Union,
+        &kernel,
+        &RunContext::none(),
+    )
+    .expect("cube and sphere overlap, so their union succeeds");
+    let out =
+        split_with(&combined.mesh, IDENTITY, &[("plane_point", &v3([0.0, 0.0, cube_size]))])
+            .unwrap();
+    assert_eq!(out.report["parts"].as_array().unwrap().len(), 1);
+    assert_eq!(out.report["parts"][0]["name"], "scan (bottom)");
+    let (bottom, created) = parts(&out);
+    assert!(created.is_none());
+    assert_solid(&bottom, "bottom");
+    assert!(close(volume(&bottom), volume(&combined.mesh), 1e-9));
+}
+
+/// A plane along an edge (not a face): it touches the cube only where
+/// one vertical edge lies exactly on it, with the whole rest of the cube
+/// strictly on one side. Never refused either, by the same rule.
+#[test]
+fn plane_along_an_edge_is_never_refused() {
+    let c = cube(1.0);
+    let out = split_with(
+        &c,
+        IDENTITY,
+        &[("plane_point", "0,0,0.5"), ("plane_normal", "1,1,0")],
+    )
+    .unwrap();
+    let (kept, created) = parts(&out);
+    assert!(created.is_none(), "nothing strictly on the plane's far side");
+    assert_solid(&kept, "kept");
+    assert!(close(volume(&kept), 1.0, 1e-9));
+    assert_eq!(kept.face_count(), c.face_count(), "unchanged, bit for bit");
 }
 
 #[test]

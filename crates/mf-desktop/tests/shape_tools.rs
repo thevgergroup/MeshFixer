@@ -519,7 +519,7 @@ fn split_cuts_every_selected_object() {
     h.state_mut().split.plane[11] = 11.3;
     settle(&mut h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cuts 2 selected objects");
+    h.get_by_label("Cuts: left, right");
     h.get_by_label("Cut").click();
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())

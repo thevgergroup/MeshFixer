@@ -36,7 +36,7 @@ pub use manifold::{BridgeGuard, ManifoldRobust, bridge};
 pub use manifold_cpp::ManifoldCpp;
 pub use plane_cut::{
     CAPPING, CHECKING, CUTTING, CutError, CutParts, FINDING_THE_CUT, HalfCut, Plane, PlaneFrame,
-    SectionRegion, Side, check_closed, cut_half, plane_cut,
+    SectionRegion, Side, check_closed, cut_half, cut_half_with, plane_cut,
 };
 pub use section::{SectionError, triangulate_section};
 pub use validate::{SolidError, self_intersecting_faces, validate_boolean, validate_solid};

@@ -85,6 +85,10 @@ pub struct SplitState {
     /// The section view (on by default): the part above the plane
     /// ghosted, the part below shaded, the cut drawn at the plane.
     pub section: bool,
+    /// Close each kept part with a flat cap where it was cut (on by
+    /// default, owner 2026-11-12). Off leaves it open at the cut — no
+    /// cap faces, no joint — for a vase or bowl.
+    pub cap: bool,
 }
 
 impl Default for SplitState {
@@ -98,6 +102,7 @@ impl Default for SplitState {
             gap: 0.0,
             placed_for: None,
             section: true,
+            cap: true,
         }
     }
 }
@@ -394,6 +399,30 @@ fn split_plane_misses_selection(app: &MeshFixerApp) -> bool {
         world_bounds(app, id)
             .is_some_and(|(lo, hi)| plane_misses_world_box(point, normal, gap, lo, hi))
     })
+}
+
+/// Names of objects the cut plane crosses (its world box, the same
+/// one-sided test as [`split_plane_misses_selection`]) but that aren't
+/// selected, so Split's panel can say plainly they won't be touched
+/// (owner 2026-11-12: a stale pick must never cut an object silently,
+/// but an object the plane visibly passes through and *isn't* selected
+/// should say so, not look ignored by accident).
+pub(crate) fn unselected_objects_the_plane_crosses(app: &MeshFixerApp) -> Vec<String> {
+    let selected = app.selected_objects();
+    let point = app.split.point();
+    let normal = app.split.normal();
+    let gap = app.split.gap;
+    app.session
+        .document()
+        .objects()
+        .iter()
+        .filter(|o| !selected.contains(&o.id))
+        .filter(|o| {
+            world_bounds(app, o.id)
+                .is_some_and(|(lo, hi)| !plane_misses_world_box(point, normal, gap, lo, hi))
+        })
+        .map(|o| o.name.clone())
+        .collect()
 }
 
 /// The refusal card: what went wrong in plain words, and the next action
@@ -853,6 +882,9 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .max_decimals(2),
     )
     .on_hover_text(t!("split.gap_help"));
+    ui.add_space(theme::SPACE_XS);
+    ui.checkbox(&mut app.split.cap, t!("split.cap"))
+        .on_hover_text(t!("split.cap_help"));
 }
 
 // ---------------------------------------------------------------------

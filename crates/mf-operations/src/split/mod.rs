@@ -155,7 +155,11 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
 }
 
 /// The refusals, with what to do next (the copy table's plain words).
-fn refusal(e: CutError) -> OpError {
+/// `transform` is the target's (object → world), so a self-intersection's
+/// `at` — found in object space, where [`mf_boolean::cut_half`] works —
+/// is reported in the same world/document frame as the Split panel's own
+/// Point fields, not the object's local one (owner 2026-11-12).
+fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
     match e {
         CutError::Cancelled => OpError::Cancelled,
         CutError::NotClosed { boundary_edges, .. } => failed(
@@ -165,19 +169,30 @@ fn refusal(e: CutError) -> OpError {
                  to cap. Close holes first."
             ),
         ),
-        CutError::MissesObject => failed(
+        CutError::MissesObject { .. } => failed(
             "plane_misses_object",
             "The cut plane doesn't pass through the object (or the gap is wider than it). Move \
              the plane so it crosses the model.",
         ),
-        CutError::SectionSelfIntersects { at } => failed(
-            "section_self_intersects",
-            format!(
-                "The cut grazes the surface here (near {:.3}, {:.3}, {:.3}); move the plane \
-                 slightly.",
-                at[0], at[1], at[2]
-            ),
-        ),
+        CutError::SectionSelfIntersects { at } => {
+            let at = apply(transform, at);
+            failed(
+                // A cut's own code, not `mesh.boolean`'s
+                // "section_self_intersects" (ADR owner 2026-11-12): the
+                // *model* isn't self-overlapping here — coplanar faces
+                // resolve cleanly by `mf_boolean::plane_cut`'s own
+                // simulation of simplicity — only the section this
+                // particular plane makes genuinely crosses or touches
+                // itself. Make solid fixes a self-overlapping model; it
+                // wouldn't fix this, so it isn't offered for it.
+                "split_section_self_intersects",
+                format!(
+                    "The cut grazes the surface here (near {:.3}, {:.3}, {:.3}); move the plane \
+                     slightly.",
+                    at[0], at[1], at[2]
+                ),
+            )
+        }
         CutError::InvalidPlane => failed(
             "invalid_plane",
             "The cut plane's direction is zero; give it a direction.",
@@ -215,7 +230,7 @@ impl Operation for SplitPlane {
     }
 
     fn version(&self) -> u32 {
-        2
+        3
     }
 
     fn upgrade_params(&self, recorded: u32, params: &mut Params) -> bool {
@@ -226,6 +241,13 @@ impl Operation for SplitPlane {
                     "hole_profile".to_owned(),
                     mf_spec::ParamValue::Text("round".into()),
                 );
+                self.upgrade_params(2, params)
+            }
+            // Version 2 (and 1, falling through) always capped.
+            2 => {
+                params
+                    .0
+                    .insert("cap".to_owned(), mf_spec::ParamValue::Bool(true));
                 true
             }
             v => v == self.version(),
@@ -280,12 +302,24 @@ impl Operation for SplitPlane {
         let mut joints = Vec::new();
         let mut created = 0usize;
         let both = params.get_choice("keep")? == "both";
+        let cap = params.get_bool("cap")?;
         let normal = params.get_vec3("plane_normal")?;
         let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
         for (k, target) in inputs.iter().enumerate() {
             match split_one(k, target, &scene, params, ctx) {
                 Ok(one) => {
-                    if both && len > 0.0 {
+                    // A joint needs a genuine split: `keep: both` can
+                    // still create nothing for this target when the
+                    // plane lies exactly on its surface and one side is
+                    // empty (owner 2026-11-12) — no second piece, so no
+                    // cut face pair to report as a joint. Uncapped (a
+                    // vase or bowl), there's no cap face pair to place
+                    // connectors against either, so no joint either.
+                    let made_a_part = one
+                        .changes
+                        .iter()
+                        .any(|c| matches!(c, ObjectChange::Create { .. }));
+                    if both && len > 0.0 && cap && made_a_part {
                         joints.push(serde_json::json!({
                             "a": { "created": created },
                             "b": { "operand": k },
@@ -374,9 +408,10 @@ fn split_one(
     let keep = params.get_choice("keep")?;
     let gap = params.get_float("cut_gap")?;
     let pegs = params.get_choice("pegs")?;
+    let cap = params.get_bool("cap")?;
     let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
     if len == 0.0 || !len.is_finite() {
-        return Err(refusal(CutError::InvalidPlane));
+        return Err(refusal(&target.transform, CutError::InvalidPlane));
     }
     let inv = inverse(&target.transform).ok_or_else(|| {
         failed(
@@ -404,15 +439,34 @@ fn split_one(
         point: apply(&inv, shifted(-1.0)),
         normal: object_normal,
     };
-    mf_boolean::check_closed(target.mesh, ctx).map_err(refusal)?;
-    let above = (keep != "below")
-        .then(|| mf_boolean::cut_half(target.mesh, &plane_above, Side::Above, ctx))
-        .transpose()
-        .map_err(refusal)?;
-    let below = (keep != "above")
-        .then(|| mf_boolean::cut_half(target.mesh, &plane_below, Side::Below, ctx))
-        .transpose()
-        .map_err(refusal)?;
+    mf_boolean::check_closed(target.mesh, ctx).map_err(|e| refusal(&target.transform, e))?;
+    // A side genuinely empty because the plane grazes the model's
+    // surface exactly there, with nothing strictly past it (`CutError::
+    // MissesObject { grazed: true }` on just one side), is not a
+    // refusal with `keep: both`: it degrades to keeping only the other
+    // side, the same as if `keep` had asked for it by name, rather than
+    // failing a cut that a plane lying exactly on a face must never be
+    // refused for (owner 2026-11-12). A plane that doesn't touch the
+    // model's surface at all (`grazed: false`) is still a genuine miss;
+    // so is asking for just one side and missing it entirely.
+    let side_or_none = |keep_this: bool, plane: &Plane, side: Side| {
+        keep_this
+            .then(|| mf_boolean::cut_half_with(target.mesh, plane, side, cap, ctx))
+            .transpose()
+    };
+    let above = match side_or_none(keep != "below", &plane_above, Side::Above) {
+        Ok(above) => above,
+        Err(CutError::MissesObject { grazed: true }) if keep == "both" => None,
+        Err(e) => return Err(refusal(&target.transform, e)),
+    };
+    let below = match side_or_none(keep != "above", &plane_below, Side::Below) {
+        Ok(below) => below,
+        Err(CutError::MissesObject { grazed: true }) if keep == "both" => None,
+        Err(e) => return Err(refusal(&target.transform, e)),
+    };
+    if above.is_none() && below.is_none() {
+        return Err(refusal(&target.transform, CutError::MissesObject { grazed: false }));
+    }
     ctx.checkpoint()?;
     let mut above = above;
     let mut below = below;
@@ -453,19 +507,32 @@ fn split_one(
                 provenance: as_created(below.provenance, k),
             });
         }
-        (Some(part), None) | (None, Some(part)) => {
-            let name = if keep == "above" {
-                top_name
-            } else {
-                bottom_name
-            };
-            parts.push(part_report(&name, "target", &part));
+        (Some(part), None) => {
+            // Above only: by request (`keep: above`), or `keep: both`
+            // with Below genuinely empty (the plane lies exactly on the
+            // model's lower surface there).
+            parts.push(part_report(&top_name, "target", &part));
             changes.push(ObjectChange::Geometry {
                 operand: k,
                 mesh: part.mesh,
                 provenance: part.provenance,
             });
-            changes.push(ObjectChange::Rename { operand: k, name });
+            changes.push(ObjectChange::Rename {
+                operand: k,
+                name: top_name,
+            });
+        }
+        (None, Some(part)) => {
+            parts.push(part_report(&bottom_name, "target", &part));
+            changes.push(ObjectChange::Geometry {
+                operand: k,
+                mesh: part.mesh,
+                provenance: part.provenance,
+            });
+            changes.push(ObjectChange::Rename {
+                operand: k,
+                name: bottom_name,
+            });
         }
         (None, None) => unreachable!("keep is both, above or below"),
     }

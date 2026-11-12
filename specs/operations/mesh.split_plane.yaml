@@ -31,6 +31,10 @@ parameters:
     min: 0.0
     unit: mm
     description: "Thickness of the slab removed at the cut, centred on the plane, so the parts don't touch (D23; 0 cuts without a gap)"
+  - name: cap
+    type: bool
+    default: true
+    description: "Close each kept part with a flat cap where it was cut (on by default). Off leaves it open at the cut, with no cap faces and no joint recorded — for a vase or bowl"
   # Alignment holes and dowels (Task 13, D12); dovetail (Task 14): a
   # groove of hole_diameter at the cut, hole_depth_below deep, flanks at
   # 15 degrees, through the bottom part, and a matching tail on the top.

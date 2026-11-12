@@ -8,18 +8,31 @@
 //!   is the sign of Shewchuk's `orient3d` against them (D2). A vertex with
 //!   sign zero is *on* the plane and is shared by the faces either side and
 //!   the cap: it is never duplicated or moved.
+//! - **On-plane vertices break ties with a fixed symbolic perturbation**
+//!   (simulation of simplicity, [`SOS_SIDE`]): for deciding which side
+//!   *owns* a face, a zero side counts as [`SOS_SIDE`], always, whichever
+//!   side is being kept. A face with every corner on the plane (a cube's
+//!   top face, cut exactly along it) is then a real face of the
+//!   [`SOS_SIDE`] part, unchanged, not a cap — the other part simply
+//!   doesn't reach the plane there. This is what makes a plane that lies
+//!   exactly on mesh faces never refused (owner 2026-11-12): coplanar
+//!   faces resolve to one side consistently, so the section stays
+//!   well-defined even with nothing strictly crossing. A plane that only
+//!   grazes an edge or a lone vertex, with every face around it owned
+//!   by the other side, keeps nothing real either way: that's still
+//!   [`CutError::MissesObject`] (its `grazed` flag says which case it
+//!   was, for a caller like `mesh.split_plane` that only cares that
+//!   *something* was kept).
 //! - **Each crossing edge is split once**, from its lower vertex id to its
 //!   higher, so both faces using the edge share the cut point. For an
 //!   axis-aligned normal the cut point's axis coordinate is set to the
 //!   plane's exactly, so horizontal and vertical caps are exactly flat.
-//! - **Faces lying in the plane** (all three corners on it) are removed
-//!   from both parts; the caps cover their area again. This keeps one rule
-//!   for steps and ledges that sit exactly on the cut.
-//! - **Caps** close the boundary loops left on the plane. They are
-//!   triangulated by a constrained Delaunay triangulation (`spade`, D3)
-//!   with nesting by orientation (a winding number per triangle), so a
-//!   hollow model's section is an annulus. A section whose loops cross,
-//!   touch or pinch in the plane is refused as
+//! - **Caps** close the boundary loops left on the plane by genuinely
+//!   crossing faces. They are triangulated by a constrained Delaunay
+//!   triangulation (`spade`, D3) with nesting by orientation (a winding
+//!   number per triangle), so a hollow model's section is an annulus. A
+//!   section whose loops cross, touch or pinch — a real topological fault,
+//!   not a coplanar face resolved by [`SOS_SIDE`] — is refused as
 //!   [`CutError::SectionSelfIntersects`]: "move the plane slightly".
 //!
 //! Faces away from the plane keep their ids, indices and positions, bit for
@@ -115,8 +128,16 @@ pub enum CutError {
         non_manifold_edges: usize,
         inconsistent_edges: usize,
     },
+    /// `grazed` is true when the plane touches the model's surface
+    /// exactly (some vertex has a real side of exactly zero) even
+    /// though nothing is strictly on this side: a box's top face, cut
+    /// exactly along it, `MissesObject`s on the "above" side with
+    /// `grazed: true`, not a genuine total miss. A caller content with
+    /// one side existing (`keep: both`) reads this as "nothing to keep
+    /// here", not a refusal; a caller that asked for just this side
+    /// still refuses, by name.
     #[error("the plane doesn't cut the object: all of it is on one side")]
-    MissesObject,
+    MissesObject { grazed: bool },
     #[error("the section crosses or touches itself near {at:?}")]
     SectionSelfIntersects { at: [f64; 3] },
     #[error(transparent)]
@@ -280,17 +301,34 @@ pub fn plane_cut(mesh: &Mesh, plane: Plane, ctx: &RunContext) -> Result<CutParts
     })
 }
 
+/// The fixed side a zero (on-plane) vertex counts as, for deciding which
+/// side owns a face that doesn't otherwise cross the plane (simulation of
+/// simplicity): always [`Side::Below`]'s sign, whichever side is being
+/// kept. A face every one of whose corners is on the plane then belongs
+/// entirely to the Below part, as a real face, never duplicated into
+/// Above and never left to a cap that would otherwise never get made (no
+/// genuinely crossing face means no boundary loop to cap it with).
+const SOS_SIDE: i8 = -1;
+
 /// What one face chunk contributes to a half cut.
 #[derive(Default)]
 struct ChunkScan {
-    /// Faces wholly on the discarded side, or lying in the plane.
+    /// Faces wholly on the discarded side, or lying wholly in the plane
+    /// and owned by the other side (see [`SOS_SIDE`]).
     removed: Vec<FaceId>,
-    /// Faces with corners strictly on both sides.
+    /// Faces with corners strictly on both real sides (never on-plane
+    /// only: an all-zero face is owned by [`SOS_SIDE`] directly, above).
     crossing: Vec<(FaceId, [u32; 3])>,
     /// Directed edges in the plane of kept faces: `(from, to, face)`.
     plane_edges: Vec<(u32, u32, FaceId)>,
     /// On-plane vertices a kept face uses.
     used_on_plane: Vec<u32>,
+    /// How many faces this chunk keeps whole or splits (not removed):
+    /// whether this side ends up with any real content at all. A vertex
+    /// — even a whole edge — exactly on the plane with every face
+    /// around it owned by the other side isn't enough (owner
+    /// 2026-11-12): nothing would actually be kept.
+    kept_faces: usize,
 }
 
 /// One side of the cut of a **closed** mesh (the caller checks with
@@ -300,6 +338,22 @@ pub fn cut_half(
     mesh: &Mesh,
     plane: &Plane,
     keep: Side,
+    ctx: &RunContext,
+) -> Result<HalfCut, CutError> {
+    cut_half_with(mesh, plane, keep, true, ctx)
+}
+
+/// As [`cut_half`], but a vase or bowl (owner 2026-11-12: "Cap the
+/// cut") can ask for `cap: false`: the part is left open at the cut —
+/// no cap faces, no section regions, a real boundary where the plane
+/// crossed it, exactly as an opening the model already had. Finding the
+/// cut and splitting crossing faces happen the same either way; only
+/// step 4 (closing the boundary with a cap) is skipped.
+pub fn cut_half_with(
+    mesh: &Mesh,
+    plane: &Plane,
+    keep: Side,
+    cap: bool,
     ctx: &RunContext,
 ) -> Result<HalfCut, CutError> {
     let frame = PlaneFrame::new(plane).ok_or(CutError::InvalidPlane)?;
@@ -338,16 +392,7 @@ pub fn cut_half(
         })?;
     span.finish();
     let live = |v: usize| mesh.is_vertex_live(VertexId(v as u32));
-    let any_kept = (0..slots)
-        .into_par_iter()
-        .any(|v| side[v] == keep_sign && live(v));
-    let any_discarded = (0..slots)
-        .into_par_iter()
-        .any(|v| side[v] == -keep_sign && live(v));
     ctx.checkpoint()?;
-    if !any_kept || !any_discarded {
-        return Err(CutError::MissesObject);
-    }
 
     // 2. Classify faces, per chunk, in parallel; concatenated in face order.
     let face_chunks = mesh.face_chunk_count();
@@ -359,13 +404,42 @@ pub fn cut_half(
             let mut out = ChunkScan::default();
             for (f, tri) in mesh.faces_in_chunk(k) {
                 let s = tri.map(|v| side[v as usize]);
+                if s == [0, 0, 0] {
+                    // Lying wholly in the plane: owned by SOS_SIDE,
+                    // unchanged (a real face there, not a cap), removed
+                    // otherwise. Never duplicated, never left to a cap
+                    // that genuinely crossing faces might not exist to
+                    // form.
+                    if keep_sign == SOS_SIDE {
+                        out.kept_faces += 1;
+                        out.used_on_plane.extend_from_slice(&tri);
+                        // Its own three edges, in the triangle's stored
+                        // winding: each exactly cancels, in
+                        // `boundary_loops`, the reverse edge a
+                        // neighbouring kept side face emits along the
+                        // same on-plane edge (both use the same `tri[i]
+                        // -> tri[i+1]` convention as the loop below).
+                        // What's left of a closed, already-capped
+                        // region is nothing to retrace — only a
+                        // genuinely open boundary (where no such
+                        // neighbour exists) survives to be capped.
+                        for i in 0..3 {
+                            out.plane_edges.push((tri[i], tri[(i + 1) % 3], f));
+                        }
+                    } else {
+                        out.removed.push(f);
+                    }
+                    continue;
+                }
                 let kept = s.contains(&keep_sign);
                 let discarded = s.contains(&-keep_sign);
                 if kept && discarded {
+                    out.kept_faces += 1;
                     out.crossing.push((f, tri));
-                } else if discarded || s == [0, 0, 0] {
+                } else if discarded {
                     out.removed.push(f);
                 } else {
+                    out.kept_faces += 1;
                     for i in 0..3 {
                         if s[i] == 0 {
                             out.used_on_plane.push(tri[i]);
@@ -380,6 +454,17 @@ pub fn cut_half(
         })
         .collect::<Result<_, _>>()?;
     span.finish();
+    // Nothing kept, by actual face content — not merely a vertex or
+    // edge exactly on the plane with every face around it owned by the
+    // other side (owner 2026-11-12: that's still nothing to cut here).
+    // `grazed` (the plane touches the model's surface exactly somewhere,
+    // whether or not it's this side) tells the caller whether this is a
+    // "this side is empty, but the cut is otherwise valid" result, or a
+    // genuine total miss.
+    if scans.iter().all(|s| s.kept_faces == 0) {
+        let grazed = (0..slots).into_par_iter().any(|v| side[v] == 0 && live(v));
+        return Err(CutError::MissesObject { grazed });
+    }
 
     // 3. Remove the discarded side and the crossing faces; split each
     // crossing face's kept side into pieces.
@@ -502,12 +587,16 @@ pub fn cut_half(
     }
     ctx.checkpoint()?;
 
-    // 4. The boundary left in the plane, as loops.
+    // 4. The boundary left in the plane, as loops: still traced and
+    // checked for a genuine fault (crossing, touching or pinching)
+    // even with `cap: false` — a vase's open rim is still exactly one
+    // well-defined loop per opening, just left uncapped, not however
+    // the ambiguous section `SectionSelfIntersects` refuses.
     let span = ctx.span(CAPPING, 0.0, 1.0, 1);
     let loops = boundary_loops(&plane_edges, &pos)?;
     let mut cap_faces = Vec::new();
     let mut section_regions = Vec::new();
-    if !loops.is_empty() {
+    if cap && !loops.is_empty() {
         // Counter-clockwise outer loops seen from above: the part below's
         // boundary runs the other way round its cap.
         let oriented: Vec<Vec<(u32, FaceId)>> = loops

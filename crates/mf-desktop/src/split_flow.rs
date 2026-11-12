@@ -943,13 +943,27 @@ pub fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 /// into Connect.
 fn cut_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let open = app.current_analysis().map(|a| a.diagnostics.is_closed) == Some(false);
-    let n = app.selected_objects().len();
     section(ui, &t!("split.section.cut"));
     if app.split_flow.mode == CutMode::Volume {
         let pieces = box_pieces(app).unwrap_or_default(); // allow-swallow: no selection bounds yet means no list to show; Cut itself is refused by name
         widgets::body(ui, crate::tp!("split.cut.volume_summary", pieces.len()));
     } else {
-        widgets::body(ui, crate::tp!("split.targets", n));
+        // Owner 2026-11-12: say which objects by name, not just a count,
+        // so a stale multi-pick (or any other mismatch between what's
+        // selected and what's about to be cut) is visible before Apply,
+        // not discovered after. Objects the plane visibly crosses but
+        // isn't selected are named too, so they plainly read as spared
+        // rather than silently ignored.
+        let names: Vec<String> = app
+            .selected_objects()
+            .iter()
+            .map(|&id| name_of(app, id))
+            .collect();
+        widgets::body(ui, t!("split.cut.names", names = names.join(", ")));
+        let not_cut = crate::shape_tools::unselected_objects_the_plane_crosses(app);
+        if !not_cut.is_empty() {
+            widgets::caption(ui, t!("split.not_cut.names", names = not_cut.join(", ")));
+        }
         widgets::caption(ui, t!("split.result"));
     }
     widgets::caption(ui, t!("split.cut.joints_help"));
@@ -1222,6 +1236,9 @@ fn volume_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             widgets::caption(ui, t!("split.pieces.none"));
         }
     }
+    ui.add_space(theme::SPACE_XS);
+    ui.checkbox(&mut app.split.cap, t!("split.cap"))
+        .on_hover_text(t!("split.cap_help"));
 }
 
 fn vec3(v: DVec3) -> String {
@@ -1249,6 +1266,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                     ("plane_normal".to_owned(), vec3(s.normal())),
                     ("keep".to_owned(), s.keep.clone()),
                     ("cut_gap".to_owned(), s.gap.to_string()),
+                    ("cap".to_owned(), s.cap.to_string()),
                 ]),
             )
         }
@@ -1260,6 +1278,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                     ("box_min".to_owned(), vec3(v.min())),
                     ("box_max".to_owned(), vec3(v.max())),
                     ("cut_gap".to_owned(), app.split.gap.to_string()),
+                    ("cap".to_owned(), app.split.cap.to_string()),
                 ]),
             )
         }
