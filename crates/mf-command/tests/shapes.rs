@@ -18,6 +18,7 @@ use mf_parts::GeneratorRecord;
 fn session(dir: &Path) -> (Session, ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),
@@ -303,6 +304,7 @@ fn a_linked_pair_moves_together_and_attaches_to_its_two_pieces() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("two.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {

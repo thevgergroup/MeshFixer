@@ -28,6 +28,7 @@ fn session_in(
 ) -> (Session, ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit,
         objects: vec![ModelObject {
             metadata: Default::default(),
@@ -251,6 +252,7 @@ fn split_several_targets_in_one_command() {
     let path = dir.path().join("doc.3mf");
     let placed = |x: f64, z: f64| rotation_translation(2, 0.0, [x, 0.0, z]);
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: [("a", 0.0, 0.0), ("b", 5.0, 0.0), ("high", 10.0, 20.0)]
             .into_iter()

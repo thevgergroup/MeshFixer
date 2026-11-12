@@ -26,6 +26,7 @@ use mf_selection::{Selection, SelectionKind, TranslateError, Translation};
 fn session_with(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, Vec<ObjectId>) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: objects
             .into_iter()
@@ -367,6 +368,7 @@ fn undo_boolean_restores_the_tool_with_its_id() {
     assert!(s.document().object(result).is_none());
     // A 3MF export after the undo contains both objects.
     let model = Model {
+        metadata: Default::default(),
         unit: s.document().units(),
         objects: s
             .document()
@@ -515,6 +517,7 @@ fn edited_transforms_round_trip_through_3mf() {
     .unwrap();
     s.execute(plain("object.drop_to_plate", ids[1])).unwrap();
     let model = Model {
+        metadata: Default::default(),
         unit: s.document().units(),
         objects: s
             .document()
@@ -974,6 +977,7 @@ fn an_import_after_an_abandoned_branch_keeps_its_id() {
     let c_path = dir.path().join("c.3mf");
     write_model_path(
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![ModelObject {
                 metadata: Default::default(),

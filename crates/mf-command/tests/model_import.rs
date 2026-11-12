@@ -14,6 +14,7 @@ fn three_part(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("parts.3mf");
     let shifted = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 20.0, 0.0, 0.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Inch,
         objects: vec![
             ModelObject {

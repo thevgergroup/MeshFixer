@@ -690,6 +690,7 @@ fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Fa
         })
         .collect::<Result<Vec<_>, Failure>>()?;
     Ok(mf_io::threemf::Model {
+        metadata: Default::default(),
         unit: doc.units(),
         objects,
     })
@@ -819,6 +820,7 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             boolean_demo()
         };
         let model = mf_io::threemf::Model {
+            metadata: Default::default(),
             unit: mf_io::threemf::Unit::Millimeter,
             objects: scene
                 .into_iter()

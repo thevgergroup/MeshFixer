@@ -381,6 +381,7 @@ fn run_on_3mf_keeps_every_object() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
@@ -489,6 +490,7 @@ fn run_applies_a_mirrored_transform_and_keeps_normals_outward() {
         -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0,
     ];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),
@@ -532,6 +534,7 @@ fn translated_cube_log(dir: &Path) -> std::path::PathBuf {
     use mf_io::threemf::{Model, ModelObject, Unit};
     let input = dir.join("moved.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),
@@ -612,6 +615,7 @@ fn replay_refuses_to_write_several_objects_to_one_stl() {
     let input = dir.path().join("pair.3mf");
     let at = |x: f64| [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, 0.0, 0.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
@@ -972,6 +976,7 @@ fn units_flag_on_a_3mf_is_a_usage_error() {
     let input = dir.path().join("in.3mf");
     mf_io::write_model_path(
         &mf_io::threemf::Model {
+            metadata: Default::default(),
             unit: mf_io::threemf::Unit::Millimeter,
             objects: vec![mf_io::threemf::ModelObject {
                 metadata: Default::default(),
@@ -998,6 +1003,7 @@ fn two_objects(dir: &Path) -> std::path::PathBuf {
     use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
     let input = dir.join("two.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {

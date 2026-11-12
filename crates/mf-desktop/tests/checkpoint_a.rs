@@ -154,6 +154,7 @@ fn key(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key) {
 fn scene(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("checkpoint-a.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: mf_fixtures::demo_scene()
             .into_iter()

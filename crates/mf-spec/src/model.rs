@@ -357,7 +357,7 @@ impl OperationSpec {
             || self.effects.iter().any(|e| {
                 matches!(
                     e.as_str(),
-                    "transform_changes" | "removes_objects" | "creates_objects"
+                    "transform_changes" | "removes_objects" | "creates_objects" | "renames_objects"
                 )
             })
     }

@@ -410,6 +410,7 @@ pub fn write_path_with(
         Format::Obj => obj::write(mesh).into_bytes(),
         Format::ThreeMf => {
             let model = threemf::Model {
+                metadata: Default::default(),
                 unit,
                 objects: vec![threemf::ModelObject {
                     metadata: Default::default(),
@@ -462,6 +463,7 @@ pub fn write_model_path_with(
     // Compared against the model with empty objects already left out
     // (MF-ISSUE-034), since those never make it into `bytes`.
     let kept = threemf::Model {
+        metadata: Default::default(),
         unit: model.unit,
         objects: model
             .objects

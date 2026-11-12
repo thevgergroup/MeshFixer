@@ -22,6 +22,7 @@ use mf_selection::{Selection, SelectionKind};
 fn session_with(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, Vec<ObjectId>) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: objects
             .into_iter()
@@ -202,6 +203,7 @@ fn run_scenario(dir: &Path, open_neck: bool) -> (Session, ObjectId, std::path::P
     let head_path = dir.join("head.3mf");
     write_model_path(
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![ModelObject {
                 metadata: Default::default(),
@@ -403,6 +405,7 @@ fn seam_is_faired_and_a_far_head_is_refused() {
     let head_path = dir.path().join("head.3mf");
     write_model_path(
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![ModelObject {
                 metadata: Default::default(),

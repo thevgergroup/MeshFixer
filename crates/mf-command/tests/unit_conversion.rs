@@ -20,6 +20,7 @@ use mf_io::{read_model, write_model_path};
 fn session_at(dir: &std::path::Path, unit: Unit) -> (Session, mf_command::ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit,
         objects: vec![ModelObject {
             metadata: Default::default(),

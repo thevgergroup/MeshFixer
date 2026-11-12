@@ -341,6 +341,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::DropToPlate,
     &transform::ArrangeOnPlate,
     &transform::Delete,
+    &transform::Rename,
     &split::SplitPlane,
     &split::region::SplitRegion,
     &split::region::DeleteFaces,

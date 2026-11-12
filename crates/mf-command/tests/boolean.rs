@@ -18,6 +18,7 @@ use mf_runtime::{JobPool, RunContext};
 fn session_with(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, Vec<ObjectId>) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: objects
             .into_iter()

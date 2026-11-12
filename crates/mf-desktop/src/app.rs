@@ -1193,6 +1193,7 @@ impl MeshFixerApp {
             })
             .collect::<Result<Vec<_>, String>>()?;
         Ok(mf_io::threemf::Model {
+            metadata: Default::default(),
             unit: doc.units(),
             objects,
         })

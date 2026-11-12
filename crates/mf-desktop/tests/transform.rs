@@ -63,6 +63,7 @@ fn model_file(
 ) -> std::path::PathBuf {
     let path = dir.join(format!("{name}.3mf"));
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),
