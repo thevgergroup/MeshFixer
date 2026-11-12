@@ -2890,6 +2890,7 @@ version = "0.0.1"
 dependencies = [
  "blake3",
  "glam",
+ "mf-boolean",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",
@@ -2898,6 +2899,7 @@ dependencies = [
  "mf-spec",
  "serde",
  "serde-saphyr",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.21",
 ]

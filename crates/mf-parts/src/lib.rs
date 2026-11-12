@@ -7,6 +7,7 @@
 //!   user's folder ([`Library`]), [`SurfaceFrame`] and [`place`].
 
 mod builtin;
+mod builtin_shapes;
 mod connector;
 pub mod connectors;
 pub mod dirs;
@@ -16,6 +17,7 @@ mod frame;
 mod library;
 mod machine;
 mod manifest;
+pub mod shape;
 
 pub use builtin::builtins;
 pub use connector::{
@@ -37,3 +39,7 @@ pub use machine::{
     UNCALIBRATED_NAME,
 };
 pub use manifest::{Attach, PartKind, PartManifest};
+pub use shape::{
+    GeneratorRecord, Shape, ShapeRegisterError, ShapeRole, builtin_shapes, find_shape, new_record,
+    record_spec, regenerate, register_shape, shapes,
+};

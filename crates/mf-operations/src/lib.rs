@@ -36,6 +36,7 @@ pub use make_solid::{
 pub mod layout;
 mod remove_small;
 pub mod sculpt;
+pub mod shapes;
 mod split;
 #[cfg(feature = "test-kinds")]
 mod test_consume_tool;
@@ -128,6 +129,24 @@ pub enum ObjectChange {
         transform: [f64; 12],
         provenance: Provenance,
     },
+    /// An object property set (`Some`) or removed (`None`), such as a
+    /// parametric shape's recipe or its Solid/Hole role: on an operand,
+    /// or on an object this output creates (named by its place among the
+    /// output's [`ObjectChange::Create`]s, which must come first).
+    Property {
+        object: ChangeObject,
+        key: String,
+        value: Option<String>,
+    },
+}
+
+/// Which object an [`ObjectChange::Property`] is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangeObject {
+    /// The operand at this index.
+    Operand(usize),
+    /// The `n`th object this output creates (0 is the first `Create`).
+    Created(usize),
 }
 
 /// Where one object of the document sits (read-only scene context, for
@@ -329,6 +348,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &split::joints::PlaceConnectors,
     &sculpt::SculptStroke,
     &add_part::AddPart,
+    &shapes::AddShape,
+    &shapes::SetShapeParams,
     &connector_ops::ConnectorJoin,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,

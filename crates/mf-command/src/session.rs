@@ -5,7 +5,9 @@ use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, Revi
 use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, Operation, Target};
+use mf_operations::{
+    ChangeObject, DocOutput, ObjectChange, OpError, OperandInput, Operation, Target,
+};
 use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{OperandRole, OperationSpec, Params, SpecError};
@@ -23,6 +25,10 @@ pub struct PropertyChange {
     pub key: String,
     pub value: Option<String>,
 }
+
+/// The command that regenerates a parametric shape from its recipe: the
+/// only geometry change that keeps an object's [`mf_document::GENERATOR`].
+pub const SET_SHAPE_PARAMS: &str = "object.set_shape_params";
 
 /// The name operand 0 (the command's target) is recorded under.
 pub const TARGET_OPERAND: &str = "target";
@@ -361,7 +367,8 @@ impl Prepared {
                 }
                 ObjectChange::Transform { .. }
                 | ObjectChange::Remove { .. }
-                | ObjectChange::Rename { .. } => ChangeInfo::default(),
+                | ObjectChange::Rename { .. }
+                | ObjectChange::Property { .. } => ChangeInfo::default(),
             });
         }
         let target = &self.operands[0];
@@ -436,7 +443,8 @@ fn check_changes(
             }
             ObjectChange::Transform { .. }
             | ObjectChange::Remove { .. }
-            | ObjectChange::Rename { .. } => continue,
+            | ObjectChange::Rename { .. }
+            | ObjectChange::Property { .. } => continue,
         };
         for (_, sources) in &provenance.created_faces {
             for &(k, face) in &sources.operands {
@@ -455,6 +463,49 @@ fn check_changes(
             }
         }
     }
+    // A property change names an operand that exists and may change, or
+    // an object created earlier in the same output; never a removed one.
+    let mut created_so_far = 0usize;
+    let removed: Vec<usize> = changes
+        .iter()
+        .filter_map(|c| match c {
+            ObjectChange::Remove { operand } => Some(*operand),
+            _ => None,
+        })
+        .collect();
+    for change in changes {
+        match change {
+            ObjectChange::Create { .. } => created_so_far += 1,
+            ObjectChange::Property {
+                object: ChangeObject::Created(n),
+                key,
+                ..
+            } if *n >= created_so_far => {
+                return Err(invalid(format!(
+                    "property '{key}' names created object {n}, which isn't created before it"
+                )));
+            }
+            ObjectChange::Property {
+                object: ChangeObject::Operand(k),
+                key,
+                ..
+            } => {
+                let o = operands.get(*k).ok_or_else(|| {
+                    invalid(format!(
+                        "property '{key}' names operand {k}, but there are {}",
+                        operands.len()
+                    ))
+                })?;
+                if !matches!(o.role, None | Some(OperandRole::Changed)) || removed.contains(k) {
+                    return Err(invalid(format!(
+                        "operand '{}' can't have its property '{key}' changed",
+                        o.name
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
     // Per operand: (geometry, transform, removed, renamed).
     let mut seen = vec![(false, false, false, false); operands.len()];
     for change in changes {
@@ -463,7 +514,7 @@ fn check_changes(
             ObjectChange::Transform { operand, .. } => (*operand, 1),
             ObjectChange::Remove { operand } => (*operand, 2),
             ObjectChange::Rename { operand, .. } => (*operand, 3),
-            ObjectChange::Create { .. } => continue,
+            ObjectChange::Create { .. } | ObjectChange::Property { .. } => continue,
         };
         let o = operands.get(operand).ok_or_else(|| {
             invalid(format!(
@@ -1129,6 +1180,11 @@ impl Session {
         let mut operand_removed = vec![false; c.operands.len()];
         let mut created: Vec<ObjectOutput> = Vec::new();
         let unknown = |id: ObjectId| CommandError::UnknownObject(id);
+        // Only regenerating a shape from its recipe keeps it parametric;
+        // any other geometry change bakes it into a plain mesh
+        // (parametric-shapes brief: combine, sculpt, split, make solid).
+        let keeps_recipe = c.op_id == SET_SHAPE_PARAMS;
+        let mut created_ids: Vec<ObjectId> = Vec::new();
         let DocOutput { changes, report } = c.output;
         for (change, info) in changes.into_iter().zip(c.info) {
             match change {
@@ -1148,6 +1204,11 @@ impl Session {
                         .with_geometry(id, Geometry::Mesh(mesh))
                         .and_then(|d| d.with_openings(id, openings))
                         .ok_or(unknown(id))?;
+                    if !keeps_recipe {
+                        for key in mf_document::PARAMETRIC_KEYS {
+                            document = document.with_property(id, key, None).ok_or(unknown(id))?;
+                        }
+                    }
                     provenance.insert(id, p);
                     operand_out[operand] = info.hashes;
                     operand_changed[operand] = true;
@@ -1161,6 +1222,23 @@ impl Session {
                     let id = c.operands[operand].object;
                     document = document.with_name(id, name).ok_or(unknown(id))?;
                     operand_changed[operand] = true;
+                }
+                ObjectChange::Property { object, key, value } => {
+                    let id = match object {
+                        ChangeObject::Operand(k) => {
+                            operand_changed[k] = true;
+                            c.operands[k].object
+                        }
+                        ChangeObject::Created(n) => {
+                            *created_ids
+                                .get(n)
+                                .ok_or_else(|| CommandError::InvalidChanges {
+                                    op: c.op_id.to_owned(),
+                                    reason: format!("property '{key}' names created object {n}"),
+                                })?
+                        }
+                    };
+                    document = document.with_property(id, &key, value).ok_or(unknown(id))?;
                 }
                 ObjectChange::Remove { operand } => {
                     let id = c.operands[operand].object;
@@ -1209,6 +1287,7 @@ impl Session {
                             reason: format!("object {id} already exists"),
                         })?;
                     provenance.insert(id, p);
+                    created_ids.push(id);
                     created.push(ObjectOutput {
                         object: id,
                         created: true,

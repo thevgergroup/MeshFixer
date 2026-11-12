@@ -65,6 +65,18 @@ pub struct Object {
 pub const ROLE: &str = "role";
 /// The [`ROLE`] value of a hole: subtracted when combined.
 pub const HOLE: &str = "hole";
+/// The property holding a parametric shape's recipe (its generator id,
+/// version and params, as JSON; `mf_parts::GeneratorRecord`): present
+/// while the object is an editable shape, removed when a mesh operation
+/// bakes it into a plain mesh (parametric-shapes brief).
+pub const GENERATOR: &str = "generator";
+/// The property naming the linked group a parametric shape belongs to (a
+/// connector placed as several objects: a peg and its hole, a hinge's
+/// leaves and pin). Editing the group's params regenerates every member.
+pub const GROUP: &str = "group";
+/// The properties a mesh operation removes when it changes an object's
+/// geometry: what made it an editable shape (it is a plain mesh after).
+pub const PARAMETRIC_KEYS: [&str; 2] = [GENERATOR, GROUP];
 /// The 3MF metadata prefix of an object property.
 const METADATA_PREFIX: &str = "meshfixer:";
 
@@ -81,6 +93,11 @@ impl Object {
     /// True if the object's role is [`HOLE`].
     pub fn is_hole(&self) -> bool {
         self.properties.get(ROLE).is_some_and(|r| r == HOLE)
+    }
+
+    /// True while the object is an editable shape (it has a recipe).
+    pub fn is_parametric(&self) -> bool {
+        self.properties.contains_key(GENERATOR)
     }
 
     /// The object's properties as 3MF object metadata (`meshfixer:<key>`).

@@ -82,6 +82,14 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/mesh.split_box.yaml"),
     ),
     (
+        "object.add_shape.yaml",
+        include_str!("../../../specs/operations/object.add_shape.yaml"),
+    ),
+    (
+        "object.set_shape_params.yaml",
+        include_str!("../../../specs/operations/object.set_shape_params.yaml"),
+    ),
+    (
         "split.place_connectors.yaml",
         include_str!("../../../specs/operations/split.place_connectors.yaml"),
     ),

@@ -13,7 +13,7 @@ const SEGMENTS: u32 = 48;
 /// A surface of revolution about z: `profile` is `(radius, z)` from bottom
 /// to top. A point with radius 0 is a pole (one vertex); the profile is
 /// closed at an end only if it ends at a pole.
-fn revolve(profile: &[(f64, f64)], segments: u32) -> Mesh {
+pub(crate) fn revolve(profile: &[(f64, f64)], segments: u32) -> Mesh {
     let mut positions = Vec::new();
     // Per profile point: its first vertex, and whether it's a pole.
     let mut rows: Vec<(u32, bool)> = Vec::new();
@@ -49,7 +49,7 @@ fn revolve(profile: &[(f64, f64)], segments: u32) -> Mesh {
     Mesh::new(positions, triangles).expect("a revolved profile is a valid mesh")
 }
 
-fn arc(r: f64, z0: f64, from: f64, to: f64, steps: u32) -> Vec<(f64, f64)> {
+pub(crate) fn arc(r: f64, z0: f64, from: f64, to: f64, steps: u32) -> Vec<(f64, f64)> {
     (0..=steps)
         .map(|i| {
             let t = from + (to - from) * i as f64 / steps as f64;
@@ -59,19 +59,19 @@ fn arc(r: f64, z0: f64, from: f64, to: f64, steps: u32) -> Vec<(f64, f64)> {
         .collect()
 }
 
-fn sphere(r: f64) -> Mesh {
+pub(crate) fn sphere(r: f64) -> Mesh {
     use std::f64::consts::FRAC_PI_2;
     revolve(&arc(r, r, -FRAC_PI_2, FRAC_PI_2, 24), SEGMENTS)
 }
 
-fn capsule(r: f64, h: f64) -> Mesh {
+pub(crate) fn capsule(r: f64, h: f64) -> Mesh {
     use std::f64::consts::FRAC_PI_2;
     let mut p = arc(r, r, -FRAC_PI_2, 0.0, 12);
     p.extend(arc(r, r + h, 0.0, FRAC_PI_2, 12));
     revolve(&p, SEGMENTS)
 }
 
-fn torus(major: f64, minor: f64) -> Mesh {
+pub(crate) fn torus(major: f64, minor: f64) -> Mesh {
     let (nu, nv) = (SEGMENTS, 24u32);
     let mut positions = Vec::new();
     for i in 0..nu {
@@ -96,7 +96,7 @@ fn torus(major: f64, minor: f64) -> Mesh {
 
 /// A box `size` wide, its corners rounded with radius `round` (0: sharp),
 /// sitting on z = 0, from a cube subdivided `n` times per edge.
-fn rounded_box(size: [f64; 3], round: f64, n: u32) -> Mesh {
+pub(crate) fn rounded_box(size: [f64; 3], round: f64, n: u32) -> Mesh {
     use std::collections::HashMap;
     let mut index: HashMap<[i64; 3], u32> = HashMap::new();
     let mut grid: Vec<[i64; 3]> = Vec::new();

@@ -18,6 +18,8 @@ serde.workspace = true
 serde-saphyr.workspace = true
 thiserror.workspace = true
 glam.workspace = true
+serde_json.workspace = true
+mf-boolean.workspace = true
 
 [dev-dependencies]
 mf-command.workspace = true
