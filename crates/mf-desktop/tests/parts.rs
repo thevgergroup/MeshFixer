@@ -85,6 +85,7 @@ fn opened_with(
         .wgpu()
         .build_eframe(move |cc| MeshFixerApp::with_settings(cc, None, settings).unwrap());
     h.state_mut().import_model(ImportedModel {
+        metadata: Default::default(),
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {

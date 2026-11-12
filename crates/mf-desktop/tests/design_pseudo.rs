@@ -62,6 +62,7 @@ fn the_pseudo_locale_brackets_catalogued_strings() {
             mf_fixtures::translated(&mf_fixtures::cube(2.0), [60.0, 0.0, 0.0]),
         ]);
         h.state_mut().import_model(ImportedModel {
+            metadata: Default::default(),
             objects: vec![ModelObject {
                 metadata: Default::default(),
                 name: "plate".into(),

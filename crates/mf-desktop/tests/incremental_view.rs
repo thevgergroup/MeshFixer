@@ -18,6 +18,7 @@ use mf_render::{ChunkVertices, UploadStats};
 
 fn model(mesh: Mesh) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),
             name: "sphere".into(),

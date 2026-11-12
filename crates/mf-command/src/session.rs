@@ -667,6 +667,18 @@ impl Session {
         &self.current_node().document
     }
 
+    /// Replaces the *current* revision's organisation in place (no new
+    /// revision): used right after `import_model` restores the Browser's
+    /// groups/order/hidden/locked from the file's `meshfixer:browser`
+    /// metadata, folded into the last object's import revision exactly
+    /// as its unit is (`add_object_as`'s `with_units`), so importing one
+    /// file is still one step to undo, not many.
+    fn set_organisation_in_place(&mut self, organisation: mf_document::Organisation) {
+        let cursor = self.cursor;
+        let node = &mut self.nodes[cursor.0 as usize];
+        node.document = node.document.with_organisation(organisation);
+    }
+
     /// Unique ID of the current state, as a number (for stale checks).
     pub fn revision(&self) -> u64 {
         self.cursor.0
@@ -729,7 +741,16 @@ impl Session {
                 self.document().units()
             ));
         }
-        let ids = model
+        // Only a 3MF this document started from carries the Browser's own
+        // groups/order/hidden/locked (`meshfixer:browser`); merging a
+        // file into an existing document leaves the current organisation
+        // alone (its new objects just join the root, as `with_object`
+        // already does).
+        let organisation = first_import
+            .then(|| model.metadata.get("meshfixer:browser"))
+            .flatten()
+            .and_then(|s| mf_document::Organisation::from_json(s));
+        let ids: Vec<ObjectId> = model
             .objects
             .into_iter()
             .enumerate()
@@ -746,6 +767,11 @@ impl Session {
                 )
             })
             .collect();
+        if let Some(organisation) = organisation
+            && !ids.is_empty()
+        {
+            self.set_organisation_in_place(organisation);
+        }
         (ids, warnings)
     }
 

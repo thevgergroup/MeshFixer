@@ -5,6 +5,7 @@
 //! state is through `mf-command` (MF-CMD-001).
 
 mod geometry;
+mod organisation;
 
 use std::collections::BTreeMap;
 
@@ -12,6 +13,7 @@ use mf_io::SourceInfo;
 pub use mf_io::threemf::{IDENTITY as IDENTITY_TRANSFORM, Unit};
 
 pub use geometry::{Geometry, GeometryKind};
+pub use organisation::{Entry, Group, GroupId, Organisation, OrganisationError};
 
 /// A document state in a session's revision DAG (MF-HIST-001). Monotonic,
 /// never reused.
@@ -120,6 +122,10 @@ pub struct Document {
     objects: Vec<Object>,
     /// Model units (MF-DOC-004); millimetres unless an import says otherwise.
     units: Unit,
+    /// The Browser's organisation (project organisation brief, step 2):
+    /// groups, order, hidden and locked. Document state like everything
+    /// else here, so it's undoable, saved in 3MF metadata and replays.
+    organisation: Organisation,
 }
 
 impl Document {
@@ -142,10 +148,26 @@ impl Document {
         self.objects.iter().find(|o| o.id == id)
     }
 
-    /// A new document with `object` appended.
+    pub fn organisation(&self) -> &Organisation {
+        &self.organisation
+    }
+
+    /// A new document with a different organisation (groups, order,
+    /// hidden, locked): the whole value replaces the old one, as every
+    /// `with_*` here replaces its one piece of state.
+    pub fn with_organisation(&self, organisation: Organisation) -> Document {
+        let mut d = self.clone();
+        d.organisation = organisation;
+        d
+    }
+
+    /// A new document with `object` appended, tracked in the
+    /// organisation (at the root, if it wasn't already placed somewhere).
     pub fn with_object(&self, object: Object) -> Document {
         let mut d = self.clone();
+        let id = object.id;
         d.objects.push(object);
+        d.organisation = d.organisation.with_object_tracked(id);
         d
     }
 
@@ -203,11 +225,13 @@ impl Document {
 
     /// A new document without one object, or `None` if it doesn't exist.
     /// The original document still holds it, so undo restores it with the
-    /// same id, in the same place.
+    /// same id, in the same place (its own revision's organisation,
+    /// included, since undo moves to that whole prior snapshot).
     pub fn without_object(&self, id: ObjectId) -> Option<Document> {
         let at = self.objects.iter().position(|o| o.id == id)?;
         let mut d = self.clone();
         d.objects.remove(at);
+        d.organisation = d.organisation.without_object(id);
         Some(d)
     }
 

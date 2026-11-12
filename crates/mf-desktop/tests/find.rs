@@ -48,6 +48,7 @@ fn wait_until(h: &mut Harness<'_, MeshFixerApp>, what: &str, cond: impl Fn(&Mesh
 
 fn model(objects: Vec<(&str, Mesh, [f64; 12])>) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {

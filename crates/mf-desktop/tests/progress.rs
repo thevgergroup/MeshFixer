@@ -71,6 +71,7 @@ fn big_mesh() -> Mesh {
 
 fn big_model() -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),
             name: "big".into(),
@@ -749,6 +750,7 @@ fn cancel_is_prompt_after_switching_objects_during_a_fill() {
     let big = harness.state().active.unwrap();
     // A second, small object, added without making it active.
     let (ids, _) = harness.state_mut().session.import_model(ImportedModel {
+        metadata: Default::default(),
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),
             name: "cube".into(),

@@ -1197,8 +1197,15 @@ impl MeshFixerApp {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // Only written when there's something to say (a group, a hidden
+        // or locked object): a plain document with everything at the
+        // root exports with no Browser metadata at all.
+        let mut metadata = BTreeMap::new();
+        if doc.organisation() != &mf_command::Organisation::default() {
+            metadata.insert("meshfixer:browser".to_owned(), doc.organisation().to_json());
+        }
         Ok(mf_io::threemf::Model {
-            metadata: Default::default(),
+            metadata,
             unit: doc.units(),
             objects,
         })

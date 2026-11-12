@@ -71,6 +71,7 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
         });
     let n = objects.len();
     h.state_mut().import_model(ImportedModel {
+        metadata: Default::default(),
         objects: objects
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {

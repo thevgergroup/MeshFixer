@@ -58,6 +58,47 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                     mesh.clone(),
                     BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
                 )
+            } else if op.id() == "object.rename" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([("name".to_string(), "renamed".to_string())]),
+                )
+            } else if op.id() == "object.add_shape" {
+                let shape = mf_parts::find_shape("shape.box").unwrap();
+                let record = mf_parts::new_record(shape, &BTreeMap::new()).unwrap();
+                let shapes = vec![mf_operations::shapes::ShapeToAdd {
+                    generator: record,
+                    name: "box".to_string(),
+                    hole: false,
+                    attach_to: None,
+                    transform: None,
+                    group: None,
+                }];
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "shapes".to_string(),
+                        mf_operations::shapes::shapes_param(&shapes),
+                    )]),
+                )
+            } else if op.id() == "object.set_shape_params" {
+                let shape = mf_parts::find_shape("shape.box").unwrap();
+                let record = mf_parts::new_record(shape, &BTreeMap::new()).unwrap();
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "generators".to_string(),
+                        mf_operations::shapes::generators_param(&[record]),
+                    )]),
+                )
+            } else if op.id() == "object.move_group" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "transforms".to_string(),
+                        mf_operations::shapes::transforms_param(&[mf_io::threemf::IDENTITY]),
+                    )]),
+                )
             } else if op.id() == "mesh.combine" {
                 (uv_sphere(24, 48), BTreeMap::new())
             } else {

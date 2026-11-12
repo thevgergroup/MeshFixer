@@ -86,6 +86,7 @@ fn harness(size: (f32, f32)) -> Harness<'static, MeshFixerApp> {
 
 fn model(objects: Vec<(&str, Mesh)>) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: objects
             .into_iter()
             .map(|(name, mesh)| ModelObject {

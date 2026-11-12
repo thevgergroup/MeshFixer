@@ -139,6 +139,9 @@ pub struct ImportedModel {
     pub unit: threemf::Unit,
     pub source: SourceInfo,
     pub warnings: Vec<String>,
+    /// The model's own `<metadata>` ([`threemf::Model::metadata`]): empty
+    /// for STL and OBJ, which have none.
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
@@ -169,7 +172,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             transform: threemf::IDENTITY,
         }]
     };
-    let (objects, unit, precision, format, warnings) = match format {
+    let (objects, unit, precision, format, warnings, metadata) = match format {
         Format::Obj => {
             let text = std::str::from_utf8(&bytes).map_err(|e| IoError::Parse {
                 line: 0,
@@ -182,6 +185,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 Format::Obj,
                 warnings,
+                Default::default(),
             )
         }
         Format::StlBinary | Format::StlAscii => {
@@ -196,6 +200,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 format,
                 warnings,
+                Default::default(),
             )
         }
         Format::ThreeMf => {
@@ -209,10 +214,12 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 Format::ThreeMf,
                 warnings,
+                model.metadata,
             )
         }
     };
     Ok(ImportedModel {
+        metadata,
         objects,
         unit,
         source: SourceInfo {
