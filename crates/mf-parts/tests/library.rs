@@ -19,7 +19,7 @@ fn ctx() -> RunContext {
 fn builtins_are_closed_and_deterministic() {
     let (lib, warnings) = Library::load(None, &ctx());
     assert!(warnings.is_empty());
-    assert_eq!(lib.parts.len(), 12);
+    assert_eq!(lib.parts.len(), 13);
     for part in &lib.parts {
         let id = &part.manifest.id;
         let mesh = part.mesh(&ctx()).unwrap();

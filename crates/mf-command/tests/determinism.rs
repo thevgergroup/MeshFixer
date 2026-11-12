@@ -58,6 +58,71 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                     mesh.clone(),
                     BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
                 )
+            } else if op.id() == "object.add_shape" {
+                // The parametric-shapes brief's own placement op: needs at
+                // least one shape in its `shapes` JSON, or it refuses
+                // "nothing_to_add" rather than running (pre-existing gap:
+                // this op predates this test's own special cases, from
+                // before the parametric-shapes system existed).
+                let shape = mf_operations::shapes::ShapeToAdd {
+                    generator: mf_parts::GeneratorRecord {
+                        id: "shape.box".to_owned(),
+                        version: mf_parts::find_shape("shape.box")
+                            .expect("the Box shape is a built-in")
+                            .version(),
+                        params: mf_parts::find_shape("shape.box")
+                            .expect("the Box shape is a built-in")
+                            .spec()
+                            .validate(&BTreeMap::new())
+                            .expect("the Box shape's own defaults validate"),
+                        part: None,
+                    },
+                    name: "Box".to_owned(),
+                    hole: false,
+                    attach_to: None,
+                    transform: None,
+                    group: None,
+                };
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "shapes".to_string(),
+                        mf_operations::shapes::shapes_param(&[shape]),
+                    )]),
+                )
+            } else if op.id() == "object.set_shape_params" {
+                // Likewise needs one recipe per target (here, one target,
+                // the geometry fixture itself re-read as a Box so the
+                // regenerate step has a matching recipe to replay).
+                let record = mf_parts::GeneratorRecord {
+                    id: "shape.box".to_owned(),
+                    version: mf_parts::find_shape("shape.box")
+                        .expect("the Box shape is a built-in")
+                        .version(),
+                    params: mf_parts::find_shape("shape.box")
+                        .expect("the Box shape is a built-in")
+                        .spec()
+                        .validate(&BTreeMap::new())
+                        .expect("the Box shape's own defaults validate"),
+                    part: None,
+                };
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "generators".to_string(),
+                        mf_operations::shapes::generators_param(&[record]),
+                    )]),
+                )
+            } else if op.id() == "object.move_group" {
+                // One target, one transform (an identity move is enough
+                // to exercise it without needing a real linked group).
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "transforms".to_string(),
+                        mf_operations::shapes::transforms_param(&[mf_io::threemf::IDENTITY]),
+                    )]),
+                )
             } else if op.id() == "mesh.combine" {
                 (uv_sphere(24, 48), BTreeMap::new())
             } else {
