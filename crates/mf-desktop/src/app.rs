@@ -5079,6 +5079,53 @@ impl MeshFixerApp {
             }
             "object.attach" => Some(format!("Attached {} parts", r["attached"].as_u64()?)),
             "object.move_group" => Some(format!("Moved {name} with its group")),
+            "mesh.combine" => {
+                let n = rec.operands.len().max(1);
+                Some(format!("Combined {n} object{} into {name}", plural_s(n)))
+            }
+            "mesh.make_solid" => {
+                let cell = r["cell_size"].as_f64().filter(|&c| c > 0.0);
+                Some(match cell {
+                    Some(cell) => format!("Made {name} solid ({} mm cells)", measure(cell)),
+                    None => format!("Made {name} solid"),
+                })
+            }
+            "connector.join" => {
+                let gap = r["measured_gap"].as_f64()?;
+                Some(crate::t!(
+                    "status.connector_join",
+                    gap = crate::defects::measure(gap),
+                    unit = crate::defects::unit_symbol(doc.units())
+                ))
+            }
+            "mesh.sculpt_stroke" => {
+                let moved = r["moved_vertices"].as_u64()?;
+                let brush = rec
+                    .params
+                    .get_choice("brush")
+                    .ok()
+                    .and_then(mf_operations::sculpt::BrushKind::parse)
+                    .map(|b| crate::i18n::tr(&format!("sculpt.brush.{}", b.word()), &[]))
+                    .unwrap_or_else(|| "Sculpt".to_owned());
+                let splits = r["remesh_splits"].as_u64().unwrap_or_default();
+                Some(if splits > 0 {
+                    crate::i18n::tr_plural(
+                        "status.sculpt.remeshed",
+                        moved,
+                        &[
+                            ("brush", brush),
+                            ("name", name.to_owned()),
+                            ("splits", thousands(splits)),
+                        ],
+                    )
+                } else {
+                    crate::i18n::tr_plural(
+                        "status.sculpt",
+                        moved,
+                        &[("brush", brush), ("name", name.to_owned())],
+                    )
+                })
+            }
             _ => None,
         }
     }
@@ -5592,6 +5639,30 @@ fn plain_report(op_id: &str, report: &serde_json::Value) -> String {
             }
             text
         }
+        "mesh.boolean" => {
+            let op = match report["operation"].as_str() {
+                Some("union") => "Combine",
+                Some("subtract") => "Subtract",
+                Some("intersect") => "Intersect",
+                _ => "Boolean",
+            };
+            crate::tp!("status.boolean", num("created_faces"), op = op)
+        }
+        "mesh.delete_faces" => crate::tp!("status.delete_faces", num("removed_faces")),
+        // "connector.join", "mesh.combine" and "mesh.make_solid" have
+        // their own plain words in `object_report` (they need the
+        // document's units or the object's name, not in the report).
+        "object.add_part" => crate::tp!("status.part_added", num("faces")),
+        "object.arrange_on_plate" => {
+            if report["off_plate"].as_bool() == Some(true) {
+                crate::t!("status.placed_beside_plate")
+            } else {
+                crate::t!("status.placed_on_plate")
+            }
+        }
+        // "mesh.sculpt_stroke" has its own plain words in `object_report`
+        // (it needs the brush and object name, which aren't in the
+        // engine's own report: see the module docs there).
         _ => {
             let raw = report.to_string();
             match raw.char_indices().nth(160) {
@@ -5993,6 +6064,55 @@ mod tests {
         let big = serde_json::json!({ "values": (0..1000).collect::<Vec<_>>() });
         let text = plain_report("mesh.inspect", &big);
         assert!(text.chars().count() <= 161 && text.ends_with('…'), "{text}");
+    }
+
+    /// Every operation the status line commonly shows gets plain words,
+    /// never the report's raw JSON (the owner's bug: `{"created_faces":
+    /// 0,"dabs":5,...}` showing after a sculpt stroke). `mesh.combine`,
+    /// `mesh.make_solid`, `connector.join` and `mesh.sculpt_stroke` need
+    /// more of the app's state (the object's name, the document's units)
+    /// than `plain_report` sees, so they're covered by `object_report`
+    /// instead; this test covers what reaches `plain_report` itself.
+    #[test]
+    fn no_raw_json_reaches_the_status_line() {
+        let boolean = serde_json::json!({
+            "operation": "union",
+            "created_faces": 42,
+            "removed_faces": 3,
+        });
+        assert_eq!(
+            plain_report("mesh.boolean", &boolean),
+            "Combine added 42 triangles"
+        );
+        let deleted = serde_json::json!({"removed_faces": 1, "removed_vertices": 3});
+        assert_eq!(plain_report("mesh.delete_faces", &deleted), "Deleted 1 triangle");
+        let part = serde_json::json!({"part": "bolt-m4", "part_hash": "abc", "faces": 128});
+        assert_eq!(
+            plain_report("object.add_part", &part),
+            "Added the part: 128 triangles"
+        );
+        let on_plate = serde_json::json!({"transform": vec![0.0; 12], "off_plate": false});
+        assert_eq!(
+            plain_report("object.arrange_on_plate", &on_plate),
+            "Arranged on the plate"
+        );
+        let beside = serde_json::json!({"transform": vec![0.0; 12], "off_plate": true});
+        assert_eq!(
+            plain_report("object.arrange_on_plate", &beside),
+            "The plate is full; placed beside it"
+        );
+        for (op, report) in [
+            ("mesh.boolean", &boolean),
+            ("mesh.delete_faces", &deleted),
+            ("object.add_part", &part),
+            ("object.arrange_on_plate", &on_plate),
+        ] {
+            let text = plain_report(op, report);
+            assert!(
+                !text.starts_with('{'),
+                "{op}'s status text is still raw JSON: {text}"
+            );
+        }
     }
 
     /// A file over the import limit says so in plain words, with what to

@@ -108,6 +108,17 @@ pub fn run_stroke(
     samples: &[DabSample],
     ctx: &RunContext,
 ) -> Result<(Mesh, mf_geometry::Provenance), OpError> {
+    run_stroke_with_stats(mesh, brush, samples, ctx).map(|(mesh, provenance, _)| (mesh, provenance))
+}
+
+/// [`run_stroke`], plus what dynamic detail's remeshing did (for the
+/// status line's plain words: `app.rs`'s `object_report`).
+pub fn run_stroke_with_stats(
+    mesh: &Mesh,
+    brush: BrushParams,
+    samples: &[DabSample],
+    ctx: &RunContext,
+) -> Result<(Mesh, mf_geometry::Provenance, RemeshStats), OpError> {
     ctx.progress.report(INDEXING, 0.0);
     let index = SculptIndex::build(mesh, ctx)?;
     let mut stroke = StrokeState::new(mesh, index, brush);
@@ -120,7 +131,9 @@ pub fn run_stroke(
         stroke.apply(s, ctx)?;
     }
     span.finish();
-    stroke.finish()
+    let stats = stroke.remesh_stats();
+    let (mesh, provenance) = stroke.finish()?;
+    Ok((mesh, provenance, stats))
 }
 
 impl Operation for SculptStroke {
@@ -166,12 +179,13 @@ impl Operation for SculptStroke {
                 report: serde_json::json!({ "dabs": 0 }),
             });
         }
-        let (mesh, provenance) = run_stroke(target.mesh, brush, &samples, ctx)?;
+        let (mesh, provenance, stats) = run_stroke_with_stats(target.mesh, brush, &samples, ctx)?;
         let report = serde_json::json!({
             "dabs": samples.len(),
             "moved_vertices": provenance.moved_vertices.len(),
             "created_faces": provenance.created_faces.len(),
             "removed_faces": provenance.removed_faces.len(),
+            "remesh_splits": stats.splits,
         });
         if provenance.is_empty() {
             return Ok(DocOutput {
