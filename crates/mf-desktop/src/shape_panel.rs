@@ -294,6 +294,100 @@ fn apply_fit_choice(app: &MeshFixerApp, params: &mut Params, name: &str, value: 
     }
 }
 
+/// If `id` is a round hole that prints sideways (its axis within 45° of
+/// horizontal where it sits, so its unsupported top would sag): its
+/// number among the document's holes, 1 first (fix item 9's live
+/// warning).
+pub fn sagging_hole(app: &MeshFixerApp, id: ObjectId) -> Option<usize> {
+    let doc = app.session.document();
+    let o = doc.object(id)?;
+    if !o.is_hole() {
+        return None;
+    }
+    let record = recipe(app, id)?;
+    if !mf_parts::shape::sags_sideways(&record, rotation(&o.transform)) {
+        return None;
+    }
+    doc.objects()
+        .iter()
+        .filter(|h| h.is_hole())
+        .position(|h| h.id == id)
+        .map(|i| i + 1)
+}
+
+/// "Hole N prints sideways and will sag at the top; switch to Teardrop",
+/// with the one-click fix.
+fn sideways_warning(app: &mut MeshFixerApp, ui: &mut egui::Ui, n: usize) {
+    widgets::chip(
+        ui,
+        icons::WARNING,
+        theme::HOLE,
+        &t!("shape.sideways", n = n),
+    );
+    if ui
+        .add_enabled_ui(app.busy.is_none(), |ui| {
+            widgets::wide_button(
+                ui,
+                widgets::Kind::Secondary,
+                None,
+                &t!("shape.sideways.fix"),
+            )
+        })
+        .inner
+        .clicked()
+    {
+        set_param(app, "hole_profile", ParamValue::Text("teardrop".into()));
+    }
+}
+
+/// After a command that moves objects commits: every editable hole it
+/// moved whose hole profile no longer matches where it sits (a teardrop
+/// that should point another way, or an `auto` hole that now prints
+/// sideways or upright) is re-resolved, as one more step (fix item 9:
+/// re-evaluate when the transform changes). Never after undo or redo:
+/// this only follows a command that just committed.
+pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
+    const MOVES: &[&str] = &[
+        "object.set_transform",
+        "object.move_group",
+        "object.drop_to_plate",
+        "object.arrange_on_plate",
+    ];
+    if !MOVES.contains(&op) {
+        return;
+    }
+    let doc = app.session.document();
+    let stale: Vec<(ObjectId, GeneratorRecord)> = doc
+        .objects()
+        .iter()
+        .filter_map(|o| {
+            let record = recipe(app, o.id)?;
+            let oriented = mf_parts::shape::orient_hole(&record, rotation(&o.transform));
+            (oriented != record).then_some((o.id, oriented))
+        })
+        .collect();
+    if !stale.is_empty() {
+        app.pending_reorient = Some(stale);
+    }
+}
+
+/// Runs a re-orientation [`after_commit`] queued, once the app is idle.
+pub fn run_pending_reorient(app: &mut MeshFixerApp) {
+    if app.busy.is_some() {
+        return;
+    }
+    let Some(stale) = app.pending_reorient.take() else {
+        return;
+    };
+    let (ids, records): (Vec<ObjectId>, Vec<GeneratorRecord>) = stale
+        .into_iter()
+        .filter(|(id, _)| app.session.document().object(*id).is_some())
+        .unzip();
+    if !ids.is_empty() {
+        regenerate(app, ids, records, t!("shape.reorient"));
+    }
+}
+
 /// The selection panel's shape section: "Editable shape" and its params,
 /// or "Mesh" for a plain mesh.
 pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
@@ -316,6 +410,9 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         &t!("shape.editable", name = generator_name(&record)),
     )
     .on_hover_text(t!("shape.editable.tip"));
+    if let Some(n) = sagging_hole(app, id) {
+        sideways_warning(app, ui, n);
+    }
     let members = members(app, id);
     if members.len() > 1 {
         let names: Vec<String> = members

@@ -1,5 +1,5 @@
 id: mesh.split_plane
-version: 1
+version: 2
 summary: Cut a closed object in two along a plane and close each part with a flat cap.
 geometry_kinds: [mesh]
 # Every selected object (many): each one the plane crosses becomes its
@@ -44,6 +44,11 @@ parameters:
     default: round
     values: [round, square, keyed]
     description: "Shape of the alignment holes and dowels"
+  - name: hole_profile
+    type: choice
+    default: auto
+    values: [auto, round, teardrop, flat_top]
+    description: "Cross-section of round alignment holes (D24): auto makes them teardrops when they print sideways (their axis, the cut's normal, within 45 degrees of horizontal), pointing up; round, teardrop or flat-top always. Version 1 had round holes only"
   - name: hole_diameter
     type: float
     default: 5.0

@@ -205,3 +205,84 @@ fn a_registered_shape_joins_the_registry_once() {
     let ids: Vec<&str> = shapes().iter().map(|s| s.id()).collect();
     assert_eq!(&ids[..LIBRARY.len()], LIBRARY);
 }
+
+/// Fix item 9: a hole-like shape defaults to Auto, which resolves to
+/// Teardrop when its axis is within 45° of horizontal for where it sits
+/// (pointing world up) and Round when it's upright; the resolution is
+/// recorded in its params, and a hole kept Round sideways is flagged.
+#[test]
+fn auto_hole_profiles_follow_the_placement_and_are_recorded() {
+    use glam::{DMat3, DVec3};
+    let ctx = RunContext::none();
+    let pocket = defaults("shape.magnet_pocket");
+    assert_eq!(pocket.params.get_choice("hole_profile").unwrap(), "auto");
+    // Upright (axis along world Z): round.
+    let upright = mf_parts::shape::orient_hole(&pocket, DMat3::IDENTITY);
+    assert_eq!(upright.params.get_float("profile").unwrap(), 0.0);
+    // Lying on its side (local z along world X): teardrop, its point
+    // facing world up (+Z), which is local y after the turn.
+    let sideways = DMat3::from_axis_angle(DVec3::Y, std::f64::consts::FRAC_PI_2);
+    let turned = mf_parts::shape::orient_hole(&pocket, sideways);
+    assert_eq!(turned.params.get_float("profile").unwrap(), 1.0);
+    let up = sideways
+        * DVec3::new(
+            turned.params.get_float("up_x").unwrap(),
+            turned.params.get_float("up_y").unwrap(),
+            0.0,
+        );
+    assert!((up - DVec3::Z).length() < 1e-9, "the point faces up: {up}");
+    // The mesh reaches past the round hole on the point's side only:
+    // world up is local -x after this turn.
+    let r = (6.0 + 0.0) / 2.0;
+    let round = regenerate(&upright, &ctx).unwrap().bounding_box().unwrap();
+    let tear = regenerate(&turned, &ctx).unwrap().bounding_box().unwrap();
+    assert!(round.min[0] >= -r - 1e-9);
+    assert!(
+        tear.min[0] < -r - 1.0 && tear.max[0] <= r + 1e-9,
+        "{tear:?}"
+    );
+    // Kept round on purpose but lying sideways: the live warning.
+    let mut kept = pocket.clone();
+    kept.params.0.insert(
+        "hole_profile".into(),
+        mf_spec::ParamValue::Text("round".into()),
+    );
+    assert!(mf_parts::shape::sags_sideways(&kept, sideways));
+    assert!(!mf_parts::shape::sags_sideways(&kept, DMat3::IDENTITY));
+    assert!(
+        !mf_parts::shape::sags_sideways(&turned, sideways),
+        "auto is a teardrop"
+    );
+}
+
+/// Fix item 9 in the joint connectors: a round dowel's holes take the
+/// placement's hole profile; a placement from before it existed stays
+/// round.
+#[test]
+fn joint_connector_holes_take_the_hole_profile() {
+    let ctx = RunContext::none();
+    let dowel = mf_parts::connectors()
+        .into_iter()
+        .find(|c| c.id() == "joint.dowel")
+        .unwrap();
+    let hole = |raw: &[(&str, &str)]| {
+        let raw = raw
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let params = dowel.spec().validate(&raw).unwrap();
+        let parts = dowel.generate(&params, &ctx).unwrap();
+        let mesh = &parts.parts.iter().find(|p| p.role == "hole").unwrap().mesh;
+        mesh.bounding_box().unwrap()
+    };
+    let round = hole(&[]);
+    let tear = hole(&[("hole_profile", "teardrop"), ("up_x", "1"), ("up_y", "0")]);
+    assert!((round.max[0] - 2.5).abs() < 1e-6, "{round:?}");
+    assert!(
+        (tear.max[0] - 2.5 * std::f64::consts::SQRT_2).abs() < 1e-6,
+        "{tear:?}"
+    );
+    // Auto with nothing resolved yet (an old placement) is round.
+    let auto = hole(&[("hole_profile", "auto")]);
+    assert_eq!(auto, round);
+}

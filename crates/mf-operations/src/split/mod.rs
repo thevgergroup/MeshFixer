@@ -140,7 +140,21 @@ impl Operation for SplitPlane {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
+    }
+
+    fn upgrade_params(&self, recorded: u32, params: &mut Params) -> bool {
+        match recorded {
+            // Version 1's round alignment holes were always round.
+            1 => {
+                params.0.insert(
+                    "hole_profile".to_owned(),
+                    mf_spec::ParamValue::Text("round".into()),
+                );
+                true
+            }
+            v => v == self.version(),
+        }
     }
 
     fn execute(
@@ -437,6 +451,45 @@ fn footprint(mesh: &Mesh, t: &[f64; 12]) -> Option<Footprint> {
 /// A new object's mesh and placement.
 type Placed = (Mesh, [f64; 12]);
 
+/// A round alignment hole's outline with the hole profile asked for
+/// (fix item 9, D24), in `pegs::prism_at`'s own frame (x along `key`
+/// projected onto the cut, y = normal × x, z the normal): under `auto` a
+/// teardrop if the hole's axis (the cut's normal) is within 45 degrees
+/// of horizontal, its point facing world up; otherwise the choice. Also
+/// the profile it used, for the report.
+fn round_alignment_hole(
+    choice: &str,
+    r: f64,
+    n: [f64; 3],
+    key: [f64; 3],
+    chord_tol: f64,
+) -> (Vec<[f64; 2]>, &'static str) {
+    use glam::{DMat3, DVec3};
+    use mf_parts::connectors::hole_profile::{HoleProfile, axis_tilt, hole_outline, local_up};
+    let z = DVec3::from(n).normalize_or(DVec3::Z);
+    let k = DVec3::from(key);
+    let mut x = k - z * k.dot(z);
+    if x.length() < 1e-12 {
+        x = z.any_orthonormal_vector();
+    }
+    let x = x.normalize();
+    let y = z.cross(x);
+    let frame = DMat3::from_cols(x, y, z);
+    let profile = match choice {
+        "teardrop" => HoleProfile::Teardrop,
+        "flat_top" => HoleProfile::FlatTop,
+        "round" => HoleProfile::Round,
+        _ => HoleProfile::auto(axis_tilt(frame, DVec3::Z)),
+    };
+    let up = local_up(frame, DVec3::X, DVec3::Y, DVec3::Z).unwrap_or([0.0, 1.0]);
+    let name = match profile {
+        HoleProfile::Round => "round",
+        HoleProfile::Teardrop => "teardrop",
+        HoleProfile::FlatTop => "flat_top",
+    };
+    (hole_outline(profile, r, up, 45.0, chord_tol), name)
+}
+
 /// Holes, attached pegs and dowels (D12). Changes the parts in place
 /// (their provenance stays relative to the target's input) and returns the
 /// dowels to create, each with its placement, and a report.
@@ -456,6 +509,8 @@ fn alignment(
         "keyed" => PegShape::Keyed,
         _ => PegShape::Round,
     };
+    let hole_profile = params.get_choice("hole_profile")?;
+    let mut profile_used: Option<&'static str> = None;
     let d = params.get_float("hole_diameter")?;
     let depth_above = params.get_float("hole_depth_above")?;
     let depth_below = params.get_float("hole_depth_below")?;
@@ -611,7 +666,14 @@ fn alignment(
             pegs_above.push(tail);
             continue;
         }
-        let hole = pegs::profile(h.shape, d, chord_tol);
+        let hole = if h.shape == PegShape::Round {
+            let (outline, used) =
+                round_alignment_hole(hole_profile, d / 2.0, world_n, key, chord_tol);
+            profile_used = Some(used);
+            outline
+        } else {
+            pegs::profile(h.shape, d, chord_tol)
+        };
         let hole_tool = pegs::prism_at(base_below, world_n, key, &hole, -depth_below, over);
         if pegs == "attached" {
             let peg = pegs::dowel_profile(h.shape, d, clearance, chord_tol);
@@ -789,6 +851,7 @@ fn alignment(
             "dovetail_angle_degrees": dovetail.then_some(dovetail::ANGLE_DEGREES),
             "holes": holes.len(),
             "hole_diameter": d,
+            "hole_profile": profile_used,
             "dowel_diameter": dowel_d,
             "dowel_length": if pegs == "dowels" { dowel_len } else { attached_len },
             "dowels": report_dowels,

@@ -401,26 +401,43 @@ pub fn has_hole_profile(record: &GeneratorRecord) -> bool {
 /// without a hole profile comes back unchanged. Recorded in the params,
 /// so replay builds the same profile.
 pub fn orient_hole(record: &GeneratorRecord, local_to_world: glam::DMat3) -> GeneratorRecord {
-    use crate::connectors::hole_profile::{HoleProfile, axis_tilt, local_up};
-    use glam::DVec3;
     if !has_hole_profile(record) {
         return record.clone();
     }
-    let mut out = record.clone();
-    let up = local_up(local_to_world, DVec3::X, DVec3::Y, DVec3::Z);
-    if let Some([x, y]) = up {
+    GeneratorRecord {
+        params: orient_params(&record.params, local_to_world),
+        ..record.clone()
+    }
+}
+
+/// [`orient_hole`] on bare params (a joint connector's placement, which
+/// `split.place_connectors` resolves for where it sits on the joint).
+/// Params without a hole profile come back unchanged.
+pub fn orient_params(params: &Params, local_to_world: glam::DMat3) -> Params {
+    use crate::connectors::hole_profile::{HoleProfile, axis_tilt, local_up};
+    use glam::DVec3;
+    if !(params.0.contains_key("hole_profile") && params.0.contains_key("up_x")) {
+        return params.clone();
+    }
+    let mut out = params.clone();
+    // Only the directions matter: a uniform scale (document units) or a
+    // mirror can't change which way is up.
+    let rot = glam::DMat3::from_cols(
+        local_to_world.x_axis.normalize_or(DVec3::X),
+        local_to_world.y_axis.normalize_or(DVec3::Y),
+        local_to_world.z_axis.normalize_or(DVec3::Z),
+    );
+    if let Some([x, y]) = local_up(rot, DVec3::X, DVec3::Y, DVec3::Z) {
         // Rounded so a transform's last-bit noise doesn't make a new
         // recipe (and a new history step) for the same direction.
         let r = |v: f64| (v * 1e9).round() / 1e9;
-        out.params.0.insert("up_x".into(), ParamValue::Float(r(x)));
-        out.params.0.insert("up_y".into(), ParamValue::Float(r(y)));
+        out.0.insert("up_x".into(), ParamValue::Float(r(x)));
+        out.0.insert("up_y".into(), ParamValue::Float(r(y)));
     }
-    if record.params.get_choice("hole_profile").ok() == Some("auto") {
-        let tilt = axis_tilt(local_to_world, DVec3::Z);
+    if params.get_choice("hole_profile").ok() == Some("auto") {
+        let tilt = axis_tilt(rot, DVec3::Z);
         let code = HoleProfile::auto(tilt).code();
-        out.params
-            .0
-            .insert("profile".into(), ParamValue::Float(code));
+        out.0.insert("profile".into(), ParamValue::Float(code));
     }
     out
 }
@@ -430,8 +447,16 @@ pub fn orient_hole(record: &GeneratorRecord, local_to_world: glam::DMat3) -> Gen
 /// horizontal) and so would sag at its unsupported top: the live
 /// "switch to Teardrop" warning (fix item 9).
 pub fn sags_sideways(record: &GeneratorRecord, local_to_world: glam::DMat3) -> bool {
+    has_hole_profile(record) && params_sag_sideways(&record.params, local_to_world)
+}
+
+/// [`sags_sideways`] on bare params (a joint connector's placement). A
+/// dowel or peg that isn't round has no round hole to sag.
+pub fn params_sag_sideways(params: &Params, local_to_world: glam::DMat3) -> bool {
     use crate::connectors::hole_profile::{HoleProfile, axis_tilt};
-    has_hole_profile(record)
-        && chosen_profile(&record.params) == HoleProfile::Round
+    let round_shape = params.get_float("shape").map_or(true, |s| s.round() == 0.0);
+    params.0.contains_key("hole_profile")
+        && round_shape
+        && chosen_profile(params) == HoleProfile::Round
         && HoleProfile::auto(axis_tilt(local_to_world, glam::DVec3::Z)) == HoleProfile::Teardrop
 }

@@ -424,3 +424,74 @@ fn full_plate_reports_dowels_off_the_plate() {
     );
     assert_eq!(layout.off_plate, vec![2]);
 }
+
+/// Fix item 9: round alignment holes are teardrops when they print
+/// sideways (a vertical cut, so the holes run horizontally) and round
+/// when they're upright (a horizontal cut); the report names the
+/// profile used, and a version 1 record (round holes only) keeps round.
+#[test]
+fn sideways_alignment_holes_are_teardrops_under_auto() {
+    let vertical: Vec<(&str, &str)> = vec![
+        ("pegs", "dowels"),
+        ("hole_depth_above", "5"),
+        ("hole_depth_below", "8"),
+        ("plane_point", "0.37,0,0"),
+        ("plane_normal", "1,0,0"),
+    ];
+    let out = parts(split(&sphere(), &vertical).unwrap());
+    assert_eq!(out.report["pegs"]["hole_profile"], "teardrop");
+    let up = parts(split(&sphere(), &DOWELS).unwrap());
+    assert_eq!(up.report["pegs"]["hole_profile"], "round");
+    let kept: Vec<(&str, &str)> = vertical
+        .iter()
+        .copied()
+        .chain([("hole_profile", "round")])
+        .collect();
+    let out = parts(split(&sphere(), &kept).unwrap());
+    assert_eq!(out.report["pegs"]["hole_profile"], "round");
+    // Version 1 had round holes only: its record replays round.
+    let op = find("mesh.split_plane").unwrap();
+    let mut params = mf_spec::Params::default();
+    assert!(op.upgrade_params(1, &mut params));
+    assert_eq!(params.get_choice("hole_profile").unwrap(), "round");
+}
+
+/// Fix item 9 in Connect's connectors: a dowel placed on a vertical cut
+/// (its holes run sideways) resolves to a teardrop under auto, pointing
+/// world up; on a horizontal cut it stays round; an explicit Round is
+/// kept (and is what the live warning flags).
+#[test]
+fn connect_dowels_resolve_their_hole_profile_for_the_joint() {
+    use glam::DVec3;
+    use mf_operations::{JointFrame, JointSide, Placement, oriented_params};
+    let dowel = |hole_profile: Option<f64>| Placement {
+        connector: "joint.dowel".into(),
+        on: JointSide::A,
+        at: [0.0, 0.0],
+        angle: 0.0,
+        params: hole_profile
+            .map(|c| [("hole_profile".to_owned(), c)].into())
+            .unwrap_or_default(),
+    };
+    let wall = JointFrame::new(DVec3::ZERO, DVec3::X, DVec3::Y, 0.0).unwrap();
+    let floor = JointFrame::new(DVec3::ZERO, DVec3::Z, DVec3::X, 0.0).unwrap();
+    let sideways = oriented_params(&wall, &dowel(None), 1.0).unwrap();
+    assert_eq!(sideways.get_choice("hole_profile").unwrap(), "auto");
+    assert_eq!(sideways.get_float("profile").unwrap(), 1.0);
+    let up =
+        mf_operations::placement_to_world(&wall, &dowel(None), 1.0).transform_vector3(DVec3::new(
+            sideways.get_float("up_x").unwrap(),
+            sideways.get_float("up_y").unwrap(),
+            0.0,
+        ));
+    assert!((up - DVec3::Z).length() < 1e-9, "points up: {up}");
+    let upright = oriented_params(&floor, &dowel(None), 1.0).unwrap();
+    assert_eq!(upright.get_float("profile").unwrap(), 0.0);
+    let kept = oriented_params(&wall, &dowel(Some(1.0)), 1.0).unwrap();
+    assert_eq!(kept.get_choice("hole_profile").unwrap(), "round");
+    let world = mf_operations::placement_to_world(&wall, &dowel(Some(1.0)), 1.0);
+    assert!(mf_parts::shape::params_sag_sideways(
+        &kept,
+        glam::DMat3::from_mat4(world)
+    ));
+}

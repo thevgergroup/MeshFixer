@@ -144,6 +144,27 @@ fn editable(kind: &str) -> &'static [(&'static str, &'static str)] {
     }
 }
 
+/// True if `p`'s connector cuts a round hole (a round dowel or peg, a
+/// magnet or insert pocket): the ones that take a hole profile.
+fn has_round_hole(p: &Placement, gap_mm: f64) -> bool {
+    mf_operations::placement_params(p, gap_mm).is_ok_and(|params| {
+        params.0.contains_key("hole_profile")
+            && params.get_float("shape").map_or(true, |s| s.round() == 0.0)
+    })
+}
+
+/// True if `p` cuts a round hole that prints sideways on this joint
+/// (its axis within 45° of horizontal) but is kept round, so its top
+/// would sag.
+pub fn sags_sideways(app: &MeshFixerApp, joint: &Joint, p: &Placement) -> bool {
+    let mm = mm(app);
+    let Ok(params) = mf_operations::placement_params(p, joint.frame.gap / mm) else {
+        return false;
+    };
+    let world = mf_operations::placement_to_world(&joint.frame, p, mm);
+    mf_parts::shape::params_sag_sideways(&params, glam::DMat3::from_mat4(world))
+}
+
 /// A placement's full parameters (its own and the spec's defaults), mm.
 fn full_params(p: &Placement, gap_mm: f64) -> BTreeMap<String, f64> {
     mf_operations::placement_params(p, gap_mm)
@@ -467,6 +488,23 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let Some(i) = to_remove {
         split_flow::remove_connector(app, j, i);
     }
+    // Fix item 9's live warning: a round hole explicitly kept round that
+    // prints sideways, with the one-click fix.
+    for (i, p) in joint.placements.iter().enumerate() {
+        if !sags_sideways(app, &joint, p) {
+            continue;
+        }
+        warning_card(ui, &t!("connect.sideways", n = i + 1));
+        if widgets::wide_button(ui, Kind::Secondary, None, &t!("shape.sideways.fix")).clicked()
+            && let Some(q) = app
+                .split_flow
+                .joints
+                .get_mut(j)
+                .and_then(|jt| jt.placements.get_mut(i))
+        {
+            q.params.insert("hole_profile".into(), 2.0);
+        }
+    }
     if let Some(i) = app
         .split_flow
         .selected
@@ -727,6 +765,29 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
                         changed = true;
                     }
                 });
+            });
+        }
+        if has_round_hole(&p, gap_mm) {
+            // The round holes' cross-section (fix item 9): auto by default.
+            let code = p.params.get("hole_profile").copied().unwrap_or(0.0).round() as usize; // allow-swallow: absent means auto (code 0)
+            let names = [
+                t!("hole.auto"),
+                t!("hole.round"),
+                t!("hole.teardrop"),
+                t!("hole.flat_top"),
+            ];
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(t!("connect.param.hole_profile")).color(theme::TEXT_MUTED));
+                egui::ComboBox::from_id_salt(("connect hole profile", i))
+                    .selected_text(names[code.min(3)].clone())
+                    .show_ui(ui, |ui| {
+                        for (k, name) in names.iter().enumerate() {
+                            if ui.selectable_label(k == code, name).clicked() && k != code {
+                                edited.params.insert("hole_profile".into(), k as f64);
+                                changed = true;
+                            }
+                        }
+                    });
             });
         }
         if p.connector == "joint.dovetail" {

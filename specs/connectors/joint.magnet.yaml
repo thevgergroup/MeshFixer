@@ -36,6 +36,36 @@ parameters:
     min: 0.0
     unit: mm
     description: "The cut's own gap between the two caps"
+  - name: hole_profile
+    type: choice
+    default: auto
+    values: [auto, round, teardrop, flat_top]
+    description: "The round holes' cross-section (D24): auto (teardrop when the hole prints sideways, within 45 degrees of horizontal), round, teardrop or flat-top"
+  - name: profile
+    type: float
+    default: 0.0
+    min: 0.0
+    max: 2.0
+    description: "What auto resolved to for this placement (0 round, 1 teardrop, 2 flat-top); recorded so replay is Exact"
+  - name: up_x
+    type: float
+    default: 0.0
+    min: -1.0
+    max: 1.0
+    description: "Which way a teardrop's point faces in the connector's own x/y (world up as seen from the hole), x part"
+  - name: up_y
+    type: float
+    default: 1.0
+    min: -1.0
+    max: 1.0
+    description: "Which way a teardrop's point faces in the connector's own x/y, y part"
+  - name: overhang
+    type: float
+    default: 45.0
+    min: 1.0
+    max: 89.0
+    unit: deg
+    description: "The steepest overhang the printer handles, from vertical (the teardrop's flank angle)"
 preconditions: []
 effects: [geometry_changes]
 runtime:

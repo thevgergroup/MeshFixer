@@ -229,3 +229,85 @@ fn the_selection_panel_edits_a_shape_and_shows_when_it_is_baked() {
     assert!(h.query_by_label("Editable shape · Box").is_none());
     still(&mut h, "baked");
 }
+
+fn recipe(h: &Harness<'_, MeshFixerApp>, id: mf_command::ObjectId) -> mf_parts::GeneratorRecord {
+    mf_desktop::shape_panel::recipe(h.state(), id).unwrap()
+}
+
+/// Fix item 9: a hole defaults to Auto, re-evaluated when its transform
+/// changes (one more step after the move, never after undo); a hole kept
+/// Round while it prints sideways shows "Hole N prints sideways…" with
+/// a one-click switch to Teardrop.
+#[test]
+fn a_sideways_hole_is_re_aimed_and_warned_about() {
+    require_gpu!("a_sideways_hole_is_re_aimed_and_warned_about");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    let id = place(&mut h, "Magnet pocket");
+    let r = recipe(&h, id);
+    assert_eq!(r.params.get_choice("hole_profile").unwrap(), "auto");
+    assert_eq!(
+        r.params.get_float("profile").unwrap(),
+        0.0,
+        "upright: round"
+    );
+
+    // Turn it on its side: the move, then the re-aim.
+    let mut t = h.state().session.document().object(id).unwrap().transform;
+    // Rotate 90° about world Y: local z now runs along world X.
+    let (x, z) = ([t[0], t[1], t[2]], [t[6], t[7], t[8]]);
+    t[0..3].copy_from_slice(&[-z[0], -z[1], -z[2]]);
+    t[6..9].copy_from_slice(&x);
+    let before = h.state().session.history_labels().len();
+    h.state_mut().commit_transform(id, t, "on its side".into());
+    wait_until(&mut h, "the move and the re-aim", |a| {
+        a.busy.is_none()
+            && a.pending_reorient.is_none()
+            && a.session.history_labels().len() >= before + 2
+    });
+    settle(&mut h);
+    assert_eq!(h.state().session.history_labels().len(), before + 2);
+    assert_eq!(
+        recipe(&h, id).params.get_float("profile").unwrap(),
+        1.0,
+        "teardrop"
+    );
+    // Undo takes back the re-aim only, and doesn't trigger another.
+    h.state_mut().undo();
+    settle(&mut h);
+    assert_eq!(recipe(&h, id).params.get_float("profile").unwrap(), 0.0);
+    assert!(h.state().session.can_redo());
+    h.state_mut().redo();
+    settle(&mut h);
+
+    // Kept Round on purpose: the warning and its fix.
+    let before = h.state().session.history_labels().len();
+    h.state_mut().set_active(id);
+    mf_desktop::shape_panel::set_param(
+        h.state_mut(),
+        "hole_profile",
+        mf_spec::ParamValue::Text("round".into()),
+    );
+    wait_until(&mut h, "kept round", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > before
+    });
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(id);
+    settle(&mut h);
+    h.get_by_label("Hole 1 prints sideways and will sag at the top; switch to Teardrop");
+    still(&mut h, "sideways-warning");
+    let before = h.state().session.history_labels().len();
+    h.get_by_label("Switch to Teardrop").click();
+    wait_until(&mut h, "switched to teardrop", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > before
+    });
+    settle(&mut h);
+    assert_eq!(
+        recipe(&h, id).params.get_choice("hole_profile").unwrap(),
+        "teardrop"
+    );
+    assert!(
+        h.query_by_label_contains("prints sideways").is_none(),
+        "the warning is gone"
+    );
+}

@@ -168,6 +168,10 @@ fn find_connector(id: &str) -> Option<&'static dyn mf_parts::Connector> {
     mf_parts::connectors().into_iter().find(|c| c.id() == id)
 }
 
+/// The hole profile choices, by the code a [`Placement`] records them as
+/// (`hole_profile`: 0 auto, 1 round, 2 teardrop, 3 flat-top).
+pub const HOLE_PROFILES: [&str; 4] = ["auto", "round", "teardrop", "flat_top"];
+
 /// The placement's full, validated connector parameters (its spec's
 /// defaults for anything not set), with the joint's gap (`gap_mm`).
 pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
@@ -186,6 +190,22 @@ pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
         .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
     raw.insert("gap".into(), gap_mm.max(0.0).to_string());
+    // A placement's params are numbers: its hole profile is recorded as a
+    // code (fix item 9; absent means auto) and handed to the connector
+    // as the word its spec takes.
+    raw.remove("hole_profile");
+    if let Some(code) = p.params.get("hole_profile")
+        && connector.spec().parameter("hole_profile").is_some()
+    {
+        raw.insert(
+            "hole_profile".into(),
+            HOLE_PROFILES
+                .get(code.round().clamp(0.0, 3.0) as usize)
+                .copied()
+                .unwrap_or("auto")
+                .into(),
+        );
+    }
     if p.connector == "joint.dovetail"
         && !raw.contains_key("groove_a")
         && !raw.contains_key("groove_b")
@@ -226,6 +246,21 @@ pub fn placement_to_world(frame: &JointFrame, p: &Placement, mm: f64) -> DMat4 {
     let mut m = DMat4::from_mat3(r);
     m.w_axis = frame.at(p.at).extend(1.0);
     m
+}
+
+/// [`placement_params`] with the hole profile resolved for where the
+/// placement sits on the joint (fix item 9, D24): a round hole whose
+/// axis runs within 45 degrees of horizontal in the world (the pieces'
+/// print orientation) becomes a teardrop under `auto`, its point facing
+/// world up. A pure function of the recorded placement and frame, so
+/// replay builds the same profile.
+pub fn oriented_params(frame: &JointFrame, p: &Placement, mm: f64) -> Result<Params, OpError> {
+    let params = placement_params(p, frame.gap / mm)?;
+    let world = placement_to_world(frame, p, mm);
+    Ok(mf_parts::shape::orient_params(
+        &params,
+        DMat3::from_mat4(world),
+    ))
 }
 
 /// `mesh` with every vertex moved by `m` (a rigid move and a uniform
@@ -525,15 +560,13 @@ pub struct JointCheck {
 fn resists_rotation(id: &str, params: &Params) -> bool {
     match id {
         "joint.dovetail" | "joint.insert" => true,
-        "joint.dowel" | "joint.peg" => {
-            !matches!(
-                mf_parts::connectors::joint::Shape::from_code(
-                    params.get_float("shape").unwrap_or(0.0),
-                    params.get_float("sides").unwrap_or(6.0),
-                ),
-                mf_parts::connectors::joint::Shape::Round
-            )
-        }
+        "joint.dowel" | "joint.peg" => !matches!(
+            mf_parts::connectors::joint::Shape::from_code(
+                params.get_float("shape").unwrap_or(0.0),
+                params.get_float("sides").unwrap_or(6.0),
+            ),
+            mf_parts::connectors::joint::Shape::Round
+        ),
         _ => false,
     }
 }
@@ -585,7 +618,12 @@ pub fn joint_checks(placements: &[Placement], gap_mm: f64) -> Vec<JointCheck> {
 /// solid piece's own cut face, to place the second dowel sensibly;
 /// `None` if the fix doesn't apply (an unknown name, or there's no
 /// single round dowel/peg to fix).
-pub fn fix_joint(placements: &[Placement], gap_mm: f64, cap: &CapRegion, fix: &str) -> Option<Vec<Placement>> {
+pub fn fix_joint(
+    placements: &[Placement],
+    gap_mm: f64,
+    cap: &CapRegion,
+    fix: &str,
+) -> Option<Vec<Placement>> {
     let resisting: Vec<bool> = placements
         .iter()
         .map(|p| {
@@ -618,10 +656,7 @@ pub fn fix_joint(placements: &[Placement], gap_mm: f64, cap: &CapRegion, fix: &s
             // Mirrored across the cap's own centre: as far from the
             // first hole as this one simple rule can put it, on a cap
             // of any convex-ish shape.
-            let at = [
-                2.0 * centre[0] - first.at[0],
-                2.0 * centre[1] - first.at[1],
-            ];
+            let at = [2.0 * centre[0] - first.at[0], 2.0 * centre[1] - first.at[1]];
             let at = if cap.contains(at) { at } else { centre };
             let mut second = first.clone();
             second.at = at;
@@ -682,7 +717,7 @@ pub fn placed_parts(
     p: &Placement,
     mm: f64,
 ) -> Result<Vec<PlacedPart>, OpError> {
-    let params = placement_params(p, frame.gap / mm)?;
+    let params = oriented_params(frame, p, mm)?;
     let to_world = placement_to_world(frame, p, mm);
     Ok(generated(p, &params)?
         .into_iter()
@@ -1057,8 +1092,7 @@ pub fn fix(
             // ray's own rounding falls), so the check can't immediately
             // re-fire on the fixed placement.
             let key = if a_end { "groove_a" } else { "groove_b" };
-            q.params
-                .insert(key.into(), to_edge / settings.mm + 0.5);
+            q.params.insert(key.into(), to_edge / settings.mm + 0.5);
             Ok(Some(q))
         }
     }
@@ -1293,7 +1327,7 @@ impl Operation for PlaceConnectors {
                     ),
                 ));
             }
-            let cp = placement_params(p, gap / mm)?;
+            let cp = oriented_params(&frame, p, mm)?;
             for part in placed_parts(&frame, p, mm)? {
                 match (part.join, part.side) {
                     (JoinKind::Separate, _) => loose.push(transformed(

@@ -306,6 +306,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("connect.param.dowel_length", "Dowel length"),
     ("connect.param.groove_a", "Reach, start end"),
     ("connect.param.groove_b", "Reach, finish end"),
+    ("connect.param.hole_profile", "Hole shape"),
     ("connect.param.insert", "Insert diameter"),
     ("connect.param.length", "Tail length"),
     ("connect.param.magnet", "Magnet diameter"),
@@ -342,6 +343,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("connect.shape.round", "Round"),
     ("connect.shape.square", "Square"),
     ("connect.shapes_label", "Add connectors as editable shapes"),
+    ("connect.sideways", "Hole {n} prints sideways and will sag at the top; switch to Teardrop"),
     ("connectors.add", "Add"),
     ("connectors.apply", "Add \"{name}\""),
     (
@@ -444,6 +446,10 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("history.empty", "No history yet"),
     ("history.tab", "History"),
     ("history.tip", "Click a step to go back to it"),
+    ("hole.auto", "Auto"),
+    ("hole.flat_top", "Flat-top"),
+    ("hole.round", "Round"),
+    ("hole.teardrop", "Teardrop"),
     (
         "inspect.help",
         "Everything the analysis measured, in plain numbers",
@@ -668,7 +674,10 @@ static CATALOGUE: &[(&str, &str)] = &[
         "shape.mesh.tip",
         "A plain mesh: sculpt, cut, combine or repair it. Its size can't be changed by parameters (a mesh operation baked it, or it was imported).",
     ),
+    ("shape.reorient", "Re-aim hole profiles for the new placement"),
     ("shape.section", "Shape"),
+    ("shape.sideways", "Hole {n} prints sideways and will sag at the top; switch to Teardrop"),
+    ("shape.sideways.fix", "Switch to Teardrop"),
     ("shape.unknown", "This shape's generator ({id}) isn't available, so it can't be edited."),
     ("solid.apply", "Make it solid"),
     (

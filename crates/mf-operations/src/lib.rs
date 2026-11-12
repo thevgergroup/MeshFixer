@@ -45,9 +45,9 @@ mod test_unit_conversion;
 mod transform;
 
 pub use split::joints::{
-    CapRegion, Check, CheckKind, CheckSettings, JointCheck, JointCheckKind, JointFrame, JointSide,
+    CapRegion, Check, CheckKind, CheckSettings, HOLE_PROFILES, JointCheck, JointCheckKind, JointFrame, JointSide,
     Piece, PlacedPart, Placement, cap_middle, cap_region, check_placement, fix, fix_joint,
-    footprint_2d, joint_checks, placed_parts, placement_params, placement_to_world,
+    footprint_2d, joint_checks, oriented_params, placed_parts, placement_params, placement_to_world,
     wanted_clearance,
 };
 pub use split::pegs::{

@@ -401,6 +401,9 @@ pub struct MeshFixerApp {
     pub shape_edit: Option<crate::shape_panel::ShapeDraft>,
     /// Hinge placement choices and the swing preview.
     pub hinge: crate::hinge_tool::HingeState,
+    /// Editable holes whose profile a move left stale, to re-resolve once
+    /// idle (`shape_panel::after_commit`).
+    pub pending_reorient: Option<Vec<(ObjectId, mf_parts::GeneratorRecord)>>,
     /// Set by Parts/Connectors right before placing (`object.add_part`):
     /// once that command's `Message::Completed` has run (so `active` is
     /// already the newly created object, D6's own `after_object_changes`
@@ -788,6 +791,7 @@ impl MeshFixerApp {
             connectors: Default::default(),
             shape_edit: None,
             hinge: Default::default(),
+            pending_reorient: None,
             pending_open_transform: None,
             last_invocation_op: None,
             refusal: None,
@@ -2303,6 +2307,7 @@ impl MeshFixerApp {
                         // Split's workflow: a cut's joints, or a joint's
                         // connectors applied.
                         crate::split_flow::after_commit(self, op, &r);
+                        crate::shape_panel::after_commit(self, op);
                         // The command's result stays: a filled hole's
                         // "selection cleared" would only repeat it.
                         if let Some(note) = self.retarget_selection()
@@ -4980,6 +4985,7 @@ impl MeshFixerApp {
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
+        crate::shape_panel::run_pending_reorient(self);
         if self.busy.is_none()
             && let Some(pending) = self.pending_open_transform.take()
         {
@@ -5769,6 +5775,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
     let hidden_params: &[&str] = match op_id {
         "mesh.split_plane" if params.get_choice("pegs").ok() == Some("none") => &[
             "peg_shape",
+            "hole_profile",
             "hole_diameter",
             "hole_depth_above",
             "hole_depth_below",

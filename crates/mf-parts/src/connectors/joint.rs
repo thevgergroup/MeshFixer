@@ -182,7 +182,9 @@ pub enum Shape {
     Square,
     /// A regular polygon with `sides` corners on the circle (3..=12; 6
     /// by default, i.e. a hex).
-    NSided { sides: u32 },
+    NSided {
+        sides: u32,
+    },
     /// A "D" profile: a circle with one flat, same as `mesh.split_plane`'s
     /// own keyed alignment holes (`split::pegs::PegShape::Keyed`).
     Keyed,
@@ -268,6 +270,30 @@ fn shape_profile(shape: Shape, d: f64, tol: f64) -> Vec<[f64; 2]> {
         Shape::Square => square_profile(d),
         Shape::NSided { sides } => n_gon(sides, r),
         Shape::Keyed => keyed_profile(r, 0.6 * r, tol),
+    }
+}
+
+/// A round hole's outline with the profile its params ask for (fix item
+/// 9, D24): exactly [`circle`] when Round, a teardrop or flat-top over
+/// the same circle otherwise, its point facing the recorded `up_x`/
+/// `up_y` (world up seen from the hole). A placement made before the
+/// hole profile existed has no such params and stays round.
+fn round_hole(params: &Params, r: f64, tol: f64) -> Vec<[f64; 2]> {
+    let profile = crate::shape::chosen_profile(params);
+    let up = [
+        params.get_float("up_x").unwrap_or(0.0),
+        params.get_float("up_y").unwrap_or(1.0),
+    ];
+    let overhang = params.get_float("overhang").unwrap_or(45.0);
+    super::hole_profile::hole_outline(profile, r, up, overhang, tol)
+}
+
+/// A dowel or peg's hole: its shape's own outline, or for a round one
+/// the hole profile its params ask for.
+fn hole_outline_for(params: &Params, shape: Shape, d: f64, tol: f64) -> Vec<[f64; 2]> {
+    match shape {
+        Shape::Round => round_hole(params, d / 2.0, tol),
+        other => shape_profile(other, d, tol),
     }
 }
 
@@ -362,7 +388,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
             let shape = shape_of(params);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
             let over = s.d;
-            let hole = shape_profile(shape, s.d, tol);
+            let hole = hole_outline_for(params, shape, s.d, tol);
             let len = dowel_length(params)?;
             if len <= 0.0 {
                 return Err(refuse(
@@ -426,7 +452,11 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                     ),
                     part(
                         "counterpart hole",
-                        prism_z(&shape_profile(shape, s.d, tol), b - s.d, b + s.depth_other),
+                        prism_z(
+                            &hole_outline_for(params, shape, s.d, tol),
+                            b - s.d,
+                            b + s.depth_other,
+                        ),
                         Side::B,
                         JoinKind::Subtract,
                     ),
@@ -480,7 +510,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
             let s = sizes(params, false)?;
             let tol = chord_tol(s.d, s.clearance);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
-            let pocket = circle((s.d + s.clearance) / 2.0, tol);
+            let pocket = round_hole(params, (s.d + s.clearance) / 2.0, tol);
             Ok(ConnectorParts {
                 parts: vec![
                     part(
@@ -507,14 +537,14 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                 parts: vec![
                     part(
                         "insert pocket",
-                        prism_z(&circle(s.d / 2.0, tol), a - s.depth_on, a + s.d),
+                        prism_z(&round_hole(params, s.d / 2.0, tol), a - s.depth_on, a + s.d),
                         Side::A,
                         JoinKind::Subtract,
                     ),
                     part(
                         "counterpart screw hole",
                         prism_z(
-                            &circle((screw + s.clearance) / 2.0, tol),
+                            &round_hole(params, (screw + s.clearance) / 2.0, tol),
                             b - s.d,
                             b + s.depth_other,
                         ),
@@ -544,12 +574,14 @@ pub fn footprint(id: &str, params: &Params) -> Result<Vec<[f64; 2]>, ConnectorEr
             let h = d / 2.0;
             vec![[-l, -h], [l, -h], [l, h], [-l, h]]
         }
-        "joint.magnet" => circle((d + c) / 2.0, chord_tol(d, c)),
+        "joint.magnet" => round_hole(params, (d + c) / 2.0, chord_tol(d, c)),
         "joint.insert" => {
             let screw = float(params, "screw_diameter")?;
-            circle((d / 2.0).max((screw + c) / 2.0), chord_tol(d, c))
+            round_hole(params, (d / 2.0).max((screw + c) / 2.0), chord_tol(d, c))
         }
-        "joint.dowel" | "joint.peg" => shape_profile(shape_of(params), d, chord_tol(d, c)),
+        "joint.dowel" | "joint.peg" => {
+            hole_outline_for(params, shape_of(params), d, chord_tol(d, c))
+        }
         _ => circle(d / 2.0, chord_tol(d, c)),
     })
 }
@@ -590,7 +622,11 @@ pub fn fit_probe(id: &str, params: &Params) -> Result<Option<(Mesh, Mesh)>, Conn
             let tail = dovetail_section(s.d - s.clearance, z0 - b, z1 - b, b);
             prism_x(&tail, -length / 2.0 + margin, length / 2.0 - margin)
         }
-        _ => prism_z(&shape_pin_profile(shape_of(params), s.d, s.clearance, tol), z0, z1),
+        _ => prism_z(
+            &shape_pin_profile(shape_of(params), s.d, s.clearance, tol),
+            z0,
+            z1,
+        ),
     };
     Ok(Some((hole, pin)))
 }
