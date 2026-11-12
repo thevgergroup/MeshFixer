@@ -4957,6 +4957,24 @@ impl MeshFixerApp {
                     if dz < 0.0 { "down" } else { "up" }
                 ))
             }
+            "object.add_shape" => {
+                let n = r["shapes"].as_array()?.len();
+                Some(if n == 1 {
+                    "Added an editable shape".to_owned()
+                } else {
+                    format!("Added {n} editable shapes as a linked group")
+                })
+            }
+            "object.set_shape_params" => {
+                let n = r["regenerated"].as_u64()?;
+                Some(if n == 1 {
+                    format!("Rebuilt {name}")
+                } else {
+                    format!("Rebuilt {name} and the rest of its group ({n} objects)")
+                })
+            }
+            "object.attach" => Some(format!("Attached {} parts", r["attached"].as_u64()?)),
+            "object.move_group" => Some(format!("Moved {name} with its group")),
             _ => None,
         }
     }

@@ -470,7 +470,8 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 let Some(value) = draft.params.0.get_mut(&p.name) else {
                     continue;
                 };
-                ui.label(label(&p.name)).on_hover_text(&p.description);
+                ui.add(egui::Label::new(label(&p.name)).wrap_mode(egui::TextWrapMode::Extend))
+                    .on_hover_text(&p.description);
                 let suffix = match p.unit.as_deref() {
                     Some("mm") => " mm",
                     Some("deg") => "°",
