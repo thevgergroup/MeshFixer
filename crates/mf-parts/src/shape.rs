@@ -268,6 +268,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 },
                 unit: Some("mm".into()),
                 default_from: None,
+                fit_role: None,
                 description: description.into(),
             },
             P::Num(name, default, min, max, unit, description) => ParamSpec {
@@ -275,6 +276,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 kind: ParamKind::Float { default, min, max },
                 unit: unit.map(Into::into),
                 default_from: None,
+                fit_role: None,
                 description: description.into(),
             },
             P::Int(name, default, min, max, description) => ParamSpec {
@@ -286,6 +288,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 },
                 unit: None,
                 default_from: None,
+                fit_role: None,
                 description: description.into(),
             },
             P::Choice(name, default, values, description) => ParamSpec {
@@ -296,6 +299,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 },
                 unit: None,
                 default_from: None,
+                fit_role: None,
                 description: description.into(),
             },
             P::Text(name, default, description) => ParamSpec {
@@ -305,6 +309,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 },
                 unit: None,
                 default_from: None,
+                fit_role: None,
                 description: description.into(),
             },
         })

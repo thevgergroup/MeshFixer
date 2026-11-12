@@ -47,6 +47,7 @@ parameters:
     min: 0.0
     unit: mm
     default_from: fit.hinge_gap
+    fit_role: clearance
     description: "Axial gap between neighbouring knuckles, and the pin's radial clearance in leaf_b's bore (from the print fit profile)"
   - name: open_angle
     type: float

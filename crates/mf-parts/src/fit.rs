@@ -471,3 +471,42 @@ pub fn resolve(fit_class: &FitClass, machine: &MachineProfile, compensation: Com
     };
     fit_class.clearance + tolerance
 }
+
+/// Fills every parameter of `spec` that declares a `fit_role`
+/// (`mf_spec::FIT_ROLES`) and that `raw` doesn't already set, from the
+/// chosen `fit_class` and `machine` (parts-architecture-review.md's
+/// generic Fit/Machine filler, replacing a connector-by-connector `if
+/// id == ...` chain): `"clearance"`/`"hole"`/`"outer_xy"`/`"z"` resolve
+/// through [`resolve`] with the matching [`Compensation`];
+/// `"machine_hole_undersize"` is `machine.hole_undersize` on its own,
+/// uncompensated; `"fit_class_name"`/`"machine_profile_name"` are the
+/// chosen pair's own names. A parameter the caller already set in `raw`
+/// is left alone (the same "set wins over derived" rule
+/// `OperationSpec::fill_defaults` already uses for `default_from`).
+pub fn fill_fit_role_params(
+    spec: &mf_spec::OperationSpec,
+    raw: &mut std::collections::BTreeMap<String, String>,
+    fit_class: &FitClass,
+    machine: &MachineProfile,
+) {
+    for p in &spec.parameters {
+        let Some(role) = p.fit_role.as_deref() else {
+            continue;
+        };
+        if raw.contains_key(&p.name) {
+            continue;
+        }
+        let value = match role {
+            "clearance" => resolve(fit_class, machine, Compensation::None).to_string(),
+            "hole" => resolve(fit_class, machine, Compensation::Hole).to_string(),
+            "outer_xy" => resolve(fit_class, machine, Compensation::OuterXy).to_string(),
+            "z" => resolve(fit_class, machine, Compensation::Z).to_string(),
+            "machine_hole_undersize" => machine.hole_undersize.to_string(),
+            "fit_class_name" => fit_class.name.clone(),
+            "machine_profile_name" => machine.name.clone(),
+            // allow-swallow: `mf_spec::OperationSpec::validate` already refused any `fit_role` not in `FIT_ROLES` when the spec was parsed, so an unknown role here can't happen; this is a no-op rather than a panic in case a future role is added to FIT_ROLES without a matching arm here.
+            _ => continue,
+        };
+        raw.insert(p.name.clone(), value);
+    }
+}

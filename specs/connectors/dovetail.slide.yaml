@@ -45,20 +45,24 @@ parameters:
   - name: fit_class
     type: text
     default: "Snug"
+    fit_role: fit_class_name
     description: "The Fit class the groove's clearance was resolved from"
   - name: machine_profile
     type: text
     default: "Uncalibrated"
+    fit_role: machine_profile_name
     description: "The Machine profile the groove's clearance was resolved from"
   - name: fit_clearance
     type: float
     default: 0.0
     unit: mm
+    fit_role: clearance
     description: "The Fit class's own clearance, resolved and recorded (D20)"
   - name: machine_tolerance
     type: float
     default: 0.0
     unit: mm
+    fit_role: machine_hole_undersize
     description: "The Machine profile's hole undersize, resolved and recorded (D20)"
   - name: gap
     type: float

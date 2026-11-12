@@ -26,11 +26,13 @@ parameters:
     type: float
     default: 0.0
     unit: mm
+    fit_role: hole
     description: "The chosen Fit class's clearance (design intent) between the thread and its mating hole, before machine tolerance. Negative is interference (a press fit)"
   - name: machine_tolerance
     type: float
     default: 0.0
     unit: mm
+    fit_role: machine_hole_undersize
     description: "The active Machine profile's hole-undersize compensation, added to fit_clearance to size a bore (0 on an uncalibrated machine)"
 preconditions:
   - size is one of the metric coarse presets on the packet

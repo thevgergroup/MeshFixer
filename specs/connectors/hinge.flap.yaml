@@ -47,6 +47,7 @@ parameters:
     min: 0.0
     unit: mm
     default_from: fit.hinge_gap
+    fit_role: clearance
     description: "Radial clearance between the pin and a bore (leaf_b's knuckles, or both leaves' knuckles with a separate pin), and the axial gap between neighbouring knuckles (from the print fit profile)"
   - name: pin_mode
     type: choice

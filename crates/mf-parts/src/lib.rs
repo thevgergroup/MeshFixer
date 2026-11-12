@@ -27,7 +27,7 @@ pub use connector::{
 pub use connectors::connectors;
 pub use fit::{
     BUILTIN_NAME, Compensation, FIT_PROFILES_FILE, FitClass, FitClasses, FitError, FitProfile,
-    FitProfiles, resolve,
+    FitProfiles, fill_fit_role_params, resolve,
 };
 pub use fit_check::{FitCheck, FitExpectation, MatingSurfaces, check_fit};
 pub use frame::{SurfaceFrame, place};

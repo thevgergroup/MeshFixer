@@ -89,8 +89,50 @@ pub struct ParamSpec {
     /// `default`, when the caller didn't set it (D20): `fit.<field>` of
     /// the active print fit profile. See [`OperationSpec::fill_defaults`].
     pub default_from: Option<String>,
+    /// How a connector/shape generator's Fit class and Machine profile
+    /// pickers (the desktop's newer dual-pane fit system, distinct from
+    /// `default_from`'s older single `FitProfile`) fill this parameter,
+    /// so a generic filler can replace a per-connector `if id == ...`
+    /// match (parts-architecture-review.md's `fit_role`): one of
+    /// `"clearance"` (the class's own `clearance`, no machine
+    /// compensation), `"hole"`/`"outer_xy"`/`"z"` (the clearance
+    /// compensated by the machine profile's matching field,
+    /// `mf_parts::Compensation`), or `"fit_class_name"`/
+    /// `"machine_profile_name"` (the chosen class's or profile's own
+    /// name, recorded so a saved placement shows which pair it came
+    /// from). `mf-spec` only carries the string — it has no dependency
+    /// on `mf-parts`, which interprets it (`mf-desktop`'s
+    /// `connector_tool::fill_fit_role_params`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_role: Option<String>,
     pub description: String,
 }
+
+/// Every `fit_role` a spec parameter may declare (kept as plain text in
+/// the spec itself, since `mf-spec` doesn't depend on `mf-parts`'s
+/// `Compensation`; validated against this list at parse time so a typo
+/// is refused by name rather than silently never filled).
+///
+/// `"clearance"`/`"hole"`/`"outer_xy"`/`"z"` are the Fit class's own
+/// `clearance`, resolved through the Machine profile's matching
+/// compensation (`mf_parts::Compensation::{None,Hole,OuterXy,Z}`) — the
+/// combined value every connector's own generated gap/clearance param
+/// already wants. `"machine_hole_undersize"` is the Machine profile's
+/// raw `hole_undersize` field on its own, uncompensated (Thread's and
+/// the dovetail's own `machine_tolerance`, which is *added to* an
+/// already-resolved `fit_clearance` rather than folded into one
+/// combined value). `"fit_class_name"`/`"machine_profile_name"` are the
+/// chosen pair's own names, recorded so a saved placement shows which
+/// pair it came from.
+pub const FIT_ROLES: &[&str] = &[
+    "clearance",
+    "hole",
+    "outer_xy",
+    "z",
+    "machine_hole_undersize",
+    "fit_class_name",
+    "machine_profile_name",
+];
 
 /// A source of print-fit values for [`OperationSpec::fill_defaults`]
 /// (D20), implemented by `mf_parts::FitProfile`. `field` is the part
@@ -174,6 +216,8 @@ struct RawParam {
     unit: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     default_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fit_role: Option<String>,
     description: String,
 }
 
@@ -282,11 +326,19 @@ impl TryFrom<RawParam> for ParamSpec {
                 "default_from '{from}' must name a print fit field (fit.<field>)"
             ));
         }
+        if let Some(role) = &r.fit_role
+            && !FIT_ROLES.contains(&role.as_str())
+        {
+            return Err(format!(
+                "fit_role '{role}' isn't one of {FIT_ROLES:?}"
+            ));
+        }
         Ok(ParamSpec {
             name: r.name,
             kind,
             unit: r.unit,
             default_from: r.default_from,
+            fit_role: r.fit_role,
             description: r.description,
         })
     }
@@ -338,6 +390,7 @@ impl From<ParamSpec> for RawParam {
             values,
             unit: p.unit,
             default_from: p.default_from,
+            fit_role: p.fit_role,
             description: p.description,
         }
     }

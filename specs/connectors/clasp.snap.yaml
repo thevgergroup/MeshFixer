@@ -37,6 +37,7 @@ parameters:
     min: 0.0
     unit: mm
     default_from: fit.hinge_gap
+    fit_role: clearance
     description: "Clearance between the lip and the catch's top face in the closed print pose (from the print fit profile)"
 preconditions:
   - the arm's engagement strain (beam formula from arm_length, arm_thickness and lip_depth) is at most 3%

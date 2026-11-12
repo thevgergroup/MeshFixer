@@ -50,11 +50,13 @@ parameters:
     type: float
     default: 0.3
     unit: mm
+    fit_role: outer_xy
     description: "Knuckle-to-knuckle gap, and every other gap between the two moving sides (from the Fit class and Machine profile)"
   - name: pin_clearance
     type: float
     default: 0.3
     unit: mm
+    fit_role: hole
     description: "Radial clearance between the pin and every knuckle's bore (from the Fit class and Machine profile)"
   - name: pin_mode
     type: choice
@@ -71,10 +73,12 @@ parameters:
   - name: fit_class
     type: text
     default: "Free running"
+    fit_role: fit_class_name
     description: "The Fit class the gaps were resolved from"
   - name: machine_profile
     type: text
     default: "Uncalibrated"
+    fit_role: machine_profile_name
     description: "The Machine profile the gaps were resolved from"
 preconditions:
   - gap and pin_clearance are more than 0 (otherwise the moving parts would print fused)

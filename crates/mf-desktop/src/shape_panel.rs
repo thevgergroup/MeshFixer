@@ -241,56 +241,63 @@ pub fn set_param(app: &mut MeshFixerApp, name: &str, value: ParamValue) {
     };
     let mut params = record.params.clone();
     params.0.insert(name.to_owned(), value.clone());
-    apply_fit_choice(app, &mut params, name, &value);
+    if let Ok(spec) = mf_parts::record_spec(&record) {
+        apply_fit_choice(app, spec, &mut params, name, &value);
+    }
     set_params(app, id, params);
 }
 
-/// A new Fit class or Machine profile name also sets what it resolves to.
-fn apply_fit_choice(app: &MeshFixerApp, params: &mut Params, name: &str, value: &ParamValue) {
-    let ParamValue::Text(chosen) = value else {
-        return;
-    };
-    if params.0.contains_key("pin_clearance") && matches!(name, "fit_class" | "machine_profile") {
-        // A hinge: both its gaps follow the pair (`hinge_tool::hinge_fit`).
-        let (classes, _) = crate::connector_tool::fit_classes(app);
-        let (profiles, _) = crate::connector_tool::machine_profiles(app);
-        let text = |k: &str| match params.0.get(k) {
-            Some(ParamValue::Text(t)) => t.clone(),
-            _ => String::new(),
-        };
-        if let (Some(c), Some(m)) = (
-            classes.get(&text("fit_class")),
-            profiles.get(&text("machine_profile")),
-        ) {
-            params
-                .0
-                .insert("gap".into(), ParamValue::Float(c.clearance + m.outer_xy));
-            params.0.insert(
-                "pin_clearance".into(),
-                ParamValue::Float(c.clearance + m.hole_undersize),
-            );
-        }
+/// A new Fit class or Machine profile name also sets what every other
+/// `fit_role`-tagged param of `spec` resolves to
+/// (`mf_parts::fill_fit_role_params`, the same generic filler
+/// `connector_tool.rs::connector_params` uses at placement time, now
+/// reused for a live edit instead of each shape/connector needing its
+/// own "which gaps follow the pair" special case).
+fn apply_fit_choice(
+    app: &MeshFixerApp,
+    spec: &mf_spec::OperationSpec,
+    params: &mut Params,
+    name: &str,
+    value: &ParamValue,
+) {
+    if !matches!(name, "fit_class" | "machine_profile") {
         return;
     }
-    match name {
-        "fit_class" => {
-            let (classes, _) = crate::connector_tool::fit_classes(app);
-            if let Some(c) = classes.get(chosen) {
-                params
-                    .0
-                    .insert("fit_clearance".into(), ParamValue::Float(c.clearance));
+    let ParamValue::Text(_) = value else { return };
+    let (classes, _) = crate::connector_tool::fit_classes(app);
+    let (profiles, _) = crate::connector_tool::machine_profiles(app);
+    let text = |k: &str| match params.0.get(k) {
+        Some(ParamValue::Text(t)) => t.clone(),
+        _ => String::new(),
+    };
+    let (Some(class), Some(machine)) = (
+        classes.get(&text("fit_class")),
+        profiles.get(&text("machine_profile")),
+    ) else {
+        return;
+    };
+    let mut raw: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    // Force every `fit_role` param to re-derive (never "already set"),
+    // since this *is* the edit that changed what they should resolve to.
+    for p in &spec.parameters {
+        if p.fit_role.is_some() {
+            raw.remove(&p.name);
+        }
+    }
+    mf_parts::fill_fit_role_params(spec, &mut raw, class, machine);
+    for (k, v) in raw {
+        if let Some(p) = spec.parameter(&k) {
+            match &p.kind {
+                mf_spec::ParamKind::Text { .. } => {
+                    params.0.insert(k, ParamValue::Text(v));
+                }
+                _ => {
+                    if let Ok(f) = v.parse::<f64>() {
+                        params.0.insert(k, ParamValue::Float(f));
+                    }
+                }
             }
         }
-        "machine_profile" => {
-            let (profiles, _) = crate::connector_tool::machine_profiles(app);
-            if let Some(m) = profiles.get(chosen) {
-                params.0.insert(
-                    "machine_tolerance".into(),
-                    ParamValue::Float(m.hole_undersize),
-                );
-            }
-        }
-        _ => {}
     }
 }
 

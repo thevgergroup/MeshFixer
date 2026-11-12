@@ -204,11 +204,15 @@ fn run_on(
 
 /// `id`'s connector parameters, fully resolved and validated against
 /// its own spec (every parameter, not just the ones the Fit/Machine
-/// pickers touch): Thread's `fit_clearance`/`machine_tolerance` from the
-/// chosen Fit class and Machine profile; the others' own `gap` from the
-/// same pair (`Compensation::None`: a hinge or clasp's clearance is the
-/// fit class's own gap, with no machine-specific bore compensation of
-/// its own parameter). The library part's own generated mesh
+/// pickers touch): every parameter whose spec declares a `fit_role`
+/// (Thread's `fit_clearance`/`machine_tolerance`, the hinge's and the
+/// dovetail's `gap`/`pin_clearance`/`fit_clearance`/`machine_tolerance`
+/// and their `fit_class`/`machine_profile` names, ...) is filled
+/// generically from the chosen Fit class and Machine profile
+/// (`mf_parts::fill_fit_role_params`, parts-architecture-review.md: no
+/// more per-connector `if id == ...` branch). Thread's `size`/`length`
+/// are its own UI state, not a fit-role concern, so they're still set
+/// by hand here. The library part's own generated mesh
 /// (`object.add_part`) is sized from the connector's spec defaults, not
 /// this; what matters here is that `connector_params_json` (recorded on
 /// placement so Merge can regenerate the exact same parts, D22) is a
@@ -242,34 +246,15 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
             "length".to_owned(),
             app.connectors.thread_length.to_string(),
         );
-        let fit_clearance = mf_parts::resolve(&class, &machine, Compensation::Hole);
-        raw.insert("fit_clearance".to_owned(), fit_clearance.to_string());
-        raw.insert(
-            "machine_tolerance".to_owned(),
-            machine.hole_undersize.to_string(),
-        );
-    } else if id == crate::hinge_tool::HINGE {
-        raw.insert(
-            "gap".to_owned(),
-            (class.clearance + machine.outer_xy).to_string(),
-        );
-        raw.insert(
-            "pin_clearance".to_owned(),
-            (class.clearance + machine.hole_undersize).to_string(),
-        );
-        raw.insert("fit_class".to_owned(), class.name.clone());
-        raw.insert("machine_profile".to_owned(), machine.name.clone());
-    } else if id == "dovetail.slide" {
-        raw.insert("fit_clearance".to_owned(), class.clearance.to_string());
-        raw.insert(
-            "machine_tolerance".to_owned(),
-            machine.hole_undersize.to_string(),
-        );
-        raw.insert("fit_class".to_owned(), class.name.clone());
-        raw.insert("machine_profile".to_owned(), machine.name.clone());
-    } else {
+    } else if spec.parameter("gap").is_some_and(|p| p.fit_role.is_none()) {
+        // A connector whose own `gap` has no `fit_role` of its own (the
+        // Connect point-placement joint connectors, whose `gap` instead
+        // comes from the cut frame, never this picker): the plain,
+        // uncompensated clearance, same as every connector here used to
+        // get by default before `fit_role` existed.
         raw.insert("gap".to_owned(), gap.to_string());
     }
+    mf_parts::fill_fit_role_params(spec, &mut raw, &class, &machine);
     let params = spec
         .validate(&raw)
         .map_err(|e| format!("'{id}''s own parameters: {e}"))?;
