@@ -151,10 +151,13 @@ fn on_open(app: &mut MeshFixerApp) {
 }
 
 /// Sculpt claims a press wherever it lands on the active object's
-/// surface (a stroke, not the camera's orbit), while a stroke isn't
-/// already open mid-drag (never pulled from under it): with one open,
-/// `viewport_input`'s own `Move`/`End` handling continues it regardless
-/// of where the pointer strays, same as any other drag.
+/// *visible* surface (a stroke, not the camera's orbit), while a stroke
+/// isn't already open mid-drag (never pulled from under it): with one
+/// open, `viewport_input`'s own `Move`/`End` handling continues it
+/// regardless of where the pointer strays, same as any other drag. Front
+/// faces only, same rule and reasoning as [`surface_point`]: claiming a
+/// press that `surface_point` would then refuse (no dab) would start a
+/// drag that visibly does nothing.
 fn claims(app: &MeshFixerApp) -> Option<Claims> {
     if app.sculpt_stroke.is_some() {
         return Some(Box::new(|_| true) as Claims);
@@ -176,7 +179,16 @@ fn claims(app: &MeshFixerApp) -> Option<Claims> {
     Some(Box::new(move |px: (f64, f64)| {
         let (origin, dir) = cam.ray(cam.target, size, px);
         let model = mf_render::model_matrix(&transform);
-        bvh.ray_pick(&mesh, origin, dir, &model).is_some()
+        let Some((face, _)) = bvh.ray_pick(&mesh, origin, dir, &model) else {
+            return false;
+        };
+        let Some(corners) = mesh.face(face) else {
+            return false;
+        };
+        let [a, b, c] = corners.map(|v| DVec3::from(mesh.corner_position(v)));
+        let [wa, wb, wc] = [a, b, c].map(|p| model.transform_point3(p));
+        let world_normal = (wb - wa).cross(wc - wa);
+        world_normal.dot(DVec3::from(dir)) < 0.0
     }) as Claims)
 }
 
@@ -207,6 +219,19 @@ fn barycentric(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> [f64; 3] {
 /// world space. `None` off the surface, or before the object has a
 /// picking BVH to search against (Sculpt reuses it rather than building
 /// its own: see the module docs).
+///
+/// `Bvh::ray_pick` finds the nearest crossing of either winding (the
+/// general picking contract every tool shares — `occluded`'s own tests
+/// need that). For Sculpt specifically, the stroke's own invariant is
+/// narrower: a dab only ever comes from the *visible* surface under the
+/// cursor, so a hit whose face points away from the camera (back-facing)
+/// is refused here, even though the BVH itself doesn't distinguish it
+/// from a front-facing one. On an ordinary closed, outward-facing mesh
+/// the nearest hit is always front-facing anyway (the surface blocks the
+/// ray before it reaches anything behind it); this only matters once the
+/// mesh is open, self-intersecting, or has an inverted face already on
+/// it — exactly the state a bad drag could otherwise leave it in, which
+/// must never become a place a *new* stroke can start from.
 fn surface_point(
     app: &MeshFixerApp,
     id: ObjectId,
@@ -231,6 +256,18 @@ fn surface_point(
     let local = model.inverse().transform_point3(world);
     let corners = mesh.face(face)?;
     let [a, b, c] = corners.map(|v| DVec3::from(mesh.corner_position(v)));
+    // World-space corners (not just the normal) so a non-uniform scale
+    // or shear in `model` doesn't need the usual inverse-transpose
+    // correction: the cross product of transformed edges is always the
+    // right world-space normal direction, just recomputed from points
+    // instead of carried through as a vector.
+    let [wa, wb, wc] = [a, b, c].map(|p| model.transform_point3(p));
+    let world_normal = (wb - wa).cross(wc - wa);
+    // Back-facing: the surface at the hit point faces the same way the
+    // ray travels (away from the camera), not toward it.
+    if world_normal.dot(DVec3::from(dir)) >= 0.0 {
+        return None;
+    }
     let bary = barycentric(local, a, b, c);
     Some((
         DabSample {

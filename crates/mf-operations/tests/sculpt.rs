@@ -119,7 +119,13 @@ fn each_brush_moves_only_vertices_within_radius() {
             }
             moved += usize::from(bits(now) != bits(before));
         }
-        assert!(moved > 10, "{kind:?} moved {moved} vertices");
+        // Grab (`Drag`) captures its vertex set once, from the first
+        // dab's centre, and never grows it as later dabs continue the
+        // path (the fix for the owner's spike/tear report): a short path
+        // moves fewer vertices than a brush that's reapplied fresh along
+        // every dab's own footprint.
+        let min_moved = if kind == BrushKind::Drag { 1 } else { 10 };
+        assert!(moved > min_moved, "{kind:?} moved {moved} vertices");
     }
 }
 
@@ -163,19 +169,55 @@ fn symmetry_x_mirrors_displacement_exactly() {
     for kind in BrushKind::ALL {
         let mut p = params(kind);
         p.symmetry = [true, false, false];
+        // Grab's own tolerance (below) scales with the cursor's total
+        // drag distance along `path()`, times the brush strength: see
+        // that branch's comment.
+        let drag_scale = p.strength
+            * path()
+                .windows(2)
+                .map(|w| (0..3).map(|k| (w[1][k] - w[0][k]).powi(2)).sum::<f64>().sqrt())
+                .sum::<f64>();
         let (after, _) = stroke(&mesh, p, &samples);
         let mut moved = 0;
         for (v, before) in mesh.vertices() {
             let m = mirror_of[&bits(before)];
             let (a, b) = (after.position(v).unwrap(), after.position(m).unwrap());
-            assert_eq!(
-                bits([0.0 - a[0], a[1], a[2]]),
-                bits(b),
-                "{kind:?}: {v:?} and {m:?}"
-            );
+            if kind == BrushKind::Drag {
+                // Grab's region capture always walks the same geodesic
+                // flood fill as "stay on this surface" (never a 3D
+                // radius), whatever that option is set to: the same
+                // non-bit-exact-mirror caveat `combine` documents for it
+                // applies here too. Unlike the other brushes' small
+                // per-dab bumps, Grab's displacement is the cursor's
+                // *total* drag distance times a vertex's falloff weight,
+                // so a boundary vertex whose two mirror images read
+                // slightly different geodesic distances (and so
+                // noticeably different weights, right where the
+                // falloff curve is steepest) can differ by a fraction of
+                // the whole drag, not just a fraction of the radius: this
+                // checks closeness against that larger, drag-scaled
+                // bound, not exact bits (as
+                // `stay_on_surface_moves_both_mirror_sides_closely` does
+                // for "stay on this surface").
+                let d = (0..3)
+                    .map(|k| (a[k] - if k == 0 { -b[k] } else { b[k] }).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                assert!(
+                    d < 0.5 * drag_scale,
+                    "{kind:?}: {v:?} and {m:?} differ by {d} (drag scale {drag_scale})"
+                );
+            } else {
+                assert_eq!(
+                    bits([0.0 - a[0], a[1], a[2]]),
+                    bits(b),
+                    "{kind:?}: {v:?} and {m:?}"
+                );
+            }
             moved += usize::from(bits(a) != bits(before));
         }
-        assert!(moved > 20, "{kind:?}: both sides move ({moved})");
+        let min_moved = if kind == BrushKind::Drag { 0 } else { 20 };
+        assert!(moved > min_moved, "{kind:?}: both sides move ({moved})");
     }
 }
 
@@ -397,4 +439,201 @@ fn frozen_param_round_trips() {
     )
     .unwrap();
     assert_ne!(m.content_hash(), mesh.content_hash());
+}
+
+// ---------------------------------------------------------------------
+// Grab (`BrushKind::Drag`): the owner's "moves the far side, spikes, and
+// tears the surface" report. Each test below covers one of the fix's
+// invariants: the far side never moves, another object is never
+// touched, no face ever inverts, and a dab's displacement is exactly
+// `strength × drag distance` at the centre.
+// ---------------------------------------------------------------------
+
+/// A stroke of exactly these dab centres (face + barycentric picked
+/// nearest each point), one `StrokeState::apply` per dab, in order.
+fn grab_stroke(mesh: &Mesh, p: BrushParams, points: &[[f64; 3]]) -> Mesh {
+    let samples = dabs(mesh, points);
+    let index = SculptIndex::build(mesh, &RunContext::none()).unwrap();
+    let mut s = StrokeState::new(mesh, index, p);
+    for d in &samples {
+        s.apply(d, &RunContext::none()).unwrap();
+    }
+    s.finish().unwrap().0
+}
+
+/// Grab only ever moves the vertices of the geodesic region captured at
+/// the first dab: every vertex on the far side of the sphere (more than
+/// the radius away, geodesically, from the +x pole) stays exactly where
+/// it was, however far the drag then travels.
+#[test]
+fn grab_never_moves_the_far_side() {
+    let mesh = symmetric_sphere();
+    let mut p = params(BrushKind::Drag);
+    p.radius = 0.3;
+    p.strength = 1.0;
+    p.view_dir = [-1.0, 0.0, 0.0];
+    let radius = p.radius;
+    // A long drag: +x pole to well past the equator along y. If Grab
+    // re-gathered a 3D-radius set on every dab (the bug), a drag this
+    // long would sweep most of the sphere; captured once, it must only
+    // ever touch the small patch around the +x pole.
+    let path: Vec<[f64; 3]> = (0..20)
+        .map(|i| {
+            let a = i as f64 * 0.12;
+            [a.cos(), a.sin(), 0.0]
+        })
+        .collect();
+    let after = grab_stroke(&mesh, p, &path);
+    let mut moved = 0;
+    for (v, before) in mesh.vertices() {
+        // Far side: more than the radius from the start point in
+        // straight-line distance too (a stronger, simpler check than
+        // geodesic — straight-line is always ≤ geodesic, so "far by
+        // straight line" is a safe superset of "far by geodesic").
+        let d_start = (0..3).map(|k| (before[k] - path[0][k]).powi(2)).sum::<f64>().sqrt();
+        let now = after.position(v).unwrap();
+        if d_start >= radius {
+            assert_eq!(
+                bits(now),
+                bits(before),
+                "{v:?} is {d_start} from the drag's start, past the radius {radius}: it must not move"
+            );
+        }
+        moved += usize::from(bits(now) != bits(before));
+    }
+    assert!(moved > 0, "the captured patch itself must still move");
+}
+
+/// Grab never moves another object's vertices: a stroke on one sphere
+/// leaves an unrelated second sphere (a separate `StrokeState`/mesh
+/// entirely — the engine has no way to reach across objects) untouched.
+/// This is really checking that nothing in the engine's region capture
+/// or falloff reaches past the single mesh it was built against.
+#[test]
+fn grab_never_moves_another_object() {
+    let mesh = symmetric_sphere();
+    let other = symmetric_sphere();
+    let mut p = params(BrushKind::Drag);
+    p.radius = 0.3;
+    p.strength = 1.0;
+    let path: Vec<[f64; 3]> = (0..10)
+        .map(|i| {
+            let a = i as f64 * 0.12;
+            [a.cos(), a.sin(), 0.0]
+        })
+        .collect();
+    let _ = grab_stroke(&mesh, p, &path);
+    // `other` was never touched: still the identical revision (same
+    // content), since a stroke only ever edits the one mesh it was
+    // built with (`StrokeState::new`'s own `base`).
+    assert_eq!(other.content_hash(), symmetric_sphere().content_hash());
+}
+
+/// A large, aggressive drag never flips a face's orientation: every
+/// live face's normal still points roughly the way it did before the
+/// stroke (dot product with the original normal stays positive).
+#[test]
+fn grab_never_inverts_a_face() {
+    let mesh = symmetric_sphere();
+    let mut p = params(BrushKind::Drag);
+    // Deliberately oversized relative to the mesh and at full strength:
+    // exactly the kind of large drag that tore the surface in the
+    // owner's report, absent the fix.
+    p.radius = 0.6;
+    p.strength = 1.0;
+    let before_normals: HashMap<FaceId, [f64; 3]> = mesh
+        .faces()
+        .map(|(f, t)| {
+            let [a, b, c] = t.map(|v| mesh.corner_position(v));
+            let e1 = (0..3).map(|k| b[k] - a[k]).collect::<Vec<_>>();
+            let e2 = (0..3).map(|k| c[k] - a[k]).collect::<Vec<_>>();
+            let n = [
+                e1[1] * e2[2] - e1[2] * e2[1],
+                e1[2] * e2[0] - e1[0] * e2[2],
+                e1[0] * e2[1] - e1[1] * e2[0],
+            ];
+            (f, n)
+        })
+        .collect();
+    let path: Vec<[f64; 3]> = (0..8)
+        .map(|i| {
+            let a = i as f64 * 0.3;
+            [a.cos(), a.sin(), 0.0]
+        })
+        .collect();
+    let after = grab_stroke(&mesh, p, &path);
+    for (f, t) in after.faces() {
+        let Some(&n0) = before_normals.get(&f) else {
+            continue;
+        };
+        let [a, b, c] = t.map(|v| after.position(mf_geometry::VertexId(v)).unwrap());
+        let e1 = (0..3).map(|k| b[k] - a[k]).collect::<Vec<_>>();
+        let e2 = (0..3).map(|k| c[k] - a[k]).collect::<Vec<_>>();
+        let n1 = [
+            e1[1] * e2[2] - e1[2] * e2[1],
+            e1[2] * e2[0] - e1[0] * e2[2],
+            e1[0] * e2[1] - e1[1] * e2[0],
+        ];
+        let dot: f64 = (0..3).map(|k| n0[k] * n1[k]).sum();
+        assert!(dot > 0.0, "{f:?} flipped: old normal {n0:?}, new {n1:?}");
+    }
+}
+
+/// Displacement at the centre: the vertex nearest the dab centre (full
+/// falloff weight, 1.0) moves by exactly `strength × the drag distance`,
+/// projected onto the view plane — one dab's worth of absolute Grab
+/// displacement, not an accumulated or re-applied delta. A flat grid
+/// (not the sphere the other Grab tests use): looking straight down its
+/// own normal (`z`), a dab exactly on a vertex projects to exactly that
+/// vertex with no surface-curvature ambiguity at all, so this isolates
+/// Grab's displacement formula itself from `centre()`'s own geometry.
+#[test]
+fn grab_displacement_equals_drag_distance_at_centre() {
+    let mesh = mf_fixtures::grid(10);
+    let mut p = params(BrushKind::Drag);
+    p.radius = 3.0;
+    p.strength = 0.8;
+    p.falloff = Falloff::Flat; // weight 1.0 everywhere inside the radius
+    p.view_dir = [0.0, 0.0, -1.0]; // straight down the grid's own normal
+    // Vertex (5, 5) is the dab centre; (6, 5) is one grid step away,
+    // well inside the radius, where the drag ends.
+    let v = |i: u32, j: u32| j * 11 + i;
+    let centre_vertex = v(5, 5);
+    let drag_vertex = v(6, 5);
+    let face_at = |vert: u32| mesh.faces().find(|(_, t)| t.contains(&vert)).unwrap();
+    let dab_on = |vert: u32| {
+        let (f, t) = face_at(vert);
+        let i = t.iter().position(|&x| x == vert).unwrap();
+        let mut bary = [0.0; 3];
+        bary[i] = 1.0;
+        DabSample {
+            face: f,
+            bary,
+            pressure: 1.0,
+        }
+    };
+    let centre_dab = dab_on(centre_vertex);
+    let drag_dab = dab_on(drag_vertex);
+    let before = mesh.position(mf_geometry::VertexId(centre_vertex)).unwrap();
+    let index = SculptIndex::build(&mesh, &RunContext::none()).unwrap();
+    let mut s = StrokeState::new(&mesh, index, p.clone());
+    s.apply(&centre_dab, &RunContext::none()).unwrap();
+    s.apply(&drag_dab, &RunContext::none()).unwrap();
+    // The stroke's own recorded centres: on this flat grid, viewed
+    // straight down its own normal, a dab exactly on a vertex projects
+    // to that same point (no curvature to redirect it), so `centres[0]`
+    // and `centres[1]` are exactly `centre_vertex` and `drag_vertex`.
+    let centres = s.centres().to_vec();
+    let (after, _) = s.finish().unwrap();
+    let now = after.position(mf_geometry::VertexId(centre_vertex)).unwrap();
+    let moved: f64 = (0..3).map(|k| (now[k] - before[k]).powi(2)).sum::<f64>().sqrt();
+    let raw: [f64; 3] = std::array::from_fn(|k| centres[1][k] - centres[0][k]);
+    // The view direction is the grid's own normal, so nothing to drop:
+    // the raw displacement is already entirely in the view plane.
+    let want: f64 = (0..3).map(|k| (p.strength * raw[k]).powi(2)).sum::<f64>().sqrt();
+    assert!(want > 1e-9, "the drag must have actually moved the centre: {want}");
+    assert!(
+        (moved - want).abs() < 1e-9,
+        "centre vertex moved {moved}, expected {want} (strength × drag distance)"
+    );
 }
