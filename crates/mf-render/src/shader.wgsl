@@ -17,6 +17,10 @@ struct Scene {
     tint_selected: vec4<f32>,
     tint_hover: vec4<f32>,
     tint_hole_neighbourhood: vec4<f32>,
+    // Sculpt ▸ "Show sculpt changes": one colour, strength scaled by tier
+    // (low/med/high) in `base_color`, so a 3-tier heatmap needs only one
+    // more tint slot.
+    tint_sculpt_changed: vec4<f32>,
     // The selection cue (renderer.rs `SelectionCue`): x: emphasis (the
     // pulse after framing, 0–1), y: x-ray opacity, z: a Hole's hidden-part
     // ghost opacity (0 while "Show holes through solids" is off).
@@ -72,6 +76,9 @@ const HOVER: u32 = 4u;
 const NON_MANIFOLD_ADJ: u32 = 8u;
 const RECENT_REPAIR: u32 = 16u;
 const HOLE_NEIGHBOURHOOD: u32 = 32u;
+// Sculpt ▸ "Show sculpt changes": bits 6–7 hold a 3-tier heatmap (low,
+// medium, high), not a single on/off flag (gpu_mesh.rs `FaceStates`).
+const SCULPT_CHANGED_TIERS: u32 = 192u;
 
 struct SurfaceOut {
     @builtin(position) clip: vec4<f32>,
@@ -117,6 +124,13 @@ fn base_color(front: bool, state: u32) -> vec3<f32> {
     rgb = tint(rgb, state, LOOSE_PIECE, scene.tint_loose_piece);
     rgb = tint(rgb, state, NON_MANIFOLD_ADJ, scene.tint_non_manifold_adj);
     rgb = tint(rgb, state, RECENT_REPAIR, scene.tint_recent_repair);
+    // Sculpt ▸ "Show sculpt changes": the tier (0 none, 1–3 low/med/high)
+    // scales the one tint colour's strength, a heatmap from one slot.
+    let tier = f32((state & SCULPT_CHANGED_TIERS) >> 6u);
+    if (tier > 0.0) {
+        let t = scene.tint_sculpt_changed;
+        rgb = mix(rgb, t.rgb, t.a * (tier / 3.0));
+    }
     return rgb;
 }
 
@@ -148,13 +162,42 @@ fn studio(n_in: vec3<f32>) -> vec4<f32> {
     return vec4<f32>(0.14 + 0.70 * k + 0.12 * f + 0.12 * hemi, spec, rim, 0.0);
 }
 
+// Curvature shading ("cavity"): how fast the shaded (view-space) normal
+// changes across neighbouring fragments, screen-space (no extra vertex
+// data, no extra pass). A broad, gently curved surface (a dome, a
+// cylinder) has a small, near-uniform rate of change; a dent or a bump's
+// rim bends sharply over a few pixels, well above that. A deadzone below
+// `BASELINE` keeps a plain curved surface untouched, so only genuinely
+// sharp local curvature (a sculpted bump or dent, a fillet) reads: the
+// effect is a local anomaly detector, not a shading of curvature itself.
+// Signed by whether the surface bends away from the eye (concave, a
+// dent's hollow: darkens) or towards it (convex, a bump's crown: a faint
+// lift), so both read clearly.
+const CAVITY_BASELINE: f32 = 0.012;
+const CAVITY_GAIN: f32 = 16.0;
+
+fn cavity(n_in: vec3<f32>) -> f32 {
+    let n = normalize(n_in);
+    let curvature = length(fwidth(n));
+    let strength = clamp((curvature - CAVITY_BASELINE) * CAVITY_GAIN, 0.0, 1.0);
+    // Which way it bends: the view-facing component of the normal's own
+    // screen-space slope, so a hollow curving away from the eye signs
+    // oppositely from a crown curving towards it.
+    let v = normalize(scene.eye_dir.xyz);
+    let bend = dot(dpdx(n) + dpdy(n), v);
+    return clamp(-sign(bend) * strength, -1.0, 1.0);
+}
+
 fn lit(rgb: vec3<f32>, n_in: vec3<f32>) -> vec3<f32> {
     let l = studio(n_in);
+    // ±12%: a dent reads darker, a bump's rim a little brighter, without
+    // washing out the studio lighting underneath.
+    let cav = 1.0 + 0.12 * cavity(n_in);
     if (scene.shading.x > 0.5) {
         // Studio: brighter, with a soft highlight.
-        return rgb * (0.08 + 1.0 * l.x) + vec3<f32>(0.22 * l.y + 0.06 * l.z);
+        return (rgb * (0.08 + 1.0 * l.x) + vec3<f32>(0.22 * l.y + 0.06 * l.z)) * cav;
     }
-    return rgb * l.x + vec3<f32>(0.05 * l.z);
+    return rgb * l.x * cav + vec3<f32>(0.05 * l.z);
 }
 
 // The wireframe: how much of a triangle edge this fragment is (0–1), a

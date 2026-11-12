@@ -261,7 +261,7 @@ impl RenderMesh {
 /// What the face states of the active object's revision are made from
 /// (see [`face_states`]). Small to compare, so the UI thread can tell when
 /// they change; the O(n) part is done on a worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StateInputs {
     /// The selection's faces (a loop or edge selection tints no face).
     pub selected: Option<OverlayTarget>,
@@ -278,7 +278,33 @@ pub struct StateInputs {
     /// The faces around the holes (View ▸ Show hole overview), from the
     /// analysis; `None` while the overview is off.
     pub hole_ring: Option<Arc<[u32]>>,
+    /// Sculpt ▸ "Show sculpt changes": the active object's mesh as of
+    /// when the tool opened, to compare `mesh` against; `None` while the
+    /// overlay (or the tool) is off.
+    pub sculpt_baseline: Option<Mesh>,
 }
+
+impl PartialEq for StateInputs {
+    /// `Mesh` has no `PartialEq` of its own (MF-DOC-001: compare content,
+    /// not identity, and a full comparison would defeat the point of
+    /// staying cheap); `sculpt_baseline` compares by content hash
+    /// (cached, so repeating this every frame is cheap) instead.
+    fn eq(&self, other: &Self) -> bool {
+        self.selected == other.selected
+            && self.hover == other.hover
+            && self.recent == other.recent
+            && self.tangled == other.tangled
+            && self.loose_limit == other.loose_limit
+            && self.hole_ring == other.hole_ring
+            && match (&self.sculpt_baseline, &other.sculpt_baseline) {
+                (Some(a), Some(b)) => a.content_hash() == b.content_hash(),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for StateInputs {}
 
 /// Which pieces "Remove loose pieces" would remove: every piece but the
 /// main body up to `max_size` triangles (`None`: none of them), and the
@@ -346,6 +372,11 @@ pub fn face_states(
             }
             Some(OverlayTarget::Loops(_) | OverlayTarget::Edges(_)) | None => {}
         }
+    }
+    // `set`'s last use was just above: borrowing `flagged` directly from
+    // here on is fine.
+    if let Some(baseline) = &inputs.sculpt_baseline {
+        flagged.extend(crate::sculpt_tool::sculpt_changed_faces(baseline, mesh));
     }
     ctx.checkpoint()?;
     Ok(FaceStates::from_flagged(mesh, &mut flagged))

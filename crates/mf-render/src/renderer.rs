@@ -99,6 +99,10 @@ pub struct FaceTints {
     pub recent_repair: [f32; 4],
     pub selected: [f32; 4],
     pub hover: [f32; 4],
+    /// Sculpt ▸ "Show sculpt changes": one colour, strength scaled by the
+    /// face's tier (low/med/high: [`FaceStates::SCULPT_CHANGED_LOW`] and
+    /// up).
+    pub sculpt_changed: [f32; 4],
 }
 
 impl Palette {
@@ -123,6 +127,7 @@ impl Palette {
             recent_repair: [0.31, 0.8, 0.47, 0.45],
             selected: [0.16, 0.82, 1.0, 0.6],
             hover: [0.91, 0.93, 0.96, 0.85],
+            sculpt_changed: [1.0, 0.45, 0.1, 0.8],
         },
         xray_opacity: 0.55,
         hole_xray_opacity: 0.2,
@@ -146,7 +151,7 @@ struct SceneUniforms {
     /// Render target size in pixels (x, y), for screen-space line widths.
     viewport: [f32; 4],
     /// [`FaceTints`], in its order.
-    tints: [[f32; 4]; 6],
+    tints: [[f32; 4]; 7],
     /// x: the selection's emphasis ([`SelectionCue`]), y: x-ray opacity,
     /// z: a Hole's hidden-part ghost opacity (0 while the "Show holes
     /// through solids" overlay is off, so the pass draws nothing visible).
@@ -856,6 +861,7 @@ impl MeshRenderer {
                 p.tints.selected,
                 p.tints.hover,
                 p.tints.hole_neighbourhood,
+                p.tints.sculpt_changed,
             ],
             cue: [
                 self.cue.emphasis.clamp(0.0, 1.0),

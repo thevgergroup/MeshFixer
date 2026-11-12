@@ -397,6 +397,14 @@ pub struct MeshFixerApp {
     /// from the view's top-left): the brush cursor, and where the next
     /// dab samples.
     pub sculpt_hover: Option<(f64, f64)>,
+    /// The Sculpt panel's "Show sculpt changes" overlay (off by default):
+    /// tints vertices by how far they've moved since the tool was opened.
+    pub sculpt_show_changes: bool,
+    /// The active object's mesh as it was when Sculpt was opened (the
+    /// "Show sculpt changes" overlay's reference point): `None` outside
+    /// Sculpt. Reset whenever the active object changes while Sculpt
+    /// stays open, so switching objects starts a fresh baseline.
+    pub sculpt_baseline: Option<(ObjectId, Mesh)>,
     pub solid: crate::shape_tools::SolidState,
     /// The Parts tool's state (Task 23): search, the part last placed
     /// and its Join-to-scan settings.
@@ -809,6 +817,8 @@ impl MeshFixerApp {
             sculpt_stroke: None,
             sculpt_pending: None,
             sculpt_hover: None,
+            sculpt_show_changes: false,
+            sculpt_baseline: None,
             solid: Default::default(),
             parts: Default::default(),
             connectors: Default::default(),
@@ -2194,6 +2204,18 @@ impl MeshFixerApp {
         }
         if self.active != Some(id) {
             self.inspected = None;
+            // Sculpt's "Show sculpt changes" measures from a snapshot of
+            // the active object: a fresh one for the newly active object,
+            // so switching objects doesn't compare the wrong mesh (or
+            // silently disable the overlay).
+            if self.active_tool == crate::sculpt_tool::SCULPT {
+                self.sculpt_baseline = self
+                    .session
+                    .document()
+                    .object(id)
+                    .and_then(|o| o.mesh())
+                    .map(|m| (id, m.clone()));
+            }
         }
         self.active = Some(id);
     }
@@ -3602,6 +3624,15 @@ impl MeshFixerApp {
             hole_ring: (self.show_hole_overview && !self.tool_hides_defects())
                 .then(|| self.analyses.get(mesh).map(|a| a.hole_ring.clone()))
                 .flatten(),
+            sculpt_baseline: (self.active_tool == crate::sculpt_tool::SCULPT
+                && self.sculpt_show_changes)
+                .then(|| {
+                    self.sculpt_baseline
+                        .as_ref()
+                        .filter(|(id, _)| *id == object)
+                        .map(|(_, m)| m.clone())
+                })
+                .flatten(),
         }
     }
 
@@ -3695,6 +3726,11 @@ impl MeshFixerApp {
         .into_iter()
         .filter(|(on, _)| *on)
         .fold(0, |m, (_, bit)| m | u32::from(bit))
+            | if self.active_tool == crate::sculpt_tool::SCULPT && self.sculpt_show_changes {
+                u32::from(FaceStates::SCULPT_CHANGED_TIERS)
+            } else {
+                0
+            }
     }
 
     /// Keep the face states of the active object's shown revision up to
@@ -3742,6 +3778,7 @@ impl MeshFixerApp {
                 tangled: Arc::from([]),
                 loose_limit: None,
                 hole_ring: None,
+                sculpt_baseline: None,
             };
             if render.wants_states(&inputs) {
                 self.state_seq += 1;

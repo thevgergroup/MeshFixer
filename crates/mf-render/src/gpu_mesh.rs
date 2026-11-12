@@ -566,8 +566,19 @@ impl FaceStates {
     pub const RECENT_REPAIR: u8 = 16;
     /// Within one ring of a hole (the hole overview: a faint hole tint).
     pub const HOLE_NEIGHBOURHOOD: u8 = 32;
+    /// Sculpt ▸ "Show sculpt changes": a face with a corner that's moved a
+    /// little since the tool opened (bits 6–7 hold the tier: see
+    /// [`Self::SCULPT_CHANGED_TIERS`], so one flag range spans a 3-tier
+    /// heatmap, not a single on/off colour).
+    pub const SCULPT_CHANGED_LOW: u8 = 64;
+    /// Moved a moderate amount.
+    pub const SCULPT_CHANGED_MED: u8 = 128;
+    /// Moved the most (both tier bits set): the highest tier.
+    pub const SCULPT_CHANGED_HIGH: u8 = 192;
+    /// Both sculpt-change tier bits: masks a face's tier out of its flags.
+    pub const SCULPT_CHANGED_TIERS: u8 = 192;
     /// Every flag.
-    pub const ALL: u8 = 63;
+    pub const ALL: u8 = 255;
 
     /// No face flagged: what a freshly uploaded [`GpuMesh`] holds. O(chunks).
     pub fn empty(mesh: &Mesh) -> FaceStates {

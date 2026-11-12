@@ -23,6 +23,11 @@ pub const LOOSE_PIECE: Color32 = Color32::from_rgb(255, 200, 40);
 pub const NON_MANIFOLD: Color32 = Color32::from_rgb(235, 52, 52);
 /// Faces created by the last few commands (toggle: View ▸ Highlight recent repairs).
 pub const RECENT_REPAIR: Color32 = Color32::from_rgb(80, 205, 120);
+/// Sculpt ▸ "Show sculpt changes": a chartreuse heatmap, apart from every
+/// other defect/overlay hue (`HOLE`'s orange, `LOOSE_PIECE`'s amber,
+/// `RECENT_REPAIR`'s green, `CRACK`'s magenta…), strongest where a vertex
+/// has moved most since the tool opened.
+pub const SCULPT_CHANGED: Color32 = Color32::from_rgb(180, 244, 52);
 
 /// Where two objects cross (`mesh.intersections`), drawn while Combine is
 /// open: a violet, apart from the accent's indigo and `CRACK`'s magenta.
@@ -62,6 +67,9 @@ pub const HOLE_NEIGHBOURHOOD_STRENGTH: f32 = 0.3;
 /// Faces next to a tangled edge: a light red, so the red edge line stays
 /// the strongest mark.
 pub const NON_MANIFOLD_FACE_STRENGTH: f32 = 0.25;
+/// Sculpt ▸ "Show sculpt changes": the top tier's strength (the shader
+/// scales it down for the lower two, `renderer.rs` `base_color`).
+pub const SCULPT_CHANGED_STRENGTH: f32 = 0.7;
 
 /// The selection where nearer surfaces hide it (the x-ray pass) is drawn
 /// in `SELECTED` at this opacity: the same colour, so the same meaning.
@@ -189,6 +197,7 @@ pub fn palette() -> mf_render::Palette {
             recent_repair: tint(RECENT_REPAIR, RECENT_REPAIR_STRENGTH),
             selected: tint(SELECTED, SELECTED_FACE_STRENGTH),
             hover: tint(HOVER, HOVER_FACE_STRENGTH),
+            sculpt_changed: tint(SCULPT_CHANGED, SCULPT_CHANGED_STRENGTH),
         },
         xray_opacity: XRAY_OPACITY,
         hole_xray_opacity: HOLE_XRAY_OPACITY,

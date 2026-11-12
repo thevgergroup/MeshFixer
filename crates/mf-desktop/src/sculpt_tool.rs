@@ -124,7 +124,11 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         hides_defects: |app| app.sculpt_stroke.is_some(),
         keys: sculpt_keys,
         on_key: sculpt_on_key,
-        on_close: |app, close| end_stroke(app, close),
+        on_open,
+        on_close: |app, close| {
+            end_stroke(app, close);
+            app.sculpt_baseline = None;
+        },
         ..T::new(
             SCULPT,
             "tool.sculpt.name",
@@ -133,6 +137,12 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             30,
         )
     })
+}
+
+/// "Show sculpt changes" (off by default) measures from the active
+/// object's mesh as of right now: snapshot it when the tool opens.
+fn on_open(app: &mut MeshFixerApp) {
+    app.sculpt_baseline = app.active.zip(app.active_mesh().cloned());
 }
 
 /// Sculpt claims a press wherever it lands on the active object's
@@ -477,6 +487,13 @@ fn continue_stroke(app: &mut MeshFixerApp, px: (f64, f64)) {
                 render.mesh = next_mesh;
                 render.bounds = stroke.vertices.bounds;
                 render.origin = stroke.vertices.origin;
+                if app.sculpt_show_changes
+                    && let Some((id, baseline)) = &app.sculpt_baseline
+                    && *id == stroke.object
+                {
+                    let states = sculpt_changes_face_states(baseline, &render.mesh);
+                    render.gpu.set_face_states(&queue, &states);
+                }
             }
             None => {
                 let gpu = mf_render::GpuMesh::from_vertices(&device, &stroke.vertices);
@@ -735,9 +752,82 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if app.sculpt.detail_on {
         ui.add(egui::Slider::new(&mut app.sculpt.detail, 0.05..=1.0).max_decimals(2));
     }
+
+    section(ui, &t!("sculpt.section.overlay"));
+    ui.checkbox(&mut app.sculpt_show_changes, t!("sculpt.show_changes"))
+        .on_hover_text(t!("sculpt.show_changes.tip"));
+}
+
+// ---------------------------------------------------------------------
+// "Show sculpt changes": tints vertices by how far they've moved since
+// the tool opened (the Sculpt panel's overlay checkbox).
+// ---------------------------------------------------------------------
+
+/// A moved corner's tier: how far it's moved, as a fraction of `scale`
+/// (the mesh's own bounding-box diagonal, so the thresholds mean the same
+/// thing on a 5 mm part and a 500 mm one).
+fn sculpt_change_tier(moved: f64, scale: f64) -> u8 {
+    if scale <= 0.0 || !scale.is_finite() {
+        return 0;
+    }
+    let t = moved / scale;
+    if t > 0.03 {
+        mf_render::FaceStates::SCULPT_CHANGED_HIGH
+    } else if t > 0.01 {
+        mf_render::FaceStates::SCULPT_CHANGED_MED
+    } else if t > 0.002 {
+        mf_render::FaceStates::SCULPT_CHANGED_LOW
+    } else {
+        0
+    }
+}
+
+/// "Show sculpt changes": every live face of `current` whose corners have
+/// moved enough from `baseline` (the mesh as of when Sculpt opened) to
+/// read a tier, paired with that tier (the max of its corners'). A vertex
+/// `baseline` doesn't have (dynamic detail created it mid-stroke) reads
+/// as the top tier: it's new since the tool opened, the most a vertex can
+/// have "changed". O(current's faces).
+pub fn sculpt_changed_faces(baseline: &Mesh, current: &Mesh) -> Vec<(u32, u8)> {
+    let scale = current
+        .bounding_box()
+        .map(|bb| {
+            let d = std::array::from_fn::<f64, 3, _>(|k| bb.max[k] - bb.min[k]);
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        })
+        .unwrap_or(0.0);
+    let corner_tier = |v: u32| -> u8 {
+        let Some(now) = current.position(mf_geometry::VertexId(v)) else {
+            return 0;
+        };
+        match baseline.position(mf_geometry::VertexId(v)) {
+            Some(before) => {
+                let d = (0..3).map(|k| (now[k] - before[k]).powi(2)).sum::<f64>().sqrt();
+                sculpt_change_tier(d, scale)
+            }
+            // A vertex the baseline doesn't have: created after the tool
+            // opened (dynamic detail's remeshing).
+            None => mf_render::FaceStates::SCULPT_CHANGED_HIGH,
+        }
+    };
+    current
+        .faces()
+        .filter_map(|(f, t)| {
+            let tier = t.iter().map(|&v| corner_tier(v)).max().unwrap_or(0);
+            (tier > 0).then_some((f.0, tier))
+        })
+        .collect()
+}
+
+/// As [`sculpt_changed_faces`], as a standalone [`mf_render::FaceStates`]
+/// (the live stroke's own GPU mesh, which carries no other overlay).
+pub fn sculpt_changes_face_states(baseline: &Mesh, current: &Mesh) -> mf_render::FaceStates {
+    let mut flagged = sculpt_changed_faces(baseline, current);
+    mf_render::FaceStates::from_flagged(current, &mut flagged)
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may panic on failure
 mod tests {
     use super::*;
     use std::collections::HashSet;
@@ -793,6 +883,99 @@ mod tests {
                 .find(|(_, k)| *k == crate::tools::ToolKey::Brush(b))
                 .map(|(k, _)| *k);
             assert_eq!(found, Some(want), "{b:?}'s wired key must match its tooltip shortcut");
+        }
+    }
+
+    /// "Show sculpt changes": an unmoved mesh has no changed faces at all.
+    #[test]
+    fn an_unchanged_mesh_has_no_sculpt_changed_faces() {
+        let mesh = mf_fixtures::grid(6);
+        assert!(sculpt_changed_faces(&mesh, &mesh).is_empty());
+    }
+
+    /// A small, a moderate and a large move (as fractions of the mesh's
+    /// own bounding-box diagonal) land in the low, medium and high tiers
+    /// respectively, and every face touching the moved vertex is flagged.
+    #[test]
+    fn moves_land_in_the_right_tier_by_size() {
+        let mesh = mf_fixtures::grid(6);
+        let diag = {
+            let bb = mesh.bounding_box().unwrap();
+            let d: [f64; 3] = std::array::from_fn(|k| bb.max[k] - bb.min[k]);
+            (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
+        };
+        let moved = |frac: f64| {
+            let mut edit = mesh.edit();
+            let p = mesh.position(mf_geometry::VertexId(0)).unwrap();
+            edit.move_vertex(mf_geometry::VertexId(0), [p[0] + frac * diag, p[1], p[2]])
+                .unwrap();
+            edit.finish().unwrap().0
+        };
+        use mf_render::FaceStates;
+        for (frac, want) in [
+            (0.001, 0u8),                        // under the low threshold: unchanged
+            (0.005, FaceStates::SCULPT_CHANGED_LOW),
+            (0.02, FaceStates::SCULPT_CHANGED_MED),
+            (0.05, FaceStates::SCULPT_CHANGED_HIGH),
+        ] {
+            let after = moved(frac);
+            let changed = sculpt_changed_faces(&mesh, &after);
+            if want == 0 {
+                assert!(changed.is_empty(), "{frac}: expected no change, got {changed:?}");
+            } else {
+                assert!(!changed.is_empty(), "{frac}: expected some tier, got none");
+                assert!(
+                    changed.iter().all(|&(_, tier)| tier == want),
+                    "{frac}: expected every flagged face at tier {want}, got {changed:?}"
+                );
+                // Every live face incident to vertex 0 is flagged (the max
+                // of its corners' tiers, and only vertex 0 moved).
+                let incident: HashSet<u32> = after
+                    .faces()
+                    .filter(|(_, t)| t.contains(&0))
+                    .map(|(f, _)| f.0)
+                    .collect();
+                let flagged: HashSet<u32> = changed.iter().map(|&(f, _)| f).collect();
+                assert_eq!(flagged, incident, "{frac}: wrong faces flagged");
+            }
+        }
+    }
+
+    /// A vertex the baseline doesn't have (created by dynamic detail's
+    /// remeshing mid-stroke) reads as the top tier: new since the tool
+    /// opened is the most a vertex can have "changed".
+    #[test]
+    fn a_vertex_new_since_the_baseline_reads_as_the_top_tier() {
+        let before = mf_fixtures::grid(6);
+        // A face split (a new vertex at its centroid): present in `after`
+        // but not `before`.
+        let mut edit = before.edit();
+        let (_, t) = before.faces().next().unwrap();
+        let corners: Vec<[f64; 3]> = t.iter().map(|&v| before.position(mf_geometry::VertexId(v)).unwrap()).collect();
+        let centroid = std::array::from_fn(|k| corners.iter().map(|c| c[k]).sum::<f64>() / 3.0);
+        let new_v = edit.add_vertex(centroid);
+        edit.remove_face(mf_geometry::FaceId(0)).unwrap();
+        edit.add_face([t[0], t[1], new_v.0], mf_geometry::Sources::default())
+            .unwrap();
+        edit.add_face([t[1], t[2], new_v.0], mf_geometry::Sources::default())
+            .unwrap();
+        edit.add_face([t[2], t[0], new_v.0], mf_geometry::Sources::default())
+            .unwrap();
+        let after = edit.finish().unwrap().0;
+        let changed = sculpt_changed_faces(&before, &after);
+        let new_faces: HashSet<u32> = after
+            .faces()
+            .filter(|(_, t)| t.contains(&new_v.0))
+            .map(|(f, _)| f.0)
+            .collect();
+        assert!(!new_faces.is_empty());
+        for f in &new_faces {
+            let tier = changed.iter().find(|&&(cf, _)| cf == *f).map(|&(_, t)| t);
+            assert_eq!(
+                tier,
+                Some(mf_render::FaceStates::SCULPT_CHANGED_HIGH),
+                "a face touching a vertex new since the baseline must read the top tier"
+            );
         }
     }
 }
