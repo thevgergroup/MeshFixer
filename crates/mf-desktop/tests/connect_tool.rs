@@ -154,8 +154,18 @@ fn ball_cut_in_two() -> Harness<'static, MeshFixerApp> {
     h
 }
 
-/// Scrolls the tool panel until `label` is inside the window, then
-/// clicks it (Connect's panel is taller than the window).
+/// How much of the window's bottom edge the status bar covers (its own
+/// text row): a node whose rect's bottom falls within this band is
+/// visually hidden behind it even though it's within the window's own
+/// pixel bounds, so [`scroll_and_click`] keeps scrolling past it rather
+/// than treating it as "on screen" and clicking through the status bar
+/// onto whatever's really underneath (`core_workflows.rs`'s own copy of
+/// this helper has the identical fix, for the identical reason).
+const STATUS_BAR_HEIGHT: f32 = 36.0;
+
+/// Scrolls the tool panel until `label` is inside the window (clear of
+/// the status bar at the bottom), then clicks it (Connect's panel is
+/// taller than the window).
 fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     let over = egui::pos2(200.0, WINDOW.1 * 0.5);
     h.event(egui::Event::PointerMoved(over));
@@ -163,12 +173,12 @@ fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     let mut tries = 0;
     loop {
         let rect = h.get_by_label(label).rect();
-        if rect.bottom() <= WINDOW.1 - 4.0 && rect.top() >= 40.0 {
+        if rect.bottom() <= WINDOW.1 - STATUS_BAR_HEIGHT && rect.top() >= 40.0 {
             break;
         }
         tries += 1;
         assert!(tries < 400, "scrolled to {label:?}");
-        let down = rect.bottom() > WINDOW.1 - 4.0;
+        let down = rect.bottom() > WINDOW.1 - STATUS_BAR_HEIGHT;
         h.event(egui::Event::MouseWheel {
             unit: egui::MouseWheelUnit::Line,
             delta: egui::vec2(0.0, if down { -1.0 } else { 1.0 }),
@@ -714,77 +724,82 @@ fn the_counterpart_is_flattened_onto_the_same_place_as_the_footprint() {
     }
 }
 
-/// D23 (owner 2026-11-11): a dovetail is placed by dragging a line
-/// across the cut face, not a single click; the drag's direction
-/// becomes the slide direction (`angle`), its centre `at`, and each end
-/// reaches the cap's own boundary (through) unless the drag itself
-/// stopped short of it.
+/// Owner decision 2026-11-12: the dovetail moved out of Connect's point
+/// placement into the parametric shape system
+/// (`mf_parts::connectors::dovetail_slide`, `dovetail_tool.rs`), so its
+/// kind is no longer offered in the picker a click places from — only
+/// the Dovetail *shortcut* button, which drops the whole linked pair at
+/// once rather than letting a click pick "Dovetail" first (that flow is
+/// `core_workflows.rs`'s own
+/// `dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove`).
 #[test]
-fn dragging_places_a_dovetail_along_the_drag_line() {
-    require_gpu!("dragging_places_a_dovetail_along_the_drag_line");
+fn the_kind_picker_no_longer_offers_dovetail_but_the_shortcut_button_does() {
+    require_gpu!("the_kind_picker_no_longer_offers_dovetail_but_the_shortcut_button_does");
     let mut h = ball_cut_in_two();
     h.get_by_label("Connect").click();
     wait_until(&mut h, "the joint's cut faces", |a| {
         a.split_flow.geometry().is_some()
     });
     settle(&mut h);
+    assert_eq!(
+        h.get_all_by_label("Dovetail").count(),
+        1,
+        "only the shortcut button says Dovetail; the kind picker's segmented control doesn't"
+    );
     h.get_by_label("Dovetail").click();
     settle(&mut h);
+    let names = objects(&h);
+    assert!(
+        names.iter().any(|n| n.contains("Dovetail") && n.contains("tail"))
+            && names.iter().any(|n| n.contains("Dovetail") && n.contains("groove")),
+        "the shortcut placed a linked tail/groove pair: {names:?}"
+    );
+    still(&mut h, "dovetail-shortcut");
+}
 
-    // A plain click (no drag) still places one, with a short default
-    // reach both ways, through (the fallback the owner asked for).
-    let p = cap_point(&h, [10.0, 10.0]);
-    click_at(&mut h, p);
+/// A joint whose placements already include a legacy `joint.dovetail`
+/// (from before the owner's 2026-11-12 decision, or a log replayed from
+/// then) still shows, edits and replays it unchanged: the details
+/// block's reach/through fields keep working on an already-placed
+/// dovetail even though a new one can no longer be started from the
+/// kind picker.
+#[test]
+fn a_legacy_dovetail_placement_still_edits_its_reach_and_open_state() {
+    require_gpu!("a_legacy_dovetail_placement_still_edits_its_reach_and_open_state");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    // Seed a legacy dovetail placement directly (as an old save or a
+    // replayed log would already have one in `joint.placements`, never
+    // through the removed click-to-place UI).
+    {
+        let a = h.state_mut();
+        let j = a.split_flow.joint.unwrap_or(0);
+        let on = a.split_flow.joints[j].transparent.other();
+        a.split_flow.joints[j].placements.push(mf_operations::Placement {
+            connector: "joint.dovetail".to_owned(),
+            on,
+            at: [0.0, 0.0],
+            angle: 0.0,
+            params: std::collections::BTreeMap::from([
+                ("groove_a".to_owned(), 20.0),
+                ("groove_b".to_owned(), 20.0),
+                ("open_a".to_owned(), 1.0),
+                ("open_b".to_owned(), 1.0),
+            ]),
+        });
+        a.split_flow.selected = Some(0);
+    }
     settle(&mut h);
     assert_eq!(placements(&h).len(), 1);
     assert_eq!(placements(&h)[0].connector, "joint.dovetail");
-    assert!(placements(&h)[0].params["groove_a"] > 0.0);
-    assert_eq!(placements(&h)[0].params["open_a"], 1.0);
-    still(&mut h, "dovetail-click");
-
-    // A real drag along +x: the slide direction (angle) is ~0 degrees,
-    // and the centre is the drag's own midpoint.
-    let (from, to) = (cap_point(&h, [-15.0, 5.0]), cap_point(&h, [5.0, 5.0]));
-    drag(&mut h, from, to);
-    settle(&mut h);
-    let ps = placements(&h);
-    assert_eq!(ps.len(), 2, "the drag added a second dovetail");
-    let dragged = &ps[1];
-    assert!(
-        dragged.angle.abs() < 5.0 || (dragged.angle.abs() - 180.0).abs() < 5.0,
-        "dragged along +x, angle {}",
-        dragged.angle
-    );
-    assert!(
-        (dragged.at[0] - -5.0).abs() < 1.0 && (dragged.at[1] - 5.0).abs() < 1.0,
-        "centred on the drag's midpoint: {:?}",
-        dragged.at
-    );
-    still(&mut h, "dovetail-dragged");
-}
-
-/// D23: the selected dovetail's details block exposes each end's reach
-/// and its through/stopped checkbox; unchecking "Through" reveals a
-/// length field for that end, and editing it updates the placement.
-#[test]
-fn the_details_block_edits_each_dovetail_ends_reach_and_open_state() {
-    require_gpu!("the_details_block_edits_each_dovetail_ends_reach_and_open_state");
-    let mut h = ball_cut_in_two();
-    h.get_by_label("Connect").click();
-    wait_until(&mut h, "the joint's cut faces", |a| {
-        a.split_flow.geometry().is_some()
-    });
-    settle(&mut h);
-    h.get_by_label("Dovetail").click();
-    settle(&mut h);
-    let p = cap_point(&h, [0.0, 0.0]);
-    click_at(&mut h, p);
-    settle(&mut h);
-    assert_eq!(placements(&h).len(), 1);
     assert_eq!(
         placements(&h)[0].params["open_a"],
         1.0,
-        "through by default"
+        "through, as seeded"
     );
 
     // Unchecking the start end's "Through" box makes it stopped.
