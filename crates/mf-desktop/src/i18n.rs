@@ -244,6 +244,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "Place each connector as a linked group of editable shapes (the part on one piece, its hole on the other) instead of cutting them in now. Edit them, then Attach.",
     ),
     ("connect.check", "Connector {n}: {message}"),
+    ("connect.dovetail_shortcut", "Dovetail"),
+    (
+        "connect.dovetail_shortcut.tip",
+        "Drop a linked dovetail pair (a tail and its groove) onto this joint, aligned to the cap plane and pointing to the nearest edge. Move, rotate and resize it like any other shape, then Attach.",
+    ),
     ("connect.fit.class", "Fit: {name}"),
     ("connect.fit.machine", "Printer: {name}"),
     (
@@ -394,6 +399,10 @@ static CATALOGUE: &[(&str, &str)] = &[
         "dock.collapsed_tool",
         "Show the {tool} panel (hides the Browser on a small window)",
     ),
+    ("dovetail.ends_inside", "Ends inside the piece; it can't slide in"),
+    ("dovetail.ends_inside.fix", "Extend through the edge"),
+    ("dovetail.name", "Dovetail"),
+    ("dovetail.place", "Place dovetail"),
     ("empty.open", "Open a mesh…"),
     ("empty.title", "Nothing open yet"),
     (

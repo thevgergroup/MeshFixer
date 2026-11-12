@@ -259,6 +259,14 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
         );
         raw.insert("fit_class".to_owned(), class.name.clone());
         raw.insert("machine_profile".to_owned(), machine.name.clone());
+    } else if id == "dovetail.slide" {
+        raw.insert("fit_clearance".to_owned(), class.clearance.to_string());
+        raw.insert(
+            "machine_tolerance".to_owned(),
+            machine.hole_undersize.to_string(),
+        );
+        raw.insert("fit_class".to_owned(), class.name.clone());
+        raw.insert("machine_profile".to_owned(), machine.name.clone());
     } else {
         raw.insert("gap".to_owned(), gap.to_string());
     }

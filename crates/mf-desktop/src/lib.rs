@@ -6,6 +6,7 @@ pub mod app;
 pub mod connect_tool;
 pub mod connector_tool;
 pub mod defects;
+pub mod dovetail_tool;
 pub mod framing;
 pub mod gpu;
 pub mod hinge_tool;

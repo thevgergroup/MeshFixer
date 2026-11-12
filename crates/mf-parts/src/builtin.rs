@@ -277,5 +277,6 @@ pub fn builtins() -> Vec<Builtin> {
         connector_builtin(&crate::connectors::flap::FlapHinge, "Flap hinge"),
         connector_builtin(&crate::connectors::clasp::SnapClasp, "Snap clasp"),
         connector_builtin(&crate::connectors::thread::Thread, "Thread"),
+        connector_builtin(&crate::connectors::dovetail_slide::DovetailSlide, "Dovetail"),
     ]
 }

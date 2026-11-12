@@ -4,6 +4,7 @@
 //! (MF-PLUG-001).
 
 pub mod clasp;
+pub mod dovetail_slide;
 pub mod flap;
 pub mod hinge;
 pub mod hole_profile;
@@ -30,6 +31,7 @@ pub fn connectors() -> Vec<&'static dyn Connector> {
         &joint::Dovetail,
         &joint::Magnet,
         &joint::Insert,
+        &dovetail_slide::DovetailSlide,
     ]
 }
 

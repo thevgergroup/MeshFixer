@@ -344,8 +344,12 @@ fn sideways_warning(app: &mut MeshFixerApp, ui: &mut egui::Ui, n: usize) {
 /// moved whose hole profile no longer matches where it sits (a teardrop
 /// that should point another way, or an `auto` hole that now prints
 /// sideways or upright) is re-resolved, as one more step (fix item 9:
-/// re-evaluate when the transform changes). Never after undo or redo:
-/// this only follows a command that just committed.
+/// re-evaluate when the transform changes); and every dovetail it moved
+/// or turned whose `extend_through_edge` is on gets its length
+/// re-evaluated (`dovetail_tool::reextend`, the brief's "re-evaluates on
+/// move or rotate"), the tail and groove both regenerated from the same
+/// new length. Never after undo or redo: this only follows a command
+/// that just committed.
 pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
     const MOVES: &[&str] = &[
         "object.set_transform",
@@ -357,7 +361,7 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
         return;
     }
     let doc = app.session.document();
-    let stale: Vec<(ObjectId, GeneratorRecord)> = doc
+    let mut stale: Vec<(ObjectId, GeneratorRecord)> = doc
         .objects()
         .iter()
         .filter_map(|o| {
@@ -366,6 +370,33 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
             (oriented != record).then_some((o.id, oriented))
         })
         .collect();
+    let mut seen_groups: Vec<String> = Vec::new();
+    let groups: Vec<(ObjectId, Option<String>)> = doc
+        .objects()
+        .iter()
+        .map(|o| (o.id, o.properties.get(GROUP).cloned()))
+        .collect();
+    for (id, group) in groups {
+        if let Some(g) = &group {
+            if seen_groups.contains(g) {
+                continue;
+            }
+            seen_groups.push(g.clone());
+        }
+        if let Some((tail, new_record)) = crate::dovetail_tool::reextend(app, id) {
+            let Ok(length) = new_record.params.get_float("length") else {
+                continue;
+            };
+            for (member, record) in members(app, tail) {
+                if stale.iter().any(|(s, _)| *s == member) {
+                    continue;
+                }
+                let mut params = record.params.clone();
+                params.0.insert("length".into(), mf_spec::ParamValue::Float(length));
+                stale.push((member, GeneratorRecord { params, ..record }));
+            }
+        }
+    }
     if !stale.is_empty() {
         app.pending_reorient = Some(stale);
     }
@@ -413,6 +444,7 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let Some(n) = sagging_hole(app, id) {
         sideways_warning(app, ui, n);
     }
+    crate::dovetail_tool::warning_section(app, ui, id);
     let members = members(app, id);
     if members.len() > 1 {
         let names: Vec<String> = members

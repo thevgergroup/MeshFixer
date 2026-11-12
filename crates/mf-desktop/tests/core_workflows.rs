@@ -1206,3 +1206,213 @@ fn parametric_shape_edit_param_then_undo() {
         "undo restored the original width"
     );
 }
+
+// ---------------------------------------------------------------------
+// Dovetail: place from Connect's shortcut, rotate 90° with Transform,
+// apply (Attach), and check the tail exits the piece boundary and the
+// groove matches within the clearance.
+// ---------------------------------------------------------------------
+
+/// The dovetail tail object in the document (its name ends "(tail)",
+/// `connector_tool::group_members`'s naming).
+fn tail_id(h: &Harness<'_, MeshFixerApp>) -> mf_command::ObjectId {
+    id_of(&h, "Dovetail (tail)")
+}
+
+fn groove_id(h: &Harness<'_, MeshFixerApp>) -> mf_command::ObjectId {
+    id_of(&h, "Dovetail (groove)")
+}
+
+/// A 90°-about-Z rotation of `t`'s linear part, same translation.
+fn rotated_90_z(t: &[f64; 12]) -> [f64; 12] {
+    let rot = glam::DMat3::from_axis_angle(glam::DVec3::Z, std::f64::consts::FRAC_PI_2);
+    let before = mf_desktop::shape_panel::rotation(t);
+    let after = rot * before;
+    [
+        after.x_axis.x,
+        after.x_axis.y,
+        after.x_axis.z,
+        after.y_axis.x,
+        after.y_axis.y,
+        after.y_axis.z,
+        after.z_axis.x,
+        after.z_axis.y,
+        after.z_axis.z,
+        t[9],
+        t[10],
+        t[11],
+    ]
+}
+
+/// Places a dovetail on the open joint through Connect's shortcut
+/// button, waits for it to commit, and returns the tail's object id.
+fn place_dovetail_via_connect(h: &mut Harness<'_, MeshFixerApp>) -> mf_command::ObjectId {
+    let history = history_len(h);
+    scroll_and_click(h, "Dovetail");
+    wait_until(h, "the dovetail placed", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    tail_id(h)
+}
+
+/// The exact minimum distance (mm) between `a` and `b`'s world-placed
+/// meshes (`mf_geometry::minimum_distance`, the same BVH measure every
+/// connector's own fit check uses).
+fn world_min_distance(
+    h: &Harness<'_, MeshFixerApp>,
+    a: mf_command::ObjectId,
+    b: mf_command::ObjectId,
+) -> f64 {
+    let doc = h.state().session.document();
+    let oa = doc.object(a).unwrap();
+    let ob = doc.object(b).unwrap();
+    let mesh_a = oa.mesh().unwrap().clone();
+    let mesh_b = ob.mesh().unwrap().clone();
+    let mat = |t: &[f64; 12]| {
+        glam::DMat4::from_cols_array(&[
+            t[0], t[1], t[2], 0.0, t[3], t[4], t[5], 0.0, t[6], t[7], t[8], 0.0, t[9], t[10],
+            t[11], 1.0,
+        ])
+    };
+    // `a`'s frame: mesh_b is placed by b_to_a = a_world^-1 * b_world.
+    let b_to_a = mat(&oa.transform).inverse() * mat(&ob.transform);
+    let ctx = mf_runtime::RunContext::none();
+    let bvh = mf_geometry::Bvh::build(&mesh_a, &ctx).unwrap();
+    mf_geometry::minimum_distance(&mesh_a, &bvh, &mesh_b, &b_to_a, &ctx)
+        .unwrap()
+        .expect("both meshes have faces")
+}
+
+/// Connect's Dovetail shortcut drops a linked tail/groove pair on the
+/// open joint; rotating the whole group 90° with Transform
+/// (`object.move_group`) still leaves the tail exiting the piece it's
+/// sunk into (`dovetail_tool::ends_inside`) and the groove matching the
+/// tail within the fit's clearance (`minimum_distance`); applying it
+/// (Attach) folds both into their pieces, one undo step.
+#[test]
+fn dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove() {
+    require_gpu!("dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove");
+    // A flat-capped block rather than the ball Connect's dowel test
+    // uses: a sliding dovetail needs real flat room either side of the
+    // cut to extend through without self-intersecting against
+    // curvature. Long and narrow (100 x 30 in x/y) so its cut cap's
+    // nearest edge, from the centre, is unambiguous and axis-aligned
+    // (along y, 15 mm away): Connect's Dovetail shortcut aims straight
+    // at it rather than cutting a square cap's corner.
+    let block = {
+        let (p, t) = mf_fixtures::cube(1.0).to_arrays();
+        let p = p
+            .into_iter()
+            .map(|[x, y, z]| [x * 100.0, y * 30.0, z * 60.0])
+            .collect();
+        Mesh::new(p, t).unwrap()
+    };
+    let mut h = opened(vec![("block", block, at([-50.0, -15.0, 0.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label("Cut").click();
+    wait_until(&mut h, "the cut", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+
+    let tail = place_dovetail_via_connect(&mut h);
+    let groove = groove_id(&h);
+
+    // Rotate the linked pair 90° about Z with Transform
+    // (`commit_transform`, the same path the gizmo's ring drag commits
+    // through): both the tail and the groove move together, one
+    // `object.move_group` step, possibly followed by a second,
+    // `extend_through_edge`'s own re-evaluation (`shape_panel::
+    // after_commit` -> `dovetail_tool::reextend`), the same "one more
+    // step" pattern a hole profile's re-orientation already uses.
+    h.state_mut().set_active(tail);
+    settle(&mut h);
+    let history = history_len(&h);
+    let before_tail = h.state().session.document().object(tail).unwrap().transform;
+    let before_groove = h.state().session.document().object(groove).unwrap().transform;
+    let turned = rotated_90_z(&before_tail);
+    h.state_mut()
+        .commit_transform(tail, turned, "test rotate".into());
+    wait_until(&mut h, "the rotate", |a| a.busy.is_none());
+    settle(&mut h);
+    assert!(
+        history_len(&h) == history + 1 || history_len(&h) == history + 2,
+        "the move, and possibly extend-through-edge's own re-evaluation: {} -> {}",
+        history,
+        history_len(&h)
+    );
+    let after_tail = h.state().session.document().object(tail).unwrap().transform;
+    let after_groove = h.state().session.document().object(groove).unwrap().transform;
+    assert_ne!(after_tail, before_tail, "the tail turned");
+    assert_ne!(
+        after_groove, before_groove,
+        "the groove turned with its group"
+    );
+
+    // The tail exits the piece it's attached to (extend-through-edge
+    // re-evaluated after the rotate, `shape_panel::after_commit` ->
+    // `dovetail_tool::reextend`): not "ends inside", the live warning a
+    // stopped or short dovetail would get.
+    assert_ne!(
+        mf_desktop::dovetail_tool::ends_inside(h.state(), tail),
+        Some(true),
+        "the tail should exit the piece after rotating"
+    );
+
+    // The groove matches the tail within the fit's clearance: the exact
+    // minimum distance between their world-placed meshes is positive
+    // (never fused) and no more than the recorded clearance (the tail's
+    // own recipe, `fit_clearance + machine_tolerance`, exactly what the
+    // generator narrowed the tail by) plus a small margin for the
+    // flank's own width-change with depth.
+    let gap = world_min_distance(&h, tail, groove);
+    let record = mf_desktop::shape_panel::recipe(h.state(), tail).unwrap();
+    let clearance =
+        record.params.get_float("fit_clearance").unwrap() + record.params.get_float("machine_tolerance").unwrap();
+    assert!(
+        gap >= 0.0 && gap <= clearance.max(0.0) + 0.5,
+        "gap {gap} should be within the clearance {clearance}"
+    );
+
+    // Apply: Attach joins the tail to its piece and cuts the groove
+    // from the other, one undo step, through the shape panel's own
+    // "Attach to … and …" button (`shape_panel::attach_sides`).
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(tail);
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label_contains("Attach to").click();
+    wait_until(&mut h, "attach", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+
+    // The tail and the groove objects are gone, folded into their
+    // pieces (`object.attach`, same as every other connector group).
+    assert!(
+        h.state().session.document().object(tail).is_none(),
+        "the tail joined its piece"
+    );
+    assert!(
+        h.state().session.document().object(groove).is_none(),
+        "the groove was cut from its piece"
+    );
+    let names = objects(&h);
+    assert_eq!(names.len(), 2, "{names:?}");
+}
