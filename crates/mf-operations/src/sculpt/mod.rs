@@ -97,6 +97,7 @@ pub fn brush_params(
             "off" => 0.0,
             _ => params.get_float("detail")?,
         },
+        stay_on_surface: params.get_bool("stay_on_surface")?,
     })
 }
 

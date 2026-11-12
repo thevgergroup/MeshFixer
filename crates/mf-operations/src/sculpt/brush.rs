@@ -80,6 +80,13 @@ pub struct BrushParams {
     /// fraction of the radius; 0 is off. After each dab the faces wholly
     /// inside its footprint are remeshed toward it.
     pub detail: f64,
+    /// "Stay on this surface" (on by default): the brush affects only
+    /// faces reachable from the one under the cursor without crossing a
+    /// sharp crease ([`super::stroke::CREASE_COS`]) or into a face group
+    /// the mesh records apart from it (a split cap's). Falloff follows
+    /// the surface (geodesic), not straight-line distance. Off: the
+    /// brush behaves as it always has (a 3D sphere of influence).
+    pub stay_on_surface: bool,
 }
 
 /// One dab of a stroke, in a remappable form (MF-HIST-002): a point on a

@@ -44,6 +44,10 @@ fn params(kind: BrushKind) -> BrushParams {
         frozen: Vec::new(),
         view_dir: [-1.0, 0.0, 0.0],
         detail: 0.0,
+        // This file's existing tests (symmetry, masks…) were written
+        // against the straight-line falloff; `stay_on_surface.rs` covers
+        // the geodesic, crease-aware one.
+        stay_on_surface: false,
     }
 }
 
@@ -175,6 +179,49 @@ fn symmetry_x_mirrors_displacement_exactly() {
     }
 }
 
+/// "Stay on this surface" on a smooth, unbroken sphere (no creases to
+/// stop at): both sides of the mirror still move about the same amount,
+/// to a loose tolerance (not bit for bit, and not necessarily close to
+/// machine precision: `uv_sphere`'s quad diagonals all run the same way
+/// in absolute terms, not mirrored, so the two sides' *triangulations*
+/// aren't true mirrors of each other even though every vertex position
+/// is; a geodesic flood fill can read that real difference in a way
+/// straight-line distance never could. The combine step always
+/// evaluates each mirror image independently with this option on —
+/// see `combine`'s own doc comment — rather than risk mirroring a
+/// wrong number bit for bit), and the stroke still does something.
+#[test]
+fn stay_on_surface_moves_both_mirror_sides_closely() {
+    let mesh = symmetric_sphere();
+    let samples = dabs(&mesh, &path());
+    let mirror_of: HashMap<[u64; 3], mf_geometry::VertexId> = mesh
+        .vertices()
+        .map(|(v, p)| (bits([0.0 - p[0], p[1], p[2]]), v))
+        .collect();
+    let mut p = params(BrushKind::Inflate);
+    p.symmetry = [true, false, false];
+    p.stay_on_surface = true;
+    let radius = p.radius;
+    let (after, _) = stroke(&mesh, p, &samples);
+    let mut moved = 0;
+    let mut max_diff = 0.0_f64;
+    for (v, before) in mesh.vertices() {
+        let m = mirror_of[&bits(before)];
+        let (a, b) = (after.position(v).unwrap(), after.position(m).unwrap());
+        let d = (0..3)
+            .map(|k| (a[k] - if k == 0 { -b[k] } else { b[k] }).powi(2))
+            .sum::<f64>()
+            .sqrt();
+        max_diff = max_diff.max(d);
+        moved += usize::from(bits(a) != bits(before));
+    }
+    assert!(moved > 20, "both sides move ({moved})");
+    assert!(
+        max_diff < 0.25 * radius,
+        "the two mirror sides should move closely: worst difference {max_diff}"
+    );
+}
+
 fn sculpt_command(mesh: &Mesh, samples: &[DabSample], extra: &[(&str, &str)]) -> DocOutput {
     let spec = mf_spec::builtin::get("mesh.sculpt_stroke").unwrap();
     let text: Vec<String> = samples
@@ -239,7 +286,10 @@ fn live_stroke_equals_replayed_stroke_hash() {
         let _ = live.preview_mesh().content_hash();
     }
     let (live_mesh, live_prov) = live.finish().unwrap();
-    let out = sculpt_command(&mesh, &samples, &[]);
+    // `live` uses `params()`'s `stay_on_surface: false`; match it so this
+    // compares the same brush configuration (a separate test,
+    // `stay_on_surface.rs`, is live vs. replayed with the option on).
+    let out = sculpt_command(&mesh, &samples, &[("stay_on_surface", "false")]);
     let replayed = geometry(&out);
     assert_eq!(live_mesh.content_hash(), replayed.content_hash());
     match &out.changes[0] {

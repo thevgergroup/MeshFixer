@@ -61,6 +61,10 @@ pub struct SculptSettings {
     pub symmetry: [bool; 3],
     pub detail_on: bool,
     pub detail: f64,
+    /// "Stay on this surface" (on by default): the brush never spills
+    /// across a sharp crease or into another recorded face group (a
+    /// split cap's), and its falloff follows the surface.
+    pub stay_on_surface: bool,
 }
 
 impl Default for SculptSettings {
@@ -73,6 +77,7 @@ impl Default for SculptSettings {
             symmetry: [false, false, false],
             detail_on: false,
             detail: 0.25,
+            stay_on_surface: true,
         }
     }
 }
@@ -291,6 +296,10 @@ fn brush_params(
         ),
     );
     map.insert("detail".to_owned(), ParamValue::Float(settings.detail));
+    map.insert(
+        "stay_on_surface".to_owned(),
+        ParamValue::Bool(settings.stay_on_surface),
+    );
     let params = Params(map);
     mf_operations::sculpt::brush_params(&params, transform, &mf_operations::Target::WholeObject)
         // allow-swallow: a validation failure here just means no brush preview this frame; the real stroke goes through the full error path.
@@ -567,6 +576,10 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
             .to_owned(),
         ),
         ("detail".to_owned(), settings.detail.to_string()),
+        (
+            "stay_on_surface".to_owned(),
+            settings.stay_on_surface.to_string(),
+        ),
     ]);
     app.run_invocation(
         mf_command::Invocation {
@@ -731,6 +744,8 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.sculpt.falloff = FALLOFFS[i];
     }
+    ui.checkbox(&mut app.sculpt.stay_on_surface, t!("sculpt.stay_on_surface"))
+        .on_hover_text(t!("sculpt.stay_on_surface.tip"));
 
     section(ui, &t!("sculpt.section.symmetry"));
     ui.horizontal(|ui| {

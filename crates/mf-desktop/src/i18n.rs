@@ -635,6 +635,12 @@ static CATALOGUE: &[(&str, &str)] = &[
         "sculpt.show_changes.tip",
         "Tint vertices by how far they've moved since this tool opened",
     ),
+    ("sculpt.stay_on_surface", "Stay on this surface"),
+    (
+        "sculpt.stay_on_surface.tip",
+        "Affect only faces connected to the one under the cursor, without crossing a sharp \
+         crease or spilling onto another part (like a split cap's flat face)",
+    ),
     ("sculpt.symmetry.x", "X"),
     ("sculpt.symmetry.y", "Y"),
     ("sculpt.symmetry.z", "Z"),

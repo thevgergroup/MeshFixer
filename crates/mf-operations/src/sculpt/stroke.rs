@@ -118,6 +118,170 @@ struct Local {
     incident: HashMap<u32, Vec<usize>>,
 }
 
+/// "Stay on this surface" (MF-SCULPT-005): a sharp crease stays a wall
+/// the brush never crosses. Two faces sharing an edge are on the same
+/// side of it when their normals are within this angle (about 60°, the
+/// brief's own number): past it, the dihedral is a deliberate edge (a
+/// split cap meeting the surface it came from, a hard corner), not a
+/// smooth bend a brush should flow across.
+const CREASE_COS: f64 = 0.5; // cos(60°)
+
+/// Every candidate face's centroid and outward normal, indexed the same
+/// as `local.faces`.
+fn face_frames(local: &Local, pos: impl Fn(u32) -> V3) -> Vec<(V3, V3)> {
+    local
+        .faces
+        .iter()
+        .map(|(_, t)| {
+            let [a, b, c] = t.map(&pos);
+            let n = cross(sub(b, a), sub(c, a));
+            let centroid = scale(add(add(a, b), c), 1.0 / 3.0);
+            (centroid, normalized(n).unwrap_or([0.0, 0.0, 1.0]))
+        })
+        .collect()
+}
+
+/// Each candidate face's neighbours across a shared edge whose dihedral
+/// stays under [`CREASE_COS`] (the faces a flood fill may step into from
+/// it), by index into `local.faces`.
+fn face_adjacency(local: &Local, frames: &[(V3, V3)]) -> Vec<Vec<usize>> {
+    // Every live edge (its two vertices, sorted) → the face indices that
+    // have it (at most 2 on a manifold mesh; more are skipped, same as a
+    // non-manifold edge never being a "smooth" crossing).
+    let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (i, (_, t)) in local.faces.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let key = if a < b { (a, b) } else { (b, a) };
+            by_edge.entry(key).or_default().push(i);
+        }
+    }
+    let mut adj = vec![Vec::new(); local.faces.len()];
+    for faces in by_edge.values() {
+        if let [i, j] = faces[..] {
+            let smooth = dot(frames[i].1, frames[j].1) >= CREASE_COS;
+            if smooth {
+                adj[i].push(j);
+                adj[j].push(i);
+            }
+        }
+    }
+    adj
+}
+
+/// The face in `local.faces` whose centroid is nearest `c`: where a dab
+/// centred at `c` lands, for "Stay on this surface"'s flood fill to
+/// start from. `None` if `local` has no faces (nothing to flood from).
+fn nearest_face(c: V3, frames: &[(V3, V3)]) -> Option<usize> {
+    frames
+        .iter()
+        .enumerate()
+        .min_by(|(_, (ca, _)), (_, (cb, _))| {
+            let (da, db) = (dot(sub(*ca, c), sub(*ca, c)), dot(sub(*cb, c), sub(*cb, c)));
+            da.total_cmp(&db)
+        })
+        .map(|(i, _)| i)
+}
+
+/// Each face's geodesic distance from `c` (Dijkstra over face centroids,
+/// stepping only across a smooth edge: [`face_adjacency`]), up to `max`;
+/// faces past `max` or unreachable without crossing a crease are left
+/// out. A standard fast-marching approximation (centroid-to-centroid
+/// steps, not exact geodesics), the same kind of estimate interactive
+/// sculpting tools have always used: cheap enough for every dab, and
+/// correct about what it must be — it never steps across a sharp crease.
+fn face_geodesic_distances(
+    frames: &[(V3, V3)],
+    adj: &[Vec<usize>],
+    origin: usize,
+    origin_point: V3,
+    max: f64,
+) -> HashMap<usize, f64> {
+    use std::cmp::Ordering;
+    #[derive(PartialEq)]
+    struct Entry(f64, usize);
+    impl Eq for Entry {}
+    impl PartialOrd for Entry {
+        fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Entry {
+        fn cmp(&self, other: &Self) -> Ordering {
+            // A min-heap from `BinaryHeap` (a max-heap): reversed.
+            other.0.total_cmp(&self.0)
+        }
+    }
+    let mut dist: HashMap<usize, f64> = HashMap::new();
+    let mut heap = std::collections::BinaryHeap::new();
+    let d0 = dot(
+        sub(frames[origin].0, origin_point),
+        sub(frames[origin].0, origin_point),
+    )
+    .sqrt();
+    dist.insert(origin, d0);
+    heap.push(Entry(d0, origin));
+    while let Some(Entry(d, i)) = heap.pop() {
+        if dist.get(&i).is_some_and(|&best| d > best) {
+            continue; // a shorter path already settled this face
+        }
+        if d > max {
+            continue;
+        }
+        for &j in &adj[i] {
+            let step = dot(sub(frames[j].0, frames[i].0), sub(frames[j].0, frames[i].0)).sqrt();
+            let nd = d + step;
+            if nd <= max && dist.get(&j).is_none_or(|&best| nd < best) {
+                dist.insert(j, nd);
+                heap.push(Entry(nd, j));
+            }
+        }
+    }
+    dist
+}
+
+/// Each candidate vertex's geodesic distance from `c` (the dab centre),
+/// for "Stay on this surface": the *highest* of its incident candidate
+/// faces' (`face_geodesic_distances`), and left out entirely if even one
+/// incident face is unreached. A vertex moving would change every face
+/// it's a corner of — a cap's rim vertex, shared with the curved surface
+/// it was cut from, would deform the cap's own flat face too if it
+/// moved, so it only ever moves when *every* face it touches is on the
+/// reachable side of the crease, the same "never" semantics as a frozen
+/// face's vertices (`movable`).
+fn geodesic_vertex_distances(
+    local: &Local,
+    c: V3,
+    max: f64,
+    pos: impl Fn(u32) -> V3,
+) -> HashMap<u32, f64> {
+    let frames = face_frames(local, &pos);
+    let Some(origin) = nearest_face(c, &frames) else {
+        return HashMap::new();
+    };
+    let adj = face_adjacency(local, &frames);
+    let face_dist = face_geodesic_distances(&frames, &adj, origin, c, max);
+    let mut worst: HashMap<u32, f64> = HashMap::new();
+    let mut blocked: HashSet<u32> = HashSet::new();
+    for (i, (_, t)) in local.faces.iter().enumerate() {
+        match face_dist.get(&i) {
+            Some(&d) => {
+                for &v in t {
+                    worst.entry(v).and_modify(|best| *best = best.max(d)).or_insert(d);
+                }
+            }
+            // This candidate face wasn't reached (too far, or across the
+            // crease): every one of its corners is blocked, however close
+            // another of its faces got.
+            None => blocked.extend(t),
+        }
+    }
+    for v in blocked {
+        worst.remove(&v);
+    }
+    worst
+}
+
 impl StrokeState {
     /// A stroke on `base`, whose faces `index` holds.
     pub fn new(base: &Mesh, index: SculptIndex, params: BrushParams) -> StrokeState {
@@ -279,13 +443,23 @@ impl StrokeState {
         let p = &self.params;
         let r = p.radius;
         let local = self.gather(c, r);
+        // "Stay on this surface": a vertex's distance follows the surface
+        // from the face under the dab centre, never crossing a sharp
+        // crease (`geodesic_vertex_distances`); off, straight-line
+        // distance, as before this option existed.
+        let geodesic = p
+            .stay_on_surface
+            .then(|| geodesic_vertex_distances(&local, c, r, |v| self.pos(v)));
         let mut verts: Vec<u32> = local.incident.keys().copied().collect();
         verts.sort_unstable();
         let within: Vec<(u32, f64)> = verts
             .into_iter()
-            .filter_map(|v| {
-                let d = dot(sub(self.pos(v), c), sub(self.pos(v), c)).sqrt();
-                (d < r).then_some((v, d))
+            .filter_map(|v| match &geodesic {
+                Some(distances) => distances.get(&v).filter(|&&d| d < r).map(|&d| (v, d)),
+                None => {
+                    let d = dot(sub(self.pos(v), c), sub(self.pos(v), c)).sqrt();
+                    (d < r).then_some((v, d))
+                }
             })
             .collect();
         // The surface under the brush: area-weighted normal and centroid
@@ -532,9 +706,23 @@ impl StrokeState {
             let m = mirror_point(self.pos(v), pivot, 1 << axis);
             at.get(&m.map(f64::to_bits)).copied()
         };
-        let symmetric = union
-            .iter()
-            .all(|&v| axes.iter().all(|&k| partner(v, k).is_some()));
+        // "Stay on this surface"'s geodesic flood fill walks a graph (not
+        // a closed-form distance): its distances (and so its falloff
+        // weights) aren't guaranteed mirror-exact the way straight-line
+        // distance always is, even on an exactly symmetric model (the
+        // search order can round a shared floating-point sum a last bit
+        // differently from one image to another). The butterfly only
+        // trusts the identity image's own numbers and mirrors them
+        // algebraically, so trusting it here could silently mirror the
+        // *wrong* (slightly off) displacement bit for bit instead of
+        // leaving the two images' own, independently-correct ones. Every
+        // mirror image is evaluated and summed on its own instead
+        // (still correct; just not guaranteed bit-identical between the
+        // two sides in this one case).
+        let symmetric = !self.params.stay_on_surface
+            && union
+                .iter()
+                .all(|&v| axes.iter().all(|&k| partner(v, k).is_some()));
         if symmetric {
             // Butterfly: S_i(v) = S_{i-1}(v) + M_i S_{i-1}(m_i v), from the
             // identity image's displacements. Each step is one addition of

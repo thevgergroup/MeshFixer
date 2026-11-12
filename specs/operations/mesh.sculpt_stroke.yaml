@@ -67,11 +67,16 @@ parameters:
     default: 0.25
     min: 0.0
     description: "With adaptive detail: the target edge length as a fraction of the radius (0 is off)"
+  - name: stay_on_surface
+    type: bool
+    default: true
+    description: "The brush affects only faces connected to the one under the cursor, without crossing a sharp crease or into another recorded face group (a split cap's); falloff follows the surface, not a 3D sphere"
 preconditions:
   - every sample names a live face of the target
 postconditions:
   - only vertices within the radius of a dab centre (or its mirror images) move
   - vertices of frozen faces never move; with a face-set target, only its vertices move
+  - with stay_on_surface, a dab never moves a vertex it can't reach from the centre's face without crossing a sharp crease
   - replaying the samples gives the same result bit for bit
 effects: [geometry_changes]
 runtime:

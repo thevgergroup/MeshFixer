@@ -186,6 +186,7 @@ fn stroke_with_detail_refines_under_the_brush() {
         frozen: frozen.clone(),
         view_dir: [-1.0, 0.0, 0.0],
         detail: 0.1,
+        stay_on_surface: false,
     };
     let near = |q: [f64; 3]| {
         sphere
