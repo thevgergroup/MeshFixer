@@ -3,6 +3,7 @@
 
 pub mod analysis;
 pub mod app;
+pub mod connect_tool;
 pub mod connector_tool;
 pub mod defects;
 pub mod framing;

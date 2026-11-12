@@ -1,12 +1,15 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! The Split tool's three-step workflow (owner 2026-11-11), driven like a
-//! user: 1 Define cut (Slice, or Print volume with its box and face
-//! handles), 2 Cut, 3 Connectors (pick a joint, see-through piece, click
-//! to place, drag, the checks and their fixes, Delete, Apply, reopen).
+//! The Connect tool (owner 2026-11-11): its own rail entry, next to
+//! Split, for adding connectors to a cut joint — driven like a user:
+//! pick a joint (the list, or its cut face in the view), choose the
+//! see-through piece, click to place, drag, resize, set depth, the
+//! checks and their one-click fixes, Delete, Apply, reopen. Split's own
+//! cutting workflow is in `split_tool.rs`; this file opens Split only
+//! long enough to make the joints Connect needs.
 //!
 //! With `MF_ARTIFACTS` set, a frame of every step goes to
-//! `<dir>/design/split-<step>-<w>x<h>.png`.
+//! `<dir>/design/connect-<step>-<w>x<h>.png`.
 
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -15,7 +18,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use glam::DVec3;
-use mf_desktop::split_flow::{CutMode, Step};
+use mf_desktop::connect_tool::CONNECT;
 use mf_desktop::{MeshFixerApp, Settings};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::threemf::{ModelObject, Unit};
@@ -68,7 +71,7 @@ fn still(h: &mut Harness<'_, MeshFixerApp>, scene: &str) {
     let dir = PathBuf::from(dir).join("design");
     std::fs::create_dir_all(&dir).unwrap();
     let size = h.ctx.content_rect().size();
-    let name = format!("split-{scene}-{}x{}.png", size.x as u32, size.y as u32);
+    let name = format!("connect-{scene}-{}x{}.png", size.x as u32, size.y as u32);
     h.render().unwrap().save(dir.join(name)).unwrap();
 }
 
@@ -98,7 +101,7 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
             .collect(),
         unit: Unit::Millimeter,
         source: SourceInfo {
-            path: "split.3mf".into(),
+            path: "connect.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
@@ -131,8 +134,28 @@ fn objects(h: &Harness<'_, MeshFixerApp>) -> Vec<String> {
         .collect()
 }
 
+/// Opens a ball, Splits it with one slice (off the seam of vertices) so
+/// there's exactly one joint, and returns the harness with Split closed
+/// again (Connect isn't open yet).
+fn ball_cut_in_two() -> Harness<'static, MeshFixerApp> {
+    let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Cut").click();
+    wait_until(&mut h, "the cut", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(h.state().split_flow.joints.len(), 1, "the cut is a joint");
+    h
+}
+
 /// Scrolls the tool panel until `label` is inside the window, then
-/// clicks it (the step 3 panel is taller than the window).
+/// clicks it (Connect's panel is taller than the window).
 fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     let over = egui::pos2(200.0, WINDOW.1 * 0.5);
     h.event(egui::Event::PointerMoved(over));
@@ -217,43 +240,53 @@ fn placements(h: &Harness<'_, MeshFixerApp>) -> Vec<mf_operations::Placement> {
         .unwrap_or_default()
 }
 
-/// Slice, cut, then connectors on the joint: placed by clicking on the
-/// solid cut face, dragged, checked (a breakout and its fix), deleted,
-/// applied in one command, and the joint reopened and applied again.
+/// With no joints, Connect says so and offers a button that opens
+/// Split.
 #[test]
-fn slice_cut_and_connectors_on_the_joint() {
-    require_gpu!("slice_cut_and_connectors_on_the_joint");
+fn with_no_joints_connect_points_to_split() {
+    require_gpu!("with_no_joints_connect_points_to_split");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 30.0]))]);
-    h.get_by_label("Split").click();
+    h.get_by_label("Connect").click();
     settle(&mut h);
-    assert_eq!(h.state().split_flow.step, Step::Define);
-    assert_eq!(h.state().split_flow.mode, CutMode::Slice);
-    // Off the ball's seam of vertices.
-    h.state_mut().split.plane[11] += 1.3;
-    settle(&mut h);
-    still(&mut h, "step1-slice");
+    assert_eq!(h.state().active_tool, CONNECT);
+    h.get_by_label("Split a model first to create joints");
+    still(&mut h, "no-joints");
 
-    // 2 Cut.
-    h.get_by_label("2 Cut").click();
+    h.get_by_label("Open Split").click();
     settle(&mut h);
-    still(&mut h, "step2-cut");
-    let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut in two").click();
-    wait_until(&mut h, "the cut", |a| {
-        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    assert_eq!(h.state().active_tool, mf_desktop::shape_tools::SPLIT);
+}
+
+/// Defaults to a Sliding fit (positive clearance), not Snug at 0 mm
+/// (owner 2026-11-11).
+#[test]
+fn defaults_to_sliding_fit() {
+    require_gpu!("defaults_to_sliding_fit");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
     });
     settle(&mut h);
-    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
-    assert_eq!(
-        h.state().session.history_labels().len(),
-        history + 1,
-        "one undo step"
-    );
-    assert_eq!(h.state().split_flow.joints.len(), 1, "the cut is a joint");
+    assert_eq!(h.state().split_flow.fit_class(), "Sliding");
+    let sliding = mf_parts::FitClass::builtins()
+        .into_iter()
+        .find(|c| c.name == "Sliding")
+        .unwrap();
+    assert!(sliding.clearance > 0.0, "{:?}", sliding);
+}
 
-    // 3 Connectors: the joint opens, the top piece see-through, the
-    // camera turned to the bottom piece's cut face.
-    h.get_by_label("Next: Connectors").click();
+/// Placed by clicking on the solid cut face, dragged, checked (a
+/// breakout and its fix), deleted, applied in one command, and the
+/// joint reopened and applied again.
+#[test]
+fn place_drag_check_and_apply_on_the_joint() {
+    require_gpu!("place_drag_check_and_apply_on_the_joint");
+    let mut h = ball_cut_in_two();
+
+    // Connect: the joint opens, the top piece see-through, the camera
+    // turned to the bottom piece's cut face.
+    h.get_by_label("Connect").click();
     wait_until(&mut h, "the joint's cut faces", |a| {
         a.split_flow.geometry().is_some()
     });
@@ -274,7 +307,7 @@ fn slice_cut_and_connectors_on_the_joint() {
         "looking down onto the bottom piece's cut face: {:?}",
         cam.view_dir()
     );
-    still(&mut h, "step3-joint");
+    still(&mut h, "joint");
 
     // Click to place: a dowel, then a peg, then a magnet.
     let p = cap_point(&h, [-12.0, 0.0]);
@@ -306,7 +339,7 @@ fn slice_cut_and_connectors_on_the_joint() {
         "{:?}",
         ps[0].at
     );
-    still(&mut h, "step3-placed");
+    still(&mut h, "placed");
 
     // Drag the dowel to a new spot: its counterpart follows (drawn from
     // the same placement).
@@ -337,7 +370,7 @@ fn slice_cut_and_connectors_on_the_joint() {
             .any(|c| c.kind == CheckKind::Breakout(JointSide::A)),
         "{checks:?}"
     );
-    still(&mut h, "step3-breakout");
+    still(&mut h, "breakout");
     scroll_and_click(&mut h, "Make it shallower");
     settle(&mut h);
     let checks = h.state().split_flow.checks().unwrap();
@@ -381,13 +414,7 @@ fn slice_cut_and_connectors_on_the_joint() {
         names.contains(&"ball (bottom) dowel 1".to_owned()),
         "{names:?}"
     );
-    // Back on the joint, its connectors still there to edit.
-    h.get_by_label("3 Connectors").click();
-    wait_until(&mut h, "the joint's cut faces", |a| {
-        a.split_flow.geometry().is_some()
-    });
-    settle(&mut h);
-    still(&mut h, "step3-applied");
+    still(&mut h, "applied");
 
     // Reopened: change the peg and apply again, from before the first
     // connectors (the joint's pieces, not the holed ones, are checked).
@@ -412,111 +439,41 @@ fn slice_cut_and_connectors_on_the_joint() {
         1,
         "the update replaces the first connectors: {names:?}"
     );
-    still(&mut h, "step3-updated");
+    still(&mut h, "updated");
 }
 
-/// Print volume: the box from a printer preset, resized by a face
-/// handle, the pieces listed, cut along its faces into pieces that fit
-/// it, every cut a joint.
+/// Picking another joint's cut face in the view opens it (Print volume
+/// makes several joints at once).
 #[test]
-fn print_volume_box_cuts_into_pieces_that_fit() {
-    require_gpu!("print_volume_box_cuts_into_pieces_that_fit");
+fn clicking_another_joints_cut_face_opens_it() {
+    require_gpu!("clicking_another_joints_cut_face_opens_it");
     let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 30.0]))]);
     h.get_by_label("Split").click();
     settle(&mut h);
     h.get_by_label("Print volume").click();
     settle(&mut h);
-    assert_eq!(h.state().split_flow.mode, CutMode::Volume);
-    // The default box is a printer's volume, centred on the ball, on the
-    // plate: the 60 mm ball fits, so nothing would be cut.
-    let v = h.state().split_flow.volume.clone();
-    assert!(v.size.x >= 100.0, "{:?}", v.size);
-    assert!(
-        v.min().z.abs() < 1e-9,
-        "resting on the plate: {:?}",
-        v.min()
-    );
-    h.get_by_label("scan already fits in this box, so there's nothing to cut. Make the box smaller or move it.");
-    still(&mut h, "step1-volume-preset");
-    // A small printer: type the size.
     {
         let a = h.state_mut();
         a.split_flow.volume.size = DVec3::new(40.3, 37.9, 44.1);
         a.split_flow.volume.center = DVec3::new(0.7, -0.4, 24.35);
     }
     settle(&mut h);
-    h.get_by_label("In the box: about 40 × 38 × 44");
-    // Drag the +X face's handle outwards: the box grows along X only.
-    let before = h.state().split_flow.volume.clone();
-    let face = before.center + DVec3::new(before.size.x / 2.0, 0.0, 0.0);
-    let from = h.state().screen_point(face.to_array()).unwrap();
-    let further = h
-        .state()
-        .screen_point((face + DVec3::new(6.0, 0.0, 0.0)).to_array())
-        .unwrap();
-    drag(&mut h, from, further);
-    settle(&mut h);
-    let after = h.state().split_flow.volume.clone();
-    assert!(
-        after.size.x > before.size.x + 2.0,
-        "{:?} -> {:?}",
-        before.size,
-        after.size
-    );
-    assert!(
-        (after.min().x - before.min().x).abs() < 1e-9,
-        "the -X face stays"
-    );
-    assert!((after.size.y - before.size.y).abs() < 1e-9);
-    still(&mut h, "step1-volume");
-
-    h.get_by_label("2 Cut").click();
-    settle(&mut h);
-    still(&mut h, "step2-volume");
     let v = h.state().split_flow.volume.clone();
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut to the print volume").click();
+    h.get_by_label("Cut").click();
     wait_until(&mut h, "the cut", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });
     settle(&mut h);
-    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
-    assert_eq!(h.state().session.history_labels().len(), history + 1);
-    let names = objects(&h);
-    assert!(names.contains(&"scan (in box)".to_owned()), "{names:?}");
-    // Every face crosses the ball: six outside pieces, six joints.
-    assert_eq!(names.len(), 7, "{names:?}");
     assert_eq!(h.state().split_flow.joints.len(), 6);
-    // The inside piece fits the box, and the box stays where it cut.
-    let after_cut = h.state().split_flow.volume.clone();
-    assert_eq!((after_cut.center, after_cut.size), (v.center, v.size));
-    let doc = h.state().session.document();
-    let inside = doc
-        .objects()
-        .iter()
-        .find(|o| o.name == "scan (in box)")
-        .unwrap();
-    let t = inside.transform;
-    let mesh = inside.mesh().unwrap();
-    for (_, c) in mesh.faces() {
-        for corner in c {
-            let p = mesh.corner_position(corner);
-            let w = DVec3::new(p[0] + t[9], p[1] + t[10], p[2] + t[11]);
-            assert!(
-                w.cmpge(v.min() - DVec3::splat(1e-6)).all()
-                    && w.cmple(v.max() + DVec3::splat(1e-6)).all(),
-                "{w} outside the box"
-            );
-        }
-    }
-    h.get_by_label("Next: Connectors").click();
+
+    // The link opens Connect on the first joint from this cut.
+    h.get_by_label("Add connectors to these joints ->").click();
     wait_until(&mut h, "the joint's cut faces", |a| {
         a.split_flow.geometry().is_some()
     });
     settle(&mut h);
-    still(&mut h, "step3-volume-joint");
-    // Another joint is picked by clicking its cut face in the view: the
-    // -Y face, beside the open -X one.
+    still(&mut h, "volume-joint");
     assert_eq!(
         h.state().split_flow.joint,
         Some(0),
@@ -539,5 +496,5 @@ fn print_volume_box_cuts_into_pieces_that_fit() {
         a.split_flow.geometry().is_some()
     });
     settle(&mut h);
-    still(&mut h, "step3-volume-other-joint");
+    still(&mut h, "volume-other-joint");
 }

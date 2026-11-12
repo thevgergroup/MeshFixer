@@ -43,6 +43,7 @@ pub(crate) fn ops_of(tool: &str) -> &'static [&'static str] {
     match tool {
         crate::parts_tool::PARTS => &["object.add_part", "mesh.boolean"],
         crate::connector_tool::CONNECTORS => &["object.add_part", "connector.join"],
+        crate::connect_tool::CONNECT => &["split.place_connectors"],
         _ => &[],
     }
 }
@@ -216,13 +217,14 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_open: |app| {
             app.clear_selection();
             app.refusal = None;
+            app.split_flow.last_cut = None;
             place_plane(app, false);
-            crate::split_flow::set_step(app, crate::split_flow::Step::Define);
         },
         on_close: |app, _| {
             app.split.drag = None;
             app.split.hover = None;
-            crate::split_flow::set_step(app, app.split_flow.step);
+            app.split_flow.volume.drag = None;
+            app.split_flow.volume.face_drag = None;
         },
         ..T::new(SPLIT, "tool.split.name", icons::SPLIT, Category::Shape, 0)
     })?;
@@ -538,11 +540,9 @@ pub fn split_gizmo(app: &MeshFixerApp) -> Option<(Gizmo, Option<Handle>)> {
     if app.active_tool != SPLIT || app.active_mesh().is_none() || app.busy.is_some() {
         return None;
     }
-    // Print volume: the box's own gizmo; step 3: none.
-    match (app.split_flow.mode, app.split_flow.step) {
-        (_, crate::split_flow::Step::Connectors) => return None,
-        (crate::split_flow::CutMode::Volume, _) => return crate::split_flow::box_gizmo(app),
-        _ => {}
+    // Print volume: the box's own gizmo.
+    if app.split_flow.mode == crate::split_flow::CutMode::Volume {
+        return crate::split_flow::box_gizmo(app);
     }
     let s = &app.split;
     let g = Gizmo {
@@ -573,8 +573,7 @@ pub fn shading(app: &MeshFixerApp) -> mf_render::Shading {
 pub fn split_preview(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
     (app.active_tool == SPLIT
         && app.active_mesh().is_some()
-        && app.split_flow.mode == crate::split_flow::CutMode::Slice
-        && app.split_flow.step != crate::split_flow::Step::Connectors)
+        && app.split_flow.mode == crate::split_flow::CutMode::Slice)
         .then(|| (app.split.point(), app.split.normal()))
 }
 
@@ -1047,4 +1046,5 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
         }
     }
     crate::split_flow::overlay(app, &painter, rect);
+    crate::connect_tool::overlay(app, &painter, rect);
 }

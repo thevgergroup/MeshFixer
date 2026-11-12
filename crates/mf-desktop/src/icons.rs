@@ -49,6 +49,7 @@ pub const TRANSFORM: &str = "\u{E0A4}"; // arrows-out-cardinal
 pub const REPAIR: &str = "\u{E0B2}"; // bandaids
 pub const INSPECT: &str = "\u{EBE0}"; // list-magnifying-glass
 pub const SPLIT: &str = "\u{EAE0}"; // scissors
+pub const CONNECT: &str = "\u{EB5A}"; // plugs-connected
 pub const COMBINE: &str = "\u{E87E}"; // unite
 pub const MAKE_SOLID: &str = "\u{E1DA}"; // cube
 pub const SCULPT: &str = "\u{E6F0}"; // paint-brush
