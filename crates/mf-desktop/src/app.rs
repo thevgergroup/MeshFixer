@@ -17,7 +17,9 @@ use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
 use crate::analysis::{AnalysisCache, LatestWorker};
-use crate::defects::{Defect, HoleNumbers, HoleView, count, operation_label, thousands};
+use crate::defects::{
+    Defect, HoleNumbers, HoleView, count, measure, operation_label, param_label, thousands,
+};
 use crate::import_dialog::UnitPrompt;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::tools::{Interactive, LegendRow, ToolGroup, ToolKind};
@@ -1382,8 +1384,11 @@ impl MeshFixerApp {
     }
 
     /// The history breadcrumb: the current path from the first import, then
-    /// the steps redo would take (greyed). Root ("New document") is left out.
-    pub fn breadcrumb(&self) -> Vec<(RevisionId, String, bool)> {
+    /// the steps redo would take (greyed). Root ("New document") is left
+    /// out. Each row's short label is a plain sentence; its details are
+    /// every parameter the command ran with that isn't hidden or left at
+    /// its default (I5, owner 2026-11-11), for a hover tooltip.
+    pub fn breadcrumb(&self) -> Vec<(RevisionId, String, String, bool)> {
         let current = self.session.current();
         let mut past = true;
         self.session
@@ -1396,7 +1401,12 @@ impl MeshFixerApp {
                     past = false;
                 }
                 node.parent?;
-                Some((id, step_label(node), reached))
+                Some((
+                    id,
+                    step_label(&self.session, node),
+                    history_details(node),
+                    reached,
+                ))
             })
             .collect()
     }
@@ -5015,14 +5025,29 @@ impl MeshFixerApp {
         } else if undo {
             self.undo();
         }
-        let delete = !typing
-            && !ctx.egui_wants_keyboard_input()
-            && ctx.input_mut(|i| {
-                i.consume_key(egui::Modifiers::NONE, egui::Key::Delete)
-                    || i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace)
-            });
-        if delete && !crate::split_flow::delete_selected(self) {
-            self.delete_active_object();
+        let (delete, backspace) = if typing {
+            (false, false)
+        } else {
+            ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Delete),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Backspace),
+                )
+            })
+        };
+        if (delete || backspace) && !ctx.egui_wants_keyboard_input() {
+            // A tool that owns Delete or Backspace (Connect: the picked
+            // connector) gets it first, and it never falls through to the
+            // whole-object delete while that tool is open — even when it
+            // has nothing picked (I1, owner 2026-11-11: deleting a
+            // connector must never delete an object instead).
+            let tool = self.active_tool_def();
+            let key = if delete { egui::Key::Delete } else { egui::Key::Backspace };
+            let owned = (tool.keys)(self).iter().find(|(k, _)| *k == key).map(|&(_, k)| k);
+            match owned {
+                Some(k) => (tool.on_key)(self, k),
+                None => self.delete_active_object(),
+            }
         }
         // H: the selected objects' role, Solid or Hole.
         let role = !typing
@@ -5503,19 +5528,172 @@ fn spec_default(op_id: &str, param: &str) -> i64 {
     }
 }
 
-/// A history step in plain words: "Import part", "Fill hole", "Remove piece".
-fn step_label(node: &mf_command::RevisionNode) -> String {
+/// A history step in plain words: "Import part", "Fill hole", "Remove
+/// piece", "Split scan into 2 pieces", "Moved part by 12, 0, 0 mm" (I5,
+/// owner 2026-11-11: the shape-making operations name their object and
+/// what happened, not their raw parameter list).
+fn step_label(session: &Session, node: &mf_command::RevisionNode) -> String {
     if let Some(import) = &node.import {
         return format!("Import {}", import.name);
     }
     node.record
         .as_ref()
         .and_then(|rec| {
-            let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
-            operation_label(&rec.op_id, target).or_else(|| object_step_label(&rec.op_id))
+            history_label(session, node, rec).or_else(|| {
+                let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
+                operation_label(&rec.op_id, target).or_else(|| object_step_label(&rec.op_id))
+            })
         })
         // allow-swallow: a step with no plain words keeps the session's own label
         .unwrap_or_else(|| node.label.clone())
+}
+
+/// The object a command's output names, as the history row should: its
+/// name after the command (combine and make_solid keep the target's
+/// name; place_connectors doesn't rename anything).
+fn result_name(node: &mf_command::RevisionNode, id: ObjectId) -> String {
+    node.document
+        .object(id)
+        .map_or_else(|| "the object".to_owned(), |o| o.name.clone())
+}
+
+/// The object's name before the command ran: for a step that renames its
+/// target (split's target becomes "<name> (top)"), the row should still
+/// read "Split scan into 2 pieces", not "Split scan (top) into 2 pieces"
+/// — "(top)" only makes sense once you know it's one of the two results.
+fn before_name(session: &Session, rec: &mf_command::CommandRecord, id: ObjectId) -> String {
+    session
+        .node(rec.input_revision)
+        .and_then(|before| before.document.object(id))
+        .map_or_else(|| "the object".to_owned(), |o| o.name.clone())
+}
+
+/// The shape-making operations' history label, with the object's own
+/// name and what happened to it (I5). `None` leaves `step_label` to its
+/// generic fallbacks (a selection-based tool, or the raw label).
+fn history_label(
+    session: &Session,
+    node: &mf_command::RevisionNode,
+    rec: &mf_command::CommandRecord,
+) -> Option<String> {
+    match rec.op_id.as_str() {
+        "mesh.split_plane" | "mesh.split_box" => {
+            let name = before_name(session, rec, rec.target);
+            let pieces = rec.outputs.iter().filter(|o| o.created).count() + 1;
+            Some(format!("Split {name} into {} piece{}", pieces, plural_s(pieces)))
+        }
+        "mesh.make_solid" => {
+            let name = result_name(node, rec.target);
+            let cell = rec.params.get_float("cell_size").ok().filter(|&c| c > 0.0);
+            Some(match cell {
+                Some(cell) => format!("Made {name} solid ({} mm cells)", measure(cell)),
+                None => format!("Made {name} solid"),
+            })
+        }
+        "mesh.combine" => {
+            let name = result_name(node, rec.target);
+            let n = rec.operands.len().max(1);
+            Some(format!("Combined {n} object{} into {name}", plural_s(n)))
+        }
+        "split.place_connectors" => {
+            let name = result_name(node, rec.target);
+            let placements: Option<Vec<mf_operations::Placement>> = rec
+                .params
+                .get_text("connectors")
+                .ok()
+                .and_then(|s| serde_json::from_str(s).ok());
+            Some(match placements {
+                Some(placements) if !placements.is_empty() => {
+                    let n = placements.len();
+                    let first = &placements[0].connector;
+                    if placements.iter().all(|p| &p.connector == first) {
+                        let kind = crate::split_flow::kind_label_plural(first);
+                        format!("Added {n} {kind} to {name}'s joint")
+                    } else {
+                        format!("Added {n} connector{} to {name}'s joint", plural_s(n))
+                    }
+                }
+                _ => format!("Added connectors to {name}'s joint"),
+            })
+        }
+        "object.set_transform" => {
+            let id = rec.target;
+            let before = session.node(rec.input_revision)?;
+            let from = before.document.object(id)?.transform;
+            let to = node.document.object(id)?.transform;
+            if from == to {
+                return None;
+            }
+            let name = result_name(node, id);
+            let mesh = node.document.object(id)?.mesh()?;
+            let centre = mesh
+                .bounding_box()
+                .map_or(glam::DVec3::ZERO, |b| glam::DVec3::from(b.center()));
+            Some(transform_tool::describe(
+                &name,
+                node.document.units(),
+                &from,
+                &to,
+                centre,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn plural_s(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Every parameter `rec` ran with that applies (not hidden by another
+/// parameter's value) and isn't left at the spec's default, as
+/// "name: value" lines, for the history row's hover tooltip (I5).
+/// Parameters the label itself already states (the transform, the
+/// connector list) are left out: they'd only repeat it.
+fn history_details(node: &mf_command::RevisionNode) -> String {
+    node.record
+        .as_ref()
+        .map_or_else(String::new, |rec| history_details_of(&rec.op_id, &rec.params))
+}
+
+/// [`history_details`], from an op id and its parameters directly (so it
+/// can be tested without a whole revision).
+fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
+    let Some(spec) = mf_spec::builtin::get(op_id) else {
+        return String::new();
+    };
+    let hidden_params: &[&str] = match op_id {
+        "mesh.split_plane" if params.get_choice("pegs").ok() == Some("none") => &[
+            "peg_shape",
+            "hole_diameter",
+            "hole_depth_above",
+            "hole_depth_below",
+            "peg_count",
+            "peg_clearance",
+            "length_allowance",
+            "fit_clearance",
+            "machine_tolerance",
+            "min_wall",
+            "plate_width",
+            "plate_depth",
+            "plate_spacing",
+        ],
+        "object.set_transform" => &["transform"],
+        "split.place_connectors" => &["connectors"],
+        _ => &[],
+    };
+    let mut lines: Vec<String> = spec
+        .parameters
+        .iter()
+        .filter(|p| !hidden_params.contains(&p.name.as_str()))
+        .filter_map(|p| {
+            let value = params.0.get(&p.name)?;
+            (*value != p.kind.default_value())
+                .then(|| format!("{}: {value}", param_label(op_id, &p.name)))
+        })
+        .collect();
+    lines.sort();
+    lines.join("\n")
 }
 
 fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
@@ -5528,6 +5706,7 @@ fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)] // tests may panic on failure
 mod tests {
     use super::*;
 
@@ -5639,5 +5818,79 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    /// A split's history details: with pegs none (the default), every
+    /// pegs-only parameter is hidden even though the fit profile left
+    /// some of them off their spec default (I5, owner 2026-11-11).
+    #[test]
+    fn split_details_hide_pegs_only_parameters_when_pegs_is_none() {
+        let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
+        let raw: BTreeMap<String, String> = spec
+            .parameters
+            .iter()
+            .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
+            .collect();
+        let params = spec.validate(&raw).unwrap();
+        let details = history_details_of("mesh.split_plane", &params);
+        assert_eq!(details, "", "every parameter is at its default: {details}");
+
+        let mut raw = raw;
+        raw.insert("hole_diameter".into(), "7.5".into());
+        raw.insert("cut_gap".into(), "0.4".into());
+        let params = spec.validate(&raw).unwrap();
+        let details = history_details_of("mesh.split_plane", &params);
+        assert!(
+            !details.contains("Hole diameter"),
+            "pegs is none: hole_diameter doesn't apply: {details}"
+        );
+        assert!(details.contains("Cut gap: 0.4"), "{details}");
+    }
+
+    /// With pegs on, the alignment parameters that differ from their
+    /// defaults show (they apply this time).
+    #[test]
+    fn split_details_show_pegs_parameters_when_pegs_is_set() {
+        let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
+        let mut raw: BTreeMap<String, String> = spec
+            .parameters
+            .iter()
+            .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
+            .collect();
+        raw.insert("pegs".into(), "dowels".into());
+        raw.insert("hole_diameter".into(), "7.5".into());
+        let params = spec.validate(&raw).unwrap();
+        let details = history_details_of("mesh.split_plane", &params);
+        assert!(details.contains("Hole diameter: 7.5"), "{details}");
+        assert!(details.contains("Pegs: dowels"), "{details}");
+    }
+
+    /// A connector list and a transform are left out of the details: the
+    /// label already states them, and the transform's 12 numbers are not
+    /// plain words anyway.
+    #[test]
+    fn transform_and_connectors_are_left_out_of_the_details() {
+        let spec = mf_spec::builtin::get("object.set_transform").unwrap();
+        let raw: BTreeMap<String, String> = spec
+            .parameters
+            .iter()
+            .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
+            .collect();
+        let mut raw = raw;
+        raw.insert(
+            "transform".into(),
+            "1,0,0,0,1,0,0,0,1,12,0,0".into(),
+        );
+        let params = spec.validate(&raw).unwrap();
+        assert_eq!(history_details_of("object.set_transform", &params), "");
+
+        let spec = mf_spec::builtin::get("split.place_connectors").unwrap();
+        let raw: BTreeMap<String, String> = spec
+            .parameters
+            .iter()
+            .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
+            .collect();
+        let params = spec.validate(&raw).unwrap();
+        assert!(!history_details_of("split.place_connectors", &params).contains("connectors"));
     }
 }

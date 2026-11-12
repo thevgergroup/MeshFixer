@@ -141,6 +141,17 @@ pub struct JointGeom {
     pub caps: [mf_operations::CapRegion; 2],
 }
 
+impl JointGeom {
+    /// `side`'s own cap region (`A` first, `B` second, as every `[_; 2]`
+    /// on this struct is ordered).
+    pub fn cap(&self, side: JointSide) -> &mf_operations::CapRegion {
+        match side {
+            JointSide::A => &self.caps[0],
+            JointSide::B => &self.caps[1],
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(crate) struct GeomKey {
     pub(crate) joint: usize,
@@ -183,6 +194,12 @@ pub(crate) enum Drag {
         from_y: f64,
         depth: f64,
     },
+    /// Placing a dovetail by dragging a line across the cut face (owner
+    /// 2026-11-11, D23): `start` is where the press landed; the current
+    /// pointer (tracked by the caller, not stored here) is the line's
+    /// other end until release, when `connect_tool::add_dovetail` turns
+    /// the whole line into a placement.
+    PlaceDovetail { start: [f64; 2] },
 }
 
 /// What the pointer is over in Connect.
@@ -224,6 +241,11 @@ pub struct Flow {
     pub kind: Option<&'static str>,
     /// The connector picked (index into the open joint's placements).
     pub selected: Option<usize>,
+    /// Which placed connectors' warnings are collapsed (shown by
+    /// default; clicking a "N warnings" row toggles it shut, click again
+    /// to reopen — owner 2026-11-11). Indices into the open joint's
+    /// placements; stale ones (after a delete) are simply never hit.
+    pub collapsed_warnings: std::collections::HashSet<usize>,
     /// The thinnest wall the checks want (mm).
     pub min_wall: Option<f64>,
     /// Connect's own Fit class (owner 2026-11-11: defaults to Sliding,
@@ -307,8 +329,20 @@ pub fn kind_label(id: &str) -> String {
     }
 }
 
+/// A connector kind's plural noun, lower case ("dowels", "pegs"): for a
+/// history row naming how many of one kind a step added (I5).
+pub fn kind_label_plural(id: &str) -> String {
+    match id {
+        "joint.dowel" => t!("connect.kind.dowel.plural"),
+        "joint.peg" => t!("connect.kind.peg.plural"),
+        "joint.dovetail" => t!("connect.kind.dovetail.plural"),
+        "joint.magnet" => t!("connect.kind.magnet.plural"),
+        _ => t!("connect.kind.insert.plural"),
+    }
+}
+
 /// Document units per millimetre.
-pub(crate) fn mm(app: &MeshFixerApp) -> f64 {
+pub fn mm(app: &MeshFixerApp) -> f64 {
     1.0 / crate::transform_tool::mm_per(app.session.document().units())
 }
 
@@ -445,8 +479,42 @@ pub fn open_joint(app: &mut MeshFixerApp, j: usize) {
         f.selected = None;
         f.drag = None;
         f.framed = None;
+        f.collapsed_warnings.clear();
     }
     f.joint = Some(j);
+}
+
+/// Indices after removing placement `removed`: itself gone, everything
+/// after it shifted down one (so `expanded_warnings` keeps naming the
+/// same connectors once one is deleted).
+fn reindex_after_removal(indices: &std::collections::HashSet<usize>, removed: usize) -> std::collections::HashSet<usize> {
+    indices
+        .iter()
+        .filter(|&&i| i != removed)
+        .map(|&i| if i > removed { i - 1 } else { i })
+        .collect()
+}
+
+/// Remove connector `i` of the open joint (a row's trash button, or the
+/// details block's "Remove connector").
+pub fn remove_connector(app: &mut MeshFixerApp, j: usize, i: usize) {
+    let f = &mut app.split_flow;
+    let Some(joint) = f.joints.get_mut(j) else {
+        return;
+    };
+    if i >= joint.placements.len() {
+        return;
+    }
+    joint.placements.remove(i);
+    f.collapsed_warnings = reindex_after_removal(&f.collapsed_warnings, i);
+    if f.selected == Some(i) {
+        f.selected = None;
+    } else if let Some(s) = f.selected
+        && s > i
+    {
+        f.selected = Some(s - 1);
+    }
+    f.drag = None;
 }
 
 /// Delete the picked connector (the Delete key, while Connect is open).
@@ -455,19 +523,14 @@ pub fn delete_selected(app: &mut MeshFixerApp) -> bool {
     if app.active_tool != crate::connect_tool::CONNECT {
         return false;
     }
-    let f = &mut app.split_flow;
+    let f = &app.split_flow;
     let (Some(j), Some(i)) = (f.joint, f.selected) else {
         return false;
     };
-    let Some(joint) = f.joints.get_mut(j) else {
-        return false;
-    };
-    if i >= joint.placements.len() {
+    if i >= f.joints.get(j).map_or(0, |jt| jt.placements.len()) {
         return false;
     }
-    joint.placements.remove(i);
-    f.selected = None;
-    f.drag = None;
+    remove_connector(app, j, i);
     true
 }
 
@@ -663,6 +726,20 @@ pub(crate) fn refresh_checks(app: &mut MeshFixerApp) {
             .collect()
     };
     app.split_flow.checks = Some((key, Arc::new(checks)));
+}
+
+/// `w` flattened onto `solid`'s cap plane: its 2D place in the joint
+/// frame, re-embedded at the solid cap's depth (owner 2026-11-11, I4).
+/// A connector's own parts are generated on the solid cap already;
+/// its counterpart is physically behind the *other* cap, a different
+/// depth along the joint normal. Drawn at its true depth, a perspective
+/// camera not centred on that connector shows it offset from its own
+/// footprint by parallax; flattened, every part of one placement lands
+/// at the same screen place its footprint does, and all of them are
+/// exactly coincident when the view looks straight along the normal.
+pub fn flatten_on_cap(frame: &JointFrame, solid: JointSide, w: DVec3) -> DVec3 {
+    let lift = frame.cap_point(solid) - frame.point;
+    frame.at(frame.to_2d(w)) + lift
 }
 
 /// The feature edges of a small closed mesh (its outline: edges between

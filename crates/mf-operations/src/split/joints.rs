@@ -186,6 +186,27 @@ pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
         .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
     raw.insert("gap".into(), gap_mm.max(0.0).to_string());
+    if p.connector == "joint.dovetail"
+        && !raw.contains_key("groove_a")
+        && !raw.contains_key("groove_b")
+    {
+        // A placement saved before `groove_a`/`groove_b` existed (D23)
+        // has only the old single symmetric `groove_length`: split it
+        // in two here, before validation fills `groove_a`/`groove_b`
+        // with their own (unrelated) spec defaults, so an old save
+        // keeps its old shape instead of silently becoming two 100 mm
+        // reaches. `length_allowance`'s own validated default (0.4 mm)
+        // is used by `generate` either way; the half-length only needs
+        // `groove_length`'s own default (200 mm) when that, too, was
+        // never set.
+        let half = raw
+            .get("groove_length")
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(200.0)
+            / 2.0;
+        raw.insert("groove_a".into(), half.to_string());
+        raw.insert("groove_b".into(), half.to_string());
+    }
     connector.spec().validate(&raw).map_err(|e| {
         failed(
             "invalid_connector_params",
@@ -234,6 +255,20 @@ pub struct CapRegion {
     pub boundary: Vec<[[f64; 2]; 2]>,
     /// How far off its plane a face may be and still count as on it.
     pub tol: f64,
+}
+
+/// The ray `p + t·d` (`t ≥ 0`) meets segment `a`-`b` at parameter `t`, if
+/// it does (not parallel, and the crossing is within the segment).
+fn ray_seg(p: [f64; 2], d: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<f64> {
+    let e = [b[0] - a[0], b[1] - a[1]];
+    let denom = d[0] * e[1] - d[1] * e[0];
+    if denom.abs() < 1e-12 {
+        return None;
+    }
+    let ap = [a[0] - p[0], a[1] - p[1]];
+    let t = (ap[0] * e[1] - ap[1] * e[0]) / denom;
+    let u = (ap[0] * d[1] - ap[1] * d[0]) / denom;
+    (t >= 0.0 && (0.0..=1.0).contains(&u)).then_some(t)
 }
 
 fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> (f64, [f64; 2]) {
@@ -291,6 +326,22 @@ impl CapRegion {
             }
         }
         lo[0].is_finite().then_some((lo, hi))
+    }
+
+    /// How far from `p` the outline is, straight along unit direction
+    /// `d` (the first crossing with `t > 0`; `None` if the ray never
+    /// meets it, which can only happen if `p` is already outside, or the
+    /// outline is degenerate). A dovetail's groove reach on one side is
+    /// this, from its centre along its slide direction (and the other
+    /// side, along `-d`): "the boundary of the solid cap's outline in a
+    /// given direction" the live check and the drag-to-place UI both
+    /// need.
+    pub fn ray_boundary(&self, p: [f64; 2], d: [f64; 2]) -> Option<f64> {
+        self.boundary
+            .iter()
+            .filter_map(|s| ray_seg(p, d, s[0], s[1]))
+            .filter(|t| *t > 1e-9)
+            .fold(None, |best, t| Some(best.map_or(t, |b: f64| b.min(t))))
     }
 
     /// The cap's area.
@@ -429,6 +480,11 @@ pub enum CheckKind {
     EdgeDistance,
     DowelLength,
     Fit,
+    /// A dovetail's `-x` (`true`) or `+x` (`false`) end is stopped
+    /// (`open_a`/`open_b` false) but its recorded reach falls short of
+    /// the cap's own outline on that side, so the tail can't actually
+    /// be slid fully in or out from there either (D23).
+    DovetailStopped(bool),
 }
 
 /// One live warning about a placement, in plain words.
@@ -436,6 +492,145 @@ pub enum CheckKind {
 pub struct Check {
     pub kind: CheckKind,
     pub message: String,
+}
+
+/// What a joint-wide check is about (D22): unlike [`CheckKind`], this
+/// isn't about one placement, it's about the whole set — so it has no
+/// single placement index to fix, and lives next to the connector list
+/// rather than under one of its rows (`joint_checks`, the Connect
+/// panel's own joint-level summary area).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JointCheckKind {
+    /// Exactly one round dowel or peg, and nothing else on the joint
+    /// resists turning about it.
+    SingleRoundDowel,
+}
+
+/// One live, joint-wide warning, in plain words, with each one-click fix
+/// it offers (by name: the Connect panel turns the name back into the
+/// actual fix with [`fix_joint`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointCheck {
+    pub kind: JointCheckKind,
+    pub message: String,
+    pub fixes: Vec<&'static str>,
+}
+
+/// Whether connector `id`'s placement, with `params`, resists the joint
+/// turning about some other axis on its own: a dovetail, an insert (its
+/// screw is a second, independent anchor point as far as rotation
+/// goes), or a dowel/peg that isn't round (D22's whole point). A magnet
+/// pulls the faces together but never resists an in-plane turn, so it
+/// doesn't count.
+fn resists_rotation(id: &str, params: &Params) -> bool {
+    match id {
+        "joint.dovetail" | "joint.insert" => true,
+        "joint.dowel" | "joint.peg" => {
+            !matches!(
+                mf_parts::connectors::joint::Shape::from_code(
+                    params.get_float("shape").unwrap_or(0.0),
+                    params.get_float("sides").unwrap_or(6.0),
+                ),
+                mf_parts::connectors::joint::Shape::Round
+            )
+        }
+        _ => false,
+    }
+}
+
+/// The live, joint-wide checks (see [`JointCheckKind`]): today, only
+/// whether the joint's only alignment is a single round dowel or peg,
+/// free to turn about it since nothing else on the joint resists
+/// rotation (D22). `gap_mm` is the joint's own gap, for
+/// `placement_params`.
+pub fn joint_checks(placements: &[Placement], gap_mm: f64) -> Vec<JointCheck> {
+    let mut out = Vec::new();
+    let resisting: Vec<bool> = placements
+        .iter()
+        .map(|p| {
+            placement_params(p, gap_mm)
+                .ok()
+                .is_some_and(|params| resists_rotation(&p.connector, &params))
+        })
+        .collect();
+    let round_dowels: Vec<usize> = placements
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| {
+            (p.connector == "joint.dowel" || p.connector == "joint.peg") && !resisting[*i]
+        })
+        .map(|(i, _)| i)
+        .collect();
+    if round_dowels.len() == 1 && resisting.iter().all(|r| !r) {
+        out.push(JointCheck {
+            kind: JointCheckKind::SingleRoundDowel,
+            message: "The parts can rotate around one round dowel. Add a second, or use a \
+                      square or keyed shape"
+                .to_owned(),
+            fixes: vec!["add_second_dowel", "make_square"],
+        });
+    }
+    out
+}
+
+/// A joint-wide check's one-click fix, applied to `placements` (see
+/// [`joint_checks`]): `"add_second_dowel"` places a second
+/// `joint.dowel` (copying the first round dowel/peg's own size and
+/// clearance) mirrored across the solid cap's own bounds centre from
+/// the first — the simplest offset that's almost always still on the
+/// cap and far enough from the first hole not to collide with it, since
+/// a real cap is practically never a single point; `"make_square"`
+/// changes the existing dowel or peg's own `shape` param to Square in
+/// place, leaving everything else about it untouched. `cap` is the
+/// solid piece's own cut face, to place the second dowel sensibly;
+/// `None` if the fix doesn't apply (an unknown name, or there's no
+/// single round dowel/peg to fix).
+pub fn fix_joint(placements: &[Placement], gap_mm: f64, cap: &CapRegion, fix: &str) -> Option<Vec<Placement>> {
+    let resisting: Vec<bool> = placements
+        .iter()
+        .map(|p| {
+            placement_params(p, gap_mm)
+                .ok()
+                .is_some_and(|params| resists_rotation(&p.connector, &params))
+        })
+        .collect();
+    let round_dowels: Vec<usize> = placements
+        .iter()
+        .enumerate()
+        .filter(|(i, p)| {
+            (p.connector == "joint.dowel" || p.connector == "joint.peg") && !resisting[*i]
+        })
+        .map(|(i, _)| i)
+        .collect();
+    let &[i] = round_dowels.as_slice() else {
+        return None;
+    };
+    match fix {
+        "make_square" => {
+            let mut out = placements.to_vec();
+            out[i].params.insert("shape".into(), 1.0);
+            Some(out)
+        }
+        "add_second_dowel" => {
+            let (lo, hi) = cap.bounds()?;
+            let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+            let first = &placements[i];
+            // Mirrored across the cap's own centre: as far from the
+            // first hole as this one simple rule can put it, on a cap
+            // of any convex-ish shape.
+            let at = [
+                2.0 * centre[0] - first.at[0],
+                2.0 * centre[1] - first.at[1],
+            ];
+            let at = if cap.contains(at) { at } else { centre };
+            let mut second = first.clone();
+            second.at = at;
+            let mut out = placements.to_vec();
+            out.push(second);
+            Some(out)
+        }
+        _ => None,
+    }
 }
 
 /// The connector's outline on the cap, in the joint's 2D frame.
@@ -657,6 +852,33 @@ pub fn check_placement(
             });
         }
     }
+    if p.connector == "joint.dovetail" {
+        // The groove is cut into the "other" piece; its own cap outline
+        // is the boundary a stopped end must reach to be withdrawable.
+        let groove_cap = pieces[p.on.other().index()].cap;
+        let (s, c) = p.angle.to_radians().sin_cos();
+        let dir = [c, s];
+        let reach = mf_parts::connectors::joint::dovetail_reach(&params)
+            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
+        for (open, len, sign, a_end) in [
+            (reach.open_a, reach.a, -1.0, true),
+            (reach.open_b, reach.b, 1.0, false),
+        ] {
+            if open {
+                continue;
+            }
+            let d = [dir[0] * sign, dir[1] * sign];
+            let Some(to_edge) = groove_cap.ray_boundary(p.at, d) else {
+                continue;
+            };
+            if len * mm < to_edge - 1e-6 {
+                out.push(Check {
+                    kind: CheckKind::DovetailStopped(a_end),
+                    message: "Can't slide together: extend it to the edge".to_owned(),
+                });
+            }
+        }
+    }
     if let Some(c) = fit_check(p, &params, settings, ctx)?
         && (c.may_fuse || c.measured_gap < c.expected_gap * 0.75)
     {
@@ -820,6 +1042,23 @@ pub fn fix(
                 "clearance".into(),
                 (wanted_clearance(settings) * 1000.0).round() / 1000.0,
             );
+            Ok(Some(q))
+        }
+        CheckKind::DovetailStopped(a_end) => {
+            let groove_cap = pieces[p.on.other().index()].cap;
+            let (s, c) = p.angle.to_radians().sin_cos();
+            let sign = if a_end { -1.0 } else { 1.0 };
+            let d = [c * sign, s * sign];
+            let Some(to_edge) = groove_cap.ray_boundary(p.at, d) else {
+                return Ok(None);
+            };
+            let mut q = p.clone();
+            // A touch past the boundary (never short of it, however the
+            // ray's own rounding falls), so the check can't immediately
+            // re-fire on the fixed placement.
+            let key = if a_end { "groove_a" } else { "groove_b" };
+            q.params
+                .insert(key.into(), to_edge / settings.mm + 0.5);
             Ok(Some(q))
         }
     }

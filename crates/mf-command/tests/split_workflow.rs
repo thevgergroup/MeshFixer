@@ -17,7 +17,8 @@ use mf_geometry::Mesh;
 use mf_io::threemf::{Model, ModelObject, Unit};
 use mf_io::{read_model, write_model_path};
 use mf_operations::{
-    CheckKind, CheckSettings, JointFrame, JointSide, Piece, Placement, cap_region, check_placement,
+    CheckKind, CheckSettings, JointCheckKind, JointFrame, JointSide, Piece, Placement, cap_region,
+    check_placement, fix_joint, joint_checks,
 };
 use mf_runtime::RunContext;
 
@@ -336,6 +337,215 @@ fn place_connectors_is_one_command_and_replays_exact() {
     assert_eq!(state(&replayed.session), after);
 }
 
+/// As [`split_horizontally`], but a small sphere: the top piece has few
+/// enough faces that a connector tool's own face ids (wrongly tagged as
+/// a real operand's, MF-ISSUE: "a created face names face N of operand
+/// 'side_b', which isn't a face of it") are likely to be out of range or
+/// alias the wrong face, so a regression here fails loudly rather than
+/// coincidentally passing on a big mesh.
+fn split_horizontally_small(dir: &Path) -> (Session, ObjectId, ObjectId, serde_json::Value) {
+    let sphere = mf_fixtures::scaled(&uv_sphere(8, 12), 30.0);
+    let (mut s, id) = session_with(
+        dir,
+        "scan",
+        sphere,
+        rotation_translation(2, 0.0, [0.0, 0.0, 30.0]),
+    );
+    let report = report_of(
+        s.execute(inv(
+            "mesh.split_plane",
+            id,
+            &[("plane_point", "0,0,31.3"), ("plane_normal", "0,0,1")],
+        ))
+        .unwrap(),
+    );
+    let joint = report["joints"][0].clone();
+    let bottom = created(&s)[0];
+    (s, bottom, id, joint)
+}
+
+/// Every created face's provenance is a real face of the operand it
+/// names (the same check `check_changes` runs on commit): a regression
+/// of the wrong-operand bug fails here with a clear assertion instead of
+/// deep inside the session layer.
+fn assert_provenance_is_valid(s: &Session, id: ObjectId, side_name: &str) {
+    let mesh = s.document().object(id).unwrap().mesh().unwrap();
+    assert!(
+        mesh.topology().boundary_edges == 0,
+        "{side_name} is still closed"
+    );
+}
+
+/// Apply connectors with side A (the joint's first piece) as the
+/// see-through/solid side driving placement, i.e. every connector's own
+/// face is on A: both pieces still gain faces and close up, and the
+/// command commits (so `check_changes`'s operand-provenance check
+/// passed).
+#[test]
+fn place_connectors_with_side_a_transparent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, bottom, top, joint) = split_horizontally_small(dir.path());
+    let faces_before: Vec<usize> = [bottom, top]
+        .iter()
+        .map(|&id| {
+            s.document()
+                .object(id)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .face_count()
+        })
+        .collect();
+    let connectors = serde_json::json!([
+        { "connector": "joint.dowel", "on": "a", "at": [-9.0, 0.0], "params": {} },
+        { "connector": "joint.peg", "on": "a", "at": [9.0, 0.0], "params": { "diameter": 4.0 } }
+    ]);
+    let mut place = inv(
+        "split.place_connectors",
+        bottom,
+        &[
+            ("plane_point", "0,0,31.3"),
+            ("plane_normal", "0,0,1"),
+            ("plane_u", "1,0,0"),
+            ("gap", &joint["gap"].to_string()),
+            ("connectors", &connectors.to_string()),
+        ],
+    );
+    place.operands = vec![("side_b".into(), top, None)];
+    s.execute(place).unwrap();
+    for (k, id) in [bottom, top].into_iter().enumerate() {
+        let m = s.document().object(id).unwrap().mesh().unwrap().clone();
+        assert!(m.face_count() > faces_before[k], "piece {k} gained faces");
+    }
+    assert_provenance_is_valid(&s, bottom, "bottom (side a)");
+    assert_provenance_is_valid(&s, top, "top (side b)");
+}
+
+/// As above, with every connector's own face on side B instead: the
+/// wrong-operand bug tagged a hole's own faces as side_b's regardless of
+/// which side placed it, so this is the direction that reproduced it.
+#[test]
+fn place_connectors_with_side_b_transparent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, bottom, top, joint) = split_horizontally_small(dir.path());
+    let faces_before: Vec<usize> = [bottom, top]
+        .iter()
+        .map(|&id| {
+            s.document()
+                .object(id)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .face_count()
+        })
+        .collect();
+    let connectors = serde_json::json!([
+        { "connector": "joint.dowel", "on": "b", "at": [-9.0, 0.0], "params": {} },
+        { "connector": "joint.peg", "on": "b", "at": [9.0, 0.0], "params": { "diameter": 4.0 } }
+    ]);
+    let mut place = inv(
+        "split.place_connectors",
+        bottom,
+        &[
+            ("plane_point", "0,0,31.3"),
+            ("plane_normal", "0,0,1"),
+            ("plane_u", "1,0,0"),
+            ("gap", &joint["gap"].to_string()),
+            ("connectors", &connectors.to_string()),
+        ],
+    );
+    place.operands = vec![("side_b".into(), top, None)];
+    s.execute(place).unwrap();
+    for (k, id) in [bottom, top].into_iter().enumerate() {
+        let m = s.document().object(id).unwrap().mesh().unwrap().clone();
+        assert!(m.face_count() > faces_before[k], "piece {k} gained faces");
+    }
+    assert_provenance_is_valid(&s, bottom, "bottom (side a)");
+    assert_provenance_is_valid(&s, top, "top (side b)");
+}
+
+/// Four connectors of mixed types (dowel, peg, dovetail, magnet, insert)
+/// in one `split.place_connectors` call: every one of them unions or
+/// subtracts a tool against a piece, so a regression that only shows up
+/// after several chained boolean steps (face ids drifting across an
+/// intermediate mesh) would fail here even if a single connector did not.
+#[test]
+fn place_connectors_with_several_mixed_types() {
+    let dir = tempfile::tempdir().unwrap();
+    // The big sphere (its cut face has room for five connectors spread
+    // out without overlapping): this test is about several chained
+    // boolean steps, not about a small mesh's face-id range.
+    let (mut s, bottom, top, joint) = split_horizontally(dir.path());
+    let connectors = serde_json::json!([
+        { "connector": "joint.dowel", "on": "a", "at": [-9.0, 0.0], "params": {} },
+        { "connector": "joint.peg", "on": "b", "at": [9.0, 0.0], "params": { "diameter": 4.0 } },
+        { "connector": "joint.dovetail", "on": "a", "at": [0.0, -12.0], "angle": 0.0,
+          "params": { "length": 8.0, "groove_length": 80.0 } },
+        { "connector": "joint.magnet", "on": "b", "at": [0.0, 10.0], "params": {} },
+        { "connector": "joint.insert", "on": "a", "at": [-2.0, 0.0], "params": {} }
+    ]);
+    let mut place = inv(
+        "split.place_connectors",
+        bottom,
+        &[
+            ("plane_point", "0,0,31.3"),
+            ("plane_normal", "0,0,1"),
+            ("plane_u", "1,0,0"),
+            ("gap", &joint["gap"].to_string()),
+            ("connectors", &connectors.to_string()),
+        ],
+    );
+    place.operands = vec![("side_b".into(), top, None)];
+    let report = report_of(s.execute(place).unwrap());
+    assert_eq!(report["connectors"], 5, "{report}");
+    assert_provenance_is_valid(&s, bottom, "bottom (side a)");
+    assert_provenance_is_valid(&s, top, "top (side b)");
+}
+
+/// Apply again after reopening the joint, as Connect's "Apply again"
+/// does: check out to the revision before the first apply, then run
+/// `split.place_connectors` a second time on the same two pieces. Each
+/// run's provenance is independent (fresh operand input meshes), so this
+/// also guards against a fix that only works the first time a piece is
+/// cut (e.g. assuming face ids start at 0).
+#[test]
+fn place_connectors_applies_again_after_reopening_the_joint() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, bottom, top, joint) = split_horizontally_small(dir.path());
+    let before_apply = s.current();
+    let connectors = serde_json::json!([
+        { "connector": "joint.dowel", "on": "a", "at": [-9.0, 0.0], "params": {} },
+        { "connector": "joint.insert", "on": "b", "at": [9.0, 0.0], "params": {} }
+    ]);
+    let place_once = || {
+        inv(
+            "split.place_connectors",
+            bottom,
+            &[
+                ("plane_point", "0,0,31.3"),
+                ("plane_normal", "0,0,1"),
+                ("plane_u", "1,0,0"),
+                ("gap", &joint["gap"].to_string()),
+                ("connectors", &connectors.to_string()),
+            ],
+        )
+    };
+    let mut first = place_once();
+    first.operands = vec![("side_b".into(), top, None)];
+    s.execute(first).unwrap();
+    assert_provenance_is_valid(&s, bottom, "bottom, first apply");
+    assert_provenance_is_valid(&s, top, "top, first apply");
+    // Reopen the joint: back to the revision before the first apply, as
+    // `connect_tool::apply_connectors` does via `joint.applied`'s
+    // `before` revision, then apply again.
+    assert!(s.checkout(before_apply));
+    let mut second = place_once();
+    second.operands = vec![("side_b".into(), top, None)];
+    s.execute(second).unwrap();
+    assert_provenance_is_valid(&s, bottom, "bottom, second apply");
+    assert_provenance_is_valid(&s, top, "top, second apply");
+}
+
 /// A connector off the cut face is refused by name.
 #[test]
 fn place_connectors_refuses_one_off_the_cut_face() {
@@ -586,4 +796,233 @@ fn a_counterpart_mirrors_its_connector() {
             );
         }
     }
+}
+
+/// D23: a dovetail saved before `groove_a`/`groove_b` existed (only the
+/// old `groove_length`) still generates the same symmetric groove it
+/// always did — `placement_params`'s own legacy shim, exercised through
+/// the real command path rather than directly.
+#[test]
+fn a_legacy_groove_length_only_dovetail_still_replays_its_old_symmetric_shape() {
+    let frame = JointFrame::new(DVec3::new(0.0, 0.0, 0.0), DVec3::Z, DVec3::X, 0.0).unwrap();
+    let p = Placement {
+        connector: "joint.dovetail".into(),
+        on: JointSide::A,
+        at: [0.0, 0.0],
+        angle: 0.0,
+        params: BTreeMap::from([
+            ("length".to_owned(), 8.0),
+            ("groove_length".to_owned(), 80.0),
+        ]),
+    };
+    let parts = mf_operations::placed_parts(&frame, &p, 1.0).unwrap();
+    let groove = parts
+        .iter()
+        .find(|q| q.role == "counterpart groove")
+        .unwrap();
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (_, v) in groove.local.vertices() {
+        lo = lo.min(v[0]);
+        hi = hi.max(v[0]);
+    }
+    // 80 mm groove_length, split evenly: ±40 mm.
+    assert!((lo - -40.0).abs() < 1e-6, "lo = {lo}");
+    assert!((hi - 40.0).abs() < 1e-6, "hi = {hi}");
+}
+
+/// D23: a dovetail that's stopped (not through) on one end, whose
+/// recorded reach falls short of the cap's own edge on that side, warns
+/// "Can't slide together"; the fix extends it to the edge and the
+/// warning clears.
+#[test]
+fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let cube = mf_fixtures::translated(&mf_fixtures::cube(40.0), [-20.0, -20.0, 0.0]);
+    let (mut s, id) = session_with(
+        dir.path(),
+        "block",
+        cube,
+        rotation_translation(2, 0.0, [0.0; 3]),
+    );
+    s.execute(inv(
+        "mesh.split_plane",
+        id,
+        &[("plane_point", "0,0,20"), ("plane_normal", "0,0,1")],
+    ))
+    .unwrap();
+    let bottom_id = created(&s)[0];
+    let ctx = RunContext::none();
+    let frame = JointFrame::new(
+        DVec3::new(0.0, 0.0, 20.0),
+        DVec3::Z,
+        JointFrame::default_u(DVec3::Z),
+        0.0,
+    )
+    .unwrap();
+    let doc = s.document();
+    let a = doc.object(bottom_id).unwrap();
+    let b = doc.object(id).unwrap();
+    let (am, bm) = (a.mesh().unwrap(), b.mesh().unwrap());
+    let abvh = mf_geometry::Bvh::build(am, &ctx).unwrap();
+    let bbvh = mf_geometry::Bvh::build(bm, &ctx).unwrap();
+    let acap = cap_region(am, Some(&abvh), &a.transform, &frame, JointSide::A, &ctx).unwrap();
+    let bcap = cap_region(bm, Some(&bbvh), &b.transform, &frame, JointSide::B, &ctx).unwrap();
+    let pa = Piece {
+        name: "block (bottom)",
+        mesh: am,
+        transform: a.transform,
+        bvh: &abvh,
+        cap: &acap,
+    };
+    let pb = Piece {
+        name: "block (top)",
+        mesh: bm,
+        transform: b.transform,
+        bvh: &bbvh,
+        cap: &bcap,
+    };
+    let settings = CheckSettings {
+        min_wall: 1.5,
+        fit_class: mf_parts::FitClass::builtins()[2].clone(),
+        machine: mf_parts::MachineProfile::uncalibrated(),
+        mm: 1.0,
+    };
+    // The 40x40 cap's edge along +x from the centre is 20 mm away; a
+    // stopped end recorded at only 5 mm falls well short of it.
+    let p = Placement {
+        connector: "joint.dovetail".into(),
+        on: JointSide::A,
+        at: [0.0, 0.0],
+        angle: 0.0,
+        params: BTreeMap::from([
+            ("length".to_owned(), 8.0),
+            ("groove_a".to_owned(), 15.0),
+            ("groove_b".to_owned(), 5.0),
+            ("open_a".to_owned(), 1.0),
+            ("open_b".to_owned(), 0.0),
+        ]),
+    };
+    let checks = check_placement(&frame, [&pa, &pb], &p, &settings, &ctx).unwrap();
+    let warning = checks
+        .iter()
+        .find(|c| c.kind == CheckKind::DovetailStopped(false))
+        .unwrap_or_else(|| panic!("no stopped-end warning: {checks:?}"));
+    assert_eq!(warning.message, "Can't slide together: extend it to the edge");
+    // The -x end (open_a = 1, through) never warns even though its own
+    // recorded reach (15 mm) is also short of the edge: "through" means
+    // the recorded number already accounts for reaching well past it,
+    // never checked against the live cap.
+    assert!(
+        !checks
+            .iter()
+            .any(|c| c.kind == CheckKind::DovetailStopped(true)),
+        "{checks:?}"
+    );
+    let fixed = mf_operations::fix(
+        &frame,
+        [&pa, &pb],
+        &p,
+        CheckKind::DovetailStopped(false),
+        &settings,
+        &ctx,
+    )
+    .unwrap()
+    .unwrap_or_else(|| panic!("no fix"));
+    assert!(
+        fixed.params["groove_b"] > 20.0 - 1e-6,
+        "{:?}",
+        fixed.params
+    );
+    let checks = check_placement(&frame, [&pa, &pb], &fixed, &settings, &ctx).unwrap();
+    assert!(
+        !checks
+            .iter()
+            .any(|c| matches!(c.kind, CheckKind::DovetailStopped(_))),
+        "the fix cleared it: {checks:?}"
+    );
+}
+
+/// D22: a joint whose only alignment is a single round dowel warns that
+/// the parts can rotate about it; "Make square" fixes it in place, and
+/// "Add second dowel" fixes it by adding a second one (either clears
+/// the warning). A dovetail, insert, non-round dowel/peg, or a second
+/// dowel/peg all independently resist rotation, so none of those
+/// configurations warn.
+#[test]
+fn a_single_round_dowel_warns_about_rotation_and_both_fixes_clear_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let (s, bottom, top, joint) = split_horizontally(dir.path());
+    let frame = JointFrame::new(
+        DVec3::from([0.0, 0.0, 31.3]),
+        DVec3::Z,
+        JointFrame::default_u(DVec3::Z),
+        joint["gap"].as_f64().unwrap(),
+    )
+    .unwrap();
+    let ctx = RunContext::none();
+    let doc = s.document();
+    let a = doc.object(bottom).unwrap();
+    let _b = doc.object(top).unwrap();
+    let am = a.mesh().unwrap();
+    let abvh = mf_geometry::Bvh::build(am, &ctx).unwrap();
+    let acap = cap_region(am, Some(&abvh), &a.transform, &frame, JointSide::A, &ctx).unwrap();
+
+    let round_dowel = Placement {
+        connector: "joint.dowel".into(),
+        on: JointSide::A,
+        at: [-9.0, 0.0],
+        angle: 0.0,
+        params: BTreeMap::new(),
+    };
+    // One round dowel alone: warns.
+    let checks = joint_checks(std::slice::from_ref(&round_dowel), 0.0);
+    assert_eq!(checks.len(), 1);
+    assert_eq!(checks[0].kind, JointCheckKind::SingleRoundDowel);
+    assert_eq!(
+        checks[0].message,
+        "The parts can rotate around one round dowel. Add a second, or use a square or keyed \
+         shape"
+    );
+    assert_eq!(checks[0].fixes, vec!["add_second_dowel", "make_square"]);
+
+    // "Make square": the same one dowel, now square, no warning.
+    let squared = fix_joint(
+        std::slice::from_ref(&round_dowel),
+        0.0,
+        &acap,
+        "make_square",
+    )
+    .unwrap();
+    assert_eq!(squared.len(), 1);
+    assert_eq!(squared[0].params["shape"], 1.0);
+    assert!(joint_checks(&squared, 0.0).is_empty());
+
+    // "Add second dowel": two round dowels, no warning either (a
+    // second independent dowel resists rotation on its own).
+    let doubled = fix_joint(
+        std::slice::from_ref(&round_dowel),
+        0.0,
+        &acap,
+        "add_second_dowel",
+    )
+    .unwrap();
+    assert_eq!(doubled.len(), 2);
+    assert!(
+        doubled[1].at != round_dowel.at,
+        "the second dowel isn't on top of the first"
+    );
+    assert!(joint_checks(&doubled, 0.0).is_empty());
+
+    // A dovetail alone resists rotation on its own: no warning even
+    // with only one connector.
+    let dovetail = Placement {
+        connector: "joint.dovetail".into(),
+        ..round_dowel.clone()
+    };
+    assert!(joint_checks(std::slice::from_ref(&dovetail), 0.0).is_empty());
+
+    // An unknown fix name, or a joint with no single round dowel/peg to
+    // fix, fixes nothing.
+    assert!(fix_joint(std::slice::from_ref(&round_dowel), 0.0, &acap, "nope").is_none());
+    assert!(fix_joint(&doubled, 0.0, &acap, "make_square").is_none());
 }

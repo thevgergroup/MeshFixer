@@ -57,20 +57,20 @@ fn float(params: &Params, name: &str) -> Result<f64, ConnectorError> {
         .map_err(|e| refuse("invalid_parameter", e.to_string()))
 }
 
-/// A regular polygon of radius `r` (corners on the circle), counter-
-/// clockwise, with chordal error at most `tol` (at least 12 sides).
-pub fn circle(r: f64, tol: f64) -> Vec<[f64; 2]> {
-    let n = if r > 0.0 && tol > 0.0 && tol < r {
+/// How many sides a round feature of radius `r` needs for a chordal
+/// error of at most `tol` (at least 12).
+fn round_sides(r: f64, tol: f64) -> usize {
+    if r > 0.0 && tol > 0.0 && tol < r {
         ((std::f64::consts::PI / (1.0 - tol / r).acos()).ceil() as usize).clamp(12, 512)
     } else {
         12
-    };
-    (0..n)
-        .map(|i| {
-            let a = std::f64::consts::TAU * i as f64 / n as f64;
-            [r * a.cos(), r * a.sin()]
-        })
-        .collect()
+    }
+}
+
+/// A regular polygon of radius `r` (corners on the circle), counter-
+/// clockwise, with chordal error at most `tol` (at least 12 sides).
+pub fn circle(r: f64, tol: f64) -> Vec<[f64; 2]> {
+    n_gon(round_sides(r, tol) as u32, r)
 }
 
 /// A closed prism: the convex, counter-clockwise `profile` (in x, y)
@@ -123,6 +123,159 @@ fn dovetail_section(width: f64, s0: f64, s1: f64, cap_b: f64) -> Vec<[f64; 2]> {
         [w(s1) / 2.0, cap_b + s1],
         [-w(s1) / 2.0, cap_b + s1],
     ]
+}
+
+/// A dovetail is placed by dragging a line across the cut face (owner
+/// 2026-11-11, D23): its centre (`Placement.at`) and slide direction
+/// (`Placement.angle`, the same local-x convention every other
+/// connector's turn already uses) come from where the drag started and
+/// ended; how far the groove reaches on each side of that centre, along
+/// the slide direction, is recorded explicitly at placement time — never
+/// re-derived from the cap outline at generate time, since the cap could
+/// differ by the time `split.place_connectors` replays (the module docs'
+/// "replay must be Exact").
+///
+/// `-x` reach is `groove_a`, `+x` reach `groove_b` (both half-lengths
+/// from the centre, mm); `open_a`/`open_b` says whether each end is
+/// **through** (`!= 0.0`: the recorded reach is already far past any
+/// real cap, i.e. effectively unbounded, so the assembly can slide
+/// apart from that side) or **stopped** (`== 0.0`: the groove ends
+/// exactly at the recorded reach, short of the edge on purpose, so the
+/// assembly can't be withdrawn that way). A placement from before this
+/// existed has none of these fields; they default to one fixed length
+/// each way (half of the old `groove_length` default) both through, so
+/// an old save still slides freely both ways as it always did.
+pub struct DovetailReach {
+    pub a: f64,
+    pub b: f64,
+    pub open_a: bool,
+    pub open_b: bool,
+}
+
+pub fn dovetail_reach(params: &Params) -> Result<DovetailReach, ConnectorError> {
+    // `groove_length` is the pre-D23 single symmetric span; still read
+    // as the fallback default (halved) for a placement saved before
+    // `groove_a`/`groove_b` existed, so an old save keeps its old shape.
+    let legacy = params.get_float("groove_length").unwrap_or(200.0) / 2.0;
+    let a = params.get_float("groove_a").unwrap_or(legacy);
+    let b = params.get_float("groove_b").unwrap_or(legacy);
+    let open_a = params.get_float("open_a").map(|v| v != 0.0).unwrap_or(true);
+    let open_b = params.get_float("open_b").map(|v| v != 0.0).unwrap_or(true);
+    Ok(DovetailReach {
+        a: a.max(0.0),
+        b: b.max(0.0),
+        open_a,
+        open_b,
+    })
+}
+
+/// A dowel or peg's cross-section (D22, anti-rotation): round turns
+/// freely in its hole, so a joint with only one round dowel or peg can
+/// rotate about it; the other three shapes each resist turning on their
+/// own. Encoded in `Placement.params` as `shape` (0..=3, see
+/// [`Shape::from_code`]) and, for `NSided`, `sides` (3..=12, default 6 —
+/// a hexagon, the usual printable compromise between a strong flat-to-
+/// flat grip and a mostly-round hole).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Round,
+    Square,
+    /// A regular polygon with `sides` corners on the circle (3..=12; 6
+    /// by default, i.e. a hex).
+    NSided { sides: u32 },
+    /// A "D" profile: a circle with one flat, same as `mesh.split_plane`'s
+    /// own keyed alignment holes (`split::pegs::PegShape::Keyed`).
+    Keyed,
+}
+
+impl Shape {
+    /// Decodes `shape` (0 round, 1 square, 2 N-sided, 3 keyed) and
+    /// `sides` (used only for N-sided), as recorded in a placement's
+    /// params. An out-of-range code reads as Round rather than refusing:
+    /// the fields are plain f64s with no enum validation of their own,
+    /// so this is the parse that can't fail (like every other numeric
+    /// param here), matching how the rest of this module favours a safe
+    /// default over a hard error on a stray value.
+    pub fn from_code(shape: f64, sides: f64) -> Shape {
+        match shape.round() as i64 {
+            1 => Shape::Square,
+            2 => Shape::NSided {
+                sides: (sides.round() as i64).clamp(3, 12) as u32,
+            },
+            3 => Shape::Keyed,
+            _ => Shape::Round,
+        }
+    }
+
+    /// The numeric code this shape records as its `shape` param.
+    pub fn code(self) -> f64 {
+        match self {
+            Shape::Round => 0.0,
+            Shape::Square => 1.0,
+            Shape::NSided { .. } => 2.0,
+            Shape::Keyed => 3.0,
+        }
+    }
+}
+
+/// A regular polygon of radius `r` (corners on the circle), `n` sides,
+/// counter-clockwise, first corner on +x. [`circle`] is this at the side
+/// count a round feature needs for its chordal tolerance; an anti-
+/// rotation N-sided dowel or peg ([`Shape::NSided`]) calls it directly
+/// with its own, much smaller, `sides` (3..=12).
+fn n_gon(n: u32, r: f64) -> Vec<[f64; 2]> {
+    let n = n.max(3);
+    (0..n)
+        .map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / n as f64;
+            [r * a.cos(), r * a.sin()]
+        })
+        .collect()
+}
+
+/// A square of side `side`, centred, counter-clockwise.
+fn square_profile(side: f64) -> Vec<[f64; 2]> {
+    let h = side / 2.0;
+    vec![[-h, -h], [h, -h], [h, h], [-h, h]]
+}
+
+/// A "D" profile: a circle of radius `r` with the part beyond `flat`
+/// (along +x) cut off (as `mesh.split_plane`'s own keyed holes,
+/// `split::pegs::profile`'s `PegShape::Keyed` arm).
+fn keyed_profile(r: f64, flat: f64, tol: f64) -> Vec<[f64; 2]> {
+    let n = round_sides(r, tol);
+    let half = (flat / r).clamp(-1.0, 1.0).acos();
+    let mut out: Vec<[f64; 2]> = (0..=n)
+        .map(|i| {
+            let a = half + (std::f64::consts::TAU - 2.0 * half) * i as f64 / n as f64;
+            [r * a.cos(), r * a.sin()]
+        })
+        .collect();
+    out.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12);
+    out
+}
+
+/// The full-size hole (or pocket) profile for `shape` at diameter `d`:
+/// `Round` is [`circle`]; `Square` a square of side `d` and `Keyed` a
+/// "D" of radius `d/2` with a flat at `0.6` of the radius, both exactly
+/// as `split::pegs::profile` builds its own alignment holes of the same
+/// shapes; `NSided` a regular polygon of `sides` corners on that same
+/// circle.
+fn shape_profile(shape: Shape, d: f64, tol: f64) -> Vec<[f64; 2]> {
+    let r = d / 2.0;
+    match shape {
+        Shape::Round => circle(r, tol),
+        Shape::Square => square_profile(d),
+        Shape::NSided { sides } => n_gon(sides, r),
+        Shape::Keyed => keyed_profile(r, 0.6 * r, tol),
+    }
+}
+
+/// The pin (dowel or peg) profile for `shape`: the hole's own profile at
+/// `d − clearance` (diametral), so every shape narrows by exactly the
+/// same clearance a round pin would.
+fn shape_pin_profile(shape: Shape, d: f64, clearance: f64, tol: f64) -> Vec<[f64; 2]> {
+    shape_profile(shape, d - clearance, tol)
 }
 
 /// What each kind's parameters say, read once.
@@ -189,14 +342,27 @@ pub fn dowel_room(params: &Params) -> Result<f64, ConnectorError> {
     Ok(s.depth_on + s.depth_other + s.gap)
 }
 
+/// The dowel or peg shape a placement's `shape`/`sides` params record
+/// ([`Shape::from_code`]); `0.0`/`6.0` (Round, 6 sides) for a connector
+/// that doesn't have these fields in its spec at all (every joint
+/// connector but dowel and peg) or a placement made before this shape
+/// picker existed, so an old saved connector keeps reading as the round
+/// pin it always was.
+fn shape_of(params: &Params) -> Shape {
+    let shape = params.get_float("shape").unwrap_or(0.0);
+    let sides = params.get_float("sides").unwrap_or(6.0);
+    Shape::from_code(shape, sides)
+}
+
 fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError> {
     match id {
         "joint.dowel" => {
             let s = sizes(params, true)?;
             let tol = chord_tol(s.d, s.clearance);
+            let shape = shape_of(params);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
             let over = s.d;
-            let hole = circle(s.d / 2.0, tol);
+            let hole = shape_profile(shape, s.d, tol);
             let len = dowel_length(params)?;
             if len <= 0.0 {
                 return Err(refuse(
@@ -223,7 +389,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                     part(
                         "dowel",
                         prism_z(
-                            &circle((s.d - s.clearance) / 2.0, tol),
+                            &shape_pin_profile(shape, s.d, s.clearance, tol),
                             mid - len / 2.0,
                             mid + len / 2.0,
                         ),
@@ -236,6 +402,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
         "joint.peg" => {
             let s = sizes(params, true)?;
             let tol = chord_tol(s.d, s.clearance);
+            let shape = shape_of(params);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
             let stick = s.depth_other - s.allowance;
             if stick <= 0.0 {
@@ -250,7 +417,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                     part(
                         "peg",
                         prism_z(
-                            &circle((s.d - s.clearance) / 2.0, tol),
+                            &shape_pin_profile(shape, s.d, s.clearance, tol),
                             a - s.depth_on,
                             b + stick,
                         ),
@@ -259,7 +426,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                     ),
                     part(
                         "counterpart hole",
-                        prism_z(&circle(s.d / 2.0, tol), b - s.d, b + s.depth_other),
+                        prism_z(&shape_profile(shape, s.d, tol), b - s.d, b + s.depth_other),
                         Side::B,
                         JoinKind::Subtract,
                     ),
@@ -269,7 +436,13 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
         "joint.dovetail" => {
             let s = sizes(params, true)?;
             let length = float(params, "length")?;
-            let groove_length = float(params, "groove_length")?.max(length);
+            let reach = dovetail_reach(params)?;
+            // The groove must reach at least as far as the tail itself
+            // on each side, whatever was recorded (a tail that outgrew
+            // its groove after an edit still slides, it just wouldn't
+            // make sense to groove less than the tail that has to pass
+            // through it).
+            let (ga, gb) = (reach.a.max(length / 2.0), reach.b.max(length / 2.0));
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
             let stick = s.depth_other - s.allowance;
             if stick <= 0.0 {
@@ -296,7 +469,7 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                     ),
                     part(
                         "counterpart groove",
-                        prism_x(&groove, -groove_length / 2.0, groove_length / 2.0),
+                        prism_x(&groove, -ga, gb),
                         Side::B,
                         JoinKind::Subtract,
                     ),
@@ -360,7 +533,8 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
 
 /// The connector's outline on side A's cap (local x, y), for drawing it
 /// and for the edge-distance check. A dovetail's is its tail's
-/// footprint (the groove runs out of the piece on purpose).
+/// footprint (the groove runs out of the piece on purpose); a dowel or
+/// peg's is its hole's shape ([`Shape`], D22), not always round.
 pub fn footprint(id: &str, params: &Params) -> Result<Vec<[f64; 2]>, ConnectorError> {
     let d = float(params, "diameter")?;
     let c = float(params, "clearance")?;
@@ -375,6 +549,7 @@ pub fn footprint(id: &str, params: &Params) -> Result<Vec<[f64; 2]>, ConnectorEr
             let screw = float(params, "screw_diameter")?;
             circle((d / 2.0).max((screw + c) / 2.0), chord_tol(d, c))
         }
+        "joint.dowel" | "joint.peg" => shape_profile(shape_of(params), d, chord_tol(d, c)),
         _ => circle(d / 2.0, chord_tol(d, c)),
     })
 }
@@ -415,7 +590,7 @@ pub fn fit_probe(id: &str, params: &Params) -> Result<Option<(Mesh, Mesh)>, Conn
             let tail = dovetail_section(s.d - s.clearance, z0 - b, z1 - b, b);
             prism_x(&tail, -length / 2.0 + margin, length / 2.0 - margin)
         }
-        _ => prism_z(&circle((s.d - s.clearance) / 2.0, tol), z0, z1),
+        _ => prism_z(&shape_pin_profile(shape_of(params), s.d, s.clearance, tol), z0, z1),
     };
     Ok(Some((hole, pin)))
 }

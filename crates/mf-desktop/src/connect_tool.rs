@@ -41,6 +41,13 @@ use crate::{icons, t, theme};
 
 pub const CONNECT: &str = "connect";
 
+/// Delete and Backspace, while Connect is open: both remove the picked
+/// connector, never the active object (owner 2026-11-11).
+const DELETE_KEYS: &[(egui::Key, crate::tools::ToolKey)] = &[
+    (egui::Key::Delete, crate::tools::ToolKey::DeleteSelection),
+    (egui::Key::Backspace, crate::tools::ToolKey::DeleteSelection),
+];
+
 pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
     shell.register_tool(T {
         help: "tool.connect.help",
@@ -48,6 +55,12 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         panel: Some(panel),
         claims,
         viewport_input: input,
+        keys: |_| DELETE_KEYS,
+        on_key: |app, key| {
+            if key == crate::tools::ToolKey::DeleteSelection {
+                split_flow::delete_selected(app);
+            }
+        },
         on_open: |app| {
             app.refusal = None;
             if app.split_flow.joint.is_none() {
@@ -135,30 +148,117 @@ fn full_params(p: &Placement, gap_mm: f64) -> BTreeMap<String, f64> {
         .unwrap_or_else(|_| p.params.clone()) // allow-swallow: an invalid placement's check card says why; the fields show what was set
 }
 
+/// A plain click's default dovetail length each way, mm (owner
+/// 2026-11-11, D23): the drag is the primary way to place one (its
+/// direction and the boundary it's dragged to set the slide direction
+/// and reach exactly), but a click without a drag still has to place
+/// something sensible rather than nothing — half of `length`'s own
+/// default (16 mm) each way, through both ends, the same "it runs out
+/// of the piece on purpose" shape every dovetail had before this (the
+/// old `groove_length: 10_000.0` hack), just not actually unbounded
+/// (`DEFAULT_CLICK_REACH` is already generous next to any real part).
+const DEFAULT_CLICK_REACH: f64 = 50.0;
+
 /// Add a connector of the chosen kind at `at` on the open joint's solid
 /// cut face, with the clearance the Fit class and Machine profile ask
-/// for; it becomes the picked one.
+/// for; it becomes the picked one. A dovetail placed this way (a click,
+/// not a drag) gets a short default reach both ways, through both ends
+/// ([`DEFAULT_CLICK_REACH`]); [`add_dovetail`] is the drag path proper.
 pub fn add_connector(app: &mut MeshFixerApp, at: [f64; 2]) {
     let kind = app.split_flow.kind();
     let clearance = mf_operations::wanted_clearance(&split_flow::settings(app));
-    let f = &mut app.split_flow;
-    let Some(joint) = f.joint.and_then(|j| f.joints.get_mut(j)) else {
-        return;
-    };
     let mut params = BTreeMap::from([(
         "clearance".to_owned(),
         (clearance * 1000.0).round() / 1000.0,
     )]);
     if kind == "joint.dovetail" {
-        // Long enough to run out of the piece both ways, so the tail
-        // slides in from the side.
-        params.insert("groove_length".into(), 10_000.0);
+        params.insert("groove_a".into(), DEFAULT_CLICK_REACH);
+        params.insert("groove_b".into(), DEFAULT_CLICK_REACH);
+        params.insert("open_a".into(), 1.0);
+        params.insert("open_b".into(), 1.0);
     }
+    push_placement(app, kind, at, 0.0, params);
+}
+
+/// Add a dovetail dragged from `start` to `end` on the open joint's
+/// solid cut face (owner 2026-11-11, D23): the line's direction is the
+/// slide direction (`angle`, the usual local-x turn every connector
+/// already has); the groove reaches from its centre to the solid cap's
+/// own outline on each side, along that direction, **through** (so the
+/// recorded reach is `OVER_THE_EDGE` past the boundary, same idea as
+/// the old `groove_length: 10_000.0` hack, just now a real, finite,
+/// recorded number instead of a magic one) unless the drag's own
+/// endpoint already fell short of the boundary, in which case that end
+/// is **stopped** at exactly the dragged length (the person dragged to
+/// a deliberately short reach, so the placement respects that rather
+/// than silently extending it to the edge).
+pub fn add_dovetail(app: &mut MeshFixerApp, start: [f64; 2], end: [f64; 2]) {
+    const OVER_THE_EDGE: f64 = 1000.0;
+    let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+    let len = (dx * dx + dy * dy).sqrt();
+    let (dir, dragged) = if len > 1e-6 {
+        ([dx / len, dy / len], len)
+    } else {
+        ([1.0, 0.0], 0.0)
+    };
+    let at = [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0];
+    let half_dragged = dragged / 2.0;
+    let scale = mm(app);
+    let caps = app.split_flow.geometry();
+    let on = app
+        .split_flow
+        .open_joint()
+        .map_or(JointSide::A, |j| j.transparent.other());
+    // The groove is cut into the *other* piece from `on`: its cap is
+    // the boundary a dragged end can reach (mirrors the live check,
+    // `CheckKind::DovetailStopped`, and `generate`'s own `Side::B`
+    // groove in `mf_parts::connectors::joint`).
+    let groove_cap = caps.as_ref().map(|g| g.cap(on.other()));
+    let reach = |sign: f64| {
+        let d = [dir[0] * sign, dir[1] * sign];
+        let to_edge = groove_cap
+            .and_then(|cap| cap.ray_boundary(at, d))
+            .map(|t| t / scale);
+        match to_edge {
+            // The drag already reached (or passed) the boundary on this
+            // side: through, recorded well past it.
+            Some(edge) if half_dragged >= edge - 1e-6 => (edge + OVER_THE_EDGE, true),
+            // The drag stopped short on purpose: stopped, at exactly
+            // the dragged length (never less than a sliver, so a
+            // same-point click-drag still makes a usable dovetail).
+            _ => (half_dragged.max(DEFAULT_CLICK_REACH * 0.2), false),
+        }
+    };
+    let (reach_a, open_a) = reach(-1.0);
+    let (reach_b, open_b) = reach(1.0);
+    let angle = dir[1].atan2(dir[0]).to_degrees();
+    let clearance = mf_operations::wanted_clearance(&split_flow::settings(app));
+    let params = BTreeMap::from([
+        ("clearance".to_owned(), (clearance * 1000.0).round() / 1000.0),
+        ("groove_a".to_owned(), (reach_a * 10.0).round() / 10.0),
+        ("groove_b".to_owned(), (reach_b * 10.0).round() / 10.0),
+        ("open_a".to_owned(), if open_a { 1.0 } else { 0.0 }),
+        ("open_b".to_owned(), if open_b { 1.0 } else { 0.0 }),
+    ]);
+    push_placement(app, "joint.dovetail", at, angle, params);
+}
+
+fn push_placement(
+    app: &mut MeshFixerApp,
+    kind: &str,
+    at: [f64; 2],
+    angle: f64,
+    params: BTreeMap<String, f64>,
+) {
+    let f = &mut app.split_flow;
+    let Some(joint) = f.joint.and_then(|j| f.joints.get_mut(j)) else {
+        return;
+    };
     joint.placements.push(Placement {
         connector: kind.to_owned(),
         on: joint.transparent.other(),
         at,
-        angle: 0.0,
+        angle,
         params,
     });
     f.selected = Some(joint.placements.len() - 1);
@@ -272,12 +372,21 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         app.split_flow.kind = Some(kinds[i]);
     }
     fit_row(app, ui);
-    // The connectors placed.
+    // Joint-wide checks (D22): about the whole set of connectors, not
+    // one row, so they show above the list rather than under a
+    // connector that isn't really what they're about.
+    let gap_mm = joint.frame.gap / mm(app);
+    for jc in mf_operations::joint_checks(&joint.placements, gap_mm) {
+        joint_check_card(app, ui, j, &jc);
+    }
+    // The connectors placed: each a row (click selects it and, if it has
+    // warnings, toggles them open here) with its own trash button.
     section(ui, &t!("connect.section.placed"));
     let checks = app.split_flow.checks().unwrap_or_default();
     if joint.placements.is_empty() {
         widgets::caption(ui, t!("connect.placed.none"));
     }
+    let mut to_remove = None;
     for (i, p) in joint.placements.iter().enumerate() {
         let n = checks.get(i).map_or(0, Vec::len);
         let label = if n == 0 {
@@ -295,37 +404,54 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             )
         };
         let on = app.split_flow.selected == Some(i);
-        if widgets::button(
-            ui,
-            if on { Kind::Primary } else { Kind::Secondary },
-            if n == 0 {
-                Some(icons::OK)
-            } else {
-                Some(icons::WARNING)
-            },
-            &label,
-            ui.available_width(),
-        )
-        .clicked()
-        {
-            app.split_flow.selected = Some(i);
+        let open = n > 0 && !app.split_flow.collapsed_warnings.contains(&i);
+        ui.horizontal(|ui| {
+            let row_width = ui.available_width() - theme::ICON_SIZE - theme::SPACE_M * 2.0;
+            if widgets::button(
+                ui,
+                if on { Kind::Primary } else { Kind::Secondary },
+                Some(if n == 0 { icons::OK } else { icons::WARNING }),
+                &label,
+                row_width,
+            )
+            .clicked()
+            {
+                app.split_flow.selected = Some(i);
+                if n > 0 {
+                    if open {
+                        app.split_flow.collapsed_warnings.insert(i);
+                    } else {
+                        app.split_flow.collapsed_warnings.remove(&i);
+                    }
+                }
+            }
+            if widgets::icon_button(
+                ui,
+                icons::TRASH,
+                &t!("connect.placed.row_remove", n = i + 1),
+                None,
+                theme::ICON_SIZE + theme::SPACE_M,
+            )
+            .clicked()
+            {
+                to_remove = Some(i);
+            }
+        });
+        if open {
+            for c in checks.get(i).into_iter().flatten() {
+                check_card(app, ui, j, i, c);
+            }
         }
+    }
+    if let Some(i) = to_remove {
+        split_flow::remove_connector(app, j, i);
     }
     if let Some(i) = app
         .split_flow
         .selected
         .filter(|&i| i < joint.placements.len())
     {
-        selected_controls(app, ui, j, i, &joint, &checks);
-    }
-    // Every other connector's warnings too, each with its fix.
-    for (i, list) in checks.iter().enumerate() {
-        if Some(i) == app.split_flow.selected {
-            continue;
-        }
-        for c in list {
-            check_card(app, ui, j, i, c);
-        }
+        selected_controls(app, ui, j, i, &joint);
     }
     // Apply.
     ui.add_space(theme::SPACE_L);
@@ -430,17 +556,11 @@ fn fit_row(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     });
 }
 
-fn selected_controls(
-    app: &mut MeshFixerApp,
-    ui: &mut egui::Ui,
-    j: usize,
-    i: usize,
-    joint: &Joint,
-    checks: &[Vec<Check>],
-) {
+fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usize, joint: &Joint) {
     let p = joint.placements[i].clone();
     let gap_mm = joint.frame.gap / mm(app);
     let full = full_params(&p, gap_mm);
+    let mut removed = false;
     widgets::card(ui, |ui| {
         ui.label(
             RichText::new(t!(
@@ -498,6 +618,99 @@ fn selected_controls(
                     changed |= r.changed();
                 });
             });
+            // Each end's reach and whether it's through (open) or
+            // stopped short of the edge on purpose (D23): `a` is the
+            // drag line's start side (-x, local frame), `b` its end (+x).
+            for (reach_key, open_key, label, through_label) in [
+                (
+                    "groove_a",
+                    "open_a",
+                    t!("connect.param.groove_a"),
+                    t!("connect.param.through_a"),
+                ),
+                (
+                    "groove_b",
+                    "open_b",
+                    t!("connect.param.groove_b"),
+                    t!("connect.param.through_b"),
+                ),
+            ] {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(label).color(theme::TEXT_MUTED));
+                    let mut open = full.get(open_key).copied().unwrap_or(1.0) != 0.0;
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut reach = full.get(reach_key).copied().unwrap_or(0.0);
+                        if !open {
+                            let r = ui.add(
+                                egui::DragValue::new(&mut reach)
+                                    .speed(0.5)
+                                    .range(0.0..=1000.0)
+                                    .suffix(" mm")
+                                    .max_decimals(1),
+                            );
+                            if r.changed() {
+                                edited.params.insert(reach_key.to_owned(), reach);
+                                changed = true;
+                            }
+                        }
+                        if ui.checkbox(&mut open, through_label).changed() {
+                            edited
+                                .params
+                                .insert(open_key.to_owned(), if open { 1.0 } else { 0.0 });
+                            changed = true;
+                        }
+                    });
+                });
+            }
+        }
+        if p.connector == "joint.dowel" || p.connector == "joint.peg" {
+            // The cross-section (D22, anti-rotation): round, square, an
+            // N-sided polygon (with its own `sides` field, 3..=12) or
+            // keyed. `mf_parts::connectors::joint::Shape` is the single
+            // source of truth for the encoding; the panel only ever
+            // reads/writes the same `shape`/`sides` params it records.
+            ui.label(RichText::new(t!("connect.param.shape")).color(theme::TEXT_MUTED));
+            {
+                let code = full.get("shape").copied().unwrap_or(0.0);
+                let sides = full.get("sides").copied().unwrap_or(6.0);
+                let shape = mf_parts::connectors::joint::Shape::from_code(code, sides);
+                let labels = [
+                    t!("connect.shape.round"),
+                    t!("connect.shape.square"),
+                    t!("connect.shape.nsided"),
+                    t!("connect.shape.keyed"),
+                ];
+                let options: Vec<(&str, &str, bool)> =
+                    labels.iter().map(|l| (l.as_str(), l.as_str(), true)).collect();
+                let current = shape.code() as usize;
+                if let (Some(i), _) = widgets::segmented(ui, &options, current) {
+                    edited.params.insert("shape".to_owned(), i as f64);
+                    changed = true;
+                }
+            }
+            if matches!(
+                mf_parts::connectors::joint::Shape::from_code(
+                    full.get("shape").copied().unwrap_or(0.0),
+                    full.get("sides").copied().unwrap_or(6.0),
+                ),
+                mf_parts::connectors::joint::Shape::NSided { .. }
+            ) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(t!("connect.param.sides")).color(theme::TEXT_MUTED));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let mut sides = full.get("sides").copied().unwrap_or(6.0);
+                        let r = ui.add(
+                            egui::DragValue::new(&mut sides)
+                                .speed(1.0)
+                                .range(3.0..=12.0),
+                        );
+                        if r.changed() {
+                            edited.params.insert("sides".to_owned(), sides.round());
+                            changed = true;
+                        }
+                    });
+                });
+            }
         }
         if changed && let Some(jt) = app.split_flow.joints.get_mut(j) {
             jt.placements[i] = edited;
@@ -506,19 +719,16 @@ fn selected_controls(
         if widgets::wide_button(
             ui,
             Kind::Secondary,
-            Some(icons::CLOSE),
-            &t!("connect.delete"),
+            Some(icons::TRASH),
+            &t!("connect.remove"),
         )
         .clicked()
         {
-            if let Some(jt) = app.split_flow.joints.get_mut(j) {
-                jt.placements.remove(i);
-            }
-            app.split_flow.selected = None;
+            removed = true;
         }
     });
-    for c in checks.get(i).into_iter().flatten() {
-        check_card(app, ui, j, i, c);
+    if removed {
+        split_flow::remove_connector(app, j, i);
     }
 }
 
@@ -545,6 +755,7 @@ fn check_card(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usize, c: 
             CheckKind::EdgeDistance | CheckKind::OffCap => t!("connect.fix.inwards"),
             CheckKind::DowelLength => t!("connect.fix.dowel"),
             CheckKind::Fit => t!("connect.fix.fit"),
+            CheckKind::DovetailStopped(_) => t!("connect.fix.dovetail_edge"),
         };
         fix = widgets::wide_button(ui, Kind::Secondary, None, &label).clicked();
     });
@@ -581,6 +792,70 @@ pub fn apply_fix(app: &mut MeshFixerApp, j: usize, i: usize, kind: CheckKind) {
         }
         Ok(None) => app.status = Some(t!("connect.fix.none")),
         Err(e) => app.status = Some(t!("connect.fix.failed", reason = e.to_string())),
+    }
+}
+
+/// A joint-wide warning (D22): not about one connector row, so it has
+/// no index of its own and no `connect.check` "Connector N:" prefix;
+/// one or more named fixes, each its own button (today's only one,
+/// `SingleRoundDowel`, offers two).
+fn joint_check_card(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    j: usize,
+    jc: &mf_operations::JointCheck,
+) {
+    let mut fix = None;
+    widgets::card(ui, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(icons::WARNING)
+                    .font(icons::font(theme::ICON_SIZE))
+                    .color(theme::LOOSE_PIECE),
+            );
+            ui.add(egui::Label::new(RichText::new(&jc.message).color(theme::TEXT)).wrap());
+        });
+        for &name in &jc.fixes {
+            let label = match name {
+                "add_second_dowel" => t!("connect.fix.add_second_dowel"),
+                "make_square" => t!("connect.fix.make_square"),
+                _ => continue,
+            };
+            if widgets::wide_button(ui, Kind::Secondary, None, &label).clicked() {
+                fix = Some(name);
+            }
+        }
+    });
+    ui.add_space(theme::SPACE_XS);
+    if let Some(name) = fix {
+        apply_joint_fix(app, j, name);
+    }
+}
+
+/// Apply a joint-wide check's one-click fix (see
+/// [`mf_operations::fix_joint`]): the solid piece's own cap bounds the
+/// second dowel's placement, so this needs the joint's geometry read in
+/// (same as a per-connector fix).
+fn apply_joint_fix(app: &mut MeshFixerApp, j: usize, name: &str) {
+    let (Some(joint), Some(g)) = (
+        app.split_flow.joints.get(j).cloned(),
+        app.split_flow.geometry(),
+    ) else {
+        return;
+    };
+    let gap_mm = joint.frame.gap / mm(app);
+    let cap = g.cap(joint.solid());
+    match mf_operations::fix_joint(&joint.placements, gap_mm, cap, name) {
+        Some(placements) => {
+            let n = placements.len();
+            if let Some(jt) = app.split_flow.joints.get_mut(j) {
+                jt.placements = placements;
+            }
+            if n > joint.placements.len() {
+                app.split_flow.selected = Some(n - 1);
+            }
+        }
+        None => app.status = Some(t!("connect.fix.none")),
     }
 }
 
@@ -849,11 +1124,27 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                         }
                     })
                 }
+                // A dovetail is placed by dragging a line across the
+                // cut face, not a single click (owner 2026-11-11, D23):
+                // the press starts the line; every other kind still
+                // places on `Click` below, unchanged.
+                Some(Hit::Cap(uv)) if app.split_flow.kind() == "joint.dovetail" => {
+                    Some(Drag::PlaceDovetail { start: uv })
+                }
                 _ => None,
             };
         }
         Some(ToolPointer::Move(px)) | Some(ToolPointer::End(px)) => {
             let drag = app.split_flow.drag;
+            if let Some(Drag::PlaceDovetail { start }) = drag {
+                if matches!(input.pointer, Some(ToolPointer::End(_))) {
+                    let end = state.on_plane(px).unwrap_or(start);
+                    app.split_flow.drag = None;
+                    add_dovetail(app, start, end);
+                }
+                app.split_flow.hover = None;
+                return Input::Consumed;
+            }
             let joint = &mut app.split_flow.joints[j];
             match drag {
                 Some(Drag::Move { index, grab }) => {
@@ -897,7 +1188,9 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                             .insert("depth_on".into(), (d * 10.0).round() / 10.0);
                     }
                 }
-                None => {}
+                // Handled above (returns early): kept here only so the
+                // match stays exhaustive as `Drag` grows.
+                Some(Drag::PlaceDovetail { .. }) | None => {}
             }
             if matches!(input.pointer, Some(ToolPointer::End(_))) {
                 app.split_flow.drag = None;
@@ -981,7 +1274,9 @@ fn draw_connectors(
         };
         // The parts: its own (into the solid piece, behind the face:
         // faint), the counterpart (into the see-through piece), the
-        // loose dowel.
+        // loose dowel; every one flattened onto the solid cap
+        // (`flatten_on_cap`, I4) so it draws coincident with its own
+        // footprint instead of offset by perspective parallax.
         for part in previews.get(i).into_iter().flatten() {
             let (colour, width) = match part.side {
                 Some(s) if s == solid => (own.gamma_multiply(0.45), 1.0),
@@ -989,7 +1284,11 @@ fn draw_connectors(
                 None => (theme::TEXT_MUTED.gamma_multiply(0.7), 1.0),
             };
             for e in &part.edges {
-                if let (Some(a), Some(b)) = (at(e[0]), at(e[1])) {
+                let (a, b) = (
+                    split_flow::flatten_on_cap(&joint.frame, solid, e[0]),
+                    split_flow::flatten_on_cap(&joint.frame, solid, e[1]),
+                );
+                if let (Some(a), Some(b)) = (at(a), at(b)) {
                     painter.line_segment([a, b], egui::Stroke::new(width, colour));
                 }
             }

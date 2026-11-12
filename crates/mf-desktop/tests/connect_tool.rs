@@ -498,3 +498,359 @@ fn clicking_another_joints_cut_face_opens_it() {
     settle(&mut h);
     still(&mut h, "volume-other-joint");
 }
+
+/// I1 (owner 2026-11-11): Delete and Backspace, while Connect is open,
+/// remove only the picked connector — never the active object, whether
+/// or not a connector is picked.
+#[test]
+fn delete_never_falls_through_to_the_active_object() {
+    require_gpu!("delete_never_falls_through_to_the_active_object");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    assert_eq!(objects(&h).len(), 2, "the ball's two pieces, no more");
+
+    // With nothing picked, Delete does nothing (I1): not the connector,
+    // not the object.
+    {
+        let a = h.state_mut();
+        a.split_flow.selected = None;
+    }
+    h.event(egui::Event::PointerMoved(egui::pos2(
+        WINDOW.0 * 0.6,
+        WINDOW.1 * 0.5,
+    )));
+    h.step();
+    h.key_press(egui::Key::Delete);
+    settle(&mut h);
+    assert_eq!(
+        placements(&h).len(),
+        1,
+        "nothing picked: Delete removes nothing"
+    );
+    assert_eq!(objects(&h).len(), 2, "and not the object either");
+
+    // Picked: Delete removes the connector, never the object (the
+    // original bug: the global object.delete ran instead).
+    {
+        let a = h.state_mut();
+        a.split_flow.selected = Some(0);
+    }
+    settle(&mut h);
+    h.key_press(egui::Key::Delete);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 0, "Delete removed the connector");
+    assert_eq!(
+        objects(&h).len(),
+        2,
+        "the object was never touched: {:?}",
+        objects(&h)
+    );
+    assert!(h.state().active.is_some(), "nothing was deleted from the tree");
+}
+
+/// I2 (owner 2026-11-11): each row under "Connectors on this joint" has
+/// its own trash button, and the selected connector's details block has
+/// a "Remove connector" button; both remove just that connector.
+#[test]
+fn rows_and_the_details_block_have_their_own_remove_button() {
+    require_gpu!("rows_and_the_details_block_have_their_own_remove_button");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p1 = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p1);
+    settle(&mut h);
+    h.get_by_label("Peg").click();
+    settle(&mut h);
+    let p2 = cap_point(&h, [12.0, 0.0]);
+    click_at(&mut h, p2);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 2);
+
+    // The details block's "Remove connector" removes the selected one
+    // (connector 2, the peg, is selected after placing it).
+    assert_eq!(h.state().split_flow.selected, Some(1));
+    scroll_and_click(&mut h, "Remove connector");
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1, "the details block's button removed it");
+    assert_eq!(placements(&h)[0].connector, "joint.dowel");
+
+    // Row 1's own trash button removes it without selecting it first.
+    assert_eq!(h.state().split_flow.selected, None);
+    scroll_and_click(&mut h, "Remove connector 1");
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 0, "the row's trash button removed it");
+}
+
+/// I3 (owner 2026-11-11): a "N warnings" row expands on click to show
+/// each warning in plain words with its one-click fix, and collapses
+/// again on a second click.
+#[test]
+fn a_warning_row_expands_on_click_to_show_its_fix() {
+    require_gpu!("a_warning_row_expands_on_click_to_show_its_fix");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p1 = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p1);
+    settle(&mut h);
+    {
+        let a = h.state_mut();
+        let j = a.split_flow.joint.unwrap();
+        a.split_flow.joints[j].placements[0]
+            .params
+            .insert("depth_on".into(), 45.0);
+    }
+    settle(&mut h);
+    assert!(
+        h.state().split_flow.checks().unwrap()[0]
+            .iter()
+            .any(|c| c.kind == CheckKind::Breakout(JointSide::A)),
+        "a breakout warning is live"
+    );
+
+    // Shown by default (I3 keeps today's always-visible behaviour as
+    // the open state): the fix button is already there.
+    assert!(
+        !h.state().split_flow.collapsed_warnings.contains(&0),
+        "warnings open by default"
+    );
+    scroll_and_click(&mut h, "1. Dowel: 1 warning");
+    settle(&mut h);
+    assert!(
+        h.state().split_flow.collapsed_warnings.contains(&0),
+        "a click on the row collapses its warnings"
+    );
+
+    // Click again: it reopens, and the fix still works.
+    scroll_and_click(&mut h, "1. Dowel: 1 warning");
+    settle(&mut h);
+    assert!(!h.state().split_flow.collapsed_warnings.contains(&0));
+    scroll_and_click(&mut h, "Make it shallower");
+    settle(&mut h);
+    let checks = h.state().split_flow.checks().unwrap();
+    assert!(checks[0].is_empty(), "the fix cleared it: {checks:?}");
+}
+
+/// I4 (owner 2026-11-11): a connector's counterpart is drawn flattened
+/// onto the solid cap (`flatten_on_cap`), so it lands at the same 2D
+/// place in the joint frame as the connector's own footprint — no
+/// perspective offset between the two, coincident when viewed along the
+/// joint normal.
+#[test]
+fn the_counterpart_is_flattened_onto_the_same_place_as_the_footprint() {
+    require_gpu!("the_counterpart_is_flattened_onto_the_same_place_as_the_footprint");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    h.get_by_label("Magnet").click();
+    settle(&mut h);
+    let pm = cap_point(&h, [9.0, -6.0]);
+    click_at(&mut h, pm);
+    settle(&mut h);
+    let p = placements(&h)[0].clone();
+    assert_eq!(p.connector, "joint.magnet");
+
+    let a = h.state();
+    let joint = a.split_flow.open_joint().unwrap().clone();
+    let scale = mf_desktop::split_flow::mm(a);
+    let parts = mf_operations::placed_parts(&joint.frame, &p, scale).unwrap();
+    let solid = joint.solid();
+    let counterpart = parts
+        .iter()
+        .find(|part| part.side.is_some_and(|s| s != solid))
+        .expect("the magnet has a counterpart pocket");
+    // The counterpart's true depth differs from the solid cap's (it's
+    // behind the *other* cap): the bug this guards against is real here,
+    // not vacuously fixed.
+    let depths: Vec<f64> = counterpart
+        .world
+        .vertices()
+        .map(|(_, vp)| (DVec3::from(vp) - joint.frame.cap_point(solid)).dot(joint.frame.normal))
+        .collect();
+    assert!(
+        depths.iter().any(|d| d.abs() > 1.0),
+        "the counterpart's true depth is away from the solid cap: {depths:?}"
+    );
+    // Every vertex of the counterpart part, flattened onto the solid
+    // cap, lands at the placement's own 2D place (I4): before the fix,
+    // its true depth put it elsewhere once drawn, offset from its own
+    // footprint by perspective.
+    for (_, vp) in counterpart.world.vertices() {
+        let v = DVec3::from(vp);
+        let flat = mf_desktop::split_flow::flatten_on_cap(&joint.frame, solid, v);
+        let uv = joint.frame.to_2d(flat);
+        let r = ((uv[0] - p.at[0]).powi(2) + (uv[1] - p.at[1]).powi(2)).sqrt();
+        assert!(
+            r < 10.0,
+            "a flattened counterpart vertex at {uv:?} is {r} mm from the \
+             footprint centre {:?}",
+            p.at
+        );
+    }
+}
+
+/// D23 (owner 2026-11-11): a dovetail is placed by dragging a line
+/// across the cut face, not a single click; the drag's direction
+/// becomes the slide direction (`angle`), its centre `at`, and each end
+/// reaches the cap's own boundary (through) unless the drag itself
+/// stopped short of it.
+#[test]
+fn dragging_places_a_dovetail_along_the_drag_line() {
+    require_gpu!("dragging_places_a_dovetail_along_the_drag_line");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    h.get_by_label("Dovetail").click();
+    settle(&mut h);
+
+    // A plain click (no drag) still places one, with a short default
+    // reach both ways, through (the fallback the owner asked for).
+    let p = cap_point(&h, [10.0, 10.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    assert_eq!(placements(&h)[0].connector, "joint.dovetail");
+    assert!(placements(&h)[0].params["groove_a"] > 0.0);
+    assert_eq!(placements(&h)[0].params["open_a"], 1.0);
+    still(&mut h, "dovetail-click");
+
+    // A real drag along +x: the slide direction (angle) is ~0 degrees,
+    // and the centre is the drag's own midpoint.
+    let (from, to) = (cap_point(&h, [-15.0, 5.0]), cap_point(&h, [5.0, 5.0]));
+    drag(&mut h, from, to);
+    settle(&mut h);
+    let ps = placements(&h);
+    assert_eq!(ps.len(), 2, "the drag added a second dovetail");
+    let dragged = &ps[1];
+    assert!(
+        dragged.angle.abs() < 5.0 || (dragged.angle.abs() - 180.0).abs() < 5.0,
+        "dragged along +x, angle {}",
+        dragged.angle
+    );
+    assert!(
+        (dragged.at[0] - -5.0).abs() < 1.0 && (dragged.at[1] - 5.0).abs() < 1.0,
+        "centred on the drag's midpoint: {:?}",
+        dragged.at
+    );
+    still(&mut h, "dovetail-dragged");
+}
+
+/// D23: the selected dovetail's details block exposes each end's reach
+/// and its through/stopped checkbox; unchecking "Through" reveals a
+/// length field for that end, and editing it updates the placement.
+#[test]
+fn the_details_block_edits_each_dovetail_ends_reach_and_open_state() {
+    require_gpu!("the_details_block_edits_each_dovetail_ends_reach_and_open_state");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    h.get_by_label("Dovetail").click();
+    settle(&mut h);
+    let p = cap_point(&h, [0.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    assert_eq!(placements(&h)[0].params["open_a"], 1.0, "through by default");
+
+    // Unchecking the start end's "Through" box makes it stopped.
+    scroll_and_click(&mut h, "Through (start end)");
+    settle(&mut h);
+    let ps = placements(&h);
+    assert_eq!(ps[0].params["open_a"], 0.0, "unchecked: now stopped");
+    still(&mut h, "dovetail-stopped");
+}
+
+/// D22 (owner 2026-11-11): a dowel's shape picker in the details block
+/// switches its cross-section, recorded in the placement so replay is
+/// Exact; "N-sided" reveals a "Sides" field.
+#[test]
+fn the_dowel_shape_picker_switches_its_cross_section() {
+    require_gpu!("the_dowel_shape_picker_switches_its_cross_section");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h)[0].connector, "joint.dowel");
+    assert!(
+        !placements(&h)[0].params.contains_key("shape"),
+        "round by default: no shape param set yet"
+    );
+    still(&mut h, "dowel-shape-round");
+
+    scroll_and_click(&mut h, "Square");
+    settle(&mut h);
+    assert_eq!(placements(&h)[0].params["shape"], 1.0);
+    still(&mut h, "dowel-shape-square");
+
+    scroll_and_click(&mut h, "N-sided");
+    settle(&mut h);
+    assert_eq!(placements(&h)[0].params["shape"], 2.0);
+    // The "Sides" field appears once N-sided is picked.
+    h.get_by_label("Sides");
+    still(&mut h, "dowel-shape-nsided");
+}
+
+/// D22: a joint with a single round dowel warns that the parts can
+/// rotate about it, above the connector list; "Make square" fixes it in
+/// place and the warning clears.
+#[test]
+fn a_single_round_dowel_warns_about_rotation_in_the_joint_summary() {
+    require_gpu!("a_single_round_dowel_warns_about_rotation_in_the_joint_summary");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    assert_eq!(placements(&h)[0].connector, "joint.dowel");
+
+    h.get_by_label("The parts can rotate around one round dowel. Add a second, or use a square \
+                    or keyed shape");
+    still(&mut h, "rotation-warning");
+
+    scroll_and_click(&mut h, "Make square");
+    settle(&mut h);
+    assert_eq!(placements(&h)[0].params["shape"], 1.0);
+    assert!(
+        h.query_by_label(
+            "The parts can rotate around one round dowel. Add a second, or use a square or \
+             keyed shape"
+        )
+        .is_none(),
+        "the fix cleared the warning"
+    );
+    still(&mut h, "rotation-fixed");
+}

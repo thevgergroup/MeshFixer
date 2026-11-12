@@ -161,6 +161,10 @@ pub enum ToolKey {
     Mode(mf_render::GizmoMode),
     /// Sculpt: switch the active brush.
     Brush(mf_operations::sculpt::BrushKind),
+    /// Connect: remove the picked connector (Delete, Backspace). A tool
+    /// that takes this key owns it while open: the app's own Delete
+    /// (`object.delete`) never runs instead (owner 2026-11-11).
+    DeleteSelection,
 }
 
 /// The keys the open tool (if any) takes.

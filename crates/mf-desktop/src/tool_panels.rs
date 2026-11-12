@@ -81,11 +81,11 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         keys: |app| crate::tools::tool_keys(app.interactive.as_ref()),
         on_key: |app, key| match key {
             crate::tools::ToolKey::Mode(mode) => app.set_transform_mode(mode),
-            // Transform's own keys never include a brush shortcut (that's
-            // Sculpt's `keys` table); unreachable here, but `ToolKey` is one
-            // enum shared across tools, so every tool's `on_key` must match
-            // it exhaustively.
-            crate::tools::ToolKey::Brush(_) => {}
+            // Transform's own keys never include a brush shortcut or
+            // Connect's delete (those are other tools' `keys` tables);
+            // unreachable here, but `ToolKey` is one enum shared across
+            // tools, so every tool's `on_key` must match it exhaustively.
+            crate::tools::ToolKey::Brush(_) | crate::tools::ToolKey::DeleteSelection => {}
         },
         overlays: |_| Some(crate::tools::transform_legend()),
         hides_defects: |_| true,

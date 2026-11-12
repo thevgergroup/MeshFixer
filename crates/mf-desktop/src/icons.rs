@@ -97,6 +97,7 @@ pub const DROP_TO_PLATE: &str = "\u{E05C}"; // arrow-line-down
 pub const RESET: &str = "\u{E038}"; // arrow-counter-clockwise
 pub const SNAP: &str = "\u{E680}"; // magnet
 pub const REMOVE: &str = "\u{EC54}"; // broom
+pub const TRASH: &str = "\u{E4A6}"; // trash
 pub const COMPACT: &str = "\u{E09E}"; // arrows-in-simple
 pub const CHECK: &str = "\u{E182}";
 pub const OK: &str = "\u{E184}"; // check-circle

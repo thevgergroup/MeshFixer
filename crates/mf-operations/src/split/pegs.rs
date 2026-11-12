@@ -447,6 +447,20 @@ pub fn compose(first: &Provenance, second: &Provenance) -> Provenance {
 }
 
 /// `mesh op tool` with the boolean engine, `tool` in `mesh`'s frame.
+///
+/// `tool` is always generated geometry (a hole, a peg, a connector
+/// part): never itself one of the command's own operands, even though
+/// `mf_boolean::boolean` tags every face it keeps from `tool` as
+/// "operand 1" (its own convention for "the second mesh passed in",
+/// `crate::mf_boolean::window`'s `BooleanOutput::provenance` doc). A
+/// caller with two real document operands (`split.place_connectors`,
+/// `a`/`b`) has its own, real operand 1, so leaving the boolean's tag in
+/// place would make a face of `tool` misread as a face of that operand
+/// (MF-ISSUE: "a created face names face N of operand 'side_b', which
+/// isn't a face of it" — the id only coincidentally fell in range often
+/// enough to go unnoticed). `tool`'s faces have no operand of their own
+/// in this command, so their tag is dropped, like any other newly
+/// created geometry ([`created_provenance`](super::joints)).
 pub fn apply_tool(
     mesh: &Mesh,
     tool: &Mesh,
@@ -468,5 +482,9 @@ pub fn apply_tool(
                 },
             },
         )?;
-    Ok((out.mesh, out.provenance))
+    let mut provenance = out.provenance;
+    for (_, s) in &mut provenance.created_faces {
+        s.operands.retain(|&(k, _)| k != 1);
+    }
+    Ok((out.mesh, provenance))
 }

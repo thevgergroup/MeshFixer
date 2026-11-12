@@ -42,6 +42,18 @@ parameters:
     min: 0.0
     unit: mm
     description: "The cut's own gap between the two caps"
+  - name: shape
+    type: float
+    default: 0.0
+    min: 0.0
+    max: 3.0
+    description: "Cross-section, as an anti-rotation shape (D22): 0 round, 1 square, 2 N-sided (see sides), 3 keyed (a D, one flat)"
+  - name: sides
+    type: float
+    default: 6.0
+    min: 3.0
+    max: 12.0
+    description: "Corners of the N-sided shape (only read when shape is 2)"
 preconditions:
   - the clearance is less than the diameter
   - the hole is deeper than the length allowance

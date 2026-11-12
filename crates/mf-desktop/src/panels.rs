@@ -1066,20 +1066,25 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             if crumbs.is_empty() {
                 widgets::caption(ui, t!("history.empty"));
             }
-            for (id, label, reached) in crumbs {
+            for (id, label, details, reached) in crumbs {
                 let text = if reached {
                     RichText::new(&label)
                 } else {
                     RichText::new(&label).color(theme::TEXT_MUTED).italics()
                 };
                 let w = ui.available_width();
+                let tip = if details.is_empty() {
+                    t!("history.tip")
+                } else {
+                    format!("{}\n\n{details}", t!("history.tip"))
+                };
                 if ui
                     .add_enabled(
                         idle,
                         egui::Button::selectable(id == current, text)
                             .min_size(egui::vec2(w, theme::ROW_HEIGHT)),
                     )
-                    .on_hover_text(t!("history.tip"))
+                    .on_hover_text(tip)
                     .clicked()
                 {
                     clicked = Some(id);

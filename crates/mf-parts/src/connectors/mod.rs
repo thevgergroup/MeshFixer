@@ -6,6 +6,7 @@
 pub mod clasp;
 pub mod flap;
 pub mod hinge;
+pub mod hole_profile;
 pub mod joint;
 pub mod thread;
 

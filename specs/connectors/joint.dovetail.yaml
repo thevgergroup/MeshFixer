@@ -24,7 +24,31 @@ parameters:
     default: 200.0
     min: 0.5
     unit: mm
-    description: "Length of the groove along the tail's direction (long enough to run out of the piece, so the tail slides in from the side)"
+    description: "Deprecated (D23): the pre-drag single symmetric groove span, kept only so a placement saved before groove_a/groove_b existed still reads the same shape. New placements use groove_a and groove_b instead."
+  - name: groove_a
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "How far the groove reaches from the placement's centre towards its drag line's start (the -x end, D23)"
+  - name: groove_b
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "How far the groove reaches from the placement's centre towards its drag line's end (the +x end, D23)"
+  - name: open_a
+    type: float
+    default: 1.0
+    min: 0.0
+    max: 1.0
+    description: "The -x end is through (1, reaches well past the cap so the assembly slides apart that way) or stopped (0, ends exactly at groove_a, short of the edge on purpose)"
+  - name: open_b
+    type: float
+    default: 1.0
+    min: 0.0
+    max: 1.0
+    description: "The +x end is through (1) or stopped (0), see open_a"
   - name: depth_on
     type: float
     default: 3.0
