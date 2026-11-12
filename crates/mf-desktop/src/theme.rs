@@ -102,6 +102,72 @@ pub fn rgba(c: Color32) -> [f32; 4] {
     [c.r(), c.g(), c.b(), c.a()].map(|v| f32::from(v) / 255.0)
 }
 
+/// Object colours (UI plan §11, View ▸ Colour objects): a muted palette,
+/// moderate saturation (~38%) so the chrome's defect and selection
+/// colours (`HOLE`'s orange, `CRACK`'s magenta, `SELECTED`'s cyan…) stay
+/// readable over it and the model still reads apart from the dark chrome.
+/// Nine hues spread evenly, at the same lightness so no object reads as
+/// "more important" just from its slot.
+pub const OBJECT_PALETTE: [Color32; 9] = [
+    Color32::from_rgb(121, 158, 195), // blue
+    Color32::from_rgb(195, 152, 121), // clay orange
+    Color32::from_rgb(121, 195, 158), // green
+    Color32::from_rgb(170, 121, 195), // violet
+    Color32::from_rgb(195, 183, 121), // ochre
+    Color32::from_rgb(195, 121, 146), // rose
+    Color32::from_rgb(121, 183, 195), // teal
+    Color32::from_rgb(152, 195, 121), // moss
+    Color32::from_rgb(195, 140, 121), // terracotta
+];
+
+/// A shade of `OBJECT_PALETTE[index]`, lightened or darkened by `variant`
+/// (siblings in a linked group, 0 the base shade, alternating out from
+/// there): a related colour, not a jarring, unrelated one.
+fn object_shade(index: usize, variant: u32) -> Color32 {
+    let base = OBJECT_PALETTE[index % OBJECT_PALETTE.len()];
+    if variant == 0 {
+        return base;
+    }
+    // ±1 step 12%, ±2 step 24%, alternating lighter/darker: a family of
+    // shades that stays inside a sane range (never near-black or
+    // near-white) for up to a handful of siblings.
+    let step = variant.div_ceil(2) as f32 * 0.12;
+    let lighten = variant % 2 == 1;
+    let mix = |c: u8| -> u8 {
+        let c = f32::from(c);
+        let target = if lighten { 255.0 } else { 0.0 };
+        (c + (target - c) * step).round().clamp(0.0, 255.0) as u8
+    };
+    Color32::from_rgb(mix(base.r()), mix(base.g()), mix(base.b()))
+}
+
+/// The object colour for an object created in `creation_order` (an
+/// `ObjectId`'s own value: monotonic, never reused, so stable for the
+/// session), optionally sharing `group` with other objects (a connector's
+/// linked parts): the group's members share a hue and vary only in shade,
+/// keyed on `creation_order` so each member of the group gets a distinct,
+/// stable variant.
+pub fn object_color(creation_order: u64, group: Option<&str>) -> Color32 {
+    match group {
+        Some(g) => {
+            let index = (hash_str(g) % OBJECT_PALETTE.len() as u64) as usize;
+            object_shade(index, (creation_order % 5) as u32)
+        }
+        None => object_shade((creation_order % OBJECT_PALETTE.len() as u64) as usize, 0),
+    }
+}
+
+/// A small stable string hash (FNV-1a): just needs to spread group names
+/// across the palette, not resist attack.
+fn hash_str(s: &str) -> u64 {
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in s.bytes() {
+        h ^= u64::from(b);
+        h = h.wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
 /// The 3D view's palette, from these tokens.
 pub fn palette() -> mf_render::Palette {
     mf_render::Palette {
@@ -306,4 +372,78 @@ fn visuals() -> egui::Visuals {
     w.open.weak_bg_fill = CONTROL;
     w.open.corner_radius = radius;
     v
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first several creation-order slots get visibly distinct
+    /// colours (the owner's complaint: a multi-object model's parts all
+    /// read the same).
+    #[test]
+    fn the_first_few_objects_get_distinct_colours() {
+        let colors: Vec<Color32> = (0..OBJECT_PALETTE.len() as u64)
+            .map(|id| object_color(id, None))
+            .collect();
+        for (i, a) in colors.iter().enumerate() {
+            for (j, b) in colors.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "slot {i} and {j} got the same colour");
+                }
+            }
+        }
+    }
+
+    /// The same object always gets the same colour (stable across frames
+    /// and across a session: it's keyed on the id alone).
+    #[test]
+    fn the_same_id_always_gets_the_same_colour() {
+        for id in [0, 1, 7, 42, 1_000_000] {
+            assert_eq!(object_color(id, None), object_color(id, None));
+        }
+    }
+
+    /// Past the palette's length, colours repeat rather than panic (a
+    /// document with more objects than palette slots).
+    #[test]
+    fn colours_wrap_past_the_palette_length() {
+        let n = OBJECT_PALETTE.len() as u64;
+        assert_eq!(object_color(0, None), object_color(n, None));
+    }
+
+    /// Linked parts (a connector's peg and its hole) share a hue — the
+    /// group's base palette slot — and differ only in shade, so they read
+    /// as a related family, not two unrelated objects.
+    #[test]
+    fn group_siblings_share_a_hue_but_vary_in_shade() {
+        let a = object_color(10, Some("joint-1"));
+        let b = object_color(11, Some("joint-1"));
+        assert_ne!(a, b, "siblings should get distinct shades");
+        // Same hue family: at least two of the three channels keep their
+        // relative order (a tinted/shaded version of the same base,
+        // rather than an unrelated hue).
+        let base_index = OBJECT_PALETTE
+            .iter()
+            .position(|&c| {
+                let variants: Vec<Color32> = (0..5).map(|v| object_shade_for_test(c, v)).collect();
+                variants.contains(&a) && variants.contains(&b)
+            });
+        assert!(base_index.is_some(), "both siblings should come from the same base shade family");
+    }
+
+    /// A different group gets a different (stable) base hue.
+    #[test]
+    fn different_groups_can_get_different_hues() {
+        let hues: std::collections::HashSet<Color32> = ["alpha", "bravo", "charlie", "delta"]
+            .iter()
+            .map(|g| object_color(0, Some(g)))
+            .collect();
+        assert!(hues.len() > 1, "distinct group names should not all collide on one hue");
+    }
+
+    fn object_shade_for_test(base: Color32, variant: u32) -> Color32 {
+        let index = OBJECT_PALETTE.iter().position(|&c| c == base).expect("test base is in the palette");
+        object_shade(index, variant)
+    }
 }

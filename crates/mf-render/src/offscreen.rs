@@ -100,6 +100,7 @@ pub fn render_image_with_chunk_limit(
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(crate::FaceStates::ALL),
+        object_color: None,
     }];
     let items = if mesh.is_empty() { &items[..0] } else { &items };
     target.draw(
@@ -171,6 +172,7 @@ pub fn render_roles_xray(
             model: *model,
             inactive: false,
             shown_states: u32::from(crate::FaceStates::ALL),
+            object_color: None,
         })
         .collect();
     target.draw(

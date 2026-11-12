@@ -889,6 +889,8 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("transform.uniform", "Uniform scale"),
     ("transform.uniform.tip", "Scale fields change together"),
     ("view.clay", "Clay"),
+    ("view.clay_objects", "Clay"),
+    ("view.object_colors", "Colour objects"),
     ("view.overlays", "Overlays…"),
     ("view.pseudo", "Pseudo-locale (debug)"),
     ("view.studio", "Studio"),

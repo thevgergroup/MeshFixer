@@ -138,6 +138,7 @@ fn gizmo_draws_over_geometry() {
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(FaceStates::ALL),
+        object_color: None,
     }];
 
     let gizmo = Gizmo {
@@ -201,6 +202,7 @@ fn plate_is_hidden_behind_objects_resting_on_it() {
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(FaceStates::ALL),
+        object_color: None,
     }];
 
     let plate = Plate {

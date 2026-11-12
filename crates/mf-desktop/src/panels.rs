@@ -128,6 +128,15 @@ pub fn menu_bar(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     }
                     ui.checkbox(&mut app.shading.wireframe, t!("view.wireframe"));
                     ui.separator();
+                    // Object colour (UI plan §11): each object a distinct
+                    // muted shade, or every object the one clay colour.
+                    for (on, label) in [
+                        (true, t!("view.object_colors")),
+                        (false, t!("view.clay_objects")),
+                    ] {
+                        ui.radio_value(&mut app.object_colors, on, label);
+                    }
+                    ui.separator();
                     ui.checkbox(&mut app.show_boundaries, "Show defects");
                     ui.checkbox(&mut app.shown.recent_repairs, "Highlight recent repairs");
                     ui.checkbox(&mut app.show_hole_markers, "Show hole markers")

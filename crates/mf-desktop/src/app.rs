@@ -352,6 +352,13 @@ pub struct MeshFixerApp {
     pub first_use_hint: bool,
     /// How the model is shaded (View > Clay / Studio / X-ray, Wireframe).
     pub shading: mf_render::Shading,
+    /// View ▸ Colour objects / Clay (UI plan §11): each object drawn in
+    /// its own palette shade, so a multi-object model stands apart from
+    /// the UI chrome and from its siblings. On by default; off (Clay)
+    /// keeps every object the one neutral surface colour. A per-face 3MF
+    /// material or colour always overrides this (`mf_render::DrawItem`'s
+    /// `object_color` is only used where the mesh has none of its own).
+    pub object_colors: bool,
     /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
@@ -789,6 +796,7 @@ impl MeshFixerApp {
             show_settings: false,
             first_use_hint: true,
             shading: mf_render::Shading::default(),
+            object_colors: true,
             split: Default::default(),
             split_flow: Default::default(),
             alignment: Default::default(),
@@ -3045,6 +3053,7 @@ impl MeshFixerApp {
                         .hover
                         .as_ref()
                         .is_some_and(|(h, t)| *h == o.id && *t == OverlayTarget::Object);
+                let color = object_color_for(self.object_colors, o, &render.mesh);
                 Some(ObjectView {
                     id: o.id,
                     render,
@@ -3064,6 +3073,7 @@ impl MeshFixerApp {
                     picked: self.picked.len() > 1 && self.picked.contains(&o.id),
                     hole: o.is_hole(),
                     ghost: crate::split_flow::is_ghost(self, o.id),
+                    color,
                 })
             })
             .collect()
@@ -5515,6 +5525,20 @@ fn is_current_revision(doc: &mf_command::Document, mesh: &Mesh) -> bool {
     doc.objects()
         .iter()
         .any(|o| o.mesh().is_some_and(|c| Mesh::ptr_eq(c, mesh)))
+}
+
+/// View ▸ Colour objects (UI plan §11): `o`'s palette shade, or `None`
+/// when the toggle is off (Clay), `o` is a Hole (it always keeps its
+/// hatch instead) or `mesh` carries its own 3MF material or colour (which
+/// always overrides the palette). Linked parts (a connector's peg and
+/// hole, a hinge's leaves and pin: `mf_command::GROUP`) share a hue and
+/// vary only in shade, so a group reads as one related family.
+fn object_color_for(on: bool, o: &mf_command::Object, mesh: &Mesh) -> Option<[f32; 4]> {
+    if !on || o.is_hole() || mesh.has_materials() {
+        return None;
+    }
+    let group = o.properties.get(mf_command::GROUP).map(String::as_str);
+    Some(theme::rgba(theme::object_color(o.id.0, group)))
 }
 
 /// An operation's report in plain words for the status line. A 5M fill's

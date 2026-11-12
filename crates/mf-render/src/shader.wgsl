@@ -100,8 +100,10 @@ fn tint(rgb: vec3<f32>, state: u32, flag: u32, t: vec4<f32>) -> vec3<f32> {
 // when hovered, or a loose piece), a hovered one only the hover tint;
 // otherwise the defect and repair tints apply, bottom to top.
 fn base_color(front: bool, state: u32) -> vec3<f32> {
-    // Back faces (seen through holes, or flipped) are tinted so they stand out.
-    var rgb = select(scene.back_face.rgb, scene.surface.rgb, front);
+    // Back faces (seen through holes, or flipped) are tinted so they stand
+    // out: that defect signal is never replaced by an object's own colour.
+    let surface = select(scene.surface.rgb, draw.color.rgb, draw.params.z > 0.5);
+    var rgb = select(scene.back_face.rgb, surface, front);
     if ((state & SELECTED) != 0u) {
         // The pulse brightens it: the selection tint at up to full strength.
         let t = scene.tint_selected;

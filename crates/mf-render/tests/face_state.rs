@@ -142,6 +142,7 @@ fn draw(
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: shown,
+        object_color: None,
     }];
     target.draw(device, queue, &mut renderer, Some(cam), &items, false, &[]);
     offscreen::read_back(device, queue, &target).unwrap()
@@ -378,6 +379,7 @@ fn a_selected_surface_keeps_its_own_shading() {
             model: DMat4::IDENTITY,
             inactive: false,
             shown_states: u32::from(FaceStates::ALL),
+            object_color: None,
         }];
         target.draw(
             &device,

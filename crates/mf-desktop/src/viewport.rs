@@ -18,6 +18,12 @@ use crate::worker::RenderMesh;
 
 pub const MSAA_SAMPLES: u32 = 4;
 
+/// One drawn object's dirty-check key: identity of its render mesh, its
+/// face-state generation (a selection change redraws), the states shown,
+/// whether it's dimmed, its Hole/ghost roles, and its palette colour
+/// (bits; View ▸ Colour objects toggling redraws).
+type ObjectKey = (ObjectId, usize, u64, u32, bool, bool, bool, Option<[u32; 4]>);
+
 #[derive(Clone, PartialEq)]
 struct FrameKey {
     camera: OrbitCamera,
@@ -25,10 +31,7 @@ struct FrameKey {
     size: (u32, u32),
     /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
-    /// Each object drawn: the identity of its render mesh, its face-state
-    /// generation (a selection change redraws), the states shown and
-    /// whether it's dimmed.
-    objects: Vec<(ObjectId, usize, u64, u32, bool, bool, bool)>,
+    objects: Vec<ObjectKey>,
     /// Identity, colour, x-ray and emphasis (bits) of each overlay layer,
     /// in draw order.
     layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
@@ -87,6 +90,11 @@ pub struct ObjectView {
     pub hole: bool,
     /// Drawn see-through: the Split workflow's transparent piece.
     pub ghost: bool,
+    /// View ▸ Colour objects (UI plan §11): this object's own palette
+    /// shade, or `None` for Clay, a Hole (which always keeps its hatch
+    /// instead) or a mesh carrying its own 3MF material or colour (which
+    /// always overrides the palette).
+    pub color: Option<[f32; 4]>,
 }
 
 /// How to draw the view this frame.
@@ -776,6 +784,7 @@ impl Viewport {
                         !(o.active || o.hovered || o.picked),
                         o.hole,
                         o.ghost,
+                        o.color.map(|c| c.map(f32::to_bits)),
                     )
                 })
                 .collect(),
@@ -816,6 +825,7 @@ impl Viewport {
                     model: model_matrix(&o.transform),
                     inactive: !(o.active || o.hovered || o.picked),
                     shown_states: o.shown_states,
+                    object_color: o.color,
                 })
                 .collect();
             let gpu_layers: Vec<Layer<'_>> = drawn
@@ -1088,6 +1098,7 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
         model,
         inactive,
         shown_states: u32::from(mf_render::FaceStates::ALL),
+        object_color: None,
     });
     let layers = [Layer {
         lines: &lines,

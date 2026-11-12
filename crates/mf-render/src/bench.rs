@@ -153,6 +153,7 @@ pub fn orbit(mesh: &Mesh, spec: OrbitSpec, ctx: &RunContext) -> Result<OrbitRun,
         model: glam::DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(FaceStates::ALL),
+        object_color: None,
     }];
     let base = OrbitCamera::fit(&bounds);
     let camera = |i: u32| {

@@ -117,6 +117,7 @@ impl Gpu {
             model: DMat4::IDENTITY,
             inactive: false,
             shown_states: u32::from(FaceStates::ALL),
+            object_color: None,
         }];
         target.draw(
             &self.device,

@@ -57,6 +57,7 @@ fn timed_draws_report_a_gpu_time_per_frame() {
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(mf_render::FaceStates::ALL),
+        object_color: None,
     }];
     let mut samples = Vec::new();
     for frame in 0..20 {

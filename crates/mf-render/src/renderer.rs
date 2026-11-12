@@ -219,6 +219,13 @@ pub struct DrawItem<'a> {
     /// solid, so what's behind or inside it shows: the Split workflow's
     /// transparent piece, with the other piece's cut face solid behind it.
     pub ghost: bool,
+    /// View ▸ Colour objects (UI plan §11): this object's own shade from
+    /// the palette, replacing [`Palette::surface`] for its front faces.
+    /// `None` draws the one neutral surface colour (Clay, or a Hole,
+    /// which always keeps its hatch regardless of this field). The
+    /// frontend leaves this `None` where the mesh carries its own 3MF
+    /// material or colour, so that always overrides the palette.
+    pub object_color: Option<[f32; 4]>,
 }
 
 /// One line overlay on an object (selected loops, cracks, tangled edges,
@@ -937,11 +944,15 @@ impl MeshRenderer {
             let u = DrawUniforms {
                 model: model.to_cols_array_2d(),
                 normal_matrix: normal_matrix(item.model).to_cols_array_2d(),
-                color: [0.0; 4],
+                color: item.object_color.unwrap_or([0.0; 4]),
                 params: [
                     f32::from(u8::from(item.inactive)),
                     self.palette.boundary_width * self.pixels_per_point,
-                    0.0,
+                    // z: 1 while this object has its own palette colour
+                    // (View ▸ Colour objects): `fs_surface` mixes it in
+                    // for `draw.color` instead of the palette's one
+                    // neutral surface colour.
+                    f32::from(u8::from(item.object_color.is_some())),
                     self.pixels_per_point,
                 ],
                 states: [item.shown_states & u32::from(FaceStates::ALL), 0, 0, 0],
