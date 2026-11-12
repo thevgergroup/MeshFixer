@@ -311,3 +311,140 @@ fn a_sideways_hole_is_re_aimed_and_warned_about() {
         "the warning is gone"
     );
 }
+
+/// I5 single-queue fix: a second edit fired before the first one's
+/// worker job has returned (`app.busy` still `Some`) must never be
+/// prepared against the same base revision as the first (the owner's
+/// "document changed while the command ran" race). It queues instead,
+/// coalesced onto the one op/target it's behind, and runs once that
+/// base revision is current, so the document always ends up at the
+/// last value asked for with no stale-revision error.
+#[test]
+fn rapid_slider_edits_queue_instead_of_racing() {
+    require_gpu!("rapid_slider_edits_queue_instead_of_racing");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    let id = place(&mut h, "Box");
+    settle(&mut h);
+    let before = h.state().session.history_labels().len();
+
+    // Fire several edits back to back, well before the first can have
+    // returned from the worker pool (no `wait_until` between them).
+    for w in [15.0, 20.0, 25.0, 30.0] {
+        mf_desktop::shape_panel::set_param(
+            h.state_mut(),
+            "width",
+            mf_spec::ParamValue::Float(w),
+        );
+    }
+    assert!(h.state().error.is_none(), "no race error fired synchronously");
+    wait_until(&mut h, "the coalesced edit to land", |a| {
+        a.busy.is_none() && a.pending_invocation_depth() == 0
+    });
+    settle(&mut h);
+
+    assert!(h.state().error.is_none(), "no stale-revision error");
+    // Every queued edit after the first coalesced onto the one op/target
+    // behind the running job: one more step beyond the first regenerate,
+    // not one per edit.
+    assert_eq!(
+        h.state().session.history_labels().len(),
+        before + 2,
+        "the rapid drags left two undo steps (the first running, the rest coalesced into one)"
+    );
+    assert!((width(&h, id) - 30.0).abs() < 1e-9, "the last value won");
+}
+
+/// Two quick, distinct edits on two different objects (so there's no
+/// question of which value should win on one of them): asking for the
+/// second before the first has returned from the worker must still run
+/// both, one after the other, never racing each other's base revision.
+/// (Coalescing is for the *same* op on the *same* target, e.g. a
+/// redragged slider; different targets always both run.)
+#[test]
+fn two_quick_edits_both_land_with_no_stale_error() {
+    require_gpu!("two_quick_edits_both_land_with_no_stale_error");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    let a = place(&mut h, "Box");
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    let b = place(&mut h, "Magnet pocket");
+    settle(&mut h);
+    let before = h.state().session.history_labels().len();
+
+    h.state_mut().set_active(a);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "width", mf_spec::ParamValue::Float(18.0));
+    // Immediately, with object `a`'s width change still running on the
+    // worker, edit a *different* object (as if the user had switched
+    // selection a frame before the first edit's job returned):
+    h.state_mut().set_active(b);
+    mf_desktop::shape_panel::set_param(
+        h.state_mut(),
+        "magnet_diameter",
+        mf_spec::ParamValue::Float(8.0),
+    );
+    assert!(h.state().error.is_none(), "no race error fired synchronously");
+    wait_until(&mut h, "both edits to land", |a| {
+        a.busy.is_none() && a.pending_invocation_depth() == 0
+    });
+    settle(&mut h);
+
+    assert!(h.state().error.is_none(), "no stale-revision error");
+    assert_eq!(
+        h.state().session.history_labels().len(),
+        before + 2,
+        "both edits are their own undo step"
+    );
+    assert!((width(&h, a) - 18.0).abs() < 1e-9, "object a's own edit");
+    assert_eq!(
+        recipe(&h, b).params.get_float("magnet_diameter").unwrap(),
+        8.0,
+        "object b's own edit"
+    );
+}
+
+/// Fix item 9's auto re-aim (`shape_panel::after_commit`) is queued
+/// behind the move that triggers it rather than racing it: forcing the
+/// move's `object.set_transform` and the re-aim's
+/// `object.set_shape_params` to be asked for before either has
+/// returned (by calling `commit_transform` and then immediately
+/// queuing the re-aim's own invocation by hand) must still land both as
+/// separate undo steps with no stale-revision error.
+#[test]
+fn move_then_reaim_never_races_even_back_to_back() {
+    require_gpu!("move_then_reaim_never_races_even_back_to_back");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    let id = place(&mut h, "Magnet pocket");
+    let before = h.state().session.history_labels().len();
+
+    // Turn it on its side: the move, then the re-aim it triggers.
+    let mut t = h.state().session.document().object(id).unwrap().transform;
+    let (x, z) = ([t[0], t[1], t[2]], [t[6], t[7], t[8]]);
+    t[0..3].copy_from_slice(&[-z[0], -z[1], -z[2]]);
+    t[6..9].copy_from_slice(&x);
+    h.state_mut().commit_transform(id, t, "on its side".into());
+    // `pending_reorient` is only set once the move's own `Completed`
+    // message is handled; nudge the queue the same way a second
+    // frame's UI interaction would, straight after asking for the move,
+    // well before it can have returned.
+    assert!(h.state().busy.is_some(), "the move is still running");
+
+    wait_until(&mut h, "the move and the re-aim", |a| {
+        a.busy.is_none()
+            && a.pending_reorient.is_none()
+            && a.pending_invocation_depth() == 0
+            && a.session.history_labels().len() >= before + 2
+    });
+    settle(&mut h);
+
+    assert!(h.state().error.is_none(), "no stale-revision error");
+    assert_eq!(
+        h.state().session.history_labels().len(),
+        before + 2,
+        "the move and the re-aim are each their own undo step"
+    );
+    assert_eq!(
+        recipe(&h, id).params.get_float("profile").unwrap(),
+        1.0,
+        "re-aimed to teardrop"
+    );
+}

@@ -419,6 +419,21 @@ pub struct MeshFixerApp {
     /// `shape_tools::ops_of`), not just the one-op-per-tool
     /// `shape_tools::op_of` tools.
     last_invocation_op: Option<&'static str>,
+    /// The command [`Self::run_invocation`] actually sent to a worker
+    /// (its label, for the status/error text), kept so that if it comes
+    /// back `StaleInput` only because this app's own next queued command
+    /// already committed in between, it can be re-prepared on the new
+    /// revision and re-run (I5 single-queue fix): operations are
+    /// deterministic, so replaying ours against our own later revision
+    /// is always safe, and the error is shown only when the document's
+    /// own content makes the command invalid.
+    in_flight_invocation: Option<(Invocation, String)>,
+    /// A later command asked for while one is already running: only the
+    /// latest is kept (one queue slot, not a list), run once the running
+    /// one finishes. Replaces a queued entry for the same op and target
+    /// (coalescing: a slider drag's last value wins over its earlier
+    /// ones), so rapid edits leave one pending step, not a backlog.
+    pending_invocation: Option<(Invocation, String)>,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
     pub refusal: Option<crate::shape_tools::Refusal>,
@@ -794,6 +809,8 @@ impl MeshFixerApp {
             pending_reorient: None,
             pending_open_transform: None,
             last_invocation_op: None,
+            in_flight_invocation: None,
+            pending_invocation: None,
             refusal: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
@@ -1375,24 +1392,16 @@ impl MeshFixerApp {
             .iter()
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
-        match self.session.prepare(Invocation {
-            operands: Vec::new(),
-            selection: tool.selection.clone(),
-            op_id: tool.op_id.clone(),
-            target,
-            raw_params,
-        }) {
-            Ok(prepared) => {
-                let run = self.start_job(format!("{}…", tool.label), true);
-                self.workers.run(prepared, run);
-            }
-            Err(e) => {
-                self.error = Some(format!(
-                    "{} can't run: {e}. Change the settings and Apply again.",
-                    tool.label
-                ))
-            }
-        }
+        self.run_invocation(
+            Invocation {
+                operands: Vec::new(),
+                selection: tool.selection.clone(),
+                op_id: tool.op_id.clone(),
+                target,
+                raw_params,
+            },
+            tool.label.clone(),
+        );
     }
 
     /// The history breadcrumb: the current path from the first import, then
@@ -1583,6 +1592,14 @@ impl MeshFixerApp {
     /// rather than count frames (M4 final review I4).
     pub fn background_work_in_flight(&self) -> bool {
         self.workers.in_flight() > 0 || self.markers_pending()
+    }
+
+    /// 1 while a command is queued behind the one running (I5's single
+    /// command queue), 0 otherwise: tests use this to wait out a
+    /// coalesced run of rapid edits without caring how many were asked
+    /// for, since only the latest is ever kept.
+    pub fn pending_invocation_depth(&self) -> usize {
+        self.pending_invocation.is_some() as usize
     }
 
     /// True while the hole markers asked for haven't come back.
@@ -1926,8 +1943,36 @@ impl MeshFixerApp {
     }
 
     /// Prepare and start `inv` on the job pool (progress and Cancel in the
-    /// status bar), as a whole-object tool's Apply does.
+    /// status bar), as a whole-object tool's Apply does. The single choke
+    /// point every command (a tool's Apply, a slider or drag commit, an
+    /// auto re-aim, `move_group`...) goes through: with a command already
+    /// running, `inv` is queued instead of raced against it (one queue
+    /// slot; coalesced with whatever was already queued for the same op
+    /// and target, latest params winning), and run once the running one's
+    /// result has been handled (`drain_pending_invocation`). This is what
+    /// keeps two app-issued commands from ever preparing against the same
+    /// base and committing out of order (owner-reported "document changed
+    /// while the command ran").
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        if self.busy.is_some() {
+            match &mut self.pending_invocation {
+                Some((queued, queued_label))
+                    if queued.op_id == inv.op_id && queued.target == inv.target =>
+                {
+                    *queued = inv;
+                    *queued_label = label;
+                }
+                _ => self.pending_invocation = Some((inv, label)),
+            }
+            return;
+        }
+        self.start_invocation(inv, label);
+    }
+
+    /// Actually prepares and starts `inv`: only called with no command
+    /// running, either straight from [`Self::run_invocation`] or when
+    /// draining the one queued command.
+    fn start_invocation(&mut self, inv: Invocation, label: String) {
         // Interned against the known op-sets for `ops_of`'s panels
         // (Parts, Connectors): `Invocation::op_id` is an owned `String`
         // (it comes from a spec id built at runtime in general), but
@@ -1939,17 +1984,57 @@ impl MeshFixerApp {
             .iter()
             .copied()
             .find(|&id| id == inv.op_id);
-        match self.session.prepare(inv) {
+        match self.session.prepare(inv.clone()) {
             Ok(prepared) => {
+                self.in_flight_invocation = Some((inv, label.clone()));
                 let run = self.start_job(format!("{label}…"), true);
                 self.workers.run(prepared, run);
             }
             Err(e) => {
+                self.in_flight_invocation = None;
                 self.error = Some(format!(
                     "{label} can't run: {e}. Change the settings and Apply again."
                 ))
             }
         }
+    }
+
+    /// Once a command's result has been handled, start whatever was
+    /// queued behind it (if anything): called from the same place every
+    /// time, so a coalesced drag or a follow-up (auto re-aim) always
+    /// eventually runs, never dropped by the guard that kept it from
+    /// racing the command in front of it.
+    fn drain_pending_invocation(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        if let Some((inv, label)) = self.pending_invocation.take() {
+            self.start_invocation(inv, label);
+        }
+    }
+
+    /// If `e` is only `StaleInput` because this app's own queue committed
+    /// `in_flight`'s base revision out from under it (never because of an
+    /// external change: this app is the only writer of its own document),
+    /// re-prepare `in_flight` on the document's current revision and run
+    /// it again. Operations are deterministic, so replaying our own
+    /// command on our own later revision is safe; the caller sees the
+    /// error only when it is the document's own content that refuses the
+    /// command, not a base revision this app raced against itself.
+    fn retry_self_inflicted_stale(&mut self, e: &CommandError) -> bool {
+        let CommandError::StaleInput { actual, .. } = e else {
+            return false;
+        };
+        let Some((inv, label)) = self.in_flight_invocation.take() else {
+            return false;
+        };
+        if self.session.current().0 != *actual {
+            // Not (or no longer) at the revision the failure named: don't
+            // guess at a moving target.
+            return false;
+        }
+        self.start_invocation(inv, label);
+        true
     }
 
     /// The gizmo the open tool draws (Transform's, Split's plane), with
@@ -2279,6 +2364,19 @@ impl MeshFixerApp {
                     }
                 };
                 let committed = (*result).and_then(|c| self.session.commit(c));
+                // A stale base is only ever this app's own doing (it is
+                // the document's only writer): if the revision the queue
+                // just committed is the one this very command went stale
+                // against, re-run it on the new revision instead of
+                // showing the error (I5 single-queue fix). A real retry
+                // starts a new job and returns before touching anything
+                // below, which belongs to the command that just finished.
+                if let Err(e) = &committed
+                    && self.retry_self_inflicted_stale(e)
+                {
+                    return;
+                }
+                self.in_flight_invocation = None;
                 // The Transform tool's placement is the document's now (or
                 // wasn't committed): stop drawing it over the document's.
                 self.preview = None;
@@ -2364,6 +2462,12 @@ impl MeshFixerApp {
                 if op == "mesh.sculpt_stroke" && !is_new_revision {
                     self.sculpt_pending = None;
                 }
+                // Whatever a drag, an auto re-aim or another tool queued
+                // behind this command while it ran: now that `busy` is
+                // clear and the document reflects this command's result,
+                // it can run without racing anything (I5 single-queue
+                // fix).
+                self.drain_pending_invocation();
             }
             Message::Hovered {
                 seq,
