@@ -15,6 +15,7 @@ pub mod metrics;
 mod panels;
 pub mod parts_tool;
 pub mod sculpt_tool;
+pub mod shape_panel;
 pub mod shape_tools;
 pub mod shell;
 pub mod split_flow;

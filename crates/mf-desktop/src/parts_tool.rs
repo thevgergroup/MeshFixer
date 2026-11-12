@@ -2,8 +2,14 @@
 //! through `shell::Tool` like Split, Combine and Make solid
 //! (`shape_tools.rs`).
 //!
-//! - **The library.** Built-in parts (`mf_parts::Library`, D16) listed
-//!   with a search box.
+//! - **The library.** The parametric shapes (`mf_parts::shapes`: the
+//!   built-ins and any a plugin registered through the shell), then the
+//!   user's own parts and the open stamps (`mf_parts::Library`, D16),
+//!   listed with a search box.
+//! - **Placing a shape** adds it as an editable shape (`object.add_shape`,
+//!   one undo step): it keeps its recipe, so selecting it shows its
+//!   params in the panel. A hole-like shape is placed as a Hole, with the
+//!   Fit class and Machine profile chosen in Connectors.
 //! - **Placing.** Clicking a part adds it to the model on the active
 //!   object's own highest point, its attach normal pointing straight up
 //!   (world +Z): `object.add_part`, one undo step. The new part becomes
@@ -185,8 +191,108 @@ fn place_part(app: &mut MeshFixerApp, id: &str) {
     }
 }
 
+/// The built-in library parts the parametric shapes replace (a sphere,
+/// a box, ...): placing one of those is placing its shape, which stays
+/// editable. Kept in the library itself so old logs that placed them
+/// with `object.add_part` still replay.
+const SUPERSEDED: &[&str] = &[
+    "sphere",
+    "cylinder",
+    "cone",
+    "box",
+    "rounded-box",
+    "torus",
+    "capsule",
+];
+
+/// A shape's starting recipe: its spec's defaults, with a hole-like
+/// shape's fit inputs from the Fit class and Machine profile chosen in
+/// Connectors (the resolved values recorded, D20), and its hole profile
+/// resolved for `transform`.
+pub(crate) fn shape_record(
+    app: &MeshFixerApp,
+    shape: &dyn mf_parts::Shape,
+    transform: &[f64; 12],
+) -> Result<mf_parts::GeneratorRecord, String> {
+    let mut raw = BTreeMap::new();
+    if shape.spec().parameter("fit_class").is_some() {
+        let (class, machine) = crate::connector_tool::chosen_fit(app)?;
+        raw.insert("fit_class".to_owned(), class.name.clone());
+        raw.insert("machine_profile".to_owned(), machine.name.clone());
+        raw.insert("fit_clearance".to_owned(), class.clearance.to_string());
+        raw.insert(
+            "machine_tolerance".to_owned(),
+            machine.hole_undersize.to_string(),
+        );
+    }
+    let record = mf_parts::new_record(shape, &raw).map_err(|e| e.to_string())?;
+    Ok(mf_parts::shape::orient_hole(
+        &record,
+        crate::shape_panel::rotation(transform),
+    ))
+}
+
+/// Places shape `id` on the active object's highest point as an editable
+/// shape (`object.add_shape`, one undo step); Transform opens on it once
+/// it commits, as for a part.
+pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
+    let Some(scan) = app.active else { return };
+    let Some(transform) = drop_point(app, scan) else {
+        return;
+    };
+    let Some(shape) = mf_parts::find_shape(id) else {
+        return;
+    };
+    let record = match shape_record(app, shape, &transform) {
+        Ok(r) => r,
+        Err(e) => {
+            app.refusal = Some(crate::shape_tools::Refusal {
+                op_id: "object.add_shape".into(),
+                code: "fit_settings_unreadable".into(),
+                message: format!(
+                    "Couldn't set up the shape's fit: {e}. Fix your Fit classes or Machine \
+                     profiles in Settings, or delete the file to go back to the defaults."
+                ),
+            });
+            return;
+        }
+    };
+    let shapes = [mf_operations::shapes::ShapeToAdd {
+        generator: record,
+        name: shape.name().to_owned(),
+        hole: shape.role() == mf_parts::ShapeRole::Hole,
+    }];
+    let params = BTreeMap::from([
+        (
+            "shapes".to_owned(),
+            mf_operations::shapes::shapes_param(&shapes),
+        ),
+        (
+            "transform".to_owned(),
+            transform
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(","),
+        ),
+        ("group".to_owned(), String::new()),
+    ]);
+    run_on(
+        app,
+        scan,
+        "object.add_shape",
+        t!("parts.apply", name = shape.name()),
+        params,
+        Vec::new(),
+    );
+    if app.busy.is_some() {
+        app.pending_open_transform = Some(crate::app::PendingPlacement::Part { scan });
+    }
+}
+
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "object.add_part");
+    crate::shape_tools::refusal_card_for(app, ui, "object.add_shape");
     crate::shape_tools::refusal_card_for(app, ui, "mesh.boolean");
     widgets::section(ui, &t!("parts.section.library"));
     ui.add(
@@ -195,12 +301,35 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .desired_width(ui.available_width()),
     );
     ui.add_space(theme::SPACE_XS);
-    let lib = library(app);
     let query = app.parts.search.to_lowercase();
+    let shapes: Vec<(&'static str, &'static str, bool)> = mf_parts::shapes()
+        .into_iter()
+        .filter(|s| query.is_empty() || s.name().to_lowercase().contains(&query))
+        .map(|s| (s.id(), s.name(), s.role() == mf_parts::ShapeRole::Hole))
+        .collect();
+    for (id, name, hole) in &shapes {
+        let icon = if *hole {
+            icons::HOLE_ROLE
+        } else {
+            icons::OBJECT
+        };
+        if ui
+            .add_enabled_ui(app.busy.is_none(), |ui| {
+                widgets::wide_button(ui, Kind::Secondary, Some(icon), name)
+            })
+            .inner
+            .on_hover_text(t!("parts.shape_tip"))
+            .clicked()
+        {
+            place_shape(app, id);
+        }
+    }
+    let lib = library(app);
     let mut parts: Vec<(String, String, bool)> = lib
         .parts
         .iter()
         .filter(|p| query.is_empty() || p.manifest.name.to_lowercase().contains(&query))
+        .filter(|p| !(p.is_builtin() && SUPERSEDED.contains(&p.manifest.id.as_str())))
         .map(|p| {
             (
                 p.manifest.id.clone(),
@@ -211,7 +340,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .filter(|(_, _, is_connector)| !is_connector)
         .collect();
     parts.sort_by(|a, b| a.1.cmp(&b.1));
-    if parts.is_empty() {
+    if parts.is_empty() && shapes.is_empty() {
         widgets::caption(ui, t!("parts.none_found"));
     }
     for (id, name, _) in &parts {

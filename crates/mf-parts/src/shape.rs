@@ -350,6 +350,12 @@ pub(crate) fn int(params: &Params, name: &str) -> Result<i64, ConnectorError> {
         .map_err(|e| refuse("invalid_parameter", e.to_string()))
 }
 
+pub(crate) fn choice<'a>(params: &'a Params, name: &str) -> Result<&'a str, ConnectorError> {
+    params
+        .get_choice(name)
+        .map_err(|e| refuse("invalid_parameter", e.to_string()))
+}
+
 /// The parameter `name` of `params` as plain text (for showing it).
 pub fn param_text(params: &Params, name: &str) -> Option<String> {
     params.0.get(name).map(|v| match v {
@@ -358,4 +364,54 @@ pub fn param_text(params: &Params, name: &str) -> Option<String> {
     })
 }
 
-pub use crate::builtin_shapes::builtin_shapes;
+pub use crate::builtin_shapes::{HOLE_OVERSHOOT, builtin_shapes, chosen_profile};
+
+/// True if `record`'s params carry a hole profile (`hole_profile`,
+/// `profile`, `up_x`, `up_y`): a hole-like shape, or a connector part
+/// whose holes take one.
+pub fn has_hole_profile(record: &GeneratorRecord) -> bool {
+    record.params.0.contains_key("hole_profile") && record.params.0.contains_key("up_x")
+}
+
+/// `record` with its hole profile resolved for a placement whose linear
+/// part is `local_to_world` (fix item 9, D24): the teardrop's point turned
+/// to face world up as seen from the hole (`up_x`, `up_y`), and, when the
+/// choice is `auto`, `profile` set to Teardrop if the hole's axis (its
+/// local z) is within 45 degrees of horizontal, Round otherwise. A record
+/// without a hole profile comes back unchanged. Recorded in the params,
+/// so replay builds the same profile.
+pub fn orient_hole(record: &GeneratorRecord, local_to_world: glam::DMat3) -> GeneratorRecord {
+    use crate::connectors::hole_profile::{HoleProfile, axis_tilt, local_up};
+    use glam::DVec3;
+    if !has_hole_profile(record) {
+        return record.clone();
+    }
+    let mut out = record.clone();
+    let up = local_up(local_to_world, DVec3::X, DVec3::Y, DVec3::Z);
+    if let Some([x, y]) = up {
+        // Rounded so a transform's last-bit noise doesn't make a new
+        // recipe (and a new history step) for the same direction.
+        let r = |v: f64| (v * 1e9).round() / 1e9;
+        out.params.0.insert("up_x".into(), ParamValue::Float(r(x)));
+        out.params.0.insert("up_y".into(), ParamValue::Float(r(y)));
+    }
+    if record.params.get_choice("hole_profile").ok() == Some("auto") {
+        let tilt = axis_tilt(local_to_world, DVec3::Z);
+        let code = HoleProfile::auto(tilt).code();
+        out.params
+            .0
+            .insert("profile".into(), ParamValue::Float(code));
+    }
+    out
+}
+
+/// True if `record` describes a round hole that, placed with
+/// `local_to_world`, prints sideways (its axis within 45 degrees of
+/// horizontal) and so would sag at its unsupported top: the live
+/// "switch to Teardrop" warning (fix item 9).
+pub fn sags_sideways(record: &GeneratorRecord, local_to_world: glam::DMat3) -> bool {
+    use crate::connectors::hole_profile::{HoleProfile, axis_tilt};
+    has_hole_profile(record)
+        && chosen_profile(&record.params) == HoleProfile::Round
+        && HoleProfile::auto(axis_tilt(local_to_world, glam::DVec3::Z)) == HoleProfile::Teardrop
+}

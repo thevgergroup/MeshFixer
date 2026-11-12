@@ -41,9 +41,15 @@ pub fn op_of(tool: &str) -> Option<&'static str> {
 /// them.
 pub(crate) fn ops_of(tool: &str) -> &'static [&'static str] {
     match tool {
-        crate::parts_tool::PARTS => &["object.add_part", "mesh.boolean"],
-        crate::connector_tool::CONNECTORS => &["object.add_part", "connector.join"],
-        crate::connect_tool::CONNECT => &["split.place_connectors"],
+        crate::parts_tool::PARTS => &["object.add_part", "object.add_shape", "mesh.boolean"],
+        crate::connector_tool::CONNECTORS => &[
+            "object.add_part",
+            "object.add_shape",
+            "connector.join",
+            "object.set_shape_params",
+        ],
+        crate::connect_tool::CONNECT => &["split.place_connectors", "object.add_shape"],
+        crate::tool_panels::SELECT | crate::transform_tool::ID => &["object.set_shape_params"],
         _ => &[],
     }
 }

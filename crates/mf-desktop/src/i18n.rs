@@ -493,6 +493,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("parts.section.join", "Join to scan"),
     ("parts.section.library", "Library"),
     ("parts.section.save", "Save"),
+    ("parts.shape_tip", "Adds an editable shape: select it to change its size and settings"),
     ("refusal.make_solid", "Run Make solid first"),
     ("refusal.repair", "Repair holes first"),
     ("refusal.title", "This can't be done yet"),

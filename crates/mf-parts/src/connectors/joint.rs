@@ -223,7 +223,7 @@ impl Shape {
 /// count a round feature needs for its chordal tolerance; an anti-
 /// rotation N-sided dowel or peg ([`Shape::NSided`]) calls it directly
 /// with its own, much smaller, `sides` (3..=12).
-fn n_gon(n: u32, r: f64) -> Vec<[f64; 2]> {
+pub(crate) fn n_gon(n: u32, r: f64) -> Vec<[f64; 2]> {
     let n = n.max(3);
     (0..n)
         .map(|i| {
@@ -242,7 +242,7 @@ fn square_profile(side: f64) -> Vec<[f64; 2]> {
 /// A "D" profile: a circle of radius `r` with the part beyond `flat`
 /// (along +x) cut off (as `mesh.split_plane`'s own keyed holes,
 /// `split::pegs::profile`'s `PegShape::Keyed` arm).
-fn keyed_profile(r: f64, flat: f64, tol: f64) -> Vec<[f64; 2]> {
+pub(crate) fn keyed_profile(r: f64, flat: f64, tol: f64) -> Vec<[f64; 2]> {
     let n = round_sides(r, tol);
     let half = (flat / r).clamp(-1.0, 1.0).acos();
     let mut out: Vec<[f64; 2]> = (0..=n)

@@ -182,35 +182,34 @@ pub fn hole_outline(
     let (sin_t, cos_t) = theta.sin_cos();
     // The tangent points, in local (right, up) coordinates.
     let (tx, ty) = (r * sin_t, r * cos_t);
-    // Keep every base point whose own angle from `up` is beyond ±theta
-    // (the round part not replaced by the straight sides), then splice
-    // in the new top in local coordinates, converted back.
-    let mut kept: Vec<[f64; 2]> = base
+    // Keep every base point outside the wedge the straight sides
+    // replace (within `theta` either side of `up`), in counter-clockwise
+    // order starting just after the left tangent point, so the list ends
+    // just before the right one; then the new top runs from the right
+    // tangent point to the left one, closing the outline. `beta` is each
+    // point's counter-clockwise angle past the left tangent direction
+    // (`90° + theta` from local +x): the wedge is `beta` in
+    // `[360° - 2·theta, 360°]` (and 0), the kept arc everything between.
+    use std::f64::consts::{FRAC_PI_2, TAU};
+    let left = FRAC_PI_2 + theta;
+    let wedge = TAU - 2.0 * theta;
+    let eps = 1e-9;
+    let mut kept: Vec<(f64, [f64; 2])> = base
         .into_iter()
-        .filter(|p| {
-            let local = to_local(*p);
-            // Angle from +up (local y), signed so +x is positive: a
-            // point is on the untouched arc if it's not within the
-            // wedge the tangent lines replace (|local x| < tx AND
-            // local y > 0, i.e. the arc segment between the two
-            // tangent points on the point's own side).
-            !(local[1] > ty - 1e-9 && local[0].abs() < tx + 1e-9)
+        .filter_map(|p| {
+            let l = to_local(p);
+            let beta = (l[1].atan2(l[0]) - left).rem_euclid(TAU);
+            (beta > eps && beta < wedge - eps).then_some((beta, p))
         })
         .collect();
-    // Find where to splice: the kept list, walking from the tangent
-    // point on the "right" side to the one on the "left" side, is the
-    // base circle's own ordering (counter-clockwise); inserting the new
-    // top vertices between the last point before the gap and the first
-    // after it keeps the whole outline counter-clockwise and simple.
-    let gap_at = kept
-        .iter()
-        .position(|p| {
-            let local = to_local(*p);
-            local[0] > 0.0 && local[1] > 0.0
-        })
-        .unwrap_or(0);
-    let new_top: Vec<[f64; 2]> = match profile {
-        HoleProfile::Teardrop => vec![from_local(tx, ty), from_local(0.0, r / cos_t), from_local(-tx, ty)],
+    kept.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let mut out: Vec<[f64; 2]> = kept.into_iter().map(|(_, p)| p).collect();
+    match profile {
+        HoleProfile::Teardrop => out.extend([
+            from_local(tx, ty),
+            from_local(0.0, r / cos_t),
+            from_local(-tx, ty),
+        ]),
         // The flat sits at the circle's own horizontal-tangent height
         // (y = r, independent of theta — see the module docs): the
         // tangent line from (tx, ty), direction (-cos θ, sin θ), meets
@@ -219,12 +218,16 @@ pub fn hole_outline(
         // tx, since the line leans inward as it climbs).
         HoleProfile::FlatTop => {
             let fx = tx - (r - ty) * cos_t / sin_t;
-            vec![from_local(fx, r), from_local(-fx, r)]
+            out.extend([
+                from_local(tx, ty),
+                from_local(fx, r),
+                from_local(-fx, r),
+                from_local(-tx, ty),
+            ]);
         }
         HoleProfile::Round => unreachable!("returned above"),
-    };
-    kept.splice(gap_at..gap_at, new_top);
-    kept
+    }
+    out
 }
 
 #[cfg(test)]
@@ -331,6 +334,35 @@ mod tests {
             .unwrap();
         assert!(apex[0] > r, "apex.x = {}", apex[0]);
         assert!(apex[1].abs() < 1e-6, "apex should be on the x axis: {apex:?}");
+    }
+
+    /// The outline is a simple, convex, counter-clockwise polygon for
+    /// any `up` and angle (so it can be extruded by a fan), its point
+    /// facing `up`.
+    #[test]
+    fn the_outline_is_convex_and_counter_clockwise_for_any_up() {
+        for profile in [HoleProfile::Teardrop, HoleProfile::FlatTop] {
+            for k in 0..16 {
+                let a = std::f64::consts::TAU * k as f64 / 16.0 + 0.1;
+                let up = [a.cos(), a.sin()];
+                for theta in [20.0, 45.0, 70.0] {
+                    let o = hole_outline(profile, 3.0, up, theta, 1e-3);
+                    let n = o.len();
+                    for i in 0..n {
+                        let (p, q, s) = (o[i], o[(i + 1) % n], o[(i + 2) % n]);
+                        let cross = (q[0] - p[0]) * (s[1] - q[1]) - (q[1] - p[1]) * (s[0] - q[0]);
+                        assert!(cross > -1e-9, "{profile:?} up {up:?} θ {theta}: turn {i} is {cross}");
+                    }
+                    let far = o
+                        .iter()
+                        .max_by(|x, y| {
+                            (x[0] * up[0] + x[1] * up[1]).total_cmp(&(y[0] * up[0] + y[1] * up[1]))
+                        })
+                        .unwrap();
+                    assert!(far[0] * up[0] + far[1] * up[1] > 3.0 - 1e-9);
+                }
+            }
+        }
     }
 
     #[test]

@@ -384,6 +384,16 @@ impl Shell {
         Ok(())
     }
 
+    /// Adds a parametric shape to the library (parametric-shapes brief,
+    /// "Registry"): the Parts library lists it after the built-ins, and
+    /// `object.set_shape_params` regenerates it by id. Refuses an id
+    /// that's already a shape.
+    pub fn register_shape(&self, shape: &'static dyn mf_parts::Shape) -> Result<(), RegisterError> {
+        mf_parts::register_shape(shape).map_err(|e| match e {
+            mf_parts::ShapeRegisterError::DuplicateId(id) => RegisterError::DuplicateId(id),
+        })
+    }
+
     /// Every tool, in rail order (by category, then order).
     pub fn tools(&self) -> &[Tool] {
         &self.tools

@@ -134,6 +134,27 @@ pub(crate) fn machine_profiles(app: &MeshFixerApp) -> (MachineProfiles, Option<S
     }
 }
 
+/// The Fit class and Machine profile chosen in this panel, resolved
+/// (the built-in "Snug" and the uncalibrated profile if the chosen names
+/// aren't there any more); an error naming the file if the user's own
+/// settings couldn't be read (never silently replaced by the defaults).
+pub(crate) fn chosen_fit(app: &MeshFixerApp) -> Result<(FitClass, MachineProfile), String> {
+    let (classes, class_err) = fit_classes(app);
+    let (profiles, profile_err) = machine_profiles(app);
+    if let Some(e) = class_err.or(profile_err) {
+        return Err(e);
+    }
+    let class = classes
+        .get(&app.connectors.fit_class)
+        .cloned()
+        .unwrap_or_else(|| FitClass::builtins()[1].clone());
+    let machine = profiles
+        .get(&app.connectors.machine_profile)
+        .cloned()
+        .unwrap_or_else(MachineProfile::uncalibrated);
+    Ok((class, machine))
+}
+
 fn connector_library(app: &MeshFixerApp) -> mf_parts::Library {
     let ctx = mf_runtime::RunContext::none();
     let dir = app.settings_dir().map(|d| d.join("parts"));

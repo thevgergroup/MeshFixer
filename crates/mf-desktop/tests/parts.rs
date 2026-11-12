@@ -263,3 +263,102 @@ fn save_as_part_names_what_was_saved() {
     );
     still(&mut h, "saved");
 }
+
+/// Clicking a library shape places an editable shape: it keeps its
+/// recipe (the `generator` property), and a hole-like one is placed as
+/// a Hole with the chosen fit recorded.
+#[test]
+fn clicking_a_shape_places_an_editable_shape() {
+    require_gpu!("clicking_a_shape_places_an_editable_shape");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    for (label, hole) in [("Box", false), ("Magnet pocket", true)] {
+        let history = h.state().session.history_labels().len();
+        h.get_by_label("Parts").click();
+        settle(&mut h);
+        h.get_by_label(label).click();
+        wait_until(&mut h, "the shape placed", |a| {
+            a.busy.is_none() && a.session.history_labels().len() > history
+        });
+        settle(&mut h);
+        let id = h.state().active.unwrap();
+        let o = h.state().session.document().object(id).unwrap();
+        assert_eq!(o.name, label);
+        assert!(o.is_parametric(), "{label} keeps its recipe");
+        assert_eq!(o.is_hole(), hole, "{label}");
+        let record =
+            mf_parts::GeneratorRecord::from_json(&o.properties[mf_command::GENERATOR]).unwrap();
+        if hole {
+            assert_eq!(record.params.get_text("fit_class").unwrap(), "Snug");
+        }
+    }
+    still(&mut h, "shapes");
+}
+
+struct Wedge;
+
+fn wedge_spec() -> &'static mf_spec::OperationSpec {
+    static S: std::sync::OnceLock<mf_spec::OperationSpec> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        mf_parts::shape::spec_of(
+            "plugin.wedge",
+            "A plugin's wedge.",
+            vec![mf_parts::shape::P::Mm("size", 8.0, 0.1, None, "Size")],
+        )
+    })
+}
+
+impl mf_parts::Shape for Wedge {
+    fn id(&self) -> &'static str {
+        "plugin.wedge"
+    }
+    fn name(&self) -> &'static str {
+        "Plugin wedge"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn spec(&self) -> &'static mf_spec::OperationSpec {
+        wedge_spec()
+    }
+    fn generate(
+        &self,
+        params: &mf_spec::Params,
+        _: &mf_runtime::RunContext,
+    ) -> Result<Mesh, mf_parts::ConnectorError> {
+        let s = params.get_float("size").unwrap();
+        Ok(Mesh::new(
+            vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
+            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+        )
+        .unwrap())
+    }
+}
+
+/// A shape a plugin registers through the shell appears in the Parts
+/// library and places like a built-in.
+#[test]
+fn a_plugin_registered_shape_appears_in_the_library() {
+    require_gpu!("a_plugin_registered_shape_appears_in_the_library");
+    static WEDGE: Wedge = Wedge;
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    h.state().shell.register_shape(&WEDGE).unwrap();
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Plugin wedge").click();
+    wait_until(&mut h, "the wedge placed", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let id = h.state().active.unwrap();
+    let o = h.state().session.document().object(id).unwrap();
+    let record =
+        mf_parts::GeneratorRecord::from_json(&o.properties[mf_command::GENERATOR]).unwrap();
+    assert_eq!(record.id, "plugin.wedge");
+    assert!(
+        h.state().shell.register_shape(&WEDGE).is_err(),
+        "a shape id registers once"
+    );
+}

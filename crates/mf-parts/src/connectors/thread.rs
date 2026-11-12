@@ -434,7 +434,7 @@ fn thread_wall(
 /// `threaded_hole`'s tapped hole, a true entry point at each mouth).
 /// Returns the mesh and the realized length (not always exactly
 /// `length`: see `thread_wall`).
-fn thread_surface(
+pub(crate) fn thread_surface(
     d: f64,
     p: f64,
     length: f64,
@@ -606,7 +606,7 @@ fn bolt(d: f64, p: f64, length: f64, hex_head: bool) -> Mesh {
 
 /// A hex nut: a hex prism with a real helical internal thread bored
 /// through it, offset outward by the resolved fit clearance.
-fn nut(d: f64, p: f64, radial_clearance: f64) -> Mesh {
+pub(crate) fn nut(d: f64, p: f64, radial_clearance: f64) -> Mesh {
     let height = 0.8 * d;
     let across_flats = 1.7 * d;
     let circumradius = across_flats / 2.0 / (std::f64::consts::PI / 6.0).cos();
