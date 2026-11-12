@@ -395,6 +395,8 @@ pub struct MeshFixerApp {
     /// The Connectors tool's state (Task 29): search, the fit class and
     /// machine profile pickers, and the connector last placed.
     pub connectors: crate::connector_tool::ConnectorsState,
+    /// The editable shape's params being edited in the selection panel.
+    pub shape_edit: Option<crate::shape_panel::ShapeDraft>,
     /// Set by Parts/Connectors right before placing (`object.add_part`):
     /// once that command's `Message::Completed` has run (so `active` is
     /// already the newly created object, D6's own `after_object_changes`
@@ -780,6 +782,7 @@ impl MeshFixerApp {
             solid: Default::default(),
             parts: Default::default(),
             connectors: Default::default(),
+            shape_edit: None,
             pending_open_transform: None,
             last_invocation_op: None,
             refusal: None,

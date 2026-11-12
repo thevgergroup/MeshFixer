@@ -609,6 +609,24 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("settings.machine_profiles.new", "New machine profile…"),
     ("settings.print_volume", "Print volume"),
     ("settings.title", "Settings"),
+    ("shape.change", "Change \"{name}\""),
+    ("shape.editable", "Editable shape · {name}"),
+    (
+        "shape.editable.tip",
+        "Change its settings below and it's rebuilt, as one undo step. Combine, Sculpt, Split or Make solid bake it into a plain mesh.",
+    ),
+    (
+        "shape.fit",
+        "Holes are {total} mm wider than their nominal size (Fit class plus Machine profile)",
+    ),
+    ("shape.group", "Linked group of {n}: {names}. A change here rebuilds all of them."),
+    ("shape.mesh", "Mesh"),
+    (
+        "shape.mesh.tip",
+        "A plain mesh: sculpt, cut, combine or repair it. Its size can't be changed by parameters (a mesh operation baked it, or it was imported).",
+    ),
+    ("shape.section", "Shape"),
+    ("shape.unknown", "This shape's generator ({id}) isn't available, so it can't be edited."),
     ("solid.apply", "Make it solid"),
     (
         "solid.offset_help",

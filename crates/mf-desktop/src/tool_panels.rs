@@ -1298,6 +1298,7 @@ fn transform_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             app.reset_transform();
         }
     });
+    crate::shape_panel::transform_section(app, ui);
     ui.add_space(theme::SPACE_L);
     if widgets::wide_button(ui, Kind::Primary, Some(icons::CHECK), &t!("transform.done"))
         .on_hover_text("Close the Transform tool (Esc)")

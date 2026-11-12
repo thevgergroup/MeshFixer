@@ -443,6 +443,7 @@ pub fn builtin() -> Shell {
     crate::sculpt_tool::register(&mut shell).expect("the Sculpt tool registers");
     crate::parts_tool::register(&mut shell).expect("the Parts tool registers");
     crate::connector_tool::register(&mut shell).expect("the Connectors tool registers");
+    crate::shape_panel::register(&mut shell).expect("the shape section registers");
     crate::panels::register(&mut shell).expect("the built-in panels register");
     register_commands(&mut shell).expect("the built-in commands register");
     shell
