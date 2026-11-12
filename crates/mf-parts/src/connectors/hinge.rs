@@ -26,7 +26,7 @@ const SEGMENTS: u32 = 32;
 
 /// A solid's positions and triangles, before merging with others into
 /// one [`Mesh`].
-type SolidParts = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+pub(crate) type SolidParts = (Vec<[f64; 3]>, Vec<[u32; 3]>);
 
 fn refuse(code: &'static str, message: impl Into<String>) -> ConnectorError {
     ConnectorError::Failed {
@@ -37,7 +37,7 @@ fn refuse(code: &'static str, message: impl Into<String>) -> ConnectorError {
 
 /// A cylindrical annulus (a tube, bored through), outer radius `r_out`,
 /// inner radius `r_in`, from `x0` to `x1`: a knuckle with a bore.
-fn bored_cylinder(r_out: f64, r_in: f64, x0: f64, x1: f64) -> SolidParts {
+pub(crate) fn bored_cylinder(r_out: f64, r_in: f64, x0: f64, x1: f64) -> SolidParts {
     let mut positions = Vec::new();
     let mut triangles = Vec::new();
     super::cylinder_wall(r_out, x0, x1, SEGMENTS, &mut positions, &mut triangles);

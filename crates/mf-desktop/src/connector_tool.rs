@@ -248,6 +248,17 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
             "machine_tolerance".to_owned(),
             machine.hole_undersize.to_string(),
         );
+    } else if id == crate::hinge_tool::HINGE {
+        raw.insert(
+            "gap".to_owned(),
+            (class.clearance + machine.outer_xy).to_string(),
+        );
+        raw.insert(
+            "pin_clearance".to_owned(),
+            (class.clearance + machine.hole_undersize).to_string(),
+        );
+        raw.insert("fit_class".to_owned(), class.name.clone());
+        raw.insert("machine_profile".to_owned(), machine.name.clone());
     } else {
         raw.insert("gap".to_owned(), gap.to_string());
     }
@@ -492,6 +503,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     widgets::caption(ui, t!("connectors.click_help"));
 
     fit_pickers(app, ui);
+    crate::hinge_tool::placement_section(app, ui);
 
     if let Some(placed) = app.connectors.placed.clone()
         && app.session.document().object(placed.object).is_some()

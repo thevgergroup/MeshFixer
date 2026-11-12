@@ -273,7 +273,7 @@ pub fn builtins() -> Vec<Builtin> {
             params: "r=5".into(),
             make: || revolve(&arc(5.0, 0.0, 0.0, FRAC_PI_2, 12), SEGMENTS),
         },
-        connector_builtin(&crate::connectors::hinge::PinHinge, "Pin hinge"),
+        connector_builtin(&crate::connectors::leaf_hinge::LeafHinge, "Pin hinge"),
         connector_builtin(&crate::connectors::flap::FlapHinge, "Flap hinge"),
         connector_builtin(&crate::connectors::clasp::SnapClasp, "Snap clasp"),
         connector_builtin(&crate::connectors::thread::Thread, "Thread"),

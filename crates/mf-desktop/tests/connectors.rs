@@ -185,6 +185,9 @@ fn clicking_a_connector_adds_it_and_opens_transform() {
     settle(&mut h);
     assert_eq!(h.state().active_tool, "connectors");
     still(&mut h, "library");
+    // A print-in-place hinge needs clearance: Snug (the default) would
+    // print it fused, so pick Free running first.
+    h.state_mut().connectors.fit_class = "Free running".into();
     let history = h.state().session.history_labels().len();
     h.get_by_label("Pin hinge").click();
     wait_until(&mut h, "the hinge placed", |a| {
@@ -194,8 +197,9 @@ fn clicking_a_connector_adds_it_and_opens_transform() {
     let names = objects(&h);
     assert!(
         names.contains(&"Pin hinge (leaf a)".to_owned())
-            && names.contains(&"Pin hinge (leaf b)".to_owned()),
-        "one editable shape per part: {names:?}"
+            && names.contains(&"Pin hinge (leaf b)".to_owned())
+            && names.contains(&"Pin hinge (pin)".to_owned()),
+        "three separate pieces: {names:?}"
     );
     assert_eq!(
         h.state().active_tool,
@@ -318,6 +322,7 @@ fn save_connector_to_library_names_what_was_saved() {
     let (mut h, settings_dir) = opened(vec![("body", cube(40.0), IDENTITY)]);
     h.get_by_label("Connectors").click();
     settle(&mut h);
+    h.state_mut().connectors.fit_class = "Free running".into();
     let history = h.state().session.history_labels().len();
     h.get_by_label("Pin hinge").click();
     wait_until(&mut h, "the hinge placed", |a| {
@@ -392,4 +397,119 @@ fn a_machine_profiles_print_volume_shows_and_a_preset_can_be_picked() {
     let profiles = mf_parts::MachineProfiles::load(settings_dir.path()).unwrap();
     let p = profiles.get("My printer").unwrap();
     assert_eq!(p.print_volume_mm, [350.0, 350.0, 340.0]);
+}
+
+/// A hinge placed between two objects (parametric-shapes brief,
+/// "Hinges"): its axis snaps to the edge they share, it is three
+/// objects (leaf A joining A, leaf B joining B, and the pin), the swing
+/// preview turns the lid and reports where it first touches, and Attach
+/// joins each leaf onto its own object.
+#[test]
+fn a_hinge_between_two_objects_swings_and_attaches() {
+    require_gpu!("a_hinge_between_two_objects_swings_and_attaches");
+    // A box and its lid, stacked 0.4 mm apart.
+    let body = translated(&cube(40.0), [0.0, 0.0, -40.0]);
+    let lid = translated(&mf_fixtures::scaled(&cube(1.0), 40.0), [0.0, 0.0, 0.4]);
+    let lid = Mesh::new(
+        lid.to_arrays()
+            .0
+            .into_iter()
+            .map(|[x, y, z]| [x, y, 0.4 + (z - 0.4) * 0.25])
+            .collect(),
+        lid.to_arrays().1,
+    )
+    .unwrap();
+    let (mut h, _settings_dir) = opened(vec![("body", body, IDENTITY), ("lid", lid, IDENTITY)]);
+    let ids: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    let (body_id, lid_id) = (ids[0], ids[1]);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    // Snug would print the hinge fused: the panel says so.
+    h.state_mut().hinge.a = Some(body_id);
+    h.state_mut().hinge.b = Some(lid_id);
+    settle(&mut h);
+    assert!(h.query_by_label_contains("would print fused").is_some());
+    scroll_and_click(&mut h, "Use Free running");
+    settle(&mut h);
+    still(&mut h, "hinge-section");
+    let edges = mf_desktop::hinge_tool::edges(h.state(), body_id, lid_id);
+    assert!(!edges.is_empty(), "the box and lid share a face");
+    let history = h.state().session.history_labels().len();
+    scroll_and_click(&mut h, "Place hinge");
+    wait_until(&mut h, "the hinge placed", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let doc = h.state().session.document().clone();
+    let pieces: Vec<&mf_command::Object> = doc
+        .objects()
+        .iter()
+        .filter(|o| o.id != body_id && o.id != lid_id)
+        .collect();
+    assert_eq!(pieces.len(), 3, "leaf A, leaf B and the pin");
+    let to = |o: &mf_command::Object| {
+        o.properties
+            .get(mf_operations::shapes::ATTACH_TO)
+            .cloned()
+            .unwrap_or_default()
+    };
+    let leaf_a = pieces.iter().find(|o| o.name.contains("leaf a")).unwrap();
+    let leaf_b = pieces.iter().find(|o| o.name.contains("leaf b")).unwrap();
+    assert_eq!(to(leaf_a), body_id.0.to_string());
+    assert_eq!(to(leaf_b), lid_id.0.to_string());
+    let leaf_a = leaf_a.id;
+
+    // The swing preview, from the selection panel.
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(leaf_a);
+    settle(&mut h);
+    wait_until(&mut h, "the swing check", |a| {
+        mf_desktop::hinge_tool::swing_report(a).is_some()
+    });
+    settle(&mut h);
+    let report = mf_desktop::hinge_tool::swing_report(h.state())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report.first_contact_deg,
+        None,
+        "the lid swings clear: {:?}",
+        report.contacts.first()
+    );
+    h.get_by_label_contains("without touching anything");
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 90.0;
+    }
+    settle(&mut h);
+    let lid_shown = h.state().shown_transform(lid_id).expect("the lid turns");
+    assert!(
+        (lid_shown[8]).abs() < 1e-6,
+        "at 90° the lid's z axis lies flat: {lid_shown:?}"
+    );
+    still(&mut h, "hinge-swing-90");
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 0.0;
+    }
+    settle(&mut h);
+
+    // Attach: each leaf joins its own object; the pin stays separate.
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Attach to body and lid").click();
+    wait_until(&mut h, "the attach", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert_eq!(names.len(), 3, "body, lid and the pin: {names:?}");
+    still(&mut h, "hinge-attached");
 }

@@ -18,6 +18,7 @@ mod library;
 mod machine;
 mod manifest;
 pub mod shape;
+pub mod swing;
 
 pub use builtin::builtins;
 pub use connector::{

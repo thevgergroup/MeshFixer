@@ -8,6 +8,7 @@ pub mod flap;
 pub mod hinge;
 pub mod hole_profile;
 pub mod joint;
+pub mod leaf_hinge;
 pub mod thread;
 
 use mf_geometry::Mesh;
@@ -20,6 +21,7 @@ use crate::connector::Connector;
 pub fn connectors() -> Vec<&'static dyn Connector> {
     vec![
         &hinge::PinHinge,
+        &leaf_hinge::LeafHinge,
         &clasp::SnapClasp,
         &flap::FlapHinge,
         &thread::Thread,

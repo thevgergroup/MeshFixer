@@ -1054,4 +1054,5 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     }
     crate::split_flow::overlay(app, &painter, rect);
     crate::connect_tool::overlay(app, &painter, rect);
+    crate::hinge_tool::overlay(app, &painter, rect);
 }

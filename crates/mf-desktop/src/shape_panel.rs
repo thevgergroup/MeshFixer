@@ -250,6 +250,28 @@ fn apply_fit_choice(app: &MeshFixerApp, params: &mut Params, name: &str, value: 
     let ParamValue::Text(chosen) = value else {
         return;
     };
+    if params.0.contains_key("pin_clearance") && matches!(name, "fit_class" | "machine_profile") {
+        // A hinge: both its gaps follow the pair (`hinge_tool::hinge_fit`).
+        let (classes, _) = crate::connector_tool::fit_classes(app);
+        let (profiles, _) = crate::connector_tool::machine_profiles(app);
+        let text = |k: &str| match params.0.get(k) {
+            Some(ParamValue::Text(t)) => t.clone(),
+            _ => String::new(),
+        };
+        if let (Some(c), Some(m)) = (
+            classes.get(&text("fit_class")),
+            profiles.get(&text("machine_profile")),
+        ) {
+            params
+                .0
+                .insert("gap".into(), ParamValue::Float(c.clearance + m.outer_xy));
+            params.0.insert(
+                "pin_clearance".into(),
+                ParamValue::Float(c.clearance + m.hole_undersize),
+            );
+        }
+        return;
+    }
     match name {
         "fit_class" => {
             let (classes, _) = crate::connector_tool::fit_classes(app);
@@ -443,6 +465,9 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
     if let Some((name, value)) = commit {
         set_param(app, &name, value);
+    }
+    if record.id == crate::hinge_tool::HINGE {
+        crate::hinge_tool::swing_section(app, ui, id);
     }
 }
 

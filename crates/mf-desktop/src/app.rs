@@ -399,6 +399,8 @@ pub struct MeshFixerApp {
     pub connectors: crate::connector_tool::ConnectorsState,
     /// The editable shape's params being edited in the selection panel.
     pub shape_edit: Option<crate::shape_panel::ShapeDraft>,
+    /// Hinge placement choices and the swing preview.
+    pub hinge: crate::hinge_tool::HingeState,
     /// Set by Parts/Connectors right before placing (`object.add_part`):
     /// once that command's `Message::Completed` has run (so `active` is
     /// already the newly created object, D6's own `after_object_changes`
@@ -785,6 +787,7 @@ impl MeshFixerApp {
             parts: Default::default(),
             connectors: Default::default(),
             shape_edit: None,
+            hinge: Default::default(),
             pending_open_transform: None,
             last_invocation_op: None,
             refusal: None,
@@ -4517,7 +4520,10 @@ impl MeshFixerApp {
         {
             return Some(d.current);
         }
-        self.preview.filter(|(o, _)| *o == id).map(|(_, t)| t)
+        self.preview
+            .filter(|(o, _)| *o == id)
+            .map(|(_, t)| t)
+            .or_else(|| crate::hinge_tool::swung(self, id))
     }
 
     /// The active object's placement as the Transform fields show it.

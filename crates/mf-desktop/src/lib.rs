@@ -8,6 +8,7 @@ pub mod connector_tool;
 pub mod defects;
 pub mod framing;
 pub mod gpu;
+pub mod hinge_tool;
 pub mod i18n;
 pub mod icons;
 pub mod import_dialog;
