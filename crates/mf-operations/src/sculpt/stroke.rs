@@ -82,6 +82,34 @@ fn mirror_vec(d: V3, mask: u8) -> V3 {
     std::array::from_fn(|k| if mask & (1 << k) != 0 { -d[k] } else { d[k] })
 }
 
+/// Grab's captured vertex set (MF-SCULPT-005/Grab fix): the geodesic
+/// region connected to the face under the first dab, within the radius,
+/// applying "stay on this surface"'s own crease rule regardless of that
+/// option's setting (a drag must never reach past a sharp crease into an
+/// unrelated part of the model). Captured once, at stroke start, and
+/// never recomputed or grown as the stroke continues: every later dab
+/// moves exactly this set, from its position *as captured*, by the
+/// cursor's total displacement since then — never a per-dab delta, which
+/// would otherwise keep re-applying motion to a (possibly different)
+/// radius-based set on every dab and run away into spikes.
+struct GrabRegion {
+    /// The dab centre the drag started from (the view-plane projection
+    /// origin for every later dab's displacement).
+    origin: V3,
+    /// Each captured vertex's position at capture time and its falloff
+    /// weight (by geodesic distance from the start face, fixed for the
+    /// whole stroke).
+    vertices: HashMap<u32, (V3, f64)>,
+    /// Every face with a corner in `vertices` (captured region or its
+    /// one-ring boundary), and its normal at capture time: the fixed
+    /// baseline the whole stroke's inversion clamp measures against
+    /// (never a dab's own prior positions — a long drag must never flip
+    /// a face relative to where the stroke *started*, even if each
+    /// individual dab's own step looked safe against the step before
+    /// it).
+    faces: Vec<([u32; 3], V3)>,
+}
+
 /// One stroke in progress. See the module docs.
 pub struct StrokeState {
     /// The stroke's input revision.
@@ -108,6 +136,11 @@ pub struct StrokeState {
     /// Created faces → the input faces they came from (remeshing).
     origins: HashMap<FaceId, Vec<FaceId>>,
     remesh: RemeshStats,
+    /// Grab's captured regions (`BrushKind::Drag` only), one per mirror
+    /// image (`apply`'s `masks`, same order), set on the first dab and
+    /// then fixed for the rest of the stroke. Empty until the first dab
+    /// runs.
+    grab: Vec<GrabRegion>,
 }
 
 /// A vertex's surroundings for one dab evaluation.
@@ -304,6 +337,7 @@ impl StrokeState {
             base_faces: base.face_slots(),
             origins: HashMap::new(),
             remesh: RemeshStats::default(),
+            grab: Vec::new(),
         }
     }
 
@@ -437,6 +471,119 @@ impl StrokeState {
         best.map_or(base_point, |t| add(base_point, scale(d, t)))
     }
 
+    /// Grab's region capture (MF-SCULPT-005/Grab fix): the vertices
+    /// geodesically connected to the face under `c` within the radius,
+    /// always applying "stay on this surface"'s own crease rule (a drag
+    /// must never reach past a sharp crease, whatever that option is set
+    /// to — this is about containing the grab to one surface, not about
+    /// the brush's general falloff shape). Each vertex's falloff weight
+    /// is fixed here, from its geodesic distance at capture time, and
+    /// never recomputed: later dabs move this same set by the cursor's
+    /// displacement, they never re-gather it.
+    fn capture_grab_region(&self, c: V3) -> GrabRegion {
+        let r = self.params.radius;
+        let local = self.gather(c, r);
+        let distances = geodesic_vertex_distances(&local, c, r, |v| self.pos(v));
+        let vertices: HashMap<u32, (V3, f64)> = distances
+            .into_iter()
+            .filter(|&(v, d)| d < r && self.movable(v, &local))
+            .map(|(v, d)| {
+                let w = self.params.falloff.weight(d / r);
+                (v, (self.pos(v), w))
+            })
+            .collect();
+        // Every face the captured set could possibly rotate (a corner in
+        // the set), with its normal as of right now (stroke start):
+        // fixed for the whole stroke's inversion clamp.
+        let faces: Vec<([u32; 3], V3)> = local
+            .faces
+            .iter()
+            .filter(|(_, t)| t.iter().any(|v| vertices.contains_key(v)))
+            .map(|(_, t)| (*t, self.face_cross(*t)))
+            .collect();
+        GrabRegion {
+            origin: c,
+            vertices,
+            faces,
+        }
+    }
+
+    /// Grab's per-dab delta (`BrushKind::Drag` only): each captured
+    /// vertex moves from its position *as captured* toward
+    /// `captured + total_disp * weight`, where `total_disp` is the
+    /// cursor's displacement since the region was captured, projected
+    /// onto the view plane (normal to `view`) at the hit depth, and
+    /// weighted by `strength × pressure`. Absolute, not incremental: the
+    /// same dab replayed twice gives the same delta, and dab N doesn't
+    /// compound dab N-1's motion onto a moving base.
+    fn grab_delta(&self, grab: &GrabRegion, c: V3, view: V3, pressure: f64) -> Vec<(u32, V3)> {
+        let p = &self.params;
+        let raw = sub(c, grab.origin);
+        // The view-plane projection: drop the component along the view
+        // direction, so the drag reads as the cursor's on-screen motion,
+        // not a 3D offset that includes depth the user never asked to
+        // move along.
+        let total = match normalized(view) {
+            Some(n) => sub(raw, scale(n, dot(raw, n))),
+            None => raw,
+        };
+        let strength = p.strength * pressure;
+        // No inversions: `total` is scaled by one shared factor `t`
+        // (binary search) so that every captured face still faces the
+        // way it did when the region was captured (stroke start), not
+        // just the way it did before this one dab — a long drag must
+        // never flip a face relative to where it started, even through
+        // many individually-safe-looking steps. `pos_at(v, t)` is the
+        // vertex's position with this dab's move scaled by `t`: moved
+        // vertices come from `grab.vertices`' captured position plus the
+        // scaled total, exactly as the final, unscaled delta will.
+        let pos_at = |v: u32, t: f64| match grab.vertices.get(&v) {
+            Some(&(captured, w)) => add(captured, scale(total, t * strength * w)),
+            None => self.pos(v),
+        };
+        let normal_at = |t: f64, tri: [u32; 3]| {
+            let [a, b, c] = tri.map(|v| pos_at(v, t));
+            cross(sub(b, a), sub(c, a))
+        };
+        let flips = |t: f64| {
+            grab.faces
+                .iter()
+                .any(|&(tri, n0)| dot(normal_at(t, tri), n0) <= 0.0)
+        };
+        let t = if flips(1.0) {
+            let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+            for _ in 0..40 {
+                let mid = 0.5 * (lo + hi);
+                if flips(mid) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            lo
+        } else {
+            1.0
+        };
+        let mut out = Vec::with_capacity(grab.vertices.len());
+        let mut verts: Vec<&u32> = grab.vertices.keys().collect();
+        verts.sort_unstable();
+        for &v in verts {
+            if !self.is_live_vertex(v) {
+                continue;
+            }
+            let target = pos_at(v, t);
+            let delta = sub(target, self.pos(v));
+            if delta != [0.0; 3] {
+                out.push((v, delta));
+            }
+        }
+        out
+    }
+
+    fn is_live_vertex(&self, v: u32) -> bool {
+        self.edit.is_vertex_live(VertexId(v))
+    }
+
     /// The displacement the brush gives each movable vertex within the
     /// radius of `c`, ascending by vertex, from current positions.
     fn evaluate(&self, c: V3, drag: V3, view: V3, pressure: f64) -> (Vec<(u32, V3)>, Local) {
@@ -538,6 +685,71 @@ impl StrokeState {
         (out, local)
     }
 
+    /// Every live face with a corner in `verts`, deduplicated: the set
+    /// whose orientation a batch of vertex moves could possibly flip.
+    fn faces_touching(&self, verts: &HashSet<u32>, local: &[&Local]) -> Vec<[u32; 3]> {
+        let mut faces: Vec<[u32; 3]> = local
+            .iter()
+            .flat_map(|l| l.faces.iter())
+            .map(|(_, t)| *t)
+            .filter(|t| t.iter().any(|v| verts.contains(v)))
+            .collect();
+        faces.sort_unstable();
+        faces.dedup();
+        faces
+    }
+
+    /// Scales every delta in `deltas` down by the same factor (binary
+    /// search between 0 and 1) until no face in `faces` flips: no face's
+    /// normal, recomputed with the scaled moves applied, points away
+    /// from (dot ≤ 0) its normal at the deltas' current, un-moved
+    /// positions. A single shared factor rather than a per-vertex clamp,
+    /// so the moved region keeps its shape (just shorter), rather than
+    /// warping unevenly near whichever vertex happened to clamp hardest.
+    /// No-op (factor 1) if nothing would flip.
+    fn clamp_to_avoid_flips(&self, deltas: &mut [(u32, V3)], faces: &[[u32; 3]]) {
+        if deltas.is_empty() || faces.is_empty() {
+            return;
+        }
+        let moved: HashMap<u32, V3> = deltas.iter().copied().collect();
+        let pos_at = |v: u32, t: f64| {
+            let p = self.pos(v);
+            match moved.get(&v) {
+                Some(&d) => add(p, scale(d, t)),
+                None => p,
+            }
+        };
+        let normal_at = |t: f64, tri: [u32; 3]| {
+            let [a, b, c] = tri.map(|v| pos_at(v, t));
+            cross(sub(b, a), sub(c, a))
+        };
+        let old: Vec<V3> = faces.iter().map(|&t| normal_at(0.0, t)).collect();
+        let flips = |t: f64| {
+            faces
+                .iter()
+                .zip(&old)
+                .any(|(&t2, &n0)| dot(normal_at(t, t2), n0) <= 0.0)
+        };
+        if !flips(1.0) {
+            return;
+        }
+        // Binary search the largest safe `t` in [0, 1]: `flips(0)` is
+        // always false (the un-moved mesh's own faces don't flip against
+        // themselves), so the search always has a safe lower bound.
+        let (mut lo, mut hi) = (0.0_f64, 1.0_f64);
+        for _ in 0..40 {
+            let mid = 0.5 * (lo + hi);
+            if flips(mid) {
+                hi = mid;
+            } else {
+                lo = mid;
+            }
+        }
+        for (_, d) in deltas.iter_mut() {
+            *d = scale(*d, lo);
+        }
+    }
+
     /// Applies one dab. Cancellable between dabs only: one dab is local
     /// work (milliseconds).
     pub fn apply(&mut self, dab: &DabSample, ctx: &RunContext) -> Result<DabDelta, OpError> {
@@ -568,13 +780,41 @@ impl StrokeState {
             })
             .collect();
         let pivot = self.params.pivot;
+        let is_grab = self.params.kind == BrushKind::Drag;
+        if is_grab && self.grab.is_empty() {
+            // Grab's region is captured once, from the first dab's
+            // centre (every mirror image's own hit face): fixed for the
+            // rest of the stroke (see `GrabRegion`'s docs).
+            self.grab = masks
+                .iter()
+                .map(|&m| self.capture_grab_region(mirror_point(c, pivot, m)))
+                .collect();
+        }
         let mut evals = Vec::with_capacity(masks.len());
-        for &m in &masks {
+        for (i, &m) in masks.iter().enumerate() {
             let cm = mirror_point(c, pivot, m);
             self.centres.push(cm);
-            evals.push(self.evaluate(cm, mirror_vec(drag, m), mirror_vec(view, m), dab.pressure));
+            if is_grab {
+                let local = self.gather(cm, self.params.radius);
+                let delta = self.grab_delta(&self.grab[i], cm, mirror_vec(view, m), dab.pressure);
+                evals.push((delta, local));
+            } else {
+                evals.push(self.evaluate(
+                    cm,
+                    mirror_vec(drag, m),
+                    mirror_vec(view, m),
+                    dab.pressure,
+                ));
+            }
         }
-        let deltas = self.combine(&masks, &axes, &evals);
+        let mut deltas = self.combine(&masks, &axes, &evals);
+        // No inversions (owner report: a large drag tore the surface):
+        // clamp this dab's moves, as one shared factor, so no face
+        // incident to a moved vertex flips its orientation.
+        let moved_verts: HashSet<u32> = deltas.iter().map(|&(v, _)| v).collect();
+        let locals: Vec<&Local> = evals.iter().map(|(_, l)| l).collect();
+        let faces = self.faces_touching(&moved_verts, &locals);
+        self.clamp_to_avoid_flips(&mut deltas, &faces);
         // Apply, and report what changed.
         let mut moved_max = 0.0_f64;
         let mut moved = HashSet::new();
@@ -718,8 +958,11 @@ impl StrokeState {
         // leaving the two images' own, independently-correct ones. Every
         // mirror image is evaluated and summed on its own instead
         // (still correct; just not guaranteed bit-identical between the
-        // two sides in this one case).
+        // two sides in this one case). Grab's region capture always walks
+        // the same geodesic flood fill (regardless of `stay_on_surface`:
+        // see `capture_grab_region`), so it has the same caveat.
         let symmetric = !self.params.stay_on_surface
+            && self.params.kind != BrushKind::Drag
             && union
                 .iter()
                 .all(|&v| axes.iter().all(|&k| partner(v, k).is_some()));
