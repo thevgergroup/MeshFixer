@@ -572,8 +572,63 @@ pub fn cut_half_with(
             new_positions[v as usize - slots]
         }
     };
+    // Canonicalise cut points: two different crossing edges of one
+    // near-plane vertex (every vertex of a ring that's a whole `ulp` off
+    // true zero, such as a UV sphere's equator, carries the *same* tiny
+    // nonzero signed distance, so `orient3d` gives it one real, exactly
+    // consistent side — a genuine crossing, not [`SOS_SIDE`]'s on-plane
+    // case) can land their cut points at the exact same position: the
+    // crossing is essentially right at that vertex. `cut` already shares
+    // one point per *edge*; this shares one point per *position* across
+    // every edge, so the boundary traced below sees the ring as what it
+    // geometrically is — one loop point there, not two that happen to
+    // sit on top of each other. Exact (bit-for-bit) equality only, same
+    // as every other test here: no epsilon.
+    // Visited lowest id first (`cut_points.values()`' own order is a
+    // `HashMap`'s, not reproducible run to run), so the canonical id for
+    // a shared position is always the lowest one that reached it: the
+    // result doesn't depend on hash iteration order (D23's determinism).
+    let mut ids: Vec<u32> = cut_points.values().copied().collect();
+    ids.sort_unstable();
+    let mut canon: HashMap<[u64; 3], u32> = HashMap::new();
+    let key = |p: [f64; 3]| -> [u64; 3] { p.map(f64::to_bits) };
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    for id in ids {
+        let k = key(pos(id));
+        match canon.entry(k) {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                remap.insert(id, *e.get());
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(id);
+            }
+        }
+    }
+    let canon = |v: u32| -> u32 { remap.get(&v).copied().unwrap_or(v) };
+    for tri in &mut pieces {
+        *tri = tri.map(canon);
+    }
+    for edge in &mut plane_edges {
+        edge.0 = canon(edge.0);
+        edge.1 = canon(edge.1);
+    }
+    // A merged-away cut point is now unused (every reference to it was
+    // remapped to its canonical twin): remove it so it isn't left as a
+    // dangling, never-referenced vertex in the output.
+    let merged_away: HashSet<u32> = remap.keys().copied().collect();
+    for &v in &merged_away {
+        edit.remove_vertex(VertexId(v))?;
+    }
     for (tri, f) in pieces.iter().zip(&piece_faces) {
         tick.tick()?;
+        // A piece with two corners merged onto one (the crossing landed
+        // essentially at a vertex it already touched) has no area:
+        // dropped, not an error — the face's other piece(s), and its
+        // neighbours across the now-shared point, still exactly cover
+        // the kept side.
+        if tri[0] == tri[1] || tri[1] == tri[2] || tri[2] == tri[0] {
+            continue;
+        }
         if degenerate(tri.map(pos)) {
             return Err(CutError::SectionSelfIntersects { at: pos(tri[0]) });
         }

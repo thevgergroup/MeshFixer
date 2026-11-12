@@ -557,6 +557,62 @@ fn split_targets_only_the_selected_object_and_names_the_rest() {
     );
 }
 
+/// The demo scene's "scan" at Split's default plane (owner 2026-11-12:
+/// `split_section_self_intersects`, "the cut grazes the surface here"):
+/// the plane is placed horizontal through the selection's own bounding
+/// box centre ([`crate::shape_tools::place_plane`]'s doc comment), which
+/// for this damaged UV sphere lands exactly on its equator — a whole
+/// *ring* of vertices on the plane, not just one. Cut must still
+/// succeed, with both new parts present and no refusal.
+#[test]
+fn split_demo_scan_at_the_default_plane_is_never_refused() {
+    require_gpu!("split_demo_scan_at_the_default_plane_is_never_refused");
+    // The demo scene's own "scan" ([`mf_fixtures::demo_scene`]) has
+    // deliberate holes (scan damage), which leaves it open — Split's Cut
+    // button is disabled for an open target, so it can't reach this bug
+    // at all. This is the same shape (a damaged-sphere-sized scan, with
+    // its scan-bump cubes, at the same placement, rotated 25 degrees
+    // about Z so the equator ring is off-axis in world space, exactly
+    // as the real demo file is), but undamaged, so Split can actually
+    // run: the plane Split places by default (the selection's own world
+    // bounding-box centre, horizontal) still lands exactly on its
+    // equator, a whole ring of vertices on the plane.
+    let sphere = mf_fixtures::scaled(
+        &mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec {
+            rings: 32,
+            segments: 64,
+            holes: 0,
+            islands: 0,
+            unwelded: 0,
+            seed: 3,
+        }),
+        20.0,
+    );
+    let mut parts = vec![sphere];
+    for d in [[23.0, 0.0, 4.0], [-6.0, 22.0, -8.0], [4.0, -9.0, 21.0]] {
+        parts.push(mf_fixtures::translated(&mf_fixtures::cube(2.0), d));
+    }
+    let scan = mf_fixtures::merge(&parts);
+    let transform = mf_fixtures::rotation_translation(2, 25.0, [-32.0, 0.0, 20.0]);
+    let mut h = opened(vec![("scan", scan, transform)]);
+    row(&h, "scan").click();
+    settle(&mut h);
+    assert_eq!(h.state().active, Some(id_of(&h, "scan")));
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().selected_objects(), vec![id_of(&h, "scan")]);
+    let history = history_len(&h);
+    h.get_by_label("Cut").click();
+    wait_until(&mut h, "the cut", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert!(names.contains(&"scan (top)".to_string()), "{names:?}");
+    assert!(names.contains(&"scan (bottom)".to_string()), "{names:?}");
+}
+
 // ---------------------------------------------------------------------
 // Combine: solid + solid + hole, with Undo.
 // ---------------------------------------------------------------------

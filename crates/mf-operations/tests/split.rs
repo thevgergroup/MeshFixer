@@ -582,3 +582,93 @@ fn created_part_provenance_names_operand_faces() {
         }
     }
 }
+
+/// A UV sphere cut exactly at a whole ring of vertices (owner
+/// 2026-11-12, `split_section_self_intersects` on the demo scan: a
+/// horizontal plane at a sphere's equator, where a *ring* of vertices —
+/// not just one — lies on the plane). Covers both the equator (ring
+/// 12 of 24: `cos(pi/2)` is an ulp off true zero in `f64`, so the ring
+/// is a genuine, if near-zero, crossing, not [`mf_boolean::plane_cut`]'s
+/// on-plane `SOS_SIDE` case) and another latitude ring (ring 8: `z =
+/// 0.5` exactly, a bit-exact ring). Keep both/above/below, cap on and
+/// off, all at both rings.
+#[test]
+fn sphere_cut_at_a_vertex_ring_is_never_refused() {
+    use mf_boolean::{Plane, Side, cut_half_with};
+    let sphere = scaled(&uv_sphere(24, 48), 10.0);
+    for z in [6.123_233_995_736_766e-17_f64 * 10.0, 0.5 * 10.0] {
+        let plane = Plane {
+            point: [0.0, 0.0, z],
+            normal: [0.0, 0.0, 1.0],
+        };
+        for keep in [Side::Below, Side::Above] {
+            for cap in [true, false] {
+                let half = cut_half_with(&sphere, &plane, keep, cap, &RunContext::none())
+                    .unwrap_or_else(|e| panic!("z={z} {keep:?} cap={cap}: {e}"));
+                if cap {
+                    let (p, t) = half.mesh.to_arrays();
+                    mf_boolean::validate_solid(&p, &t, &RunContext::none())
+                        .unwrap_or_else(|e| panic!("z={z} {keep:?} cap={cap}: not solid: {e}"));
+                }
+            }
+        }
+    }
+}
+
+/// A low-poly cylinder (three rings: bottom, middle, top) cut exactly at
+/// its middle vertex ring: every vertex the plane touches is shared by
+/// faces genuinely crossing it on both sides, the same shape of fault as
+/// the UV sphere's equator but on a mesh with no near-zero
+/// floating-point artefact — the ring really is exactly on the plane.
+#[test]
+fn cylinder_cut_exactly_at_a_vertex_ring_is_never_refused() {
+    use mf_boolean::{Plane, Side, cut_half_with};
+    let sides: u32 = 8;
+    let mut positions = Vec::new();
+    for &z in &[0.0_f64, 1.0, 2.0] {
+        for s in 0..sides {
+            let a = 2.0 * std::f64::consts::PI * s as f64 / sides as f64;
+            positions.push([a.cos(), a.sin(), z]);
+        }
+    }
+    let bottom_centre = positions.len() as u32;
+    positions.push([0.0, 0.0, 0.0]);
+    let top_centre = positions.len() as u32;
+    positions.push([0.0, 0.0, 2.0]);
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    for r in 0..2 {
+        for s in 0..sides {
+            let (b0, b1) = (r * sides + s, r * sides + (s + 1) % sides);
+            let (t0, t1) = ((r + 1) * sides + s, (r + 1) * sides + (s + 1) % sides);
+            triangles.push([b0, b1, t1]);
+            triangles.push([b0, t1, t0]);
+        }
+    }
+    for s in 0..sides {
+        triangles.push([bottom_centre, (s + 1) % sides, s]);
+    }
+    for s in 0..sides {
+        let (t0, t1) = (2 * sides + s, 2 * sides + (s + 1) % sides);
+        triangles.push([top_centre, t0, t1]);
+    }
+    let cylinder = Mesh::new(positions, triangles).unwrap();
+    // Exactly at the middle ring (z=1): every one of its vertices is on
+    // the plane, shared by the side walls genuinely crossing it above
+    // and below.
+    let plane = Plane {
+        point: [0.0, 0.0, 1.0],
+        normal: [0.0, 0.0, 1.0],
+    };
+    for keep in [Side::Below, Side::Above] {
+        for cap in [true, false] {
+            let half = cut_half_with(&cylinder, &plane, keep, cap, &RunContext::none())
+                .unwrap_or_else(|e| panic!("{keep:?} cap={cap}: {e}"));
+            if cap {
+                let (p, t) = half.mesh.to_arrays();
+                mf_boolean::validate_solid(&p, &t, &RunContext::none())
+                    .unwrap_or_else(|e| panic!("{keep:?} cap={cap}: not solid: {e}"));
+            }
+        }
+    }
+}
+
