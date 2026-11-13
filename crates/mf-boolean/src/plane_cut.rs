@@ -1022,6 +1022,37 @@ fn cut_half_core(
     for &v in &on_plane_unused {
         edit.remove_vertex(VertexId(v))?;
     }
+    // An input vertex this close to the plane is on it for this cut
+    // (`side[v] == 0`, SOS), but its own stored position is whatever the
+    // input gave it — an input built from trigonometry (a sphere's own
+    // vertices, say) is essentially never *exactly* zero in the plane's
+    // own distance, only within rounding of it. Left alone, the cap
+    // (and the kept side's own rim) would carry that vertex a few ulps
+    // off the plane it's supposedly cut along (owner 2026-11-13: caught
+    // by an exact `orient3d` check against the plane itself, on a cut
+    // near a sphere's pole). Snapped here onto the plane exactly, the
+    // same way a new cut point already is in `edge_cut_point`: moving
+    // an on-plane vertex changes nothing about which faces it's in or
+    // which side they're on (the decision that put it here), only its
+    // position by at most a few ulps.
+    for &v in &used_on_plane {
+        if island_vertices.contains(&v) {
+            continue;
+        }
+        let p = mesh.corner_position(v);
+        let snapped = match axis {
+            Some(i) => std::array::from_fn(|k| if k == i { frame.origin[i] } else { p[k] }),
+            None => {
+                let d: f64 = (0..3)
+                    .map(|k| (p[k] - frame.origin[k]) * frame.normal[k])
+                    .sum();
+                std::array::from_fn(|k| p[k] - d * frame.normal[k])
+            }
+        };
+        if snapped != p {
+            edit.move_vertex(VertexId(v), snapped)?;
+        }
+    }
     let input = slots as u32;
     let pos = |v: u32| -> [f64; 3] {
         if v < input {

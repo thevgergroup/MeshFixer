@@ -337,3 +337,126 @@ fn cap_off_removes_exactly_the_cap() {
         }
     }
 }
+
+/// A cut's cap must be exactly planar: every one of its vertices lies
+/// exactly on the cut plane, checked with Shewchuk's exact `orient3d`
+/// against three points of the plane itself (never a tolerance). Cuts
+/// near a sphere's pole, where the cap's own section loop is small and
+/// an input vertex is routinely within rounding of the plane (its own
+/// coordinates come from trigonometry, essentially never exactly on an
+/// arbitrary plane), are the sharpest test of this (owner 2026-11-13
+/// follow-up: an axis-aligned cut right at the pole of a UV sphere
+/// found cap vertices measurably off the plane — a kept input vertex
+/// this close counts as *on* the plane for the cut's own topology
+/// (simulation of simplicity), but was left at its own, slightly off,
+/// stored position; `cut_half` now snaps such a vertex onto the plane
+/// exactly, the same way a freshly cut edge point already was for an
+/// axis-aligned plane).
+///
+/// A genuinely tilted (non-axis-aligned) plane is a separate, narrower
+/// case: a *newly created* cut point's position is a float
+/// interpolation along its edge, which an axis-aligned plane makes
+/// exact (the off-axis coordinates don't have to land on anything;
+/// the axis one is set to the plane's own value directly) but a tilted
+/// one can leave a few ulps off even after projecting onto the plane
+/// (ordinary float arithmetic has no exact representation to land on,
+/// unlike the sign tests driving the cut's own topology) — tracked
+/// separately below, not asserted to zero.
+#[test]
+fn the_cap_is_exactly_planar_for_an_axis_aligned_cut_even_near_a_sphere_s_pole() {
+    use robust::{Coord3D, orient3d};
+    let ctx = RunContext::none();
+    let sphere = mf_fixtures::scaled(&uv_sphere(48, 96), 20.0);
+    let c3 = |p: [f64; 3]| Coord3D {
+        x: p[0],
+        y: p[1],
+        z: p[2],
+    };
+    // Through the centre, and two shallow cuts near the pole (z = 10,
+    // z = 18: a small cap close to the steepest part of the sphere's
+    // own curvature, where an input vertex is likeliest to be within
+    // rounding of the plane).
+    for z in [0.0, 10.0, 18.0] {
+        let p = Plane {
+            point: [0.0, 0.0, z],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let c = cut_half(&sphere, &p, Side::Above, &ctx).unwrap();
+        assert!(!c.cap_faces.is_empty(), "{p:?}");
+        // Three points of the plane (never derived from the mesh, so
+        // this can't pass by construction).
+        let (a, b, d) = (c3([0.0, 0.0, z]), c3([1.0, 0.0, z]), c3([0.0, 1.0, z]));
+        for &f in &c.cap_faces {
+            let Some(t) = c.mesh.face(f) else { continue };
+            for v_id in t {
+                let pos = c.mesh.corner_position(v_id);
+                let o = orient3d(a, b, d, c3(pos));
+                assert_eq!(
+                    o, 0.0,
+                    "cap face {f:?} vertex {v_id} at {pos:?} is off plane z={z} (orient3d={o})"
+                );
+            }
+        }
+    }
+}
+
+/// A tilted plane's cap: no *original* (kept input) vertex is ever off
+/// it — `cut_half`'s snap covers that case exactly, same as the
+/// axis-aligned one above — even though a freshly cut edge point can
+/// still be a few ulps off (the separate, float-interpolation limit
+/// described above, not asserted to zero here).
+#[test]
+fn a_tilted_cut_s_cap_has_no_off_plane_original_vertex() {
+    use robust::{Coord3D, orient3d};
+    let ctx = RunContext::none();
+    let sphere = mf_fixtures::scaled(&uv_sphere(48, 96), 20.0);
+    let c3 = |p: [f64; 3]| Coord3D {
+        x: p[0],
+        y: p[1],
+        z: p[2],
+    };
+    let p = Plane {
+        point: [0.0, 0.0, 18.0],
+        normal: [0.05, 0.03, 1.0],
+    };
+    let c = cut_half(&sphere, &p, Side::Above, &ctx).unwrap();
+    assert!(!c.cap_faces.is_empty());
+    let len =
+        (p.normal[0] * p.normal[0] + p.normal[1] * p.normal[1] + p.normal[2] * p.normal[2]).sqrt();
+    let n = p.normal.map(|x| x / len);
+    let seed = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let dot = seed[0] * n[0] + seed[1] * n[1] + seed[2] * n[2];
+    let raw_u = [
+        seed[0] - dot * n[0],
+        seed[1] - dot * n[1],
+        seed[2] - dot * n[2],
+    ];
+    let ulen = (raw_u[0] * raw_u[0] + raw_u[1] * raw_u[1] + raw_u[2] * raw_u[2]).sqrt();
+    let u = raw_u.map(|x| x / ulen);
+    let v = [
+        n[1] * u[2] - n[2] * u[1],
+        n[2] * u[0] - n[0] * u[2],
+        n[0] * u[1] - n[1] * u[0],
+    ];
+    let add = |a: [f64; 3], b: [f64; 3]| std::array::from_fn(|k| a[k] + b[k]);
+    let (a, b, d) = (c3(p.point), c3(add(p.point, u)), c3(add(p.point, v)));
+    let input_slots = sphere.vertex_slots();
+    for &f in &c.cap_faces {
+        let Some(t) = c.mesh.face(f) else { continue };
+        for v_id in t {
+            if v_id >= input_slots {
+                continue; // a freshly cut point: the separate, narrower case.
+            }
+            let pos = c.mesh.corner_position(v_id);
+            let o = orient3d(a, b, d, c3(pos));
+            assert_eq!(
+                o, 0.0,
+                "original vertex {v_id} at {pos:?} is off the tilted cut plane (orient3d={o})"
+            );
+        }
+    }
+}
