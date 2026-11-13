@@ -447,7 +447,11 @@ fn plane_on_a_box_top_face_is_never_refused() {
     assert!(created.is_none(), "nothing above the plane to create");
     assert_solid(&bottom, "bottom");
     assert!(close(volume(&bottom), 20.0f64.powi(3), 1e-9));
-    assert_eq!(bottom.face_count(), c.face_count(), "unchanged, bit for bit");
+    assert_eq!(
+        bottom.face_count(),
+        c.face_count(),
+        "unchanged, bit for bit"
+    );
     for (f, tri) in c.faces() {
         assert_eq!(bottom.face(f), Some(tri), "face {f:?}");
     }
@@ -457,7 +461,9 @@ fn plane_on_a_box_top_face_is_never_refused() {
             .any(|c| matches!(c, ObjectChange::Rename { name, .. } if name == "scan (bottom)"))
     );
     assert!(
-        !out.changes.iter().any(|c| matches!(c, ObjectChange::Create { .. })),
+        !out.changes
+            .iter()
+            .any(|c| matches!(c, ObjectChange::Create { .. })),
         "no empty \"(top)\" object"
     );
 
@@ -498,9 +504,12 @@ fn combined_cube_and_sphere_at_the_coplanar_plane_is_never_refused() {
         &RunContext::none(),
     )
     .expect("cube and sphere overlap, so their union succeeds");
-    let out =
-        split_with(&combined.mesh, IDENTITY, &[("plane_point", &v3([0.0, 0.0, cube_size]))])
-            .unwrap();
+    let out = split_with(
+        &combined.mesh,
+        IDENTITY,
+        &[("plane_point", &v3([0.0, 0.0, cube_size]))],
+    )
+    .unwrap();
     assert_eq!(out.report["parts"].as_array().unwrap().len(), 1);
     assert_eq!(out.report["parts"][0]["name"], "scan (bottom)");
     let (bottom, created) = parts(&out);
@@ -522,7 +531,10 @@ fn plane_along_an_edge_is_never_refused() {
     )
     .unwrap();
     let (kept, created) = parts(&out);
-    assert!(created.is_none(), "nothing strictly on the plane's far side");
+    assert!(
+        created.is_none(),
+        "nothing strictly on the plane's far side"
+    );
     assert_solid(&kept, "kept");
     assert!(close(volume(&kept), 1.0, 1e-9));
     assert_eq!(kept.face_count(), c.face_count(), "unchanged, bit for bit");
@@ -671,4 +683,3 @@ fn cylinder_cut_exactly_at_a_vertex_ring_is_never_refused() {
         }
     }
 }
-

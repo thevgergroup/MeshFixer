@@ -65,9 +65,8 @@ fn a_dent_reads_apart_from_a_plain_sphere() {
     let plain = uv_sphere(24, 48);
     let cam = OrbitCamera::fit(&plain.bounding_box().unwrap());
     let (w, h) = (300, 300);
-    let render = |mesh: &Mesh| {
-        offscreen::render_objects(&[(mesh, DMat4::IDENTITY)], &cam, w, h, false)
-    };
+    let render =
+        |mesh: &Mesh| offscreen::render_objects(&[(mesh, DMat4::IDENTITY)], &cam, w, h, false);
     let Some(plain_img) = gpu_or_skip("a_dent_reads_apart_from_a_plain_sphere", render(&plain))
     else {
         return;
@@ -104,9 +103,8 @@ fn a_bump_reads_apart_from_a_plain_sphere() {
     let plain = uv_sphere(24, 48);
     let cam = OrbitCamera::fit(&plain.bounding_box().unwrap());
     let (w, h) = (300, 300);
-    let render = |mesh: &Mesh| {
-        offscreen::render_objects(&[(mesh, DMat4::IDENTITY)], &cam, w, h, false)
-    };
+    let render =
+        |mesh: &Mesh| offscreen::render_objects(&[(mesh, DMat4::IDENTITY)], &cam, w, h, false);
     let Some(plain_img) = gpu_or_skip("a_bump_reads_apart_from_a_plain_sphere", render(&plain))
     else {
         return;

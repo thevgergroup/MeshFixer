@@ -1386,7 +1386,5 @@ fn run_accepts_target_as_an_operand_name_for_a_many_target_operation() {
         "target=1",
     ]);
     assert_eq!(refused.status.code(), Some(2));
-    assert!(
-        String::from_utf8_lossy(&refused.stderr).contains("has no operand named 'target'")
-    );
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("has no operand named 'target'"));
 }

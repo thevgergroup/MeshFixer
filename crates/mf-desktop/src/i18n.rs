@@ -132,8 +132,14 @@ static CATALOGUE: &[(&str, &str)] = &[
         "align.distribute_hint",
         "Spaces the objects between the two outermost ones evenly along the axis",
     ),
-    ("align.distribute_needs_three", "Select 3 or more objects to distribute"),
-    ("align.dots_hint", "Click a dot to align every selected object to it"),
+    (
+        "align.distribute_needs_three",
+        "Select 3 or more objects to distribute",
+    ),
+    (
+        "align.dots_hint",
+        "Click a dot to align every selected object to it",
+    ),
     ("align.equal_centres", "Equal centres"),
     ("align.equal_gaps", "Equal gaps"),
     ("align.hover.centre", "{axis} centre"),

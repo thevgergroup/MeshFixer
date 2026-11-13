@@ -175,10 +175,7 @@ fn split_names_the_object_and_the_piece_count() {
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
     let label = last_label(&h);
-    assert!(
-        label.starts_with("Split scan into 2 piece"),
-        "{label:?}"
-    );
+    assert!(label.starts_with("Split scan into 2 piece"), "{label:?}");
     assert!(!label.contains("mesh.split_plane"), "{label:?}");
     // pegs: none (the default): the pegs-only parameters don't apply and
     // are hidden from the details, even though some differ from the
@@ -187,7 +184,6 @@ fn split_names_the_object_and_the_piece_count() {
     assert!(!details.contains("Hole diameter"), "{details:?}");
     assert!(!details.contains("Peg shape"), "{details:?}");
 }
-
 
 /// Make solid: "Made {name} solid ({cell} mm cells)".
 #[test]
@@ -261,6 +257,36 @@ fn set_transform_names_the_object_and_the_move() {
     assert!(!label.contains("object.set_transform"), "{label:?}");
 }
 
+/// The status bar's height (window points): a control under it is hidden.
+const STATUS_BAR_HEIGHT: f32 = 36.0;
+
+/// Scrolls the tool panel until the control labelled `label` is fully
+/// in view, then clicks it (as `connect_tool.rs` does).
+fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
+    h.event(egui::Event::PointerMoved(egui::pos2(200.0, WINDOW.1 * 0.5)));
+    h.step();
+    let mut tries = 0;
+    loop {
+        let rect = h.get_by_label(label).rect();
+        if rect.bottom() <= WINDOW.1 - STATUS_BAR_HEIGHT && rect.top() >= 40.0 {
+            break;
+        }
+        tries += 1;
+        assert!(tries < 400, "scrolled to {label:?}");
+        let down = rect.bottom() > WINDOW.1 - STATUS_BAR_HEIGHT;
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, if down { -1.0 } else { 1.0 }),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    h.get_by_label(label).click();
+}
+
 /// Connect's Apply: "Added {n} {kind} to {name}'s joint" when every
 /// connector is the same kind.
 #[test]
@@ -309,9 +335,14 @@ fn place_connectors_names_the_count_kind_and_joint() {
     let p2 = cap(&h, [10.0, 0.0]);
     click_at(&mut h, p2);
     settle(&mut h);
-    assert_eq!(h.state().split_flow.open_joint().unwrap().placements.len(), 2);
+    assert_eq!(
+        h.state().split_flow.open_joint().unwrap().placements.len(),
+        2
+    );
 
-    h.get_by_label("Add connectors").click();
+    // The Placed list puts the button below the panel's fold: scrolled
+    // to first, as a user would (a click on a clipped button is lost).
+    scroll_and_click(&mut h, "Add connectors");
     wait_until(&mut h, "the connectors", |a| a.busy.is_none());
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);

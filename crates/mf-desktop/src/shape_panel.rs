@@ -69,6 +69,7 @@ pub fn recipe(app: &MeshFixerApp, id: ObjectId) -> Option<GeneratorRecord> {
         .object(id)?
         .properties
         .get(GENERATOR)?;
+    // allow-swallow: a malformed recipe isn't an editable shape (logged as a Minor in docs/issues.md)
     GeneratorRecord::from_json(text).ok()
 }
 
@@ -104,6 +105,7 @@ pub fn attach_sides(app: &MeshFixerApp, id: ObjectId) -> Option<(String, ObjectI
             .object(m)?
             .properties
             .get(mf_operations::shapes::ATTACH_TO)
+            // allow-swallow: a malformed attach_to isn't an attached side
             .and_then(|t| t.parse::<u64>().ok())
             .map(ObjectId)
         else {
@@ -180,6 +182,7 @@ pub fn set_params(app: &mut MeshFixerApp, id: ObjectId, params: Params) {
     if members.iter().zip(&records).all(|((_, a), b)| a == b) {
         return;
     }
+    // allow-swallow: id is the object being edited, which exists
     let name = doc.object(id).map(|o| o.name.clone()).unwrap_or_default();
     regenerate(
         app,
@@ -461,6 +464,7 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         );
         if let Some((group, a, b, gap)) = attach_sides(app, id) {
             let doc = app.session.document();
+            // allow-swallow: a just-deleted side shows an empty name for one frame
             let name = |o: ObjectId| doc.object(o).map(|o| o.name.clone()).unwrap_or_default();
             let label = t!("shape.attach", a = name(a), b = name(b));
             if ui

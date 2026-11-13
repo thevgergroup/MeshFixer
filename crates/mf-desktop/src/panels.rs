@@ -1198,6 +1198,7 @@ fn history_step_row(
             "Name this point…"
         };
         if ui.button(title).clicked() {
+            // allow-swallow: an unnamed point starts with an empty name field
             app.checkpoint_naming = Some((id, checkpoint.clone().unwrap_or_default()));
             ui.close();
         }
@@ -1515,6 +1516,7 @@ fn entries_tree(
     for (shown_index, &entry) in shown.iter().enumerate() {
         // The real index in `entries` (not `shown`), so Move up/down
         // target the unfiltered order the document actually keeps.
+        // allow-swallow: shown is filtered from entries, so every entry is found
         let index = entries.iter().position(|&e| e == entry).unwrap_or(0);
         let reorder = Reorder {
             into,

@@ -175,7 +175,12 @@ fn symmetry_x_mirrors_displacement_exactly() {
         let drag_scale = p.strength
             * path()
                 .windows(2)
-                .map(|w| (0..3).map(|k| (w[1][k] - w[0][k]).powi(2)).sum::<f64>().sqrt())
+                .map(|w| {
+                    (0..3)
+                        .map(|k| (w[1][k] - w[0][k]).powi(2))
+                        .sum::<f64>()
+                        .sqrt()
+                })
                 .sum::<f64>();
         let (after, _) = stroke(&mesh, p, &samples);
         let mut moved = 0;
@@ -490,7 +495,10 @@ fn grab_never_moves_the_far_side() {
         // straight-line distance too (a stronger, simpler check than
         // geodesic — straight-line is always ≤ geodesic, so "far by
         // straight line" is a safe superset of "far by geodesic").
-        let d_start = (0..3).map(|k| (before[k] - path[0][k]).powi(2)).sum::<f64>().sqrt();
+        let d_start = (0..3)
+            .map(|k| (before[k] - path[0][k]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let now = after.position(v).unwrap();
         if d_start >= radius {
             assert_eq!(
@@ -625,13 +633,24 @@ fn grab_displacement_equals_drag_distance_at_centre() {
     // and `centres[1]` are exactly `centre_vertex` and `drag_vertex`.
     let centres = s.centres().to_vec();
     let (after, _) = s.finish().unwrap();
-    let now = after.position(mf_geometry::VertexId(centre_vertex)).unwrap();
-    let moved: f64 = (0..3).map(|k| (now[k] - before[k]).powi(2)).sum::<f64>().sqrt();
+    let now = after
+        .position(mf_geometry::VertexId(centre_vertex))
+        .unwrap();
+    let moved: f64 = (0..3)
+        .map(|k| (now[k] - before[k]).powi(2))
+        .sum::<f64>()
+        .sqrt();
     let raw: [f64; 3] = std::array::from_fn(|k| centres[1][k] - centres[0][k]);
     // The view direction is the grid's own normal, so nothing to drop:
     // the raw displacement is already entirely in the view plane.
-    let want: f64 = (0..3).map(|k| (p.strength * raw[k]).powi(2)).sum::<f64>().sqrt();
-    assert!(want > 1e-9, "the drag must have actually moved the centre: {want}");
+    let want: f64 = (0..3)
+        .map(|k| (p.strength * raw[k]).powi(2))
+        .sum::<f64>()
+        .sqrt();
+    assert!(
+        want > 1e-9,
+        "the drag must have actually moved the centre: {want}"
+    );
     assert!(
         (moved - want).abs() < 1e-9,
         "centre vertex moved {moved}, expected {want} (strength × drag distance)"

@@ -1,5 +1,7 @@
 id: mesh.split_plane
-version: 2
+# Version 2 adds hole_profile (version 1 records replay round); version 3
+# adds cap (version 2 and older records replay capped, as they ran).
+version: 3
 summary: Cut a closed object in two along a plane and close each part with a flat cap.
 geometry_kinds: [mesh]
 # Every selected object (many): each one the plane crosses becomes its
@@ -34,7 +36,7 @@ parameters:
   - name: cap
     type: bool
     default: true
-    description: "Close each kept part with a flat cap where it was cut (on by default). Off leaves it open at the cut, with no cap faces and no joint recorded — for a vase or bowl"
+    description: "Close each kept part with a flat cap where it was cut (on by default). Off leaves it open at the cut, with no cap faces and no joint recorded — for a vase or bowl. Version 2 always capped"
   # Alignment holes and dowels (Task 13, D12); dovetail (Task 14): a
   # groove of hole_diameter at the cut, hole_depth_below deep, flanks at
   # 15 degrees, through the bottom part, and a matching tail on the top.

@@ -396,6 +396,7 @@ fn brush_shortcut(b: BrushKind) -> Option<egui::Key> {
 fn brush_shortcut_label(b: BrushKind) -> String {
     brush_shortcut(b)
         .map(|k| crate::panels::shortcut_text(egui::Modifiers::NONE, k))
+        // allow-swallow: documented: a brush without a shortcut has an empty label
         .unwrap_or_default()
 }
 
@@ -871,6 +872,7 @@ pub fn sculpt_changed_faces(baseline: &Mesh, current: &Mesh) -> Vec<(u32, u8)> {
     current
         .faces()
         .filter_map(|(f, t)| {
+            // allow-swallow: a triangle always has three corners, so max() is Some
             let tier = t.iter().map(|&v| corner_tier(v)).max().unwrap_or(0);
             (tier > 0).then_some((f.0, tier))
         })

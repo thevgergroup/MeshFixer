@@ -220,7 +220,10 @@ fn grab_drag_never_moves_the_far_side_of_the_sphere() {
     settle(&mut h);
 
     let after = h.state().active_mesh().unwrap().clone();
-    assert!(!Mesh::ptr_eq(&before, &after), "the drag must have changed something");
+    assert!(
+        !Mesh::ptr_eq(&before, &after),
+        "the drag must have changed something"
+    );
 
     // The far side: more than the radius away, in straight-line
     // distance (object space, matching `drag_start` above), from the
@@ -233,7 +236,10 @@ fn grab_drag_never_moves_the_far_side_of_the_sphere() {
     let radius = 5.0;
     let mut moved = 0;
     for (v, p0) in before.vertices() {
-        let d = (0..3).map(|k| (p0[k] - drag_start[k]).powi(2)).sum::<f64>().sqrt();
+        let d = (0..3)
+            .map(|k| (p0[k] - drag_start[k]).powi(2))
+            .sum::<f64>()
+            .sqrt();
         let now = after.position(v).unwrap();
         if d >= radius + 1.0 {
             // +1mm margin past the radius: the dab centre itself may
@@ -308,7 +314,11 @@ fn grab_drag_never_moves_another_object() {
         other_after.content_hash(),
         "the other object must be completely untouched by a stroke on the first"
     );
-    assert_eq!(h.state().active, Some(first_id), "the active object didn't change");
+    assert_eq!(
+        h.state().active,
+        Some(first_id),
+        "the active object didn't change"
+    );
 }
 
 /// No face of the sphere inverts, even after a large, aggressive Grab
@@ -410,10 +420,12 @@ fn grab_drag_moves_the_dabbed_point_by_about_the_drag_distance() {
     // the exact formula; this just checks the real UI path produces a
     // comparable, sane result, clear of both "did nothing" and "flew off
     // disproportionately far" (the bug's own spikes).
-    assert!(max_moved > 0.1, "nothing moved enough to read as a dab: {max_moved} mm");
+    assert!(
+        max_moved > 0.1,
+        "nothing moved enough to read as a dab: {max_moved} mm"
+    );
     assert!(
         max_moved < 2.0 * h.state().sculpt.radius,
         "the most-moved vertex moved {max_moved} mm, more than twice the brush radius: looks like the bug"
     );
 }
-

@@ -286,7 +286,9 @@ fn stroke_and_release_never_flicker() {
         (0..3).all(|k| p[k].abs_diff(bg[k]) <= 1)
     };
     let dist = |a: [u8; 4], b: [u8; 4]| -> i32 {
-        (0..3).map(|k| (i32::from(a[k]) - i32::from(b[k])).abs()).sum()
+        (0..3)
+            .map(|k| (i32::from(a[k]) - i32::from(b[k])).abs())
+            .sum()
     };
 
     let baseline = pixel_at(&mut h);

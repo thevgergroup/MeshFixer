@@ -341,6 +341,7 @@ pub(crate) fn new_group_id(app: &MeshFixerApp, id: &str) -> String {
         .objects()
         .iter()
         .filter_map(|o| o.properties.get(mf_command::GROUP))
+        // allow-swallow: group ids not ending in a number don't take part in numbering
         .filter_map(|g| g.rsplit('-').next()?.parse::<u64>().ok())
         .max()
         .map_or(1, |n| n + 1);

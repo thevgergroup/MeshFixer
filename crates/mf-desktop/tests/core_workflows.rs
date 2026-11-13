@@ -2094,9 +2094,21 @@ fn align_min_centre_max_on_each_axis() {
             );
             // The other two axes are untouched.
             for other in (0..3).filter(|&o| o != axis) {
-                assert_eq!(ba.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on a");
-                assert_eq!(bb.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on b");
-                assert_eq!(bc.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on c");
+                assert_eq!(
+                    ba.min[other],
+                    0.0 - 5.0,
+                    "{scene}: axis {other} untouched on a"
+                );
+                assert_eq!(
+                    bb.min[other],
+                    0.0 - 5.0,
+                    "{scene}: axis {other} untouched on b"
+                );
+                assert_eq!(
+                    bc.min[other],
+                    0.0 - 5.0,
+                    "{scene}: axis {other} untouched on c"
+                );
             }
         }
     }
@@ -2138,7 +2150,9 @@ fn align_anchor_stays_fixed() {
         click_at(&mut h, p);
         settle(&mut h);
     }
-    wait_until(&mut h, "c becomes the anchor", |a| a.align.anchor == Some(idc));
+    wait_until(&mut h, "c becomes the anchor", |a| {
+        a.align.anchor == Some(idc)
+    });
     settle(&mut h);
     capture(&mut h, "anchor-set");
 
@@ -2184,8 +2198,16 @@ fn align_distribute_equal_gaps() {
     settle(&mut h);
     capture(&mut h, "distribute-gaps");
 
-    assert_eq!(world_bounds(&h, ida), before_a, "a (an extreme) doesn't move");
-    assert_eq!(world_bounds(&h, idc), before_c, "c (an extreme) doesn't move");
+    assert_eq!(
+        world_bounds(&h, ida),
+        before_a,
+        "a (an extreme) doesn't move"
+    );
+    assert_eq!(
+        world_bounds(&h, idc),
+        before_c,
+        "c (an extreme) doesn't move"
+    );
     let bb = world_bounds(&h, idb);
     // a: [-5,5], c: [95,105]; equal gaps split (95-5-10)/2 = 40 each
     // side, so b's box should be [45, 55].
@@ -2298,7 +2320,10 @@ fn align_dots_sit_on_their_axis_rail() {
 
         for dot in &the_dots {
             let rail = the_rails[dot.axis];
-            assert_eq!(rail.axis, dot.axis, "rail/dot axis mismatch at orbit {scene:?}");
+            assert_eq!(
+                rail.axis, dot.axis,
+                "rail/dot axis mismatch at orbit {scene:?}"
+            );
             let (low, high) = rail.ends;
             // On the rail's own line: the two cross-axis coordinates
             // (every component except `dot.axis`) match the rail's
@@ -2315,7 +2340,10 @@ fn align_dots_sit_on_their_axis_rail() {
             }
             // Between the rail's two ends on its own axis, at the end
             // (or midpoint) the dot's mode names.
-            let (rail_lo, rail_hi) = (low[dot.axis].min(high[dot.axis]), low[dot.axis].max(high[dot.axis]));
+            let (rail_lo, rail_hi) = (
+                low[dot.axis].min(high[dot.axis]),
+                low[dot.axis].max(high[dot.axis]),
+            );
             assert!(
                 dot.world[dot.axis] >= rail_lo - 1e-9 && dot.world[dot.axis] <= rail_hi + 1e-9,
                 "{scene:?} axis {} {:?}: dot at {} isn't within the rail's segment [{rail_lo}, {rail_hi}]",

@@ -331,13 +331,12 @@ fn rapid_slider_edits_queue_instead_of_racing() {
     // Fire several edits back to back, well before the first can have
     // returned from the worker pool (no `wait_until` between them).
     for w in [15.0, 20.0, 25.0, 30.0] {
-        mf_desktop::shape_panel::set_param(
-            h.state_mut(),
-            "width",
-            mf_spec::ParamValue::Float(w),
-        );
+        mf_desktop::shape_panel::set_param(h.state_mut(), "width", mf_spec::ParamValue::Float(w));
     }
-    assert!(h.state().error.is_none(), "no race error fired synchronously");
+    assert!(
+        h.state().error.is_none(),
+        "no race error fired synchronously"
+    );
     wait_until(&mut h, "the coalesced edit to land", |a| {
         a.busy.is_none() && a.pending_invocation_depth() == 0
     });
@@ -383,7 +382,10 @@ fn two_quick_edits_both_land_with_no_stale_error() {
         "magnet_diameter",
         mf_spec::ParamValue::Float(8.0),
     );
-    assert!(h.state().error.is_none(), "no race error fired synchronously");
+    assert!(
+        h.state().error.is_none(),
+        "no race error fired synchronously"
+    );
     wait_until(&mut h, "both edits to land", |a| {
         a.busy.is_none() && a.pending_invocation_depth() == 0
     });

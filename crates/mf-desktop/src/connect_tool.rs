@@ -285,6 +285,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         widgets::caption(ui, t!("connect.joints.pick"));
         return;
     };
+    // allow-swallow: open_joint() above is Some only when joint is set
     let j = app.split_flow.joint.unwrap_or(0);
     let (na, nb) = (name_of(app, joint.a), name_of(app, joint.b));
     // Which piece is see-through.
@@ -364,6 +365,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     // The connectors placed: each a row (click selects it and, if it has
     // warnings, toggles them open here) with its own trash button.
     section(ui, &t!("connect.section.placed"));
+    // allow-swallow: checks still computing: no warnings to list yet
     let checks = app.split_flow.checks().unwrap_or_default();
     if joint.placements.is_empty() {
         widgets::caption(ui, t!("connect.placed.none"));
@@ -527,8 +529,9 @@ pub fn add_as_shapes(app: &mut MeshFixerApp, j: usize) {
     let base: u64 = first
         .rsplit('-')
         .next()
+        // allow-swallow: new_group_id always ends in its number
         .and_then(|n| n.parse().ok())
-        .unwrap_or(1); // allow-swallow: new_group_id always ends in its number
+        .unwrap_or(1);
     for (i, p) in joint.placements.iter().enumerate() {
         let params = match mf_operations::placement_params(p, gap_mm) {
             Ok(params) => params,
@@ -1131,6 +1134,7 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
         app.split_flow.hover = None;
         return Input::Pass;
     };
+    // allow-swallow: PlaceView::of needs an open joint, so joint is set
     let j = app.split_flow.joint.unwrap_or(0);
     let scale = mm(app);
     match input.pointer {
@@ -1290,11 +1294,13 @@ fn draw_connectors(
             );
         }
     }
+    // allow-swallow: checks still computing: no warnings to colour yet
     let checks = f.checks().unwrap_or_default();
     let previews = f
         .previews
         .as_ref()
         .map(|(_, _, p)| p.clone())
+        // allow-swallow: previews still computing: nothing to draw yet
         .unwrap_or_default();
     let counterpart = theme::SELECTED;
     for (i, p) in joint.placements.iter().enumerate() {
@@ -1329,7 +1335,9 @@ fn draw_connectors(
         }
         // Its outline on the solid face, filled.
         let outline = mf_operations::placement_params(p, joint.frame.gap / scale)
+            // allow-swallow: drawing only: an outline that can't be built isn't drawn; applying reports why
             .ok()
+            // allow-swallow: drawing only: an outline that can't be built isn't drawn; applying reports why
             .and_then(|params| mf_operations::footprint_2d(p, &params, scale).ok());
         if let Some(outline) = outline {
             let pts: Option<Vec<egui::Pos2>> = outline
@@ -1372,6 +1380,7 @@ fn draw_connectors(
             .map_or(egui::Pos2::ZERO, |r| r.left_top());
         let pos = |s: (f64, f64)| origin + egui::vec2(s.0 as f32, s.1 as f32);
         let hot = |h: Hit| f.hover == Some(h);
+        // allow-swallow: handles exist only for a selected connector
         let i = state.selected.unwrap_or(0);
         painter.circle(
             pos(size),

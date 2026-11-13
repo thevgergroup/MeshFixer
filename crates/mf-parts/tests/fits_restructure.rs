@@ -140,7 +140,10 @@ fn a_machine_profile_saved_before_print_volume_existed_still_loads() {
     let profiles = MachineProfiles::load(dir.path()).unwrap();
     let p = profiles.get("Prusa MK4").unwrap();
     assert!(p.calibrated);
-    assert_eq!(p.print_volume_mm, MachineProfile::uncalibrated().print_volume_mm);
+    assert_eq!(
+        p.print_volume_mm,
+        MachineProfile::uncalibrated().print_volume_mm
+    );
 }
 
 /// A machine profile's print volume must be positive and finite, same

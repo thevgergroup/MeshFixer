@@ -119,10 +119,13 @@ fn inflating_next_to_a_split_cap_leaves_the_caps_vertices_untouched() {
     }
     // Something did move (the dab had an effect at all): off the cap,
     // the curved surface near the dab moved.
-    let moved_elsewhere = mesh.vertices().any(|(id, before)| {
-        !cap_vertices.contains(&id.0) && after.position(id).unwrap() != before
-    });
-    assert!(moved_elsewhere, "the stroke should move some non-cap vertex");
+    let moved_elsewhere = mesh
+        .vertices()
+        .any(|(id, before)| !cap_vertices.contains(&id.0) && after.position(id).unwrap() != before);
+    assert!(
+        moved_elsewhere,
+        "the stroke should move some non-cap vertex"
+    );
 }
 
 /// The same stroke with the option off behaves as sculpting always has:

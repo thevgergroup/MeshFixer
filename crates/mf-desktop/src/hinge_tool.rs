@@ -373,6 +373,7 @@ pub fn swing_setup(
         .find(|(_, r)| r.id == HINGE && r.part.as_deref() == Some("leaf_a"))?;
     let doc = app.session.document();
     let t = mat(&doc.object(*leaf)?.transform);
+    // allow-swallow: drawing only: a hinge whose axis can't be read gets no axis gizmo
     let (origin, dir) = mf_parts::connectors::leaf_hinge::axis(&record.params).ok()?;
     let origin = t.transform_point3(DVec3::from(origin));
     let dir = t.transform_vector3(DVec3::from(dir)).normalize_or(DVec3::X);

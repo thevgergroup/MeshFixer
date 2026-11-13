@@ -1369,4 +1369,3 @@ fn long_object_names_use_the_full_name_column_width() {
         row2.width()
     );
 }
-

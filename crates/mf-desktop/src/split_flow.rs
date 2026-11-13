@@ -573,11 +573,12 @@ pub(crate) fn refresh_geometry(app: &mut MeshFixerApp) {
     let f = &mut app.split_flow;
     // Collect a finished read.
     let done = match &f.geom {
-        GeomSlot::Pending(k, slot) => slot
-            .lock()
-            .ok()
-            .and_then(|mut s| s.take())
-            .map(|r| (k.clone(), r)),
+        // A poisoned slot means the reader thread panicked while writing
+        // its result: it fails by name instead of reading forever.
+        GeomSlot::Pending(k, slot) => match slot.lock() {
+            Ok(mut s) => s.take().map(|r| (k.clone(), r)),
+            Err(_) => Some((k.clone(), Err("the joint reader stopped unexpectedly".to_owned()))),
+        },
         _ => None,
     };
     if let Some((k, result)) = done {
@@ -780,6 +781,7 @@ pub(crate) fn refresh_previews(app: &mut MeshFixerApp) {
     let Some(joint) = app.split_flow.open_joint().cloned() else {
         return;
     };
+    // allow-swallow: open_joint() above is Some only when joint is set
     let joint_index = app.split_flow.joint.unwrap_or(0);
     if app
         .split_flow

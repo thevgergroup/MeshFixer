@@ -39,14 +39,21 @@ fn render(color: Option<[f32; 4]>) -> Result<RgbaImage, RenderError> {
         shown_states: u32::from(FaceStates::ALL),
         object_color: color,
     }];
-    target.draw(&device, &queue, &mut renderer, Some(&cam), &items, false, &[]);
+    target.draw(
+        &device,
+        &queue,
+        &mut renderer,
+        Some(&cam),
+        &items,
+        false,
+        &[],
+    );
     offscreen::read_back(&device, &queue, &target)
 }
 
 #[test]
 fn object_color_replaces_the_surface_colour() {
-    let Some(plain) = gpu_or_skip("object_color_replaces_the_surface_colour", render(None))
-    else {
+    let Some(plain) = gpu_or_skip("object_color_replaces_the_surface_colour", render(None)) else {
         return;
     };
     // A saturated colour, nothing like `Palette::HEADLESS.surface`'s grey.
@@ -77,8 +84,10 @@ fn object_color_replaces_the_surface_colour() {
 
 #[test]
 fn no_object_color_draws_the_plain_surface_unchanged() {
-    let Some(plain) = gpu_or_skip("no_object_color_draws_the_plain_surface_unchanged", render(None))
-    else {
+    let Some(plain) = gpu_or_skip(
+        "no_object_color_draws_the_plain_surface_unchanged",
+        render(None),
+    ) else {
         return;
     };
     // The same scene through `offscreen::render_objects` (no object_color

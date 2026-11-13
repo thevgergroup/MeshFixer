@@ -1531,7 +1531,10 @@ impl MeshFixerApp {
                 let name = self.run_object_name(flat[i].0);
                 out.push(BreadcrumbRow::Run {
                     ids,
-                    label: format!("{noun} {name} ({run_len} {})", self.run_unit(flat[i].0, run_len)),
+                    label: format!(
+                        "{noun} {name} ({run_len} {})",
+                        self.run_unit(flat[i].0, run_len)
+                    ),
                     reached,
                 });
                 i += run_len;
@@ -2559,8 +2562,10 @@ impl MeshFixerApp {
             return;
         }
         let org = self.session.document().organisation().clone();
-        let entries: Vec<mf_command::Entry> =
-            ids.iter().map(|&id| mf_command::Entry::Object(id)).collect();
+        let entries: Vec<mf_command::Entry> = ids
+            .iter()
+            .map(|&id| mf_command::Entry::Object(id))
+            .collect();
         let (org, _group) = org.with_new_group("Group".to_owned(), &entries);
         if self.session.set_organisation(org, "Group".to_owned()) {
             self.after_history_move();
@@ -5533,10 +5538,12 @@ impl MeshFixerApp {
                 let brush = rec
                     .params
                     .get_choice("brush")
+                    // allow-swallow: a status label only: the brush was validated when the stroke ran
                     .ok()
                     .and_then(mf_operations::sculpt::BrushKind::parse)
                     .map(|b| crate::i18n::tr(&format!("sculpt.brush.{}", b.word()), &[]))
                     .unwrap_or_else(|| "Sculpt".to_owned());
+                // allow-swallow: strokes recorded before remeshing carry no count: none were split
                 let splits = r["remesh_splits"].as_u64().unwrap_or_default();
                 Some(if splits > 0 {
                     crate::i18n::tr_plural(
@@ -6357,6 +6364,7 @@ fn history_label(
         }
         "mesh.make_solid" => {
             let name = result_name(node, rec.target);
+            // allow-swallow: a label only: no cell size reads as the automatic one
             let cell = rec.params.get_float("cell_size").ok().filter(|&c| c > 0.0);
             Some(match cell {
                 Some(cell) => format!("Made {name} solid ({} mm cells)", measure(cell)),
@@ -6373,7 +6381,9 @@ fn history_label(
             let placements: Option<Vec<mf_operations::Placement>> = rec
                 .params
                 .get_text("connectors")
+                // allow-swallow: a label only: unreadable placements get the generic wording
                 .ok()
+                // allow-swallow: a label only: unreadable placements get the generic wording
                 .and_then(|s| serde_json::from_str(s).ok());
             Some(match placements {
                 Some(placements) if !placements.is_empty() => {
@@ -6436,6 +6446,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
         return String::new();
     };
     let hidden_params: &[&str] = match op_id {
+        // allow-swallow: only hides fields: without a pegs choice every field shows
         "mesh.split_plane" if params.get_choice("pegs").ok() == Some("none") => &[
             "peg_shape",
             "hole_profile",

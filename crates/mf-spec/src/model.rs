@@ -329,9 +329,7 @@ impl TryFrom<RawParam> for ParamSpec {
         if let Some(role) = &r.fit_role
             && !FIT_ROLES.contains(&role.as_str())
         {
-            return Err(format!(
-                "fit_role '{role}' isn't one of {FIT_ROLES:?}"
-            ));
+            return Err(format!("fit_role '{role}' isn't one of {FIT_ROLES:?}"));
         }
         Ok(ParamSpec {
             name: r.name,

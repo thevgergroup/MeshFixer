@@ -97,6 +97,7 @@ fn dovetail_tail(
         .properties
         .get(mf_operations::shapes::ATTACH_TO)?
         .parse::<u64>()
+        // allow-swallow: a malformed attach_to isn't a pair this tool can edit
         .ok()
         .map(ObjectId)?;
     doc.object(target)?;

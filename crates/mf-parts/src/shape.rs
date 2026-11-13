@@ -359,6 +359,7 @@ pub fn orient_params(params: &Params, local_to_world: glam::DMat3) -> Params {
         out.0.insert("up_x".into(), ParamValue::Float(r(x)));
         out.0.insert("up_y".into(), ParamValue::Float(r(y)));
     }
+    // allow-swallow: a shape with no hole_profile parameter has no auto profile to resolve
     if params.get_choice("hole_profile").ok() == Some("auto") {
         let tilt = axis_tilt(rot, DVec3::Z);
         let code = HoleProfile::auto(tilt).code();

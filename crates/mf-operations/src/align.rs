@@ -36,7 +36,13 @@ fn world_bounds(input: &OperandInput, ctx: &RunContext) -> Result<Option<Bounds>
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for c in 0..8 {
-        let p = [0, 1, 2].map(|a| if c & (1 << a) != 0 { bb.max[a] } else { bb.min[a] });
+        let p = [0, 1, 2].map(|a| {
+            if c & (1 << a) != 0 {
+                bb.max[a]
+            } else {
+                bb.min[a]
+            }
+        });
         let w = crate::affine::apply(&input.transform, p);
         for a in 0..3 {
             lo[a] = lo[a].min(w[a]);
@@ -221,9 +227,8 @@ impl Operation for Align {
                 // Ordered by the targets' own current position on the
                 // axis (their centre), ties broken by input order so the
                 // result is deterministic (Exact replay).
-                let mut order: Vec<usize> = (0..targets.len())
-                    .filter(|&k| boxes[k].is_some())
-                    .collect();
+                let mut order: Vec<usize> =
+                    (0..targets.len()).filter(|&k| boxes[k].is_some()).collect();
                 order.sort_by(|&a, &b| {
                     boxes[a]
                         .as_ref()
@@ -358,7 +363,12 @@ mod tests {
         [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, y, z]
     }
 
-    fn input<'a>(name: &'a str, mesh: &'a Mesh, transform: [f64; 12], slot: &'a str) -> OperandInput<'a> {
+    fn input<'a>(
+        name: &'a str,
+        mesh: &'a Mesh,
+        transform: [f64; 12],
+        slot: &'a str,
+    ) -> OperandInput<'a> {
         OperandInput {
             slot,
             object: ObjectId(1),
@@ -407,9 +417,10 @@ mod tests {
                 out.changes
                     .iter()
                     .find_map(|c| match c {
-                        ObjectChange::Transform { operand: o, transform } if *o == operand => {
-                            Some(transform[9])
-                        }
+                        ObjectChange::Transform {
+                            operand: o,
+                            transform,
+                        } if *o == operand => Some(transform[9]),
                         _ => None,
                     })
                     .unwrap_or(original[operand])
@@ -545,7 +556,10 @@ mod tests {
             .changes
             .iter()
             .find_map(|c| match c {
-                ObjectChange::Transform { operand: 0, transform } => Some(transform[9]),
+                ObjectChange::Transform {
+                    operand: 0,
+                    transform,
+                } => Some(transform[9]),
                 _ => None,
             })
             .unwrap_or(0.0);
@@ -553,7 +567,10 @@ mod tests {
             .changes
             .iter()
             .find_map(|c| match c {
-                ObjectChange::Transform { operand: 1, transform } => Some(transform[9] - t_hole[9]),
+                ObjectChange::Transform {
+                    operand: 1,
+                    transform,
+                } => Some(transform[9] - t_hole[9]),
                 _ => None,
             })
             .unwrap_or(0.0);

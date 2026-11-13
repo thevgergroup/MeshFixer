@@ -93,9 +93,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             }
             let (cam, rect) = (app.camera?, app.viewport.last_rect?);
             let view = (rect.width() as f64, rect.height() as f64);
-            Some(Box::new(move |px: (f64, f64)| {
-                hit_dot(&dots, &cam, view, px).is_some()
-            }) as Claims)
+            Some(Box::new(move |px: (f64, f64)| hit_dot(&dots, &cam, view, px).is_some()) as Claims)
         },
         viewport_input: input,
         on_open: |app| {
@@ -383,8 +381,8 @@ pub fn preview_for(app: &MeshFixerApp, axis: usize, mode: Mode) -> Vec<(ObjectId
                 return Vec::new();
             }
             let mut out = Vec::new();
-            let (first_id, first_lo, first_hi) = order[0];
-            let (last_id, last_lo, last_hi) = *order.last().expect("at least two");
+            let (_, first_lo, first_hi) = order[0];
+            let (_, last_lo, last_hi) = *order.last().expect("at least two");
             let between = &order[1..order.len() - 1];
             if mode == Mode::DistributeGaps {
                 let span_lo = first_hi[axis];
@@ -417,7 +415,6 @@ pub fn preview_for(app: &MeshFixerApp, axis: usize, mode: Mode) -> Vec<(ObjectId
                     }
                 }
             }
-            let _ = (first_id, last_id);
             out
         }
     }
@@ -462,9 +459,15 @@ fn edge_word(axis: usize, mode: Mode) -> &'static str {
 fn history_label(n: usize, axis: usize, mode: Mode, anchor: Option<&str>) -> String {
     let objects = if n == 1 { "object" } else { "objects" };
     match mode {
-        Mode::DistributeGaps => format!("Distributed {n} {objects} with equal gaps on {}", axis_name(axis)),
+        Mode::DistributeGaps => format!(
+            "Distributed {n} {objects} with equal gaps on {}",
+            axis_name(axis)
+        ),
         Mode::DistributeCentres => {
-            format!("Distributed {n} {objects} with equal centres on {}", axis_name(axis))
+            format!(
+                "Distributed {n} {objects} with equal centres on {}",
+                axis_name(axis)
+            )
         }
         Mode::Centre => match anchor {
             Some(name) => format!("Aligned {n} {objects} to the centre of {name}"),
@@ -474,7 +477,10 @@ fn history_label(n: usize, axis: usize, mode: Mode, anchor: Option<&str>) -> Str
             let edge = edge_word(axis, mode);
             match anchor {
                 Some(name) => format!("Aligned {n} {objects} to the {edge} edge of {name}"),
-                None => format!("Aligned {n} {objects} to the {edge} edge on {}", axis_name(axis)),
+                None => format!(
+                    "Aligned {n} {objects} to the {edge} edge on {}",
+                    axis_name(axis)
+                ),
             }
         }
     }
@@ -498,9 +504,7 @@ fn targets_with_groups(app: &MeshFixerApp) -> (Vec<ObjectId>, Vec<Option<usize>>
             continue;
         };
         for o in doc.objects() {
-            if o.properties.get(mf_command::GROUP) == Some(&group)
-                && !targets.contains(&o.id)
-            {
+            if o.properties.get(mf_command::GROUP) == Some(&group) && !targets.contains(&o.id) {
                 targets.push(o.id);
                 leaders.push(Some(k));
             }
@@ -596,7 +600,9 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
         None => {}
         _ => {}
     }
-    app.align.hover = input.hover.and_then(|px| hit_dot(&the_dots, &cam, view, px));
+    app.align.hover = input
+        .hover
+        .and_then(|px| hit_dot(&the_dots, &cam, view, px));
     app.align.preview = match app.align.hover {
         Some(d) => preview_for(app, d.axis, d.mode),
         None => Vec::new(),
@@ -733,17 +739,22 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ui.add_enabled_ui(can, |ui| {
                 let w = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 2.0;
                 let gaps = widgets::button(ui, Kind::Secondary, None, &t!("align.equal_gaps"), w);
-                let gaps_name = format!("Distribute {}: {}", axis_name(axis), t!("align.equal_gaps"));
+                let gaps_name =
+                    format!("Distribute {}: {}", axis_name(axis), t!("align.equal_gaps"));
                 gaps.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, &gaps_name));
                 if gaps.clicked() {
                     apply(app, axis, Mode::DistributeGaps);
                 }
                 let centres =
                     widgets::button(ui, Kind::Secondary, None, &t!("align.equal_centres"), w);
-                let centres_name =
-                    format!("Distribute {}: {}", axis_name(axis), t!("align.equal_centres"));
-                centres
-                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, &centres_name));
+                let centres_name = format!(
+                    "Distribute {}: {}",
+                    axis_name(axis),
+                    t!("align.equal_centres")
+                );
+                centres.widget_info(|| {
+                    egui::WidgetInfo::labeled(egui::Role::Button, can, &centres_name)
+                });
                 if centres.clicked() {
                     apply(app, axis, Mode::DistributeCentres);
                 }
@@ -792,7 +803,15 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     };
     // The box itself, faint: it's what ties every rail and dot to an
     // axis, so it's always drawn, not just when there's an anchor.
-    draw_box(&painter, &cam, view, rect, lo, hi, theme::TEXT_MUTED.gamma_multiply(0.35));
+    draw_box(
+        &painter,
+        &cam,
+        view,
+        rect,
+        lo,
+        hi,
+        theme::TEXT_MUTED.gamma_multiply(0.35),
+    );
     // One coloured rail per axis, along the edge `rails` picked.
     for rail in &the_rails {
         let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][rail.axis];
@@ -847,10 +866,7 @@ fn hover_label(painter: &egui::Painter, dot_pos: egui::Pos2, axis: usize, mode: 
     );
     let pad = egui::vec2(6.0, 3.0);
     let size = galley.size() + 2.0 * pad;
-    let rect = egui::Rect::from_min_size(
-        dot_pos - egui::vec2(size.x / 2.0, size.y + 12.0),
-        size,
-    );
+    let rect = egui::Rect::from_min_size(dot_pos - egui::vec2(size.x / 2.0, size.y + 12.0), size);
     painter.rect_filled(rect, theme::RADIUS, theme::PANEL.gamma_multiply(0.95));
     painter.galley(rect.min + pad, galley, theme::TEXT_STRONG);
 }
@@ -877,8 +893,18 @@ fn draw_box(
             .map(|(x, y)| rect.left_top() + egui::vec2(x as f32, y as f32))
     };
     const EDGES: [(usize, usize); 12] = [
-        (0, 1), (0, 2), (0, 4), (1, 3), (1, 5), (2, 3),
-        (2, 6), (3, 7), (4, 5), (4, 6), (5, 7), (6, 7),
+        (0, 1),
+        (0, 2),
+        (0, 4),
+        (1, 3),
+        (1, 5),
+        (2, 3),
+        (2, 6),
+        (3, 7),
+        (4, 5),
+        (4, 6),
+        (5, 7),
+        (6, 7),
     ];
     for (a, b) in EDGES {
         if let (Some(pa), Some(pb)) = (at(corner(a)), at(corner(b))) {

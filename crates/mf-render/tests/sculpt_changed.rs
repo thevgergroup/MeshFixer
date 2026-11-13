@@ -42,7 +42,15 @@ fn render(tier: u8) -> Result<image::RgbaImage, RenderError> {
         shown_states: u32::from(FaceStates::ALL),
         object_color: None,
     }];
-    target.draw(&device, &queue, &mut renderer, Some(&cam), &items, false, &[]);
+    target.draw(
+        &device,
+        &queue,
+        &mut renderer,
+        Some(&cam),
+        &items,
+        false,
+        &[],
+    );
     offscreen::read_back(&device, &queue, &target)
 }
 
@@ -58,7 +66,12 @@ fn a_flagged_tier_tints_the_surface_and_higher_tiers_tint_more() {
     let med = render(FaceStates::SCULPT_CHANGED_MED).unwrap();
     let high = render(FaceStates::SCULPT_CHANGED_HIGH).unwrap();
     if let Some(dir) = std::env::var_os("MF_ARTIFACTS") {
-        for (name, img) in [("none", &none), ("low", &low), ("med", &med), ("high", &high)] {
+        for (name, img) in [
+            ("none", &none),
+            ("low", &low),
+            ("med", &med),
+            ("high", &high),
+        ] {
             img.save(std::path::Path::new(&dir).join(format!("sculpt-changed-{name}.png")))
                 .unwrap();
         }
@@ -68,10 +81,15 @@ fn a_flagged_tier_tints_the_surface_and_higher_tiers_tint_more() {
     let dist = |img: &image::RgbaImage| {
         let a = img.get_pixel(cx, cy).0;
         let b = none.get_pixel(cx, cy).0;
-        (0..3).map(|c| (a[c] as f64 - b[c] as f64).abs()).sum::<f64>()
+        (0..3)
+            .map(|c| (a[c] as f64 - b[c] as f64).abs())
+            .sum::<f64>()
     };
     let (d_low, d_med, d_high) = (dist(&low), dist(&med), dist(&high));
-    assert!(d_low > 1.0, "the low tier should tint visibly: diff {d_low}");
+    assert!(
+        d_low > 1.0,
+        "the low tier should tint visibly: diff {d_low}"
+    );
     assert!(
         d_med > d_low,
         "the medium tier should tint more than the low one: {d_med} vs {d_low}"
