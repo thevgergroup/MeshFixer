@@ -1470,6 +1470,13 @@ pub fn thin_message(wall: f64) -> String {
     format!("Parts thinner than {} were left solid", short(2.0 * wall))
 }
 
+/// World (document) units per object unit under `transform`: the cube
+/// root of its linear part's determinant (exact for a uniform scale, a
+/// rotation or a mirror).
+pub fn world_per_object(transform: &[f64; 12]) -> f64 {
+    affine::determinant(transform).abs().cbrt()
+}
+
 /// A length as people write it: up to three decimals, no trailing zeros.
 pub fn short(x: f64) -> String {
     let s = format!("{x:.3}");
@@ -1532,7 +1539,17 @@ impl Operation for Hollow {
             ));
         }
 
-        let shell = hollow_shell(target.mesh, wall, detail, ctx)?;
+        // The settings are in document (world) units; the mesh is in its
+        // object's own.
+        let scale = world_per_object(&target.transform);
+        if !(scale > 0.0 && scale.is_finite()) {
+            return Err(failed(
+                "singular_transform",
+                "The object's transform can't be inverted; reset it first.".into(),
+            ));
+        }
+        let shell = hollow_shell(target.mesh, wall / scale, detail / scale, ctx)?;
+        let diameter = diameter / scale;
 
         ctx.progress.report(STAGES[5], 0.0);
         let holes = match mode {
@@ -1542,17 +1559,26 @@ impl Operation for Hollow {
         };
         let thin = serde_json::json!({
             "faces": shell.thin.len(),
-            "area": shell.thin_area,
+            "area": shell.thin_area * scale * scale,
             "fraction": if shell.outer_area > 0.0 { shell.thin_area / shell.outer_area } else { 0.0 },
             "below": 2.0 * wall,
             "message": if shell.thin.is_empty() { serde_json::Value::Null } else { thin_message(wall).into() },
         });
         let inner_faces = shell.inner.len();
-        let (cell, grid, points) = (shell.cell, shell.grid, shell.band_points);
+        let (cell, grid, points) = (shell.cell * scale, shell.grid, shell.band_points);
         let (mesh, provenance, hole_rows) = if holes.is_empty() {
             (shell.mesh, shell.provenance, Vec::new())
         } else {
-            let (mesh, step, rows) = cut_holes(&shell, target, &holes, diameter, profile, ctx)?;
+            let (mesh, step, mut rows) = cut_holes(&shell, target, &holes, diameter, profile, ctx)?;
+            // Sizes in document units, like the settings ("at" and "axis"
+            // stay in the object's own space).
+            for r in &mut rows {
+                for k in ["depth", "diameter"] {
+                    if let Some(v) = r[k].as_f64() {
+                        r[k] = (v * scale).into();
+                    }
+                }
+            }
             let provenance = crate::blend::compose(&shell.provenance, &step);
             (mesh, provenance, rows)
         };

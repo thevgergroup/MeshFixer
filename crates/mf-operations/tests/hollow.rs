@@ -439,3 +439,27 @@ fn hollow_cube_keeps_its_corners_and_gets_a_box_cavity() {
     }
     assert_eq!(report["thin"]["faces"], 0, "{report}");
 }
+
+/// The settings are in document units: an object placed at twice its
+/// size gets walls half as thick in its own units.
+#[test]
+fn hollow_settings_are_in_document_units_under_a_scaled_placement() {
+    let doubled = [2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0, 2.0, 0.0, 0.0, 0.0];
+    let out = run_at(
+        &ball(),
+        doubled,
+        &[("wall_thickness", "4"), ("inner_detail", "1")],
+        &RunContext::none(),
+    )
+    .unwrap();
+    assert_eq!(out.report["cell_size"], 1.0, "{}", out.report);
+    let ObjectChange::Geometry { mesh, .. } = &out.changes[0] else {
+        panic!()
+    };
+    for (v, p) in mesh.vertices() {
+        if ball().position(v).is_none() {
+            let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            assert!((r - 18.0).abs() < 0.6, "{r}");
+        }
+    }
+}
