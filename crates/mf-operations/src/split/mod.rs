@@ -465,7 +465,10 @@ fn split_one(
         Err(e) => return Err(refusal(&target.transform, e)),
     };
     if above.is_none() && below.is_none() {
-        return Err(refusal(&target.transform, CutError::MissesObject { grazed: false }));
+        return Err(refusal(
+            &target.transform,
+            CutError::MissesObject { grazed: false },
+        ));
     }
     ctx.checkpoint()?;
     let mut above = above;

@@ -276,3 +276,72 @@ fn saved_connector_regenerates_identically() {
     let regenerated_again = saved.mesh(&ctx).unwrap();
     assert_eq!(regenerated.to_arrays(), regenerated_again.to_arrays());
 }
+
+/// The one generic apply (parts-architecture-review.md): `object.attach`
+/// building the connector in place (`generated`, no member objects) does
+/// exactly what the legacy `connector.join` does, byte for byte, since
+/// `connector.join` is now that same command's body.
+#[test]
+fn attach_with_generated_parts_is_connector_join() {
+    let (a, b) = sides();
+    let empty = mf_geometry::Mesh::empty();
+    let params_json = clasp_params_json(&[]);
+    let joined = parts(join(&params_json, "0.4", &empty, &a, &b).unwrap());
+    let record = mf_parts::GeneratorRecord {
+        id: "clasp.snap".into(),
+        version: 1,
+        params: Params(serde_json::from_str(&params_json).unwrap()),
+        part: None,
+    };
+    let spec = mf_spec::builtin::get("object.attach").unwrap();
+    let raw: BTreeMap<String, String> = BTreeMap::from([
+        (
+            "generated".to_owned(),
+            mf_operations::shapes::generated_param(&[mf_operations::shapes::GeneratedMember {
+                generator: record,
+                transform: IDENTITY,
+            }]),
+        ),
+        ("gap".to_owned(), "0.4".to_owned()),
+    ]);
+    let out = find("object.attach")
+        .unwrap()
+        .execute_doc(
+            &[
+                OperandInput {
+                    slot: "target",
+                    object: ObjectId(2),
+                    name: "body",
+                    mesh: &a,
+                    transform: IDENTITY,
+                    target: Target::WholeObject,
+                },
+                OperandInput {
+                    slot: "side_b",
+                    object: ObjectId(3),
+                    name: "lid",
+                    mesh: &b,
+                    transform: IDENTITY,
+                    target: Target::WholeObject,
+                },
+            ],
+            &spec.validate(&raw).unwrap(),
+            &RunContext::none(),
+        )
+        .unwrap();
+    let mut got = [None, None];
+    for c in out.changes {
+        if let ObjectChange::Geometry { operand, mesh, .. } = c {
+            got[operand] = Some(mesh);
+        }
+    }
+    assert_eq!(
+        got[0].as_ref().unwrap().to_arrays(),
+        joined.side_a.to_arrays()
+    );
+    assert_eq!(
+        got[1].as_ref().unwrap().to_arrays(),
+        joined.side_b.to_arrays()
+    );
+    assert!(out.report["measured_gap"].as_f64().unwrap() >= 0.4 * 0.9);
+}

@@ -924,6 +924,34 @@ pub fn check_placement(
     Ok(out)
 }
 
+/// The placement's generator's own checks (until the joint connectors
+/// carry them themselves: the dowel's length against its two holes).
+fn generator_checks(
+    _frame: &JointFrame,
+    _caps: [&CapRegion; 2],
+    p: &Placement,
+    params: &Params,
+    _mm: f64,
+) -> Result<Vec<mf_parts::GenCheck>, OpError> {
+    let mut out = Vec::new();
+    if p.connector == "joint.dowel" {
+        let len = mf_parts::connectors::joint::dowel_length(params)
+            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
+        let room = mf_parts::connectors::joint::dowel_room(params)
+            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
+        if len > room - 1e-9 {
+            out.push(mf_parts::GenCheck {
+                id: "dowel_length".into(),
+                message: format!(
+                    "the dowel ({len:.1} mm) is longer than its two holes together ({room:.1} mm)"
+                ),
+                fix: None,
+            });
+        }
+    }
+    Ok(out)
+}
+
 /// The thinnest wall between `side`'s hole (if the placement cuts one
 /// into it) and the piece's outer surface, document units: the BVH
 /// minimum distance to every face but the cut face, and 0 if the hole's
@@ -1310,8 +1338,9 @@ impl Operation for PlaceConnectors {
                 ));
             }
         }
-        // (subtract, union) tools per side, in world space; loose parts.
-        let mut tools: [(Vec<Mesh>, Vec<Mesh>); 2] = Default::default();
+        // Every part, each to its piece (world space, so its placement is
+        // the identity); loose parts laid out below.
+        let mut parts: Vec<crate::PartIn> = Vec::new();
         let mut loose: Vec<Mesh> = Vec::new();
         let mut fits = Vec::new();
         let mut warnings = Vec::new();
@@ -1328,36 +1357,29 @@ impl Operation for PlaceConnectors {
             }
             let cp = oriented_params(&frame, p, mm)?;
             for part in placed_parts(&frame, p, mm)? {
-                match (part.join, part.side) {
-                    (JoinKind::Separate, _) => loose.push(transformed(
+                let Some(side) = part.side else {
+                    loose.push(transformed(
                         &part.local,
                         &DMat4::from_scale(DVec3::splat(mm)),
-                    )),
-                    (JoinKind::Subtract, Some(s)) => tools[s.index()].0.push(part.world),
-                    (JoinKind::Union, Some(s)) => tools[s.index()].1.push(part.world),
-                    (_, None) => {
-                        return Err(failed(
-                            "connector_part_unassigned",
-                            format!("{}'s '{}' joins neither piece", p.connector, part.role),
-                        ));
-                    }
-                }
+                    ));
+                    continue;
+                };
+                parts.push(crate::PartIn {
+                    name: format!("Connector {} ({})", k + 1, part.role),
+                    mesh: std::borrow::Cow::Owned(part.world),
+                    transform: crate::affine::IDENTITY,
+                    role: if part.join == JoinKind::Subtract {
+                        mf_parts::ShapeRole::Hole
+                    } else {
+                        mf_parts::ShapeRole::Solid
+                    },
+                    host: side.index(),
+                    operand: None,
+                });
             }
             let fit = fit_check(p, &cp, &settings, ctx)?;
-            if p.connector == "joint.dowel" {
-                let len = mf_parts::connectors::joint::dowel_length(&cp).map_err(
-                    |mf_parts::ConnectorError::Failed { code, message }| failed(code, message),
-                )?;
-                let room = mf_parts::connectors::joint::dowel_room(&cp).map_err(
-                    |mf_parts::ConnectorError::Failed { code, message }| failed(code, message),
-                )?;
-                if len > room - 1e-9 {
-                    warnings.push(format!(
-                        "Connector {}: the dowel ({len:.1} mm) is longer than its two holes \
-                         together ({room:.1} mm)",
-                        k + 1
-                    ));
-                }
+            for c in generator_checks(&frame, [&caps[0], &caps[1]], p, &cp, mm)? {
+                warnings.push(format!("Connector {}: {}", k + 1, c.message));
             }
             if let Some(c) = &fit
                 && c.may_fuse
@@ -1374,47 +1396,21 @@ impl Operation for PlaceConnectors {
                 })
             }));
         }
-        // Apply: subtract the holes, then union the pegs and tails, on
-        // each piece (provenance relative to its input).
-        let mut changes = Vec::new();
-        for (k, piece) in [a, b].into_iter().enumerate() {
-            let (sub, uni) = &tools[k];
-            let mut mesh = piece.mesh.clone();
-            let mut prov: Option<Provenance> = None;
-            for (list, op) in [
-                (sub, mf_boolean::BoolOp::Subtract),
-                (uni, mf_boolean::BoolOp::Union),
-            ] {
-                if list.is_empty() {
-                    continue;
-                }
-                ctx.checkpoint()?;
-                let tool = mf_boolean::operand_in_frame(
-                    &super::pegs::merged(list),
-                    &crate::affine::IDENTITY,
-                    &piece.transform,
-                )
-                .ok_or_else(|| {
-                    failed(
-                        "singular_transform",
-                        "A piece's transform can't be inverted.",
-                    )
-                })?;
-                let (m, p) = super::pegs::apply_tool(&mesh, &tool, op, ctx)?;
-                prov = Some(match &prov {
-                    Some(prev) => super::pegs::compose(prev, &p),
-                    None => p,
-                });
-                mesh = m;
-            }
-            if let Some(provenance) = prov {
-                changes.push(ObjectChange::Geometry {
-                    operand: k,
-                    mesh,
-                    provenance,
-                });
-            }
-        }
+        // Apply: on each piece, the holes cut, then the pegs and tails
+        // joined (the one apply path, `crate::apply_parts`).
+        let mut changes: Vec<ObjectChange> = crate::apply_parts(
+            [Some((0, a)), Some((1, b))],
+            &parts,
+            crate::ApplyOrder::MergedHolesFirst,
+            ctx,
+        )?
+        .into_iter()
+        .map(|r| ObjectChange::Geometry {
+            operand: r.host,
+            mesh: r.mesh,
+            provenance: r.provenance,
+        })
+        .collect();
         // Loose dowels: upright on the plate, clear of everything.
         let mut dowels: Vec<Placed> = Vec::new();
         let mut off_plate = Vec::new();

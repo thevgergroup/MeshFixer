@@ -137,14 +137,15 @@ impl Operation for SplitBox {
                      reset its transform first.",
                 )
             })?;
-            mf_boolean::check_closed(target.mesh, ctx)
-                .map_err(|e| match refusal(&target.transform, e) {
+            mf_boolean::check_closed(target.mesh, ctx).map_err(|e| {
+                match refusal(&target.transform, e) {
                     OpError::Failed { code, message } if inputs.len() > 1 => OpError::Failed {
                         code,
                         message: format!("'{}': {message}", target.name),
                     },
                     e => e,
-                })?;
+                }
+            })?;
             // The piece still inside the box, with its provenance against
             // the target's input.
             let mut piece = target.mesh.clone();
@@ -192,7 +193,8 @@ impl Operation for SplitBox {
                     // the mesh itself (or the gap swallows it), or lies
                     // exactly on the piece's own surface there without
                     // anything to cut away: skip.
-                    (Err(CutError::MissesObject { .. }), _) | (_, Err(CutError::MissesObject { .. })) => {
+                    (Err(CutError::MissesObject { .. }), _)
+                    | (_, Err(CutError::MissesObject { .. })) => {
                         continue;
                     }
                     (Err(e), _) | (_, Err(e)) => {

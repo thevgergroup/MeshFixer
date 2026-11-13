@@ -300,7 +300,10 @@ fn geodesic_vertex_distances(
         match face_dist.get(&i) {
             Some(&d) => {
                 for &v in t {
-                    worst.entry(v).and_modify(|best| *best = best.max(d)).or_insert(d);
+                    worst
+                        .entry(v)
+                        .and_modify(|best| *best = best.max(d))
+                        .or_insert(d);
                 }
             }
             // This candidate face wasn't reached (too far, or across the

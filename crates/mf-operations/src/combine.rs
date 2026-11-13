@@ -14,8 +14,11 @@
 //! - A refused step names the object at fault, with the boolean's copy
 //!   table words ([`crate::boolean::refusal_copy`]).
 
+use std::borrow::Cow;
+
 use mf_boolean::{BoolOp, BooleanError, boolean, operand_in_frame};
 use mf_geometry::{Mesh, Provenance};
+use mf_parts::ShapeRole;
 use mf_spec::Params;
 
 use crate::boolean::{kernel, refusal_copy};
@@ -90,74 +93,43 @@ impl Operation for Combine {
             });
         }
         let keep_holes = params.get_bool("keep_holes")?;
-        // Solids first, then holes, whatever order the slots came in.
-        let mut steps: Vec<(usize, BoolOp)> = Vec::with_capacity(rest.len());
-        for (slot, op) in [("solids", BoolOp::Union), ("holes", BoolOp::Subtract)] {
-            steps.extend(
-                rest.iter()
-                    .enumerate()
-                    .filter(|(_, o)| o.slot == slot)
-                    .map(|(i, _)| (i + 1, op)),
-            );
-        }
-        if steps.len() != rest.len() {
-            let other = rest
-                .iter()
-                .find(|o| o.slot != "solids" && o.slot != "holes")
-                .map_or("", |o| o.slot);
+        if let Some(other) = rest
+            .iter()
+            .find(|o| o.slot != "solids" && o.slot != "holes")
+        {
             return Err(OpError::Failed {
                 code: "missing_operand",
-                message: format!("{} has no operand slot '{other}'", self.id()),
+                message: format!("{} has no operand slot '{}'", self.id(), other.slot),
             });
         }
-        let mut mesh = target.mesh.clone();
-        let mut provenance: Option<Provenance> = None;
-        let mut report_steps = Vec::with_capacity(steps.len());
-        for &(k, op) in &steps {
-            ctx.checkpoint()?;
-            let o = &inputs[k];
-            let in_frame =
-                operand_in_frame(o.mesh, &o.transform, &target.transform).ok_or_else(|| {
-                    OpError::Failed {
-                        code: "singular_transform",
-                        message: format!(
-                            "'{}': the transform can't be inverted; reset it first",
-                            target.name
-                        ),
-                    }
-                })?;
-            let out = boolean(&mesh, &in_frame, op, kernel(), ctx).map_err(|e| match e {
-                BooleanError::Cancelled => OpError::Cancelled,
-                e => {
-                    let code = e.code();
-                    let at = if TARGET_CODES.contains(&code) {
-                        target.name
-                    } else {
-                        o.name
-                    };
-                    refuse_naming(at, code, e.to_string())
-                }
-            })?;
-            let mut step = out.provenance;
-            for (_, s) in &mut step.created_faces {
-                for (operand, _) in &mut s.operands {
-                    if *operand == 1 {
-                        *operand = k as u32;
-                    }
-                }
-            }
-            provenance = Some(match provenance {
-                None => step,
-                Some(acc) => crate::blend::compose(&acc, &step),
-            });
-            report_steps.push(serde_json::json!({
-                "object": o.name,
-                "operation": if op == BoolOp::Union { "union" } else { "subtract" },
-                "window_faces": out.window_faces,
-            }));
-            mesh = out.mesh;
-        }
-        let provenance = provenance.expect("at least one step ran");
+        let parts: Vec<PartIn> = rest
+            .iter()
+            .enumerate()
+            .map(|(i, o)| PartIn {
+                name: o.name.to_owned(),
+                mesh: std::borrow::Cow::Borrowed(o.mesh),
+                transform: o.transform,
+                role: if o.slot == "holes" {
+                    ShapeRole::Hole
+                } else {
+                    ShapeRole::Solid
+                },
+                host: 0,
+                operand: Some(i + 1),
+            })
+            .collect();
+        let mut applied = apply_parts(
+            [Some((0, target)), None],
+            &parts,
+            ApplyOrder::Sequential,
+            ctx,
+        )?;
+        let Applied {
+            mesh,
+            provenance,
+            steps: report_steps,
+            ..
+        } = applied.remove(0);
         let created = provenance.created_faces.len();
         let removed = provenance.removed_faces.len();
         let mut changes = vec![ObjectChange::Geometry {
@@ -184,4 +156,204 @@ impl Operation for Combine {
             }),
         })
     }
+}
+
+// ---------------------------------------------------------------------
+// The one apply path: N parts folded into their targets.
+// ---------------------------------------------------------------------
+
+/// One part [`apply_parts`] folds into a target: a solid joined or a hole
+/// cut, from wherever it's placed.
+pub struct PartIn<'a> {
+    /// Its name, for a refusal ("Dowel 1 (hole)").
+    pub name: String,
+    pub mesh: Cow<'a, Mesh>,
+    /// Where it's placed (it's brought into its target's frame, D10).
+    pub transform: [f64; 12],
+    pub role: ShapeRole,
+    /// Which target: 0 or 1 (`hosts`' index).
+    pub host: usize,
+    /// The command operand it is, if it's an object (its faces' sources
+    /// then name it); `None` for a generated part.
+    pub operand: Option<usize>,
+}
+
+/// How a target's parts are applied.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOrder {
+    /// One boolean per part: the solids in order, then the holes
+    /// (`mesh.combine`, `object.attach`).
+    Sequential,
+    /// Every hole as one tool, then every solid as one tool
+    /// (`split.place_connectors`, recorded that way).
+    MergedHolesFirst,
+}
+
+/// A target with its parts applied.
+pub struct Applied {
+    /// `hosts`' index.
+    pub host: usize,
+    pub mesh: Mesh,
+    /// Relative to the target's input; a part's faces name its operand.
+    pub provenance: Provenance,
+    /// One report row per boolean step.
+    pub steps: Vec<serde_json::Value>,
+}
+
+/// Folds `parts` into their targets (`hosts`: each the command operand
+/// index and its input, or `None` when the command has no such target):
+/// every solid unioned, every hole cut, each step checked by the boolean
+/// kernel and validator. One result per target that got any part. The
+/// one place a generated or placed part becomes geometry: `mesh.combine`,
+/// `object.attach`, `connector.join` and `split.place_connectors` all
+/// come here.
+pub fn apply_parts(
+    hosts: [Option<(usize, &OperandInput)>; 2],
+    parts: &[PartIn],
+    order: ApplyOrder,
+    ctx: &RunContext,
+) -> Result<Vec<Applied>, OpError> {
+    let mut out = Vec::new();
+    for (h, host) in hosts.iter().enumerate() {
+        let mine: Vec<&PartIn> = parts.iter().filter(|p| p.host == h).collect();
+        if mine.is_empty() {
+            continue;
+        }
+        let Some((_, target)) = host else {
+            return Err(OpError::Failed {
+                code: "missing_operand",
+                message: format!(
+                    "'{}' joins a second object, but none was given.",
+                    mine[0].name
+                ),
+            });
+        };
+        // Each step: the tool (in the target's frame), its op, its name
+        // and the operand its faces come from.
+        let into_frame = |p: &PartIn| {
+            operand_in_frame(&p.mesh, &p.transform, &target.transform).ok_or_else(|| {
+                OpError::Failed {
+                    code: "singular_transform",
+                    message: format!(
+                        "'{}': the transform can't be inverted; reset it first",
+                        target.name
+                    ),
+                }
+            })
+        };
+        let mut steps: Vec<(Mesh, BoolOp, String, Option<usize>)> = Vec::new();
+        match order {
+            ApplyOrder::Sequential => {
+                for (role, op) in [
+                    (ShapeRole::Solid, BoolOp::Union),
+                    (ShapeRole::Hole, BoolOp::Subtract),
+                ] {
+                    for p in mine.iter().filter(|p| p.role == role) {
+                        steps.push((into_frame(p)?, op, p.name.clone(), p.operand));
+                    }
+                }
+            }
+            ApplyOrder::MergedHolesFirst => {
+                for (role, op) in [
+                    (ShapeRole::Hole, BoolOp::Subtract),
+                    (ShapeRole::Solid, BoolOp::Union),
+                ] {
+                    let list: Vec<Mesh> = mine
+                        .iter()
+                        .filter(|p| p.role == role)
+                        .map(|p| into_frame(p))
+                        .collect::<Result<_, _>>()?;
+                    if let Some(first) = mine.iter().find(|p| p.role == role) {
+                        let name = if list.len() == 1 {
+                            first.name.clone()
+                        } else {
+                            format!("{} and {} more", first.name, list.len() - 1)
+                        };
+                        steps.push((crate::split::pegs::merged(&list), op, name, None));
+                    }
+                }
+            }
+        }
+        let mut mesh = target.mesh.clone();
+        let mut provenance: Option<Provenance> = None;
+        let mut report = Vec::with_capacity(steps.len());
+        for (tool, op, name, operand) in steps {
+            ctx.checkpoint()?;
+            let r = boolean(&mesh, &tool, op, kernel(), ctx).map_err(|e| match e {
+                BooleanError::Cancelled => OpError::Cancelled,
+                e => {
+                    let code = e.code();
+                    let at = if TARGET_CODES.contains(&code) {
+                        target.name
+                    } else {
+                        name.as_str()
+                    };
+                    refuse_naming(at, code, e.to_string())
+                }
+            })?;
+            let mut step = r.provenance;
+            for (_, s) in &mut step.created_faces {
+                match operand {
+                    Some(k) => {
+                        for (o, _) in &mut s.operands {
+                            if *o == 1 {
+                                *o = k as u32;
+                            }
+                        }
+                    }
+                    None => s.operands.retain(|&(o, _)| o != 1),
+                }
+            }
+            provenance = Some(match provenance {
+                None => step,
+                Some(acc) => crate::blend::compose(&acc, &step),
+            });
+            report.push(serde_json::json!({
+                "object": name,
+                "operation": if op == BoolOp::Union { "union" } else { "subtract" },
+                "window_faces": r.window_faces,
+            }));
+            mesh = r.mesh;
+        }
+        out.push(Applied {
+            host: h,
+            mesh,
+            provenance: provenance.expect("at least one step ran"),
+            steps: report,
+        });
+    }
+    Ok(out)
+}
+
+/// The gap two attached targets keep where they meet (a hinge's moving
+/// parts): refused as `moving_parts_fused` if it's under `gap` (less a
+/// tenth for the chord tolerance). Returns the measured distance (`None`
+/// when they're further apart than the measure looks).
+pub fn check_moving_gap(
+    a: (&Mesh, &OperandInput),
+    b: (&Mesh, &OperandInput),
+    gap: f64,
+    ctx: &RunContext,
+) -> Result<Option<f64>, OpError> {
+    let bvh = mf_geometry::Bvh::build(a.0, ctx)?;
+    let b_in_a =
+        operand_in_frame(b.0, &b.1.transform, &a.1.transform).ok_or_else(|| OpError::Failed {
+            code: "singular_transform",
+            message: format!("'{}': the transform can't be inverted", b.1.name),
+        })?;
+    let measured = mf_geometry::minimum_distance(a.0, &bvh, &b_in_a, &glam::DMat4::IDENTITY, ctx)?;
+    let tolerance = (gap * 0.1).max(1e-6);
+    if let Some(d) = measured
+        && d < gap - tolerance
+    {
+        return Err(OpError::Failed {
+            code: "moving_parts_fused",
+            message: format!(
+                "'{}' and '{}' would print fused ({d:.3} mm apart where they meet, at least \
+                 {gap:.3} mm expected); move the parts apart or pick a looser Fit class.",
+                a.1.name, b.1.name
+            ),
+        });
+    }
+    Ok(measured)
 }

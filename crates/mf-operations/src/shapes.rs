@@ -276,13 +276,160 @@ pub fn attach_param(members: &[AttachMember]) -> String {
     serde_json::to_string(members).expect("attach members always serialize")
 }
 
+/// A generator `object.attach` builds and joins in the same step, with
+/// no member objects placed first: every part it makes goes to the
+/// target its `attach_to` names (A the command's target, B `side_b`), a
+/// loose part becoming its own object at `transform`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct GeneratedMember {
+    pub generator: GeneratorRecord,
+    /// Where the generator's own frame is placed.
+    pub transform: [f64; 12],
+}
+
+/// `object.attach`'s `generated` parameter, as JSON.
+pub fn generated_param(members: &[GeneratedMember]) -> String {
+    serde_json::to_string(members).expect("generated members always serialize")
+}
+
+/// What [`attach`] joins: the two targets (operand index and input; B
+/// optional), the member objects (operand index, side 0/1, hole) and the
+/// generators built in place.
+pub(crate) struct AttachJob<'a> {
+    pub a: (usize, &'a OperandInput<'a>),
+    pub b: Option<(usize, &'a OperandInput<'a>)>,
+    pub members: Vec<(usize, usize, bool)>,
+    pub generated: Vec<GeneratedMember>,
+    /// The gap the two targets must keep (0: not checked unless
+    /// `always_measure`).
+    pub gap: f64,
+    pub always_measure: bool,
+}
+
+/// The one apply command's body (`object.attach`, and `connector.join`
+/// replaying old logs): N parts — member objects and generated ones —
+/// folded into their target slots in one step ([`crate::apply_parts`]),
+/// each member removed, each loose generated part created; then the
+/// moving-parts gap check. Returns the changes and the measured gap.
+pub(crate) fn attach(
+    job: &AttachJob,
+    inputs: &[OperandInput],
+    ctx: &RunContext,
+) -> Result<(Vec<ObjectChange>, Option<f64>), OpError> {
+    use std::borrow::Cow;
+    let mut parts: Vec<crate::PartIn> = job
+        .members
+        .iter()
+        .map(|&(k, host, hole)| crate::PartIn {
+            name: inputs[k].name.to_owned(),
+            mesh: Cow::Borrowed(inputs[k].mesh),
+            transform: inputs[k].transform,
+            role: if hole {
+                mf_parts::ShapeRole::Hole
+            } else {
+                mf_parts::ShapeRole::Solid
+            },
+            host,
+            operand: Some(k),
+        })
+        .collect();
+    let mut loose = Vec::new();
+    for g in &job.generated {
+        ctx.checkpoint()?;
+        let generator = mf_parts::find_generator(&g.generator.id).ok_or_else(|| {
+            failed(
+                "unknown_connector",
+                format!("'{}' isn't a built-in connector", g.generator.id),
+            )
+        })?;
+        if generator.version() != g.generator.version {
+            return Err(failed(
+                "generator_version",
+                format!(
+                    "'{}' was made with version {}, but this build has version {}",
+                    g.generator.id,
+                    g.generator.version,
+                    generator.version()
+                ),
+            ));
+        }
+        let made = generator
+            .generate(&g.generator.params, &mf_parts::GenContext::new(ctx))
+            .map_err(generator_error)?;
+        for part in made {
+            let host = match part.attach_to {
+                mf_parts::TargetSlot::A => 0,
+                mf_parts::TargetSlot::B => 1,
+                mf_parts::TargetSlot::Neither => {
+                    loose.push((part.name, part.mesh, g.transform));
+                    continue;
+                }
+            };
+            parts.push(crate::PartIn {
+                name: part.name.to_owned(),
+                mesh: Cow::Owned(part.mesh),
+                transform: g.transform,
+                role: part.role,
+                host,
+                operand: None,
+            });
+        }
+    }
+    let applied = crate::apply_parts(
+        [Some(job.a), job.b],
+        &parts,
+        crate::ApplyOrder::Sequential,
+        ctx,
+    )?;
+    let mut changes = Vec::new();
+    for r in &applied {
+        let operand = if r.host == 0 {
+            job.a.0
+        } else {
+            job.b.map_or(0, |b| b.0)
+        };
+        changes.push(ObjectChange::Geometry {
+            operand,
+            mesh: r.mesh.clone(),
+            provenance: r.provenance.clone(),
+        });
+        for &(k, host, _) in &job.members {
+            if host == r.host {
+                changes.push(ObjectChange::Remove { operand: k });
+            }
+        }
+    }
+    let mut measured = None;
+    if let Some(b) = job.b
+        && (job.gap > 0.0 || job.always_measure)
+    {
+        let mesh_of = |host: usize, input: &OperandInput| {
+            applied
+                .iter()
+                .find(|r| r.host == host)
+                .map_or_else(|| input.mesh.clone(), |r| r.mesh.clone())
+        };
+        let (am, bm) = (mesh_of(0, job.a.1), mesh_of(1, b.1));
+        measured = crate::check_moving_gap((&am, job.a.1), (&bm, b.1), job.gap, ctx)?;
+    }
+    for (name, mesh, transform) in loose {
+        changes.push(ObjectChange::Create {
+            name: format!("{} {name}", job.a.1.name),
+            provenance: created(&mesh),
+            mesh,
+            transform,
+        });
+    }
+    Ok((changes, measured))
+}
+
 /// `object.attach` (parametric-shapes brief, "Connectors become shape
-/// groups"): a linked group's members joined onto the two objects they
-/// connect, in one command — each side combined exactly as
-/// `mesh.combine` does (its solids unioned, then its holes cut), the
-/// members removed. With a `gap`, the two results must stay at least
-/// that far apart where they meet (D4: never silently ship fused moving
-/// parts, as `connector.join`).
+/// groups"; parts-architecture-review.md, "One generic apply"): N parts
+/// joined onto the targets they connect, in one command — a linked
+/// group's member objects (each removed once joined) and generators
+/// built in place, each part to its target slot, solids joined and holes
+/// cut. With a `gap`, the two results must stay at least that far apart
+/// where they meet (D4: never silently ship fused moving parts).
 pub struct Attach;
 
 impl Operation for Attach {
@@ -312,6 +459,9 @@ impl Operation for Attach {
     ) -> Result<DocOutput, OpError> {
         let roles: Vec<AttachMember> = serde_json::from_str(params.get_text("members")?)
             .map_err(|e| failed("invalid_members", format!("members isn't valid: {e}")))?;
+        let generated: Vec<GeneratedMember> =
+            serde_json::from_str(params.get_text("generated").unwrap_or("[]"))
+                .map_err(|e| failed("invalid_generated", format!("generated isn't valid: {e}")))?;
         let side_b = inputs.iter().position(|o| o.slot == "side_b");
         let members: Vec<usize> = (0..inputs.len())
             .filter(|&k| inputs[k].slot == "members")
@@ -326,106 +476,24 @@ impl Operation for Attach {
                 ),
             ));
         }
-        let gap = params.get_float("gap")?;
-        let keep = Params(std::collections::BTreeMap::from([(
-            "keep_holes".to_owned(),
-            mf_spec::ParamValue::Bool(false),
-        )]));
-        let mut changes = Vec::new();
-        let mut results: Vec<(usize, Mesh)> = Vec::new();
-        for (side, host) in [('a', Some(0)), ('b', side_b)] {
-            let chosen: Vec<(usize, bool)> = members
+        let job = AttachJob {
+            a: (0, &inputs[0]),
+            b: side_b.map(|k| (k, &inputs[k])),
+            members: members
                 .iter()
                 .zip(&roles)
-                .filter(|(_, r)| r.side == side)
-                .map(|(&k, r)| (k, r.hole))
-                .collect();
-            if chosen.is_empty() {
-                continue;
-            }
-            let Some(host) = host else {
-                return Err(failed(
-                    "missing_operand",
-                    "Some members join side B, but no side B object was given.",
-                ));
-            };
-            // The combine's own operands: its target, then solids, then
-            // holes; `global[i]` is local operand i's index here.
-            let mut local = vec![OperandInput {
-                slot: "target",
-                ..inputs[host].clone()
-            }];
-            let mut global = vec![host];
-            for &(k, hole) in &chosen {
-                local.push(OperandInput {
-                    slot: if hole { "holes" } else { "solids" },
-                    ..inputs[k].clone()
-                });
-                global.push(k);
-            }
-            let out = crate::combine::Combine.execute_doc(&local, &keep, ctx)?;
-            for change in out.changes {
-                changes.push(match change {
-                    ObjectChange::Geometry {
-                        operand,
-                        mesh,
-                        mut provenance,
-                    } => {
-                        for (_, sources) in &mut provenance.created_faces {
-                            for (o, _) in &mut sources.operands {
-                                *o = global[*o as usize] as u32;
-                            }
-                        }
-                        results.push((global[operand], mesh.clone()));
-                        ObjectChange::Geometry {
-                            operand: global[operand],
-                            mesh,
-                            provenance,
-                        }
-                    }
-                    ObjectChange::Remove { operand } => ObjectChange::Remove {
-                        operand: global[operand],
-                    },
-                    other => other,
-                });
-            }
-        }
-        let mut measured = None;
-        if gap > 0.0
-            && let (Some(b), Some((_, a_mesh))) = (side_b, results.iter().find(|(k, _)| *k == 0))
-        {
-            let b_mesh = results
-                .iter()
-                .find(|(k, _)| *k == b)
-                .map_or(inputs[b].mesh, |(_, m)| m);
-            let bvh = mf_geometry::Bvh::build(a_mesh, ctx)?;
-            let b_in_a =
-                mf_boolean::operand_in_frame(b_mesh, &inputs[b].transform, &inputs[0].transform)
-                    .ok_or_else(|| {
-                        failed("singular_transform", "side B's transform can't be inverted")
-                    })?;
-            measured =
-                mf_geometry::minimum_distance(a_mesh, &bvh, &b_in_a, &glam::DMat4::IDENTITY, ctx)?;
-            let tolerance = (gap * 0.1).max(1e-6);
-            if let Some(d) = measured
-                && d < gap - tolerance
-            {
-                return Err(failed(
-                    "moving_parts_fused",
-                    format!(
-                        "'{}' and '{}' would print fused ({d:.3} mm apart where they meet, at \
-                         least {gap:.3} mm expected); move the parts apart or pick a looser Fit \
-                         class.",
-                        inputs[0].name, inputs[b].name
-                    ),
-                ));
-            }
-        }
+                .map(|(&k, r)| (k, usize::from(r.side == 'b'), r.hole))
+                .collect(),
+            generated,
+            gap: params.get_float("gap")?,
+            always_measure: false,
+        };
+        let (changes, measured) = attach(&job, inputs, ctx)?;
         Ok(DocOutput {
             report: serde_json::json!({
-                "attached": members.len(),
+                "attached": members.len() + job.generated.len(),
                 "measured_gap": measured,
-                "expected_gap": gap,
+                "expected_gap": job.gap,
             }),
             changes,
         })
