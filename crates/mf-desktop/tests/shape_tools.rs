@@ -123,6 +123,39 @@ fn ball() -> Mesh {
     mf_fixtures::scaled(&mf_fixtures::uv_sphere(32, 48), 10.0)
 }
 
+/// How much of the window's bottom edge the status bar covers: a node
+/// whose rect's bottom falls within this band is hidden behind it.
+const STATUS_BAR_HEIGHT: f32 = 36.0;
+
+/// Scrolls the tool panel until `label` is inside the window (clear of
+/// the status bar at the bottom), then clicks it (the same helper as
+/// `core_workflows.rs`'s).
+fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
+    let over = egui::pos2(200.0, WINDOW.1 * 0.5);
+    h.event(egui::Event::PointerMoved(over));
+    h.step();
+    let mut tries = 0;
+    loop {
+        let rect = h.get_by_label(label).rect();
+        if rect.bottom() <= WINDOW.1 - STATUS_BAR_HEIGHT && rect.top() >= 40.0 {
+            break;
+        }
+        tries += 1;
+        assert!(tries < 400, "scrolled to {label:?}");
+        let down = rect.bottom() > WINDOW.1 - STATUS_BAR_HEIGHT;
+        h.event(egui::Event::MouseWheel {
+            unit: egui::MouseWheelUnit::Line,
+            delta: egui::vec2(0.0, if down { -1.0 } else { 1.0 }),
+            phase: egui::TouchPhase::Move,
+            source: egui::MouseWheelSource::Wheel,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.run_steps(2);
+    }
+    h.run_steps(10);
+    h.get_by_label(label).click();
+}
+
 fn objects(h: &Harness<'_, MeshFixerApp>) -> Vec<String> {
     h.state()
         .session
@@ -145,8 +178,9 @@ fn split_cuts_a_closed_object_in_two_and_refuses_an_open_one() {
     settle(&mut h);
     let n = h.state().split.normal();
     assert!((n.x - 1.0).abs() < 1e-9, "{n:?}");
-    // Off the ball's seam of vertices (a plane through a ring of them
-    // grazes the surface: refused, "move the plane slightly").
+    // Off the ball's seam of vertices (kept there so this test's
+    // screenshots stay as they were; a plane through a ring of them
+    // cuts too — core_workflows' owner tests).
     h.state_mut().split.plane[9] += 1.3;
     settle(&mut h);
     still(&mut h, "split-preview");
@@ -521,7 +555,12 @@ fn split_cuts_every_selected_object() {
     settle(&mut h);
     let history = h.state().session.history_labels().len();
     h.get_by_label("Cuts: left, right");
-    h.get_by_label("Cut").click();
+    // Scrolled into view, not a plain click: with several objects
+    // selected the Split panel's "Cuts:" list and the bounded cut
+    // area's controls (Phase 1b) push Cut below the tool dock's
+    // visible area at this window height, where a click lands on
+    // nothing and no command ever starts.
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });

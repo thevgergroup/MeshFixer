@@ -94,6 +94,23 @@ pub struct SplitState {
     /// default, owner 2026-11-12). Off leaves it open at the cut — no
     /// cap faces, no joint — for a vase or bowl.
     pub cap: bool,
+    /// Cross-section picking (Phase 1b): unticked cap regions, by seed
+    /// face, for the active object only (region ids are only meaningful
+    /// within one object's mesh, and `mesh.split_plane`'s `regions`
+    /// param is shared across every selected target in one command —
+    /// so the picker itself only shows when exactly one object is
+    /// selected; see [`crate::split_flow::region_preview`]). Empty (the
+    /// default) means every region is ticked, today's behaviour.
+    pub unticked_regions: std::collections::HashMap<ObjectId, std::collections::HashSet<u32>>,
+    /// "Limit to area" (Phase 1b): turns the infinite plane into a
+    /// disc or rectangle centred on the plane's point.
+    pub bound: bool,
+    /// "disc" or "rect".
+    pub bound_shape: String,
+    /// The bound's diameter (disc) or width (rect), world mm.
+    pub bound_width: f64,
+    /// The bound's height (rect only), world mm.
+    pub bound_height: f64,
 }
 
 impl Default for SplitState {
@@ -108,6 +125,11 @@ impl Default for SplitState {
             placed_for: None,
             section: true,
             cap: true,
+            unticked_regions: std::collections::HashMap::new(),
+            bound: false,
+            bound_shape: "disc".into(),
+            bound_width: 100.0,
+            bound_height: 100.0,
         }
     }
 }
@@ -540,9 +562,10 @@ fn next_action(code: &str) -> Option<Next> {
         | "tool_not_closed"
         | "opening_not_covered"
         | "opening_too_large_for_join" => Some(Next::Repair),
-        "operand_overlaps_itself" | "section_self_intersects" | "result_self_intersects" => {
-            Some(Next::MakeSolid)
-        }
+        "operand_overlaps_itself"
+        | "section_self_intersects"
+        | "split_section_self_intersects"
+        | "result_self_intersects" => Some(Next::MakeSolid),
         _ => None,
     }
 }
@@ -703,14 +726,23 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
                 app.split.drag = None;
             }
         }
-        Some(ToolPointer::Click(px)) => {
-            // Off the gizmo, on a target's own surface: read it as
-            // "keep this side" (owner 2026-11-12), the side classified
-            // the same way the preview shades it (which side of the
-            // plane the clicked point is on).
-            if g.hit(&cam, view, px).is_none()
-                && let Some(world) = surface_click_point(app, &cam, view, px)
-            {
+        // Off the gizmo: cross-section picking (Phase 1b) first — a
+        // click inside a region's own outline toggles it, rather than
+        // being read as "keep this side" below.
+        Some(ToolPointer::Click(px)) if g.hit(&cam, view, px).is_none() => {
+            if let Some(seed_face) = region_hit(app, &cam, view, px) {
+                let selected = app.selected_objects();
+                if let [id] = selected.as_slice() {
+                    let set = app.split.unticked_regions.entry(*id).or_default();
+                    if !set.remove(&seed_face) {
+                        set.insert(seed_face);
+                    }
+                }
+            } else if let Some(world) = surface_click_point(app, &cam, view, px) {
+                // On a target's own surface: read it as "keep this
+                // side" (owner 2026-11-12), the side classified the
+                // same way the preview shades it (which side of the
+                // plane the clicked point is on).
                 let point = app.split.point();
                 let normal = app.split.normal();
                 app.split.keep = if normal.dot(world - point) > 0.0 {
@@ -720,6 +752,7 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
                 };
             }
         }
+        Some(ToolPointer::Click(_)) => {}
         None => {}
     }
     app.split.hover = if app.split.drag.is_some() {
@@ -728,6 +761,46 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
         input.hover.and_then(|px| g.hit(&cam, view, px))
     };
     Input::Consumed
+}
+
+/// The seed face of the region whose outline (projected to screen
+/// space) contains `px`, if any (Phase 1b: click-to-toggle a
+/// cross-section region). Checks every region each frame — the list is
+/// at most a handful of small polygons, cheap next to the mesh itself.
+fn region_hit(
+    app: &MeshFixerApp,
+    cam: &mf_render::OrbitCamera,
+    view: (f64, f64),
+    px: (f64, f64),
+) -> Option<u32> {
+    let rect = app.viewport.last_rect?;
+    let at = |p: DVec3| {
+        mf_render::screen_position(cam, cam.target, view, p.to_array())
+            .map(|(x, y)| (rect.left() as f64 + x, rect.top() as f64 + y))
+    };
+    for r in crate::split_flow::region_preview(app) {
+        let pts: Vec<(f64, f64)> = r.outer_world.iter().filter_map(|&p| at(p)).collect();
+        if pts.len() == r.outer_world.len() && pts.len() >= 3 && point_in_polygon(&pts, px) {
+            return Some(r.seed_face);
+        }
+    }
+    None
+}
+
+fn point_in_polygon(poly: &[(f64, f64)], p: (f64, f64)) -> bool {
+    let n = poly.len();
+    let mut inside = false;
+    for i in 0..n {
+        let (ax, ay) = poly[i];
+        let (bx, by) = poly[(i + 1) % n];
+        if (ay > p.1) != (by > p.1) {
+            let x = ax + (p.1 - ay) / (by - ay) * (bx - ax);
+            if p.0 < x {
+                inside = !inside;
+            }
+        }
+    }
+    inside
 }
 
 /// The world-space point where a screen click lands on the nearest
@@ -910,6 +983,87 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_XS);
     ui.checkbox(&mut app.split.cap, t!("split.cap"))
         .on_hover_text(t!("split.cap_help"));
+    region_and_bound_controls(app, ui, units);
+}
+
+/// Phase 1b: the cross-section region checklist (only shown for a
+/// single selected object, and only when the plane makes more than one
+/// region) and the bounded cut area's "Limit to area" toggle with its
+/// shape and size controls.
+fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
+    section(ui, &t!("split.regions"));
+    let selected = app.selected_objects();
+    if selected.len() > 1 {
+        widgets::caption(ui, t!("split.regions_multi_object"));
+    } else {
+        let regions = crate::split_flow::region_preview(app);
+        if regions.len() > 1 {
+            widgets::caption(ui, t!("split.regions_help"));
+            let Some(&id) = selected.first() else {
+                return;
+            };
+            for r in &regions {
+                let mut ticked = r.ticked;
+                let label = crate::i18n::tr(
+                    "split.region.area",
+                    &[
+                        ("area", format!("{:.0}", r.area_mm2)),
+                        ("unit", units.to_owned()),
+                    ],
+                );
+                if ui.checkbox(&mut ticked, label).changed() {
+                    let set = app.split.unticked_regions.entry(id).or_default();
+                    if ticked {
+                        set.remove(&r.seed_face);
+                    } else {
+                        set.insert(r.seed_face);
+                    }
+                }
+            }
+            ui.add_space(theme::SPACE_XS);
+        }
+    }
+    ui.checkbox(&mut app.split.bound, t!("split.bound"))
+        .on_hover_text(t!("split.bound_help"));
+    if app.split.bound {
+        let shapes = [t!("split.bound.disc"), t!("split.bound.rect")];
+        let options: Vec<(&str, &str, bool)> = shapes
+            .iter()
+            .map(|l| (l.as_str(), l.as_str(), true))
+            .collect();
+        let current = usize::from(app.split.bound_shape == "rect");
+        if let (Some(i), _) = widgets::segmented(ui, &options, current) {
+            app.split.bound_shape = if i == 0 { "disc" } else { "rect" }.into();
+        }
+        let width_label = if app.split.bound_shape == "rect" {
+            crate::i18n::tr("split.bound.width", &[("unit", units.to_owned())])
+        } else {
+            crate::i18n::tr("split.bound.diameter", &[("unit", units.to_owned())])
+        };
+        ui.horizontal(|ui| {
+            ui.label(width_label);
+            ui.add(
+                egui::DragValue::new(&mut app.split.bound_width)
+                    .speed(1.0)
+                    .range(0.0..=f64::MAX)
+                    .max_decimals(2),
+            );
+        });
+        if app.split.bound_shape == "rect" {
+            ui.horizontal(|ui| {
+                ui.label(crate::i18n::tr(
+                    "split.bound.height",
+                    &[("unit", units.to_owned())],
+                ));
+                ui.add(
+                    egui::DragValue::new(&mut app.split.bound_height)
+                        .speed(1.0)
+                        .range(0.0..=f64::MAX)
+                        .max_decimals(2),
+                );
+            });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -1197,6 +1351,70 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
                 pts,
                 egui::Stroke::new(1.0, theme::HOVER.gamma_multiply(0.55)),
             ));
+        }
+    }
+    if split_preview(app).is_some() {
+        // Cross-section picking (Phase 1b): each region's outline,
+        // ticked ones in the selection colour, unticked ones dim.
+        for r in crate::split_flow::region_preview(app) {
+            let pts: Vec<egui::Pos2> = r.outer_world.iter().filter_map(|&p| at(p)).collect();
+            if pts.len() == r.outer_world.len() && pts.len() >= 3 {
+                let color = if r.ticked {
+                    theme::SELECTED
+                } else {
+                    theme::TEXT_MUTED
+                };
+                painter.add(egui::Shape::closed_line(
+                    pts,
+                    egui::Stroke::new(theme::BOUNDARY_WIDTH, color.gamma_multiply(0.85)),
+                ));
+            }
+        }
+        // The bounded cut plane (Phase 1b): the disc or rectangle,
+        // translucent, centred on the plane's point.
+        if app.split.bound && app.active_mesh().is_some() {
+            let point = app.split.point();
+            let normal = app.split.normal();
+            let u = normal.any_orthonormal_vector();
+            let v = normal.cross(u);
+            let scale = 1.0 / crate::transform_tool::mm_per(app.session.document().units());
+            let pts: Vec<egui::Pos2> = match app.split.bound_shape.as_str() {
+                "rect" => {
+                    let (hw, hh) = (
+                        app.split.bound_width * scale / 2.0,
+                        app.split.bound_height * scale / 2.0,
+                    );
+                    [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+                        .into_iter()
+                        .filter_map(|(x, y)| at(point + u * x + v * y))
+                        .collect()
+                }
+                _ => {
+                    let r = app.split.bound_width * scale / 2.0;
+                    (0..48)
+                        .filter_map(|i| {
+                            let a = std::f64::consts::TAU * i as f64 / 48.0;
+                            at(point + (u * a.cos() + v * a.sin()) * r)
+                        })
+                        .collect()
+                }
+            };
+            let expected = if app.split.bound_shape == "rect" {
+                4
+            } else {
+                48
+            };
+            if pts.len() == expected {
+                painter.add(egui::Shape::convex_polygon(
+                    pts.clone(),
+                    theme::HOVER.gamma_multiply(0.15),
+                    egui::Stroke::NONE,
+                ));
+                painter.add(egui::Shape::closed_line(
+                    pts,
+                    egui::Stroke::new(1.5, theme::HOVER.gamma_multiply(0.8)),
+                ));
+            }
         }
     }
     crate::split_flow::overlay(app, &painter, rect);

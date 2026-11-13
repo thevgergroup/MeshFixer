@@ -1388,3 +1388,75 @@ fn run_accepts_target_as_an_operand_name_for_a_many_target_operation() {
     assert_eq!(refused.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&refused.stderr).contains("has no operand named 'target'"));
 }
+
+/// The owner's own demo file (`artifacts/phase1/demo/boolean-demo.3mf`,
+/// copied byte for byte into `fixtures/owner/`): a freshly generated
+/// `gen-fixture boolean-demo` differs from it in the last bit of some
+/// coordinates, which is exactly the level this bug lives at, so the
+/// owner's file itself is what these tests open.
+fn owner_demo() -> String {
+    concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/owner/boolean-demo.3mf"
+    )
+    .to_owned()
+}
+
+/// Owner 2026-11-13, step (A): 'scan' and 'part' selected together, Split
+/// at the default plane for that selection (horizontal through the
+/// selection's bounding-box centre, (2.5, 0, 20)), Keep Top. Both
+/// objects cross the plane and both must be cut; never refused.
+#[test]
+fn owner_split_scan_and_part_at_the_default_plane_keep_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("a.3mf");
+    let o = meshfixer(&[
+        "run",
+        &owner_demo(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "mesh.split_plane",
+        "--operand",
+        "target=1",
+        "--param",
+        "plane_point=2.5,0,20",
+        "--param",
+        "keep=above",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(
+        err.contains("scan (top)") && err.contains("part (top)"),
+        "{err}"
+    );
+}
+
+/// Owner 2026-11-13, step (B): Combine scan + part (one object 'scan'
+/// left), then Split it at the same default plane, Keep Top, Cap on.
+#[test]
+fn owner_combine_then_split_at_the_default_plane_keep_top() {
+    let dir = tempfile::tempdir().unwrap();
+    let out = dir.path().join("b.3mf");
+    let o = meshfixer(&[
+        "run",
+        &owner_demo(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "mesh.combine",
+        "--operand",
+        "solids=1",
+        "--op",
+        "mesh.split_plane",
+        "--param",
+        "plane_point=2.5,0,20",
+        "--param",
+        "keep=above",
+        "--param",
+        "cap=true",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let err = String::from_utf8_lossy(&o.stderr);
+    assert!(err.contains("scan (top)"), "{err}");
+}

@@ -136,6 +136,19 @@ fn ball(radius: f64) -> Mesh {
     mf_fixtures::scaled(&mf_fixtures::uv_sphere(32, 48), radius)
 }
 
+/// Two lobes of radius 20mm, centres 80mm apart in x: a horizontal
+/// plane through both (z = their shared centre height) crosses each in
+/// its own disjoint cap region, never nested (Phase 1b: cross-section
+/// picking, bounded cut plane).
+fn two_lobed() -> Mesh {
+    let sphere = mf_fixtures::uv_sphere(32, 48);
+    let lobe = mf_fixtures::scaled(&sphere, 20.0);
+    mf_fixtures::merge(&[
+        mf_fixtures::translated(&lobe, [-40.0, 0.0, 0.0]),
+        mf_fixtures::translated(&lobe, [40.0, 0.0, 0.0]),
+    ])
+}
+
 fn objects(h: &Harness<'_, MeshFixerApp>) -> Vec<String> {
     h.state()
         .session
@@ -226,7 +239,11 @@ fn cut_with_keep(h: &mut Harness<'_, MeshFixerApp>, label: &str) -> Vec<String> 
     h.get_by_label(label).click();
     settle(h);
     let history = history_len(h);
-    h.get_by_label("Cut").click();
+    // Scrolled, not a plain click (owner: the Split panel can run
+    // taller than the window once the region checklist or the bounded
+    // cut area's controls add rows — Phase 1b — same as Connect's
+    // panel already needed [`scroll_and_click`] for).
+    scroll_and_click(h, "Cut");
     wait_until(h, "the cut", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });
@@ -646,6 +663,270 @@ fn split_demo_scan_at_the_default_plane_is_never_refused() {
     let names = objects(&h);
     assert!(names.contains(&"scan (top)".to_string()), "{names:?}");
     assert!(names.contains(&"scan (bottom)".to_string()), "{names:?}");
+}
+
+/// Opens the owner's own demo file (`artifacts/phase1/demo/boolean-demo.3mf`,
+/// copied byte for byte into `fixtures/owner/`) exactly as File > Open
+/// reads it. Not a regenerated stand-in: a fresh `gen-fixture
+/// boolean-demo` differs from it in the last bit of some coordinates,
+/// which is exactly the level the owner's Split refusal lived at.
+fn opened_owner_demo() -> Harness<'static, MeshFixerApp> {
+    let path = concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../fixtures/owner/boolean-demo.3mf"
+    );
+    let model = mf_io::read_model(std::path::Path::new(path)).unwrap();
+    let objects = model
+        .objects
+        .into_iter()
+        .map(|o| (o.name, o.mesh, o.transform))
+        .collect::<Vec<_>>();
+    opened(
+        objects
+            .iter()
+            .map(|(n, m, t)| (n.as_str(), m.clone(), *t))
+            .collect(),
+    )
+}
+
+/// Split's plane as the panel placed it: horizontal through `point`.
+fn assert_default_horizontal_plane_at(h: &Harness<'_, MeshFixerApp>, point: [f64; 3]) {
+    let p = h.state().split.point();
+    let n = h.state().split.normal();
+    assert_eq!([p.x, p.y, p.z], point, "Split's default plane point");
+    assert_eq!([n.x, n.y, n.z], [0.0, 0.0, 1.0], "horizontal");
+}
+
+/// Owner 2026-11-13, step (A), clicked exactly as the owner did: open
+/// the demo file, select 'scan' and 'part' together, open Split, leave
+/// the default horizontal plane at (2.5, 0, 20) (the selection's own
+/// bounding-box centre), Keep Top, Cut. Both objects cross the plane;
+/// both must be cut, never refused.
+#[test]
+fn owner_split_scan_and_part_together_keep_top_is_never_refused() {
+    require_gpu!("owner_split_scan_and_part_together_keep_top_is_never_refused");
+    let mut h = opened_owner_demo();
+    assert_eq!(objects(&h), ["scan", "part", "crossed scan", "probe"]);
+    select_together(&mut h, &["scan", "part"]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(
+        h.state().selected_objects(),
+        vec![id_of(&h, "scan"), id_of(&h, "part")]
+    );
+    assert_default_horizontal_plane_at(&h, [2.5, 0.0, 20.0]);
+    assert!(h.state().split.cap, "Cap on by default");
+    let names = cut_with_keep(&mut h, "Top");
+    assert_eq!(
+        names,
+        ["scan (top)", "part (top)", "crossed scan", "probe"],
+        "{names:?}"
+    );
+    for name in ["scan (top)", "part (top)"] {
+        let kept = world_bounds(&h, id_of(&h, name));
+        assert!(kept.min[2] >= 20.0 - 1e-9, "{name}: {kept:?}");
+        let mesh = h
+            .state()
+            .session
+            .document()
+            .object(id_of(&h, name))
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .clone();
+        let (p, t) = mesh.to_arrays();
+        mf_boolean::validate_solid(&p, &t, &mf_runtime::RunContext::none())
+            .unwrap_or_else(|e| panic!("{name}: not a closed solid: {e}"));
+    }
+}
+
+/// Owner 2026-11-13, step (B), clicked exactly as the owner did: open
+/// the demo file, select 'scan' and 'part', Combine (leaving one object,
+/// 'scan'), then Split it at the same default plane, horizontal at
+/// (2.5, 0, 20), Keep Top, Cap on, Cut. Never refused.
+#[test]
+fn owner_combine_scan_and_part_then_split_keep_top_is_never_refused() {
+    require_gpu!("owner_combine_scan_and_part_then_split_keep_top_is_never_refused");
+    let mut h = opened_owner_demo();
+    select_together(&mut h, &["scan", "part"]);
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "combine");
+    let history = history_len(&h);
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(objects(&h), ["scan", "crossed scan", "probe"]);
+    row(&h, "scan").click();
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().selected_objects(), vec![id_of(&h, "scan")]);
+    assert_default_horizontal_plane_at(&h, [2.5, 0.0, 20.0]);
+    assert!(h.state().split.cap, "Cap on");
+    let names = cut_with_keep(&mut h, "Top");
+    assert_eq!(names, ["scan (top)", "crossed scan", "probe"], "{names:?}");
+    let mesh = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "scan (top)"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    let (p, t) = mesh.to_arrays();
+    mf_boolean::validate_solid(&p, &t, &mf_runtime::RunContext::none())
+        .unwrap_or_else(|e| panic!("not a closed solid: {e}"));
+    assert!(world_bounds(&h, id_of(&h, "scan (top)")).min[2] >= 20.0 - 1e-9);
+}
+
+// ---------------------------------------------------------------------
+// Split: cross-section picking and the bounded cut plane (Phase 1b).
+// ---------------------------------------------------------------------
+
+/// A two-lobed object with only one region ticked: the other lobe stays
+/// one piece, never split, in whichever kept part it ends up in.
+#[test]
+fn split_one_region_ticked_leaves_the_other_lobe_whole() {
+    require_gpu!("split_one_region_ticked_leaves_the_other_lobe_whole");
+    let mut h = opened(vec![("lobes", two_lobed(), at([0.0, 0.0, 20.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    // Horizontal, through both lobes' middles (off their shared pole
+    // seam by the same 1.3mm offset the other Split tests use).
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let regions = mf_desktop::split_flow::region_preview(h.state());
+    assert_eq!(
+        regions.len(),
+        2,
+        "two disjoint lobes, two regions: {regions:?}"
+    );
+    // Untick the first region (as the panel's own checkbox would).
+    let id = id_of(&h, "lobes");
+    let untick = regions[0].seed_face;
+    h.state_mut()
+        .split
+        .unticked_regions
+        .entry(id)
+        .or_default()
+        .insert(untick);
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["lobes (top)", "lobes (bottom)"], "{names:?}");
+    let sphere_faces = mf_fixtures::uv_sphere(32, 48).face_count();
+    let top = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "lobes (top)"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .face_count();
+    let bottom = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "lobes (bottom)"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .face_count();
+    // The untouched lobe's whole faces are present, on top of the
+    // ticked lobe's own cut faces, in one of the two kept parts.
+    assert!(
+        top > sphere_faces || bottom > sphere_faces,
+        "top={top} bottom={bottom} sphere={sphere_faces}"
+    );
+}
+
+/// A bounded disc placed over one lobe only cuts that lobe.
+#[test]
+fn split_bounded_disc_over_one_region_only() {
+    require_gpu!("split_bounded_disc_over_one_region_only");
+    let mut h = opened(vec![("lobes", two_lobed(), at([0.0, 0.0, 20.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    // Centre the plane's point over the lobe at world x=-40 (object
+    // space, since the object's own transform is translation-only
+    // here): the disc (diameter 40mm, radius 20) covers that lobe's
+    // section (radius ~20 at most) but not the other lobe, 80mm away.
+    h.state_mut().split.plane[9] = -40.0;
+    h.state_mut().split.bound = true;
+    h.state_mut().split.bound_shape = "disc".into();
+    h.state_mut().split.bound_width = 40.0;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["lobes (top)", "lobes (bottom)"], "{names:?}");
+    let sphere_faces = mf_fixtures::uv_sphere(32, 48).face_count();
+    let top = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "lobes (top)"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .face_count();
+    let bottom = h
+        .state()
+        .session
+        .document()
+        .object(id_of(&h, "lobes (bottom)"))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .face_count();
+    assert!(
+        top > sphere_faces || bottom > sphere_faces,
+        "top={top} bottom={bottom} sphere={sphere_faces}"
+    );
+}
+
+/// A bound that crosses a region's edge is refused by name, with the
+/// owner's exact next action.
+#[test]
+fn split_bound_crossing_a_region_is_refused() {
+    require_gpu!("split_bound_crossing_a_region_is_refused");
+    let mut h = opened(vec![("lobes", two_lobed(), at([0.0, 0.0, 20.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    // The lobe at x=-40's section (at z=1.3 from its own centre) has
+    // radius sqrt(20^2 - 1.3^2) =~ 19.96. A disc of radius 10 centred
+    // at x=-25 (15mm from that lobe's centre) straddles that circle —
+    // 15 is between |19.96-10|=9.96 and 19.96+10=29.96, so the two
+    // circles genuinely cross, not one containing or missing the
+    // other (a disc concentric with the lobe's own centre, by
+    // contrast, is always cleanly inside or outside it, never a
+    // straddle).
+    h.state_mut().split.plane[9] = -25.0;
+    h.state_mut().split.bound = true;
+    h.state_mut().split.bound_shape = "disc".into();
+    h.state_mut().split.bound_width = 20.0;
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Cut");
+    wait_until(&mut h, "the refusal", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    let refusal = h.state().refusal.clone().expect("a refusal");
+    assert_eq!(refusal.code, "split_region_crosses_bound");
+    assert!(
+        refusal
+            .message
+            .contains("Make the cut area larger or move it"),
+        "{}",
+        refusal.message
+    );
+    assert_eq!(history_len(&h), history, "no cut was made");
 }
 
 // ---------------------------------------------------------------------

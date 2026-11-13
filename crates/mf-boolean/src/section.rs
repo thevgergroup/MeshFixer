@@ -81,18 +81,105 @@ pub(crate) fn winding_faces(
     points: &[[f64; 2]],
     edges: &[(usize, usize)],
 ) -> Result<Vec<([usize; 3], i32)>, Fault> {
+    winding_faces_impl(points, edges, None)
+}
+
+/// [`triangulate_section_at`] for loops that may legitimately **touch**
+/// (the plane cut, owner 2026-11-13): loop points that are the same mesh
+/// vertex (`ids`, one per point in the loops' concatenated order: an
+/// on-plane vertex the section passes more than once), or points of two
+/// different loops (two shells meeting there), are one triangulation
+/// vertex, not a fault. Two *different* vertices of one loop at one
+/// place are a fault (`SelfIntersects` at the second): rounding folding
+/// that loop back on itself (split-harden, 2026-11-13: a cut point an
+/// ulp off, then the next one back exactly on the first). Each output triangle's
+/// corner there is resolved to the loop point whose own wedge (between
+/// its incoming and outgoing loop edges) the triangle lies in, found by
+/// walking clockwise round the shared vertex to the first loop edge
+/// leaving it: the triangle is inside, so the first loop edge crossed
+/// that way is the one it leaves its region by, and that edge's own
+/// start point is the one bounding the triangle's wedge. Purely
+/// combinatorial on spade's exact triangulation: no tolerance.
+///
+/// Loops that genuinely *cross* (a constraint that can't be added, or a
+/// point exactly on another loop's edge) are still refused.
+pub(crate) fn triangulate_section_touching(
+    loops: &[Vec<[f64; 2]>],
+    ids: &[u32],
+) -> Result<Vec<[u32; 3]>, Fault> {
+    let mut points = Vec::new();
+    let mut edges = Vec::new();
+    for l in loops {
+        if l.len() < 3 {
+            return Err((SectionError::Degenerate, points.len()));
+        }
+        let base = points.len();
+        points.extend_from_slice(l);
+        for i in 0..l.len() {
+            edges.push((base + i, base + (i + 1) % l.len()));
+        }
+    }
+    let mut out = Vec::new();
+    let mut loop_of = Vec::with_capacity(points.len());
+    for (k, l) in loops.iter().enumerate() {
+        loop_of.extend(std::iter::repeat_n(k, l.len()));
+    }
+    for (t, w) in winding_faces_impl(&points, &edges, Some((ids, &loop_of)))? {
+        match w {
+            0 => {}
+            1 => out.push(t.map(|i| i as u32)),
+            _ => return Err((SectionError::SelfIntersects, t[0])),
+        }
+    }
+    if out.is_empty() {
+        return Err((SectionError::Degenerate, 0));
+    }
+    Ok(out)
+}
+
+fn winding_faces_impl(
+    points: &[[f64; 2]],
+    edges: &[(usize, usize)],
+    touch_ids: Option<(&[u32], &[usize])>,
+) -> Result<Vec<([usize; 3], i32)>, Fault> {
+    let allow_touch = touch_ids.is_some();
     let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
     let mut handles: Vec<FixedVertexHandle> = Vec::with_capacity(points.len());
     let mut owner: HashMap<usize, usize> = HashMap::with_capacity(points.len());
+    // Handles shared by more than one point (only with `allow_touch`).
+    let mut shared: HashMap<usize, Vec<usize>> = HashMap::new();
     for (i, p) in points.iter().enumerate() {
         let h = cdt
             .insert(Point2::new(p[0], p[1]))
             .map_err(|_| (SectionError::Degenerate, i))?;
-        if owner.insert(h.index(), i).is_some() {
-            // Two points at one place.
-            return Err((SectionError::SelfIntersects, i));
+        if let Some(&first) = owner.get(&h.index()) {
+            let touch = touch_ids
+                .is_some_and(|(ids, loop_of)| ids[first] == ids[i] || loop_of[first] != loop_of[i]);
+            if !touch {
+                // Two points at one place.
+                return Err((SectionError::SelfIntersects, i));
+            }
+            shared
+                .entry(h.index())
+                .or_insert_with(|| vec![first])
+                .push(i);
+        } else {
+            owner.insert(h.index(), i);
         }
         handles.push(h);
+    }
+    // For a touching vertex: each loop edge leaving it, by (from handle,
+    // to handle), names the loop point it leaves from.
+    let mut leaving: HashMap<(usize, usize), usize> = HashMap::new();
+    if allow_touch {
+        for &(a, b) in edges {
+            let (ha, hb) = (handles[a].index(), handles[b].index());
+            if shared.contains_key(&ha) && leaving.insert((ha, hb), a).is_some() {
+                // Two loop edges leave one place along the same edge: the
+                // loops overlap there, not just touch.
+                return Err((SectionError::SelfIntersects, a));
+            }
+        }
     }
     // Net directed count per undirected edge (low handle → high handle).
     let mut net: HashMap<(usize, usize), i32> = HashMap::new();
@@ -165,7 +252,34 @@ pub(crate) fn winding_faces(
         let Some(&w) = winding.get(&face.fix().index()) else {
             return Err((SectionError::Degenerate, 0));
         };
-        let t = face.vertices().map(|v| owner[&v.fix().index()]);
+        let vs = face.vertices();
+        let mut t = vs.map(|v| owner[&v.fix().index()]);
+        if !shared.is_empty() && w != 0 {
+            for (c, v) in vs.iter().enumerate() {
+                let h = v.fix().index();
+                if !shared.contains_key(&h) {
+                    continue;
+                }
+                // This face's own edge leaving `h` (the face is on its
+                // left), then clockwise round `h` to the first loop edge
+                // leaving it.
+                let mut e = face
+                    .adjacent_edges()
+                    .into_iter()
+                    .find(|e| e.from().fix().index() == h)
+                    .ok_or((SectionError::Degenerate, owner[&h]))?;
+                let start = e.fix();
+                t[c] = loop {
+                    if let Some(&k) = leaving.get(&(h, e.to().fix().index())) {
+                        break k;
+                    }
+                    e = e.rev().next();
+                    if e.fix() == start {
+                        return Err((SectionError::SelfIntersects, owner[&h]));
+                    }
+                };
+            }
+        }
         out.push((t, w));
     }
     // Deterministic order (spade's face order already is, but sort so it

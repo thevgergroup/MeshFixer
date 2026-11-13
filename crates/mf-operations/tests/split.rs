@@ -416,20 +416,25 @@ fn refusals_are_named() {
         )),
         "section_too_thin"
     );
-    // Two cubes touching along an edge, cut through that edge: the two
-    // section squares touch at a point, which is refused, not guessed.
-    // Its own code, not `mesh.boolean`'s "section_self_intersects": the
-    // model here isn't self-overlapping, only this plane's section is
-    // ambiguous (Make solid wouldn't help, so it isn't offered).
+}
+
+/// Two cubes touching along an edge, cut through that edge (owner
+/// 2026-11-13): the two section squares touch at a point. Loops that
+/// only touch are split apart at the touch, never refused — each square
+/// capped on its own — and both parts are closed solids.
+#[test]
+fn sections_that_touch_at_a_point_are_cut_not_refused() {
     let touching = merge(&[cube(1.0), translated(&cube(1.0), [1.0, 1.0, 0.0])]);
-    assert_eq!(
-        code(split_with(
-            &touching,
-            IDENTITY,
-            &[("plane_point", "0,0,0.5")]
-        )),
-        "split_section_self_intersects"
-    );
+    let out = split_with(&touching, IDENTITY, &[("plane_point", "0,0,0.5")]).unwrap();
+    let (top, created) = parts(&out);
+    let bottom = created.unwrap().1;
+    for (mesh, what) in [(&top, "top"), (&bottom, "bottom")] {
+        let topo = mesh.topology_with(&RunContext::none()).unwrap();
+        assert_eq!(topo.boundary_edges, 0, "{what}: closed");
+        assert!(topo.non_manifold_edges.is_empty(), "{what}: manifold");
+        assert_eq!(topo.inconsistent_edges, 0, "{what}: oriented");
+        assert!(close(volume(mesh), 1.0, 1e-12), "{what}: {}", volume(mesh));
+    }
 }
 
 /// Owner 2026-11-12: a plane lying exactly on a box's top face must
@@ -682,4 +687,246 @@ fn cylinder_cut_exactly_at_a_vertex_ring_is_never_refused() {
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Phase 1b: cross-section picking, bounded cut plane.
+// ---------------------------------------------------------------------
+
+/// Two spheres of radius 1, centres 6 apart (x = -3 and x = 3): a
+/// horizontal plane through both crosses each in its own disjoint
+/// section, never nested — two separate regions.
+fn two_lobes() -> Mesh {
+    let sphere = uv_sphere(12, 16);
+    merge(&[
+        translated(&sphere, [-3.0, 0.0, 0.0]),
+        translated(&sphere, [3.0, 0.0, 0.0]),
+    ])
+}
+
+/// `mesh.split_plane`'s own seed faces for `mesh`/`plane`, read the same
+/// way the engine itself computes them (`mf_boolean::cut_half`), so a
+/// test can name a region by the same identity `mesh.split_plane`'s
+/// `regions` param expects.
+fn seed_faces(mesh: &Mesh, plane_point: [f64; 3]) -> Vec<FaceId> {
+    let plane = mf_boolean::Plane {
+        point: plane_point,
+        normal: [0.0, 0.0, 1.0],
+    };
+    let half =
+        mf_boolean::cut_half(mesh, &plane, mf_boolean::Side::Above, &RunContext::none()).unwrap();
+    half.section_regions.iter().map(|r| r.seed_face).collect()
+}
+
+fn faces_param(ids: &[FaceId]) -> String {
+    ids.iter()
+        .map(|f| f.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// A version 3 log (no `regions`/`bound` keys) upgrades to today's
+/// defaults: every region cut, no bound — identical to what it already
+/// did.
+#[test]
+fn version_3_log_upgrades_to_todays_defaults() {
+    let op = find("mesh.split_plane").unwrap();
+    assert_eq!(op.version(), 4);
+    let mut old = mf_spec::Params(
+        [
+            (
+                "plane_point".to_owned(),
+                mf_spec::ParamValue::Vec3([0.0, 0.0, 0.7]),
+            ),
+            (
+                "plane_normal".to_owned(),
+                mf_spec::ParamValue::Vec3([0.0, 0.0, 1.0]),
+            ),
+            ("keep".to_owned(), mf_spec::ParamValue::Text("both".into())),
+            ("cut_gap".to_owned(), mf_spec::ParamValue::Float(0.0)),
+            ("cap".to_owned(), mf_spec::ParamValue::Bool(true)),
+            ("pegs".to_owned(), mf_spec::ParamValue::Text("none".into())),
+            (
+                "peg_shape".to_owned(),
+                mf_spec::ParamValue::Text("round".into()),
+            ),
+            (
+                "hole_profile".to_owned(),
+                mf_spec::ParamValue::Text("auto".into()),
+            ),
+            ("hole_diameter".to_owned(), mf_spec::ParamValue::Float(5.0)),
+            (
+                "hole_depth_above".to_owned(),
+                mf_spec::ParamValue::Float(6.0),
+            ),
+            (
+                "hole_depth_below".to_owned(),
+                mf_spec::ParamValue::Float(6.0),
+            ),
+            ("peg_count".to_owned(), mf_spec::ParamValue::Int(0)),
+            ("peg_clearance".to_owned(), mf_spec::ParamValue::Float(0.2)),
+            (
+                "length_allowance".to_owned(),
+                mf_spec::ParamValue::Float(0.4),
+            ),
+            ("fit_clearance".to_owned(), mf_spec::ParamValue::Float(0.2)),
+            (
+                "machine_tolerance".to_owned(),
+                mf_spec::ParamValue::Float(0.0),
+            ),
+            ("min_wall".to_owned(), mf_spec::ParamValue::Float(1.5)),
+            ("plate_width".to_owned(), mf_spec::ParamValue::Float(256.0)),
+            ("plate_depth".to_owned(), mf_spec::ParamValue::Float(256.0)),
+            ("plate_spacing".to_owned(), mf_spec::ParamValue::Float(3.0)),
+        ]
+        .into_iter()
+        .collect(),
+    );
+    assert!(op.upgrade_params(3, &mut old));
+    assert_eq!(old.get_faces("regions").unwrap(), Vec::<u32>::new());
+    assert!(!old.get_bool("bound").unwrap());
+    assert_eq!(old.get_choice("bound_shape").unwrap(), "disc");
+    // Executes identically to before: cuts the cube cleanly in two.
+    let mesh = cube(2.0);
+    let out = find("mesh.split_plane")
+        .unwrap()
+        .execute_doc(
+            &[OperandInput {
+                slot: "target",
+                object: ObjectId(1),
+                name: "scan",
+                mesh: &mesh,
+                transform: IDENTITY,
+                target: Target::WholeObject,
+            }],
+            &old,
+            &RunContext::none(),
+        )
+        .unwrap();
+    let (top, bottom) = parts(&out);
+    assert_solid(&top, "top");
+    assert_solid(&bottom.unwrap().1, "bottom");
+}
+
+/// `regions` restricted to one of two lobes' seed face cuts only that
+/// lobe; the other lobe's full geometry stays in one piece, never
+/// split, in whichever kept part contains it.
+#[test]
+fn op_level_regions_param_cuts_only_the_named_region() {
+    let mesh = two_lobes();
+    let seeds = seed_faces(&mesh, [0.0, 0.0, 0.0]);
+    assert_eq!(seeds.len(), 2, "two disjoint lobes, two regions");
+    let keep_one = [seeds[0]];
+    let out = split_with(
+        &mesh,
+        IDENTITY,
+        &[
+            ("plane_point", "0,0,0"),
+            ("plane_normal", "0,0,1"),
+            ("keep", "both"),
+            ("regions", &faces_param(&keep_one)),
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.report["objects"][0]["section_regions"], 1);
+    let (top, bottom) = parts(&out);
+    let bottom = bottom.unwrap().1;
+    let sphere_faces = uv_sphere(12, 16).face_count();
+    // The untouched lobe's whole faces are present, on top of the
+    // ticked lobe's own cut faces, in one of the two kept parts.
+    assert!(
+        top.face_count() > sphere_faces || bottom.face_count() > sphere_faces,
+        "top={} bottom={} sphere={sphere_faces}",
+        top.face_count(),
+        bottom.face_count()
+    );
+}
+
+/// A bound sized over just one lobe cuts only that lobe (the engine's
+/// own coverage is in `crates/mf-boolean/tests/plane_cut.rs`; this
+/// proves the op layer wires `bound`/`bound_shape`/`bound_width` through
+/// in world mm, converted to object units).
+#[test]
+fn op_level_bound_cuts_only_the_region_it_covers() {
+    let mesh = two_lobes();
+    let out = split_with(
+        &mesh,
+        IDENTITY,
+        &[
+            ("plane_point", "-3,0,0"),
+            ("plane_normal", "0,0,1"),
+            ("keep", "both"),
+            ("bound", "true"),
+            ("bound_shape", "disc"),
+            ("bound_width", "3"), // radius 1.5: covers the lobe at x=-3, not x=3
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.report["objects"][0]["section_regions"], 1);
+}
+
+/// A bound crossing a region's edge is refused with the owner's exact
+/// next action ("Make the cut area larger or move it").
+#[test]
+fn bound_crossing_a_region_is_refused_with_the_next_action() {
+    let sphere = scaled(&uv_sphere(12, 16), 3.0);
+    // The section at z=0.37 is a circle of radius ~2.977 centred at
+    // (0,0). A disc of radius 1.5 centred 2 units off that centre
+    // (bound_width 3, so radius 1.5, at plane_point x=2) partially
+    // overlaps the circle: some of its points fall inside the disc,
+    // some outside — a genuine straddle, not a concentric subset.
+    let out = split_with(
+        &sphere,
+        IDENTITY,
+        &[
+            ("plane_point", "2,0,0.37"),
+            ("plane_normal", "0,0,1"),
+            ("keep", "both"),
+            ("bound", "true"),
+            ("bound_shape", "disc"),
+            ("bound_width", "3"),
+        ],
+    );
+    match out {
+        Err(OpError::Failed { code, message }) => {
+            assert_eq!(code, "split_region_crosses_bound");
+            assert!(
+                message.contains("Make the cut area larger or move it"),
+                "{message}"
+            );
+        }
+        other => panic!("expected a refusal, got {:?}", other.map(|o| o.report)),
+    }
+}
+
+/// Alignment pegs with `regions` restricted to one lobe places holes
+/// only in that lobe's section — the excluded lobe has no cap at all,
+/// so there's nothing there for `pegs::place_holes` to even consider.
+#[test]
+fn pegs_with_regions_restricted_places_holes_only_in_the_ticked_region() {
+    let mesh = two_lobes();
+    let seeds = seed_faces(&mesh, [0.0, 0.0, 0.0]);
+    assert_eq!(seeds.len(), 2);
+    let keep_one = [seeds[0]];
+    let out = split_with(
+        &mesh,
+        IDENTITY,
+        &[
+            ("plane_point", "0,0,0"),
+            ("plane_normal", "0,0,1"),
+            ("keep", "both"),
+            ("regions", &faces_param(&keep_one)),
+            ("pegs", "dowels"),
+            ("hole_diameter", "0.3"),
+            ("hole_depth_above", "0.3"),
+            ("hole_depth_below", "0.3"),
+            ("min_wall", "0.05"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.report["objects"][0]["section_regions"], 1);
+    // No PegError about a second region: the call succeeded at all,
+    // which it wouldn't if place_holes tried (and failed) to fit a
+    // hole into a region that no longer exists.
+    assert!(out.report["objects"][0]["pegs"].is_object());
 }
