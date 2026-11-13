@@ -456,8 +456,9 @@ fn hollow_settings_are_in_document_units_under_a_scaled_placement() {
     let ObjectChange::Geometry { mesh, .. } = &out.changes[0] else {
         panic!()
     };
+    let input = ball();
     for (v, p) in mesh.vertices() {
-        if ball().position(v).is_none() {
+        if input.position(v).is_none() {
             let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
             assert!((r - 18.0).abs() < 0.6, "{r}");
         }
