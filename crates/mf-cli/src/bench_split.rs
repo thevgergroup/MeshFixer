@@ -76,7 +76,7 @@ pub fn command() -> Command {
 
 /// Each triangle into four by its edge midpoints, shared between the two
 /// faces of each edge, so a closed mesh stays closed.
-fn subdivide(mesh: &Mesh) -> Result<Mesh, Failure> {
+pub(crate) fn subdivide(mesh: &Mesh) -> Result<Mesh, Failure> {
     let (mut positions, triangles) = mesh.to_arrays();
     let mut mid: HashMap<(u32, u32), u32> = HashMap::with_capacity(triangles.len() * 3 / 2);
     let mut out = Vec::with_capacity(triangles.len() * 4);
@@ -111,23 +111,23 @@ fn parse_normal(s: &str) -> Result<[f64; 3], Failure> {
 }
 
 /// What a sampler thread saw while the split ran.
-struct Samples {
-    peak_footprint: u64,
-    peak_cores: f64,
+pub(crate) struct Samples {
+    pub(crate) peak_footprint: u64,
+    pub(crate) peak_cores: f64,
 }
 
-fn footprint() -> Result<u64, Failure> {
+pub(crate) fn footprint() -> Result<u64, Failure> {
     let m = mf_metrics::process_memory().map_err(Failure::Runtime)?;
     Ok(m.phys_footprint_bytes.unwrap_or(m.resident_bytes))
 }
 
-fn cpu() -> Result<f64, Failure> {
+pub(crate) fn cpu() -> Result<f64, Failure> {
     mf_metrics::process_cpu_seconds().map_err(Failure::Runtime)
 }
 
 /// Samples the footprint every 10 ms and the CPU every 50 ms until
 /// `stop`.
-fn sampler(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Result<Samples, Failure>> {
+pub(crate) fn sampler(stop: Arc<AtomicBool>) -> std::thread::JoinHandle<Result<Samples, Failure>> {
     std::thread::spawn(move || {
         let mut s = Samples {
             peak_footprint: footprint()?,

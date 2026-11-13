@@ -25,6 +25,7 @@ use mf_metrics::{CountingAlloc, GpuBufferBytes, MemoryBreakdown, Phase, measure}
 use mf_runtime::{JobPool, PoolChoice, RunContext};
 use mf_selection::{Selection, SelectionKind, Translation};
 
+mod bench_hollow;
 mod bench_split;
 
 #[global_allocator]
@@ -400,7 +401,8 @@ fn cli() -> Command {
                             .help("Print the measurements as JSON"),
                     ),
             )
-            .subcommand(bench_split::command()),
+            .subcommand(bench_split::command())
+            .subcommand(bench_hollow::command()),
     );
     cmd = cmd
         .subcommand(
@@ -1679,8 +1681,9 @@ fn main() -> ExitCode {
             Some(("memory", m)) => bench_memory(m, &ctx),
             Some(("orbit", m)) => bench_orbit(m, &mut metrics, &ctx),
             Some(("split", m)) => bench_split::run(m, &ctx),
+            Some(("hollow", m)) => bench_hollow::run(m, &ctx),
             _ => Err(Failure::Usage(
-                "bench needs a measurement: memory, orbit or split".into(),
+                "bench needs a measurement: memory, orbit, split or hollow".into(),
             )),
         },
         Some(("run", m)) => run_sequence(m, &mut metrics, &ctx),
