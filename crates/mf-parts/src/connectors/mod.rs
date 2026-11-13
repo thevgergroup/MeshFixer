@@ -15,6 +15,27 @@ pub mod thread;
 use mf_geometry::Mesh;
 
 use crate::connector::Connector;
+use crate::generator::PlacementHint;
+
+/// Every built-in connector with its library name and where it's
+/// offered, in registry order (the library lists its `Surface` ones in
+/// this order; Connect its cut-face ones).
+pub(crate) fn builtin_connectors() -> Vec<(&'static dyn Connector, &'static str, PlacementHint)> {
+    use PlacementHint::*;
+    vec![
+        (&hinge::PinHinge, "Knuckle hinge", Manual),
+        (&leaf_hinge::LeafHinge, "Pin hinge", Surface),
+        (&flap::FlapHinge, "Flap hinge", Surface),
+        (&clasp::SnapClasp, "Snap clasp", Surface),
+        (&thread::Thread, "Thread", Surface),
+        (&dovetail_slide::DovetailSlide, "Dovetail", Surface),
+        (&joint::Dowel, "Dowel", Point),
+        (&joint::Peg, "Peg", Point),
+        (&joint::Dovetail, "Dovetail", DragLine),
+        (&joint::Magnet, "Magnet", Point),
+        (&joint::Insert, "Insert", Point),
+    ]
+}
 
 /// Every built-in connector. The plugin host appends to a copy of this
 /// (or its own registry chained after it); nothing here assumes it's the

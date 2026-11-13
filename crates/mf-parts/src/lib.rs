@@ -14,6 +14,7 @@ pub mod dirs;
 mod fit;
 mod fit_check;
 mod frame;
+pub mod generator;
 mod library;
 mod machine;
 mod manifest;
@@ -31,6 +32,11 @@ pub use fit::{
 };
 pub use fit_check::{FitCheck, FitExpectation, MatingSurfaces, check_fit};
 pub use frame::{SurfaceFrame, place};
+pub use generator::{
+    Anchor, FitProbe, Fix, GenCheck, GenContext, Generator, Handles, ParamPatch, PlacementHint,
+    ShapePart, TargetSlot, Targets, cut_generators, find_generator, generators,
+    register_generator,
+};
 pub use library::{
     Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_connector_as_part,
     save_object_as_part, user_parts_dir,
