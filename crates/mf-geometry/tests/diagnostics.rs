@@ -169,3 +169,21 @@ fn volume_status_explains_missing_volume() {
     let v = serde_json::to_value(inspect(&flipped_tetrahedron())).unwrap();
     assert_eq!(v["volume_status"], "inconsistent_orientation");
 }
+
+#[test]
+fn dead_slot_ratio_counts_tombstoned_slots() {
+    let c = cube(1.0);
+    assert_eq!(inspect(&c).dead_slot_ratio, 0.0);
+    // Remove the 5 faces around vertex 0, and vertex 0: 6 of 20 slots are
+    // dead.
+    let mut e = c.edit();
+    for f in [0, 1, 4, 5, 10] {
+        e.remove_face(mf_geometry::FaceId(f)).unwrap();
+    }
+    e.remove_vertex(mf_geometry::VertexId(0)).unwrap();
+    let (holey, _) = e.finish().unwrap();
+    assert_eq!(inspect(&holey).dead_slot_ratio, 6.0 / 20.0);
+    let (compact, _) = holey.compacted();
+    assert_eq!(inspect(&compact).dead_slot_ratio, 0.0);
+    assert_eq!(inspect(&mf_geometry::Mesh::empty()).dead_slot_ratio, 0.0);
+}

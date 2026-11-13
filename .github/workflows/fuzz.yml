@@ -1,0 +1,65 @@
+name: Fuzz
+# MF-IO-002 fuzzing. Manual only (owner ruling, 2026-11-11: no automatic
+# GitHub Actions usage): started by hand from the Actions tab, choosing the
+# minutes per target.
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Minutes to fuzz each target (stl, obj, threemf)
+        required: true
+        default: "15"
+        type: string
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  fuzz:
+    # MF-IO-002: malformed, truncated or malicious STL/OBJ/3MF input must
+    # fail fast with a structured error, never panic, allocate unboundedly
+    # or hang. `fuzz/` is its own workspace (cargo-fuzz's standard layout,
+    # excluded from the main workspace) so this nightly-only build never
+    # touches the pinned stable toolchain used everywhere else.
+    # Manual only: run it from the Actions tab.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [stl, obj, threemf]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@nightly
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "fuzz -> target"
+      - name: Cache cargo-fuzz
+        id: cargo-fuzz-cache
+        uses: actions/cache@v6
+        with:
+          path: ~/.cargo/bin/cargo-fuzz
+          key: cargo-fuzz-${{ runner.os }}-v0.13.2
+      - name: Install cargo-fuzz
+        if: steps.cargo-fuzz-cache.outputs.cache-hit != 'true'
+        run: cargo install cargo-fuzz --locked --version 0.13.2
+      - name: Fuzz ${{ matrix.target }} (${{ inputs.minutes }} min)
+        working-directory: fuzz
+        env:
+          MINUTES: ${{ inputs.minutes }}
+        run: |
+          case "$MINUTES" in
+            ''|*[!0-9]*) echo "::error::minutes must be a whole number, got '$MINUTES'"; exit 1 ;;
+          esac
+          seconds=$((MINUTES * 60))
+          # +nightly: the repo-root rust-toolchain.toml pins stable, which would
+          # override the nightly installed above (cargo-fuzz needs -Zsanitizer).
+          cargo +nightly fuzz run ${{ matrix.target }} -- \
+            -rss_limit_mb=2048 -max_len=1048576 -max_total_time="$seconds"
+      - name: Upload crash artifacts
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crash-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: ignore

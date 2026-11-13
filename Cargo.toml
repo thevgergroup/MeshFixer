@@ -19,6 +19,7 @@ mf-render = { path = "crates/mf-render" }
 mf-metrics = { path = "crates/mf-metrics" }
 mf-document = { path = "crates/mf-document" }
 mf-selection = { path = "crates/mf-selection" }
+mf-runtime = { path = "crates/mf-runtime" }
 
 blake3 = "1.8"
 serde = { version = "1", features = ["derive"] }
@@ -40,12 +41,27 @@ egui-wgpu = "0.37"
 rfd = "0.18"
 jsonschema = "0.60"
 tempfile = "3"
+ctrlc = "3.5"
+libc = "0.2"
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
+# The fill-reducing (AMD) ordering for the fairing solve (MF-OP-002,
+# MF-ISSUE-053; owner-approved 2026-11-09). Integer-only; the numeric
+# factorisation is our own scalar code, so results stay bit-identical
+# across CPUs (faer's SIMD kernels pick a width per machine).
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 unwrap_used = "warn"
+
+# Line tables only: backtraces and panics keep file and line numbers, but the
+# full variable debug info (most of target/'s size and link time) is dropped.
+# The test profile inherits this. To step through locals in a debugger, set
+# CARGO_PROFILE_DEV_DEBUG=true for that build.
+[profile.dev]
+debug = "line-tables-only"
 
 # The geometry hot paths are optimised even in test builds so tests on real
 # scans (1M triangles) run in seconds, not minutes. Debug assertions and
@@ -57,4 +73,38 @@ opt-level = 2
 opt-level = 2
 
 [profile.dev.package.mf-operations]
+opt-level = 2
+
+[profile.dev.package.faer]
+opt-level = 2
+
+# Picking (the BVH build and its ray casts, MF-RENDER-004) runs in tests
+# and the app at release-like speed: the < 16 ms pick budget is measured
+# in the test harness.
+[profile.dev.package.mf-render]
+opt-level = 2
+
+# Cancellation checkpoints and the cancellable sort sit in every hot loop.
+[profile.dev.package.mf-runtime]
+opt-level = 2
+
+# Import hashes every byte it reads, and revisions hash their chunks:
+# unoptimised, BLAKE3 runs at ~60 MB/s (4 s for a 5M-triangle STL).
+[profile.dev.package.blake3]
+opt-level = 2
+
+# MF-RT-001's frame-time gate (mf-desktop/tests/progress.rs) times whole
+# frames in the test harness. Unoptimised, egui's tessellation and the
+# harness's frame read-back alone take ~70 ms, which would measure the test
+# plumbing rather than the app.
+[profile.dev.package.egui_kittest]
+opt-level = 2
+
+[profile.dev.package.epaint]
+opt-level = 2
+
+[profile.dev.package.egui]
+opt-level = 2
+
+[profile.dev.package.egui-wgpu]
 opt-level = 2

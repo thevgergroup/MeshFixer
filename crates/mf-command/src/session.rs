@@ -6,6 +6,7 @@ use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
 use mf_operations::{OpError, OpOutput, Operation, Target};
+use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
 use mf_spec::{Params, SpecError};
 
@@ -55,7 +56,11 @@ pub enum CommandError {
     #[error("object {0} does not exist")]
     UnknownObject(ObjectId),
     #[error(transparent)]
-    Operation(#[from] OpError),
+    Operation(OpError),
+    /// The run was cancelled; nothing was produced and nothing commits
+    /// (MF-CMD-006).
+    #[error("cancelled by the user")]
+    Cancelled,
     #[error(
         "the document changed while the command ran (expected revision {expected}, now {actual})"
     )]
@@ -90,6 +95,21 @@ pub enum CommandError {
     },
 }
 
+impl From<mf_runtime::Cancelled> for CommandError {
+    fn from(_: mf_runtime::Cancelled) -> Self {
+        CommandError::Cancelled
+    }
+}
+
+impl From<OpError> for CommandError {
+    fn from(e: OpError) -> Self {
+        match e {
+            OpError::Cancelled => CommandError::Cancelled,
+            other => CommandError::Operation(other),
+        }
+    }
+}
+
 /// Why a translation can't be used to re-execute a command.
 fn untranslatable_reason(t: &Translation) -> String {
     match t {
@@ -105,6 +125,9 @@ fn untranslatable_reason(t: &Translation) -> String {
             }
             TranslateError::LoopClosed { faces } => {
                 format!("the boundary loop was closed (by {} faces)", faces.len())
+            }
+            TranslateError::LoopRemoved => {
+                "the boundary loop was removed along with the faces around it".into()
             }
             TranslateError::KindNotTranslatable => "its kind can't be translated".into(),
             TranslateError::NotInSource { ids } => {
@@ -123,6 +146,9 @@ pub struct Prepared {
     target_spec: Target,
     selection: Option<Selection>,
     params: Params,
+    /// The target's intentional openings at the input revision, translated
+    /// to the output by `run` (on the worker: it needs the new topology).
+    openings: Vec<u32>,
 }
 
 impl Prepared {
@@ -132,23 +158,58 @@ impl Prepared {
 
     /// Run the operation. Safe on any thread. Hashing happens here too, so
     /// the UI thread never does O(n) work on commit (MF-RT-001).
-    pub fn run(self) -> Result<Completed, CommandError> {
+    ///
+    /// Cancelling `ctx` while this runs returns [`CommandError::Cancelled`]
+    /// and produces nothing. Once this has returned `Ok`, cancelling has no
+    /// effect: the result is committed or dropped by the caller, so there
+    /// is exactly one outcome.
+    pub fn run(self, ctx: &RunContext) -> Result<Completed, CommandError> {
         let start = Instant::now();
         let output = self
             .op
-            .execute(&self.input, &self.target_spec, &self.params)?;
+            .execute(&self.input, &self.target_spec, &self.params, ctx)?;
+        #[cfg(feature = "test-position-jitter")]
+        let output = crate::jitter::perturb(output);
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
-        // the chunks this command copied are hashed (review I6).
-        let input_hash = self.input.content_hash().to_hex();
-        let input_structure_hash = self.input.structure_hash().to_hex();
-        let output_hashes = output
-            .change
-            .as_ref()
-            .map(|(m, _)| (m.content_hash().to_hex(), m.structure_hash().to_hex()));
+        // the chunks this command copied are hashed (review I6). Still
+        // cancellable: the first hash of a freshly imported mesh is O(n).
+        let (input_hash, input_structure_hash) = self.input.hashes_with(ctx)?;
+        let (input_hash, input_structure_hash) =
+            (input_hash.to_hex(), input_structure_hash.to_hex());
+        let output_hashes = match &output.change {
+            Some((m, _)) => {
+                let (content, structure) = m.hashes_with(ctx)?;
+                Some((content.to_hex(), structure.to_hex()))
+            }
+            None => None,
+        };
         let kept = output
             .change
             .as_ref()
             .map_or(0, |(m, p)| (m.face_count() - p.created_faces.len()) as u64);
+        let openings = match &output.change {
+            Some((m, p)) if !self.openings.is_empty() => {
+                let sel = Selection {
+                    object: self.target,
+                    revision: self.base_revision,
+                    kind: SelectionKind::BoundaryLoop,
+                    ids: self.openings.clone(),
+                };
+                // The output's revision id isn't known yet; only the ids matter.
+                match mf_selection::resolve(
+                    &sel,
+                    &self.input,
+                    m,
+                    &[Step::Forward(p)],
+                    self.base_revision,
+                ) {
+                    Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
+                    // Filled, removed or merged away: no longer a hole to mark.
+                    Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+                }
+            }
+            _ => self.openings.clone(),
+        };
         Ok(Completed {
             base_revision: self.base_revision.0,
             target: self.target,
@@ -161,6 +222,7 @@ impl Prepared {
             input_structure_hash,
             output_hashes,
             kept,
+            openings,
             duration: start.elapsed(),
         })
     }
@@ -178,6 +240,8 @@ pub struct Completed {
     input_structure_hash: String,
     output_hashes: Option<(String, String)>,
     kept: u64,
+    /// The target's intentional openings, translated to the output.
+    pub openings: Vec<u32>,
     pub duration: Duration,
 }
 
@@ -207,6 +271,9 @@ pub struct RevisionNode {
     pub document: Document,
     /// How each changed object's geometry differs from the parent revision.
     pub provenance: BTreeMap<ObjectId, Provenance>,
+    /// A "mark intentional openings" step: the object and the loop ids it
+    /// set (logged, so replay reaches the same marks).
+    pub openings: Option<(ObjectId, Vec<u32>)>,
 }
 
 /// History as a DAG of immutable document states. Undo and redo move a
@@ -237,6 +304,7 @@ impl Session {
                 import: None,
                 document: Document::default(),
                 provenance: BTreeMap::new(),
+                openings: None,
             }],
             cursor: RevisionId(0),
             next_object: 1,
@@ -390,6 +458,7 @@ impl Session {
             geometry,
             source: source.clone(),
             transform,
+            openings: Vec::new(),
         });
         if let Some(u) = units {
             document = document.with_units(u);
@@ -408,6 +477,7 @@ impl Session {
             }),
             document,
             provenance: BTreeMap::new(),
+            openings: None,
         });
         id
     }
@@ -488,6 +558,7 @@ impl Session {
             target_spec,
             selection,
             params,
+            openings: object.openings.clone(),
         })
     }
 
@@ -534,6 +605,7 @@ impl Session {
         let document = self
             .document()
             .with_geometry(c.target, Geometry::Mesh(mesh))
+            .and_then(|d| d.with_openings(c.target, c.openings.clone()))
             .ok_or(CommandError::UnknownObject(c.target))?;
         let id = CommandId(self.next_command);
         self.next_command += 1;
@@ -577,6 +649,7 @@ impl Session {
             import: None,
             document,
             provenance: BTreeMap::from([(c.target, provenance)]),
+            openings: None,
         });
         Ok(CommitOutcome::NewRevision {
             report: c.output.report,
@@ -584,7 +657,7 @@ impl Session {
     }
 
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
-        let completed = self.prepare(inv)?.run()?;
+        let completed = self.prepare(inv)?.run(&RunContext::none())?;
         self.commit(completed)
     }
 
@@ -604,7 +677,8 @@ impl Session {
         }
         let op = mf_operations::find(&record.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(record.op_id.clone()))?;
-        if op.version() != record.op_version {
+        let mut params = record.params.clone();
+        if !op.upgrade_params(record.op_version, &mut params) {
             return Err(CommandError::OperationVersion {
                 op: record.op_id.clone(),
                 recorded: record.op_version,
@@ -626,18 +700,39 @@ impl Session {
         let back = self.cursor;
         self.checkout(onto);
         let result = self
-            .prepare_validated(
-                &record.op_id,
-                record.target,
-                selection,
-                record.params.clone(),
-            )
-            .and_then(Prepared::run)
+            .prepare_validated(&record.op_id, record.target, selection, params)
+            .and_then(|p| p.run(&RunContext::none()))
             .and_then(|c| self.commit(c));
         if result.is_err() {
             self.checkout(back);
         }
         result
+    }
+
+    /// Mark `openings` (boundary-loop ids of `object`'s current mesh) as
+    /// its intentional openings, replacing any marked before: a document
+    /// command that changes no geometry, undone like any other. `label`
+    /// names the history step. False if the object doesn't exist.
+    pub fn set_openings(&mut self, object: ObjectId, openings: Vec<u32>, label: String) -> bool {
+        let Some(document) = self.document().with_openings(object, openings) else {
+            return false;
+        };
+        let marks = document
+            .object(object)
+            .map(|o| o.openings.clone())
+            .expect("with_openings found the object");
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: Some((object, marks)),
+        });
+        true
     }
 
     pub fn can_undo(&self) -> bool {
@@ -682,7 +777,7 @@ impl Session {
     }
 
     /// Root → current path, then the redo chain (most recent children).
-    fn linear_view(&self) -> Vec<RevisionId> {
+    pub fn linear_view(&self) -> Vec<RevisionId> {
         let mut path = Vec::new();
         let mut cur = Some(self.cursor);
         while let Some(r) = cur {

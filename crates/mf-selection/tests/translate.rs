@@ -153,6 +153,29 @@ fn loop_selection_maps_while_open_and_fails_when_closed() {
     }
 }
 
+/// MF-ISSUE-036: a loop whose surroundings were removed (its island
+/// deleted) is reported as removed, not as "closed by 0 faces".
+#[test]
+fn loop_removed_with_its_island_is_distinct_from_loop_closed() {
+    let before = merge(&[
+        cube_with_missing_face(),
+        translated(&cube(1.0), [5.0, 0.0, 0.0]),
+    ]);
+    let loop_id = before.topology().boundary_loops[0].id;
+    let s = sel(SelectionKind::BoundaryLoop, vec![loop_id]);
+    // Remove the holey cube (faces 0..10), as remove_small_components would.
+    let mut e = before.edit();
+    for f in 0..10 {
+        e.remove_face(FaceId(f)).unwrap();
+    }
+    let (after, prov) = e.finish().unwrap();
+    assert!(after.topology().boundary_loops.is_empty());
+    match resolve(&s, &before, &after, &[Step::Forward(&prov)], RevisionId(2)) {
+        Translation::Failed(TranslateError::LoopRemoved) => {}
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
 fn selection_serializes() {
     let s = sel(SelectionKind::Faces, vec![1, 2]);

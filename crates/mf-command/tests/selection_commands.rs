@@ -24,7 +24,10 @@ fn remove_with(target: ObjectId, selection: Option<Selection>, max: &str) -> Inv
         op_id: "mesh.remove_small_components".into(),
         target,
         selection,
-        raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),
+        raw_params: BTreeMap::from([
+            ("max_triangles".to_string(), max.to_string()),
+            ("max_relative_size".to_string(), "100".to_string()),
+        ]),
     }
 }
 
@@ -130,7 +133,10 @@ fn selection_of_filled_loop_reports_loop_closed() {
         op_id: "mesh.fill_holes".into(),
         target: id,
         selection: Some(sel.clone()),
-        raw_params: BTreeMap::from([("refine".to_string(), "false".to_string())]),
+        raw_params: BTreeMap::from([
+            ("refine".to_string(), "false".to_string()),
+            ("fill_style".to_string(), "flat".to_string()),
+        ]),
     })
     .unwrap();
     let patch: Vec<mf_geometry::FaceId> = s.node(s.current()).unwrap().provenance[&id]

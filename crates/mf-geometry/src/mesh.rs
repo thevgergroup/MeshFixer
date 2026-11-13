@@ -1,9 +1,10 @@
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
-use crate::chunked::{Bits, Chunked};
+use crate::chunked::{Bits, CHUNK, Chunked};
 use crate::edit::MeshEdit;
 use crate::hash::ContentHash;
 use crate::ids::{FaceId, SlotRemap, VertexId};
@@ -44,6 +45,14 @@ impl Aabb {
             .sum::<f64>()
             .sqrt()
     }
+}
+
+/// The new number of a vertex a live face uses. Faces never reference
+/// removed vertices (enforced by [`MeshEdit::finish`]).
+fn live_vertex(map: &[Option<VertexId>], v: u32) -> u32 {
+    map[v as usize]
+        .expect("a live face only uses live vertices (MeshEdit::finish checks)")
+        .0
 }
 
 /// Old-slot → new-slot maps produced by [`Mesh::compacted`].
@@ -94,28 +103,48 @@ impl Mesh {
 
     /// A mesh whose slots are all live, in the given order.
     pub fn new(positions: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>) -> Result<Mesh, GeometryError> {
-        Self::check_counts(positions.len(), triangles.len())?;
-        if let Some(vertex) = positions
-            .iter()
-            .position(|p| !p.iter().all(|c| c.is_finite()))
-        {
-            return Err(GeometryError::NonFinite { vertex });
+        Mesh::new_with(positions, triangles, &RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::new`], checking for cancellation while validating (it is
+    /// linear in the input). The outer error is cancellation, the inner one
+    /// invalid input.
+    pub fn new_with(
+        positions: Vec<[f64; 3]>,
+        triangles: Vec<[u32; 3]>,
+        ctx: &RunContext,
+    ) -> Result<Result<Mesh, GeometryError>, Cancelled> {
+        if let Err(e) = Self::check_counts(positions.len(), triangles.len()) {
+            return Ok(Err(e));
+        }
+        let mut tick = ctx.ticker();
+        for (vertex, p) in positions.iter().enumerate() {
+            tick.tick()?;
+            if !p.iter().all(|c| c.is_finite()) {
+                return Ok(Err(GeometryError::NonFinite { vertex }));
+            }
         }
         let n = positions.len();
         for (triangle, t) in triangles.iter().enumerate() {
+            tick.tick()?;
             if let Some(&index) = t.iter().find(|&&i| i as usize >= n) {
-                return Err(GeometryError::IndexOutOfRange { triangle, index });
+                return Ok(Err(GeometryError::IndexOutOfRange { triangle, index }));
             }
         }
         let (face_count, vertex_count) = (triangles.len(), positions.len());
-        Ok(Mesh::from_parts(
-            Chunked::from_vec(positions),
-            Chunked::from_vec(triangles),
+        // Copying into chunks is ~100 MB at 5M triangles.
+        let positions = Chunked::from_vec_with(positions, ctx)?;
+        let triangles = Chunked::from_vec_with(triangles, ctx)?;
+        ctx.checkpoint()?;
+        Ok(Ok(Mesh::from_parts(
+            positions,
+            triangles,
             Bits::all_set(face_count),
             Bits::all_set(vertex_count),
             face_count,
             vertex_count,
-        ))
+        )))
     }
 
     pub(crate) fn from_parts(
@@ -230,51 +259,103 @@ impl Mesh {
 
     /// Live geometry as plain arrays, renumbered densely in slot order.
     pub fn to_arrays(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
-        let (positions, triangles, _) = self.compact_arrays();
+        let vertex_map = self.vertex_renumbering();
+        let positions = self.vertices().map(|(_, p)| p).collect();
+        let triangles = self
+            .faces()
+            .map(|(_, t)| t.map(|v| live_vertex(&vertex_map, v)))
+            .collect();
         (positions, triangles)
     }
 
-    fn compact_arrays(&self) -> (Vec<[f64; 3]>, Vec<[u32; 3]>, Compaction) {
-        let mut vertex_map = vec![None; self.inner.positions.len()];
-        let mut positions = Vec::with_capacity(self.vertex_count());
-        for (id, p) in self.vertices() {
-            vertex_map[id.0 as usize] = Some(VertexId(positions.len() as u32));
-            positions.push(p);
+    /// Old vertex slot → dense number, in slot order.
+    fn vertex_renumbering(&self) -> Vec<Option<VertexId>> {
+        let mut map = vec![None; self.inner.positions.len()];
+        for (n, (id, _)) in self.vertices().enumerate() {
+            map[id.0 as usize] = Some(VertexId(n as u32));
         }
-        let mut face_map = vec![None; self.inner.faces.len()];
-        let mut triangles = Vec::with_capacity(self.face_count());
-        for (id, t) in self.faces() {
-            face_map[id.0 as usize] = Some(FaceId(triangles.len() as u32));
-            triangles.push(t.map(|v| vertex_map[v as usize].map_or(u32::MAX, |n| n.0)));
-        }
-        let map = Compaction {
-            faces: face_map,
-            vertices: vertex_map,
-        };
-        (positions, triangles, map)
+        map
     }
 
     /// A tombstone-free copy plus the slot maps (used before export).
     pub fn compacted(&self) -> (Mesh, Compaction) {
-        let (positions, triangles, map) = self.compact_arrays();
-        let mesh = Mesh::new(positions, triangles).expect("compacting a valid mesh is valid");
-        (mesh, map)
+        self.compacted_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::compacted`], cancellable. The live elements keep their
+    /// order and are numbered densely from 0 (`mesh.compact`,
+    /// MF-ISSUE-020). Built chunk by chunk, so the only transient memory is
+    /// the slot maps (which the caller keeps as provenance).
+    pub fn compacted_with(&self, ctx: &RunContext) -> Result<(Mesh, Compaction), Cancelled> {
+        let mut tick = ctx.ticker();
+        let mut vertex_map = vec![None; self.inner.positions.len()];
+        for (n, (id, _)) in self.vertices().enumerate() {
+            tick.tick()?;
+            vertex_map[id.0 as usize] = Some(VertexId(n as u32));
+        }
+        let mut face_map = vec![None; self.inner.faces.len()];
+        for (n, (id, _)) in self.faces().enumerate() {
+            tick.tick()?;
+            face_map[id.0 as usize] = Some(FaceId(n as u32));
+        }
+        let positions = Chunked::from_iter_with(self.vertices().map(|(_, p)| p), ctx)?;
+        let faces = Chunked::from_iter_with(
+            self.faces()
+                .map(|(_, t)| t.map(|v| live_vertex(&vertex_map, v))),
+            ctx,
+        )?;
+        let (face_count, vertex_count) = (self.face_count(), self.vertex_count());
+        let mesh = Mesh::from_parts(
+            positions,
+            faces,
+            Bits::all_set(face_count),
+            Bits::all_set(vertex_count),
+            face_count,
+            vertex_count,
+        );
+        let map = Compaction {
+            faces: face_map,
+            vertices: vertex_map,
+        };
+        Ok((mesh, map))
+    }
+
+    /// Fraction of all slots (faces and vertices) that are tombstones:
+    /// storage held by earlier edits that compaction would reclaim.
+    pub fn dead_slot_ratio(&self) -> f64 {
+        let slots = self.inner.faces.len() + self.inner.positions.len();
+        if slots == 0 {
+            return 0.0;
+        }
+        let live = self.inner.face_count + self.inner.vertex_count;
+        (slots - live) as f64 / slots as f64
     }
 
     pub fn bounding_box(&self) -> Option<Aabb> {
+        self.bounding_box_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::bounding_box`], cancellable.
+    pub fn bounding_box_with(&self, ctx: &RunContext) -> Result<Option<Aabb>, Cancelled> {
         let mut it = self.vertices().map(|(_, p)| p);
-        let first = it.next()?;
+        let Some(first) = it.next() else {
+            return Ok(None);
+        };
         let mut bb = Aabb {
             min: first,
             max: first,
         };
+        let mut tick = ctx.ticker();
         for p in it {
+            tick.tick()?;
             for (i, &c) in p.iter().enumerate() {
                 bb.min[i] = bb.min[i].min(c);
                 bb.max[i] = bb.max[i].max(c);
             }
         }
-        Some(bb)
+        Ok(Some(bb))
     }
 
     /// Canonical content hash (MF-DOC-003), cached. Covers every slot (with
@@ -307,17 +388,59 @@ impl Mesh {
         })
     }
 
-    /// Derived topology, computed on first use and cached (MF-GEO-003).
-    pub fn topology(&self) -> Arc<Topology> {
-        let mut cached = self.lock_topology();
-        cached
-            .get_or_insert_with(|| Arc::new(Topology::compute(self)))
-            .clone()
+    /// The content and structure hashes, computing any chunk hashes not yet
+    /// cached in parallel and cancellably (a 5M-triangle mesh hashed from
+    /// scratch takes a few hundred milliseconds single-threaded).
+    pub fn hashes_with(&self, ctx: &RunContext) -> Result<(ContentHash, ContentHash), Cancelled> {
+        if self.inner.hash.get().is_none() {
+            self.inner.positions.warm_hashes(ctx)?;
+            self.inner.faces.warm_hashes(ctx)?;
+            self.inner.face_live.warm_hashes(ctx)?;
+            self.inner.vertex_live.warm_hashes(ctx)?;
+        }
+        Ok((self.content_hash(), self.structure_hash()))
     }
 
+    /// Derived topology, computed on first use and cached (MF-GEO-003).
+    pub fn topology(&self) -> Arc<Topology> {
+        self.topology_with(&RunContext::none())
+            .expect("a context that is never cancelled can't be cancelled")
+    }
+
+    /// As [`Mesh::topology`], cancellable, reporting progress as stage
+    /// `"topology"`. A cancelled computation caches nothing.
+    ///
+    /// Compute, then publish: the cache is only ever locked briefly (to
+    /// read it, or to store a finished result), never while computing. A
+    /// caller never waits for another caller's computation: inside a
+    /// thread pool the computing caller may itself be waiting, in a rayon
+    /// join, for the very worker that would be waiting for it, and the
+    /// pool would deadlock (M4 Task 8a, fix round 1). So callers that
+    /// arrive while one computes compute too, and the first result stored
+    /// is kept (the others are dropped; the topology is deterministic, so
+    /// they're equal). The cost: occasional duplicate work, and while it
+    /// lasts the transient memory of each computation (about the
+    /// topology's own size, per caller).
+    pub fn topology_with(&self, ctx: &RunContext) -> Result<Arc<Topology>, Cancelled> {
+        if let Some(topo) = self.lock_topology().clone() {
+            ctx.progress.report("topology", 1.0);
+            return Ok(topo);
+        }
+        let topo = Arc::new(Topology::compute_with(self, ctx)?);
+        Ok(self.lock_topology().get_or_insert(topo).clone())
+    }
+
+    /// The topology if it is already cached; never computes it (O(1), for
+    /// diagnostics on a UI thread).
+    pub fn cached_topology(&self) -> Option<Arc<Topology>> {
+        self.lock_topology().clone()
+    }
+
+    /// The cached topology's slot. Only ever held briefly (see
+    /// [`Mesh::topology_with`]).
     fn lock_topology(&self) -> std::sync::MutexGuard<'_, Option<Arc<Topology>>> {
-        // A panic while computing topology leaves nothing half-written (the
-        // value is only stored on success), so a poisoned lock is safe to use.
+        // Nothing is half-written under this lock (a finished result is
+        // stored whole), so a poisoned lock is safe to use.
         self.inner
             .topology
             .lock()
@@ -331,6 +454,8 @@ impl Mesh {
     }
 
     /// True if this revision's topology has been computed and is cached.
+    /// Never waits on a computation (the cache's lock is only held for a
+    /// moment), so a UI thread can ask every frame (MF-RT-001).
     pub fn has_cached_topology(&self) -> bool {
         self.lock_topology().is_some()
     }
@@ -372,6 +497,56 @@ impl Mesh {
 
     pub fn shares_position_chunk(&self, other: &Mesh, i: usize) -> bool {
         self.inner.positions.shares_chunk(&other.inner.positions, i)
+    }
+
+    /// True if face chunk `i` (slots `i·CHUNK..`) is the same in both
+    /// revisions: the same shared face storage *and* the same liveness, so
+    /// a removal, which only clears a tombstone bit, still counts as a
+    /// change (MF-RENDER-003). False past either mesh's end.
+    pub fn face_chunk_shared(&self, other: &Mesh, i: usize) -> bool {
+        self.inner.faces.shares_chunk(&other.inner.faces, i)
+            && self
+                .inner
+                .face_live
+                .range_eq(&other.inner.face_live, i * CHUNK, CHUNK)
+    }
+
+    /// True if vertex chunk `j` shares its positions with `other`'s (what a
+    /// face referencing it is drawn with). False past either mesh's end.
+    pub fn vertex_chunk_shared(&self, other: &Mesh, j: usize) -> bool {
+        self.shares_position_chunk(other, j)
+    }
+
+    /// True if every vertex slot `prev` has in vertex chunk `j` holds the
+    /// same position here: shared storage, or a copy that only appended
+    /// vertices (as a fill does to the last chunk). What faces built for
+    /// `prev` need to still be drawn right (MF-RENDER-003). O(1) when
+    /// shared, else a bitwise compare of the chunk.
+    pub fn vertex_chunk_kept(&self, prev: &Mesh, j: usize) -> bool {
+        if self.vertex_chunk_shared(prev, j) {
+            return true;
+        }
+        let (now, then) = (self.inner.positions.chunk(j), prev.inner.positions.chunk(j));
+        now.len() >= then.len()
+            && !then.is_empty()
+            && now
+                .iter()
+                .zip(then)
+                .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits))
+    }
+
+    /// Live faces in face chunk `i`, in ascending ID order.
+    pub fn faces_in_chunk(&self, i: usize) -> impl Iterator<Item = (FaceId, [u32; 3])> + '_ {
+        let live = &self.inner.face_live;
+        let base = i * CHUNK;
+        self.inner
+            .faces
+            .chunk(i)
+            .iter()
+            .enumerate()
+            .map(move |(k, t)| (base + k, *t))
+            .filter(move |(f, _)| live.get(*f))
+            .map(|(f, t)| (FaceId(f as u32), t))
     }
 
     /// True if both handles point at the same revision.

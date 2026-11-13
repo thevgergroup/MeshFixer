@@ -8,7 +8,16 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only (MF-ISSUE-046): with this on and MF_TEST_POSITION_JITTER set,
+# every coordinate of every vertex an operation creates is scaled by
+# 1 ± that fraction before hashing, imitating another platform's floating
+# point, to record logs that must replay as `Equivalent`. Off in
+# every normal and test build; nothing in the workspace enables it.
+test-position-jitter = []
+
 [dependencies]
+mf-runtime.workspace = true
 mf-selection.workspace = true
 serde.workspace = true
 mf-document.workspace = true

@@ -2,7 +2,7 @@
 //!
 //! `<name>.mfx.log/manifest.json` lists the source files with their content
 //! hashes. `commands.jsonl` holds one event per line, root to current: an
-//! import or a command record. Source paths are stored relative to the log
+//! import, a command record, or intentional openings marked on an object. Source paths are stored relative to the log
 //! directory where possible, so a project folder can be moved as a whole.
 
 use std::io::Write;
@@ -44,6 +44,13 @@ pub(crate) enum Event {
         part: usize,
     },
     Command(Box<CommandRecord>),
+    /// Intentional openings marked on an object (loop ids of its mesh at
+    /// that point); changes no geometry.
+    SetOpenings {
+        object: ObjectId,
+        ids: Vec<u32>,
+        label: String,
+    },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -164,6 +171,13 @@ impl Session {
                     object: import.object,
                     name: import.name.clone(),
                     part: import.part,
+                });
+            }
+            if let Some((object, ids)) = &node.openings {
+                events.push(Event::SetOpenings {
+                    object: *object,
+                    ids: ids.clone(),
+                    label: node.label.clone(),
                 });
             }
             if let Some(record) = &node.record {

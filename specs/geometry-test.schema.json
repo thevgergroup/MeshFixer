@@ -35,7 +35,7 @@
         "required": ["op"],
         "properties": {
           "op": { "type": "string" },
-          "params": { "type": "object", "additionalProperties": { "type": ["number", "boolean"] } }
+          "params": { "type": "object", "additionalProperties": { "type": ["number", "boolean", "string"] } }
         }
       },
       "expect": {

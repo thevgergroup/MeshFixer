@@ -17,6 +17,10 @@ const SOURCES: &[(&str, &str)] = &[
         "mesh.remove_small_components.yaml",
         include_str!("../../../specs/operations/mesh.remove_small_components.yaml"),
     ),
+    (
+        "mesh.compact.yaml",
+        include_str!("../../../specs/operations/mesh.compact.yaml"),
+    ),
 ];
 
 /// Raw YAML sources, for schema validation tests.

@@ -29,6 +29,9 @@ $bin inspect "$out/repaired-1m.stl" --json > "$out/inspect-after.json"
 $bin inspect "$out/damaged-1m.stl" --json --metrics "$out/metrics-inspect-1m.json" > /dev/null
 $bin remove-small-components "$out/damaged-1m.stl" -o "$out/tmp-metrics.stl" --metrics "$out/metrics-remove-small-1m.json"
 rm -f "$out/tmp-metrics.stl"
+# The working set at 5M requested (≈4.8M actual) triangles (mesh + cached topology) and topology build peak
+# (MF-GEO-002, MF-ISSUE-019); CI's memory-gate job fails it above 400 MB.
+$bin bench memory --triangles 5000000 --json > "$out/memory-5m.json"
 # Command log + verified replay (MF-CMD-004).
 $bin run "$out/damaged-1m.stl" --op mesh.remove_small_components --param max_triangles=100 \
   --save-log "$out/session.mfx.log" -o "$out/tmp-run.stl"

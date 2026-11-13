@@ -16,12 +16,15 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+mf-runtime.workspace = true
+mf-metrics.workspace = true
 mf-selection.workspace = true
 glam.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
 mf-command.workspace = true
+mf-operations.workspace = true
 mf-render.workspace = true
 eframe.workspace = true
 
@@ -38,3 +41,4 @@ mf-render.workspace = true
 tempfile.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
+sysinfo.workspace = true

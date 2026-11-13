@@ -10,7 +10,9 @@ use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
 
-use crate::{IoError, significant_digits};
+use mf_runtime::{RunContext, TICK_INTERVAL};
+
+use crate::{IoError, Limits, PARSE_FROM, READING, significant_digits};
 
 /// 3MF model units. 3MF defaults to millimetres.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -152,52 +154,132 @@ fn attr(e: &BytesStart, name: &str) -> Result<Option<String>, String> {
 /// Read a 3MF archive. Returns the model, the largest number of significant
 /// digits seen in coordinates, and warnings.
 pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoError> {
+    read_with(bytes, &RunContext::none())
+}
+
+/// Where in `"reading"` decompressing the model part starts and XML parsing
+/// starts (reading the file comes first).
+const UNZIP_FROM: f64 = PARSE_FROM;
+const XML_FROM: f64 = 0.7;
+
+/// As [`read_with_precision`], cancellable, reporting stage `"reading"` by
+/// bytes decompressed and then parsed.
+pub fn read_with(bytes: &[u8], ctx: &RunContext) -> Result<(Model, u8, Vec<String>), IoError> {
+    read_with_limits(bytes, ctx, Limits::default())
+}
+
+/// As [`read_with`], with explicit [`Limits`] (tests use tighter ones than
+/// the defaults so hostile-input tests don't need gigabyte fixtures).
+pub fn read_with_limits(
+    bytes: &[u8],
+    ctx: &RunContext,
+    limits: Limits,
+) -> Result<(Model, u8, Vec<String>), IoError> {
     let mut zip = zip::ZipArchive::new(Cursor::new(bytes))
         .map_err(|e| not_3mf(format!("not a 3MF (zip) archive: {e}")))?;
     let mut warnings = Vec::new();
-    let read_entry =
-        |zip: &mut zip::ZipArchive<Cursor<&[u8]>>, name: &str| -> Result<String, IoError> {
-            let mut entry = zip
-                .by_name(name)
-                .map_err(|e| not_3mf(format!("3MF archive has no '{name}': {e}")))?;
-            let mut text = String::new();
-            entry
-                .read_to_string(&mut text)
-                .map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))?;
-            Ok(text)
-        };
-
-    // Locate the model part through the package relationships.
-    let model_path = match read_entry(&mut zip, "_rels/.rels") {
-        Ok(rels) => {
-            let mut reader = quick_xml::Reader::from_str(&rels);
-            let mut target = None;
-            loop {
-                match reader.read_event() {
-                    Ok(Event::Empty(e)) | Ok(Event::Start(e))
-                        if e.local_name().as_ref() == "Relationship" =>
-                    {
-                        if attr(&e, "Type").map_err(not_3mf)?.as_deref() == Some(MODEL_REL) {
-                            target = attr(&e, "Target").map_err(not_3mf)?;
-                        }
-                    }
-                    Ok(Event::Eof) => break,
-                    Err(e) => return Err(not_3mf(format!("_rels/.rels: {e}"))),
-                    _ => {}
-                }
+    // Decompressed in blocks so a cancel is seen between them; only the
+    // model part (`progress`) is large enough to report.
+    //
+    // Bounds are checked twice, both before any inflate buffer grows large
+    // (MF-IO-002, review focus 5):
+    //  - the entry's declared uncompressed size and its ratio to the
+    //    compressed size on disk, against `Limits`, before reading a byte;
+    //  - a hard stop on bytes actually decompressed, in case the declared
+    //    size understates reality (a corrupt or adversarial local header).
+    // Either way, a zip bomb fails fast with `LimitExceeded`, never an
+    // unbounded inflate.
+    let read_entry = |zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+                      name: &str,
+                      progress: bool|
+     -> Result<String, IoError> {
+        const BLOCK: u64 = 4 << 20;
+        let mut entry = zip
+            .by_name(name)
+            .map_err(|e| not_3mf(format!("3MF archive has no '{name}': {e}")))?;
+        let declared = entry.size();
+        let compressed = entry.compressed_size();
+        if declared > limits.max_model_part_bytes {
+            return Err(IoError::LimitExceeded {
+                what: "declared 3MF archive entry size",
+                limit: limits.max_model_part_bytes,
+                found: declared,
+            });
+        }
+        // Only meaningful once there is enough compressed data that a
+        // ratio says anything (a few bytes of input can trivially "ratio"
+        // high on tiny, legitimate entries).
+        if compressed >= 64 && declared / compressed > limits.max_compression_ratio {
+            return Err(IoError::LimitExceeded {
+                what: "3MF archive entry compression ratio",
+                limit: limits.max_compression_ratio,
+                found: declared / compressed,
+            });
+        }
+        let size = declared as usize;
+        let span = progress.then(|| ctx.span(READING, UNZIP_FROM, XML_FROM, size));
+        let mut buf = Vec::new();
+        loop {
+            match &span {
+                Some(span) => span.step(buf.len())?,
+                None => ctx.checkpoint()?,
             }
-            target
-                .map(|t| t.trim_start_matches('/').to_owned())
-                .ok_or_else(|| not_3mf("_rels/.rels has no 3D model relationship".into()))?
+            let read = (&mut entry)
+                .take(BLOCK)
+                .read_to_end(&mut buf)
+                .map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))?;
+            if read == 0 {
+                break;
+            }
+            // Hard stop on what was actually decompressed, independent of
+            // what the entry's header claimed: a lying declared size must
+            // not let actual inflate output grow past the limit either.
+            if buf.len() as u64 > limits.max_model_part_bytes {
+                return Err(IoError::LimitExceeded {
+                    what: "decompressed 3MF archive entry size",
+                    limit: limits.max_model_part_bytes,
+                    found: buf.len() as u64,
+                });
+            }
         }
-        Err(_) => {
-            warnings.push(format!(
-                "3MF archive has no _rels/.rels; using the standard path {DEFAULT_MODEL_PATH}"
-            ));
-            DEFAULT_MODEL_PATH.to_owned()
-        }
+        String::from_utf8(buf).map_err(|e| not_3mf(format!("'{name}' is not UTF-8 text: {e}")))
     };
-    let text = read_entry(&mut zip, &model_path)?;
+
+    // Locate the model part through the package relationships. Only a
+    // _rels/.rels entry that is genuinely absent from the archive falls
+    // back to the standard path (with a warning); one that is present but
+    // unreadable or corrupt (a bad size/ratio, invalid UTF-8, malformed
+    // XML, or missing the model relationship) is a named error, never a
+    // silent fallback (MF-ISSUE-039).
+    let model_path = if zip.by_name("_rels/.rels").is_err() {
+        warnings.push(format!(
+            "3MF archive has no _rels/.rels; using the standard path {DEFAULT_MODEL_PATH}"
+        ));
+        DEFAULT_MODEL_PATH.to_owned()
+    } else {
+        let rels = read_entry(&mut zip, "_rels/.rels", false)
+            .map_err(|e| not_3mf(format!("_rels/.rels is present but unreadable: {e}")))?;
+        let mut reader = quick_xml::Reader::from_str(&rels);
+        let mut target = None;
+        loop {
+            match reader.read_event() {
+                Ok(Event::Empty(e)) | Ok(Event::Start(e))
+                    if e.local_name().as_ref() == "Relationship" =>
+                {
+                    if attr(&e, "Type").map_err(not_3mf)?.as_deref() == Some(MODEL_REL) {
+                        target = attr(&e, "Target").map_err(not_3mf)?;
+                    }
+                }
+                Ok(Event::Eof) => break,
+                Err(e) => return Err(not_3mf(format!("_rels/.rels: {e}"))),
+                _ => {}
+            }
+        }
+        target
+            .map(|t| t.trim_start_matches('/').to_owned())
+            .ok_or_else(|| not_3mf("_rels/.rels has no 3D model relationship".into()))?
+    };
+    let text = read_entry(&mut zip, &model_path, true)?;
 
     #[derive(Default)]
     struct Obj {
@@ -223,7 +305,13 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     let mut has_properties = false;
     let mut reader = quick_xml::Reader::from_str(&text);
     let mut lines = LineCounter::new(&text);
+    let xml = ctx.span(READING, XML_FROM, 1.0, text.len());
+    let mut events = 0usize;
     loop {
+        if events.is_multiple_of(TICK_INTERVAL as usize) {
+            xml.step(reader.buffer_position() as usize)?;
+        }
+        events += 1;
         let pos = reader.buffer_position();
         let line = lines.line_at(pos);
         let event = reader.read_event().map_err(|e| IoError::Parse {
@@ -389,11 +477,12 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
     }
 
     let to_model_object = |o: &Obj, transform: [f64; 12]| -> Result<ModelObject, IoError> {
-        let mesh =
-            Mesh::new(o.positions.clone(), o.triangles.clone()).map_err(|e| IoError::Parse {
+        let mesh = Mesh::new_with(o.positions.clone(), o.triangles.clone(), ctx)?.map_err(|e| {
+            IoError::Parse {
                 line: o.line,
                 message: format!("object {}: {e}", o.id),
-            })?;
+            }
+        })?;
         Ok(ModelObject {
             name: o.name.clone().unwrap_or_else(|| format!("object {}", o.id)),
             mesh,
@@ -429,6 +518,7 @@ pub fn read_with_precision(bytes: &[u8]) -> Result<(Model, u8, Vec<String>), IoE
             }
         }
     }
+    ctx.progress.report(READING, 1.0);
     Ok((Model { unit, objects: out }, digits, warnings))
 }
 
@@ -444,15 +534,41 @@ fn escape(s: &str) -> String {
         .replace('\'', "&apos;")
 }
 
-/// Encode a model as a 3MF archive. Only live vertices and faces are written.
+/// Encode a model as a 3MF archive. Only live vertices and faces are
+/// written. Empty objects (no vertices or triangles — the core schema needs
+/// at least 3 vertices and 1 triangle) are left out, since writing one
+/// produces an invalid 3MF object (MF-ISSUE-034); use
+/// [`write_filtering_empty`] to learn which objects, if any, were left out.
 pub fn write(model: &Model) -> Result<Vec<u8>, String> {
+    write_filtering_empty(model).map(|(bytes, _warnings)| bytes)
+}
+
+/// As [`write`], also returning a warning naming each object left out for
+/// being empty (MF-ISSUE-034).
+pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), String> {
     use std::fmt::Write as _;
+    let mut warnings = Vec::new();
+    let kept: Vec<&ModelObject> = model
+        .objects
+        .iter()
+        .filter(|o| {
+            if o.mesh.is_empty() {
+                warnings.push(format!(
+                    "object '{}' has no geometry; left out of the export",
+                    o.name
+                ));
+                false
+            } else {
+                true
+            }
+        })
+        .collect();
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"",
     );
     // allow-swallow: writing to a String can't fail
     let _ = write!(xml, " unit=\"{}\">\n <resources>\n", model.unit.as_attr());
-    for (k, o) in model.objects.iter().enumerate() {
+    for (k, o) in kept.iter().enumerate() {
         // allow-swallow: writing to a String can't fail
         let _ = write!(
             xml,
@@ -479,7 +595,7 @@ pub fn write(model: &Model) -> Result<Vec<u8>, String> {
         xml.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }
     xml.push_str(" </resources>\n <build>\n");
-    for (k, o) in model.objects.iter().enumerate() {
+    for (k, o) in kept.iter().enumerate() {
         if o.transform == IDENTITY {
             // allow-swallow: writing to a String can't fail
             let _ = writeln!(xml, "  <item objectid=\"{}\"/>", k + 1);
@@ -517,5 +633,14 @@ pub fn write(model: &Model) -> Result<Vec<u8>, String> {
             .map_err(|e| e.to_string())?;
     }
     zip.finish().map_err(|e| e.to_string())?;
-    Ok(buf.into_inner())
+    Ok((buf.into_inner(), warnings))
+}
+
+/// Encode `model` and write it to `path` in one step (tests and simple
+/// callers); the caller-facing export path is [`crate::write_model_path`],
+/// which also verifies by reading the bytes back.
+pub fn write_checked(model: &Model, path: &std::path::Path) -> Result<Vec<String>, String> {
+    let (bytes, warnings) = write_filtering_empty(model)?;
+    std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+    Ok(warnings)
 }

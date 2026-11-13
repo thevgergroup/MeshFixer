@@ -5,6 +5,9 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
+use mf_runtime::{Cancelled, RunContext};
+use rayon::prelude::*;
+
 static CHUNK_HASHES: AtomicU64 = AtomicU64::new(0);
 
 /// Number of chunk hashes computed so far in this process (diagnostics and
@@ -56,6 +59,20 @@ impl<T: Clone> Clone for Chunk<T> {
     }
 }
 
+impl<T: ChunkBytes> Chunk<T> {
+    /// The chunk's hash, computed on first use.
+    fn digest(&self) -> &[u8; 32] {
+        self.hash.get_or_init(|| {
+            CHUNK_HASHES.fetch_add(1, Ordering::Relaxed);
+            let mut ch = blake3::Hasher::new();
+            for x in &self.data {
+                x.hash_into(&mut ch);
+            }
+            *ch.finalize().as_bytes()
+        })
+    }
+}
+
 impl<T> Chunk<T> {
     fn new(data: Vec<T>) -> Self {
         Chunk {
@@ -91,6 +108,44 @@ impl<T: Copy> Chunked<T> {
         Chunked { chunks, len }
     }
 
+    /// As [`Chunked::from_vec`], checking for cancellation between chunks.
+    pub fn from_vec_with(v: Vec<T>, ctx: &RunContext) -> Result<Self, Cancelled> {
+        let len = v.len();
+        let mut chunks = Vec::with_capacity(len.div_ceil(CHUNK));
+        for c in v.chunks(CHUNK) {
+            ctx.checkpoint()?;
+            chunks.push(Arc::new(Chunk::new(c.to_vec())));
+        }
+        Ok(Chunked { chunks, len })
+    }
+
+    /// Collect `items` straight into chunks, checking for cancellation
+    /// between chunks. Unlike [`Chunked::from_vec_with`] there's no whole
+    /// `Vec` to copy from, so the transient cost is one chunk.
+    pub fn from_iter_with(
+        items: impl IntoIterator<Item = T>,
+        ctx: &RunContext,
+    ) -> Result<Self, Cancelled> {
+        let mut chunks = Vec::new();
+        let mut len = 0;
+        let mut current = Vec::with_capacity(CHUNK);
+        for x in items {
+            current.push(x);
+            if current.len() == CHUNK {
+                ctx.checkpoint()?;
+                len += CHUNK;
+                let full = std::mem::replace(&mut current, Vec::with_capacity(CHUNK));
+                chunks.push(Arc::new(Chunk::new(full)));
+            }
+        }
+        if !current.is_empty() {
+            len += current.len();
+            current.shrink_to_fit();
+            chunks.push(Arc::new(Chunk::new(current)));
+        }
+        Ok(Chunked { chunks, len })
+    }
+
     pub fn len(&self) -> usize {
         self.len
     }
@@ -122,6 +177,11 @@ impl<T: Copy> Chunked<T> {
         self.chunks.len()
     }
 
+    /// The elements of chunk `i` (empty past the end).
+    pub fn chunk(&self, i: usize) -> &[T] {
+        self.chunks.get(i).map_or(&[], |c| &c.data)
+    }
+
     pub fn shares_chunk(&self, other: &Chunked<T>, i: usize) -> bool {
         match (self.chunks.get(i), other.chunks.get(i)) {
             (Some(a), Some(b)) => Arc::ptr_eq(a, b),
@@ -136,16 +196,22 @@ impl<T: Copy> Chunked<T> {
     {
         h.update(&(self.len as u64).to_le_bytes());
         for c in &self.chunks {
-            let digest = c.hash.get_or_init(|| {
-                CHUNK_HASHES.fetch_add(1, Ordering::Relaxed);
-                let mut ch = blake3::Hasher::new();
-                for x in &c.data {
-                    x.hash_into(&mut ch);
-                }
-                *ch.finalize().as_bytes()
-            });
-            h.update(digest);
+            h.update(c.digest());
         }
+    }
+
+    /// Compute and cache every chunk's hash, in parallel, checking for
+    /// cancellation between chunks. Cached hashes are kept either way, so
+    /// a cancelled call loses no work.
+    pub fn warm_hashes(&self, ctx: &RunContext) -> Result<(), Cancelled>
+    where
+        T: ChunkBytes + Send + Sync,
+    {
+        self.chunks.par_iter().try_for_each(|c| {
+            ctx.checkpoint()?;
+            c.digest();
+            Ok(())
+        })
     }
 
     /// Heap bytes of chunks not already in `seen` (chunk identity by address).
@@ -199,6 +265,32 @@ impl Bits {
         }
     }
 
+    /// Word `w` (bits `64w..64w+64`); zero past the end, like the unused
+    /// bits of the last word.
+    fn word(&self, w: usize) -> u64 {
+        if w < self.words.len() {
+            self.words.get(w)
+        } else {
+            0
+        }
+    }
+
+    /// True if bits `start..start + len` are the same in both. `start`
+    /// must be a multiple of 64. O(len / 64), or O(1) when the words are
+    /// shared storage.
+    pub fn range_eq(&self, other: &Bits, start: usize, len: usize) -> bool {
+        debug_assert!(start.is_multiple_of(64));
+        let (first, end) = (start / 64, (start + len).div_ceil(64));
+        if end == first {
+            return true;
+        }
+        let chunk = first / CHUNK;
+        if (end - 1) / CHUNK == chunk && self.words.shares_chunk(&other.words, chunk) {
+            return true;
+        }
+        (first..end).all(|w| self.word(w) == other.word(w))
+    }
+
     pub fn push(&mut self, value: bool) {
         if self.len.is_multiple_of(64) {
             self.words.push(0);
@@ -214,5 +306,9 @@ impl Bits {
     pub fn hash_into(&self, h: &mut blake3::Hasher) {
         h.update(&(self.len as u64).to_le_bytes());
         self.words.hash_into(h);
+    }
+
+    pub fn warm_hashes(&self, ctx: &RunContext) -> Result<(), Cancelled> {
+        self.words.warm_hashes(ctx)
     }
 }

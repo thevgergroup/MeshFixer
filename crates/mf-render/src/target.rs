@@ -3,10 +3,13 @@
 //! Frontends display the resolved colour texture, so the renderer never
 //! depends on a UI toolkit's render pass formats (MF-RENDER-001).
 
-use crate::{GpuLines, GpuMesh, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat};
+use crate::{
+    DrawItem, GpuTimer, Layer, MeshRenderer, OrbitCamera, RenderError, RenderTargetFormat,
+};
 
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 pub const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+/// The headless palette's background ([`crate::Palette::HEADLESS`]).
 pub const BACKGROUND_RGBA: [u8; 4] = [38, 41, 46, 255];
 
 pub struct RenderTarget {
@@ -96,6 +99,21 @@ impl RenderTarget {
         })
     }
 
+    /// Bytes of the target's textures: the resolved colour, the
+    /// multisampled colour (with MSAA) and the depth buffer.
+    pub fn texture_bytes(&self) -> u64 {
+        let pixels = u64::from(self.width) * u64::from(self.height);
+        let samples = u64::from(self.samples.max(1));
+        let color = 4; // Rgba8Unorm
+        let depth = 4; // Depth32Float
+        let msaa = if self.msaa_view.is_some() {
+            pixels * samples * color
+        } else {
+            0
+        };
+        pixels * color + msaa + pixels * samples * depth
+    }
+
     pub fn texture(&self) -> &wgpu::Texture {
         &self.resolved
     }
@@ -105,25 +123,59 @@ impl RenderTarget {
     }
 
     /// Render one frame and submit it. `renderer` must have been built with
-    /// [`RenderTarget::format`] for the same sample count.
+    /// [`RenderTarget::format`] for the same sample count. Every item of
+    /// `items` is drawn at its own transform (MF-ISSUE-042), shifted into
+    /// `camera.target`'s frame, then every overlay of `layers`. The clear
+    /// colour is the renderer's palette background.
+    #[allow(clippy::too_many_arguments)]
     pub fn draw(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-        renderer: &MeshRenderer,
-        mesh: Option<(&GpuMesh, &OrbitCamera)>,
+        renderer: &mut MeshRenderer,
+        camera: Option<&OrbitCamera>,
+        items: &[DrawItem<'_>],
         show_boundaries: bool,
-        highlight: Option<&GpuLines>,
+        layers: &[Layer<'_>],
     ) {
-        if let Some((gpu, camera)) = mesh {
-            renderer.prepare(queue, gpu, camera, self.width as f32 / self.height as f32);
+        self.draw_timed(
+            device,
+            queue,
+            renderer,
+            camera,
+            items,
+            show_boundaries,
+            layers,
+            None,
+        );
+    }
+
+    /// As [`RenderTarget::draw`], timing the pass on the GPU as frame
+    /// `frame` of `timer` (see [`GpuTimer::collect`]). Returns whether the
+    /// pass was timed (it isn't while every read-back is still busy).
+    #[allow(clippy::too_many_arguments)]
+    pub fn draw_timed(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &mut MeshRenderer,
+        camera: Option<&OrbitCamera>,
+        items: &[DrawItem<'_>],
+        show_boundaries: bool,
+        layers: &[Layer<'_>],
+        mut timer: Option<(&mut GpuTimer, u64)>,
+    ) -> bool {
+        if let Some(camera) = camera {
+            renderer.prepare(queue, camera, (self.width, self.height));
         }
-        let bg = BACKGROUND_RGBA.map(|c| c as f64 / 255.0);
+        let bg = renderer.palette().background.map(f64::from);
         let (view, resolve_target) = match &self.msaa_view {
             Some(msaa) => (msaa, Some(&self.resolved_view)),
             None => (&self.resolved_view, None),
         };
         let mut encoder = device.create_command_encoder(&Default::default());
+        let timestamp_writes = timer.as_mut().and_then(|(t, frame)| t.begin(*frame));
+        let timed = timestamp_writes.is_some();
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("mf view"),
@@ -149,14 +201,29 @@ impl RenderTarget {
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: None,
+                timestamp_writes,
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            if let Some((gpu, _)) = mesh {
-                renderer.paint(&mut pass, gpu, show_boundaries, highlight);
+            if let Some(camera) = camera {
+                renderer.paint(
+                    device,
+                    queue,
+                    &mut pass,
+                    camera.target,
+                    items,
+                    show_boundaries,
+                    layers,
+                );
             }
         }
+        if let Some((t, _)) = timer.as_mut() {
+            t.resolve(&mut encoder);
+        }
         queue.submit([encoder.finish()]);
+        if let Some((t, _)) = timer {
+            t.submitted();
+        }
+        timed
     }
 }

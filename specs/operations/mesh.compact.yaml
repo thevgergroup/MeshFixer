@@ -1,0 +1,19 @@
+id: mesh.compact
+version: 1
+summary: Reclaim the space left by earlier edits, renumbering faces and vertices densely.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters: []
+preconditions:
+  - target is a mesh
+postconditions:
+  - geometry unchanged except for numbering
+  - no face or vertex slot is a tombstone
+  - kept faces and vertices keep their relative order
+  - the revision's provenance maps every old slot to its new number (selections translate through it)
+effects: [renumbers_elements]
+runtime:
+  cancellable: true
+  progress: true

@@ -72,6 +72,19 @@ fn fixture(name: &str) -> Result<Mesh, String> {
         "two_holes_grid" => grid_without(6, &[(1, 1, false), (4, 4, false)]),
         // 4×4 grid, two triangular holes touching only at vertex (2,2) = 12.
         "pinched_holes_grid" => grid_without(4, &[(1, 1, false), (2, 2, true)]),
+        // UV sphere (24 rings, 32 segments) with both polar caps cut off
+        // (|z| > 0.8): two round 32-edge holes, rimmed by ring 4 (vertices
+        // 97–128) and ring 20.
+        "sphere_with_two_caps_cut" => {
+            let base = uv_sphere(24, 32);
+            let mut e = base.edit();
+            for (id, t) in base.faces() {
+                if t.iter().all(|&v| base.corner_position(v)[2].abs() > 0.8) {
+                    e.remove_face(id).unwrap();
+                }
+            }
+            e.finish().unwrap().0
+        }
         other => return Err(format!("unknown fixture '{other}'")),
     })
 }
@@ -155,7 +168,12 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
         .collect();
     let params = spec.validate(&raw).map_err(|e| e.to_string())?;
     let target = target(&before, &case.select)?;
-    let result = op.execute(&before, &target, &params);
+    let result = op.execute(
+        &before,
+        &target,
+        &params,
+        &mf_operations::RunContext::none(),
+    );
 
     let mut problems = Vec::new();
     if let Some(Value::String(code)) = case.expect.get("error") {

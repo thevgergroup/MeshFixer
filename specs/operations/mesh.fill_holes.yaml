@@ -1,5 +1,7 @@
 id: mesh.fill_holes
-version: 1
+# Version 2 adds fill_style (MF-OP-002). Version 1 records replay with
+# fill_style flat: triangulate and refine only, exactly as they ran.
+version: 2
 summary: Close holes with a minimum-weight triangulation, refined to the surrounding triangle density.
 geometry_kinds: [mesh]
 target:
@@ -16,14 +18,26 @@ parameters:
   - name: refine
     type: bool
     default: true
+    # Always on for fill_style smooth and curvature.
     description: Add vertices so the patch matches the surrounding triangle density
+  - name: fill_style
+    type: choice
+    # flat: triangulate and refine only. smooth: bi-Laplacian fairing
+    # (Δ²x = 0) of the patch's new vertices, boundary and the 1-ring around
+    # it fixed (C1). curvature: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
+    # Fairing moves only new vertices, so smooth and curvature always
+    # refine, whatever refine says (the report's "refined" says so).
+    values: [flat, smooth, curvature]
+    default: smooth
+    description: How the patch meets the surface around the hole
 preconditions:
   - target is a mesh
   - targeted loops are traced boundary loops of at most max_loop_edges edges
 postconditions:
   - each targeted loop is closed by a patch oriented consistently with its surroundings
+  - with fill_style smooth or curvature, the patch's new vertices solve the fairing equations; a solve that does not converge fails by name (fairing_did_not_converge), never falling back to flat
   - faces and vertices outside the targeted loops are unchanged
 effects: [geometry_changes, topology_changes]
 runtime:
-  cancellable: false
-  progress: false
+  cancellable: true
+  progress: true

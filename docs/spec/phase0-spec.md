@@ -1,4 +1,8 @@
-# MeshFixer Phase 0 Engineering Spec (v0.3)
+# MeshFixer Phase 0 Engineering Spec (v0.5)
+
+v0.5 (2026-11-09, owner request): adds modelling tools and plugin/scripting requirements (§11b): booleans and intersection, splitting with alignment pegs and joints, kitbashing parts onto models, parametric connectors (hinges, clasps, joints), an object transform gizmo, plugins and scripting. Phase 0 must not block them; the M4 and M5 reviews check this.
+
+v0.4 (2026-11-08, M4 Checkpoint A): fairing is required (MF-OP-002, fill styles). Many-hole handling is MF-RENDER-006. Sculpting and carving are captured as Phase 1 requirements (§11a), which Phase 0 must not block. The owner also approved (2026-11-09) the §2 dependency change from M4 Task 4: `mf-geometry` may depend on `mf-runtime`, so topology can be built cancellably.
 
 v0.3 (2026-11-08, M3 review): MF-OP-002 corrected to Liepa's ordering (worst dihedral, then area); it now states the whole-object reporting behaviour, the 1000-edge cap and the untriangulable case.
 
@@ -52,7 +56,7 @@ crates/
 specs/operations/   tests/geometry/   fixtures/
 ```
 
-Dependency direction: `mf-geometry` depends on nothing in the workspace. Frontends (`mf-cli`, `mf-desktop`) are leaves. Only `mf-desktop` depends on egui. `mf-render` depends on geometry and selection types, never on documents or commands.
+Dependency direction: `mf-geometry` depends on nothing in the workspace except `mf-runtime` (cancellation and progress, itself dependency-light: `rayon` and `thiserror`), so topology and diagnostics can be cancelled (MF-RT-002). Frontends (`mf-cli`, `mf-desktop`) are leaves. Only `mf-desktop` depends on egui. `mf-render` depends on geometry and selection types, never on documents or commands.
 
 ---
 
@@ -187,8 +191,14 @@ Selections bound to one revision are never applied to another without translatio
 3. `mesh.fill_holes` (target: object, meaning all loops up to a size limit, or chosen boundary loops)
 4. `mesh.simplify` (stretch goal)
 
-**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing worst dihedral then area, after Liepa 2003). It never uses a chord that is already a mesh edge, or a zero-area triangle. It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. A selected loop that can't be filled (above `max_loop_edges`, default 500 and at most 1000; self-touching; or untriangulable, such as a collinear slit) fails with a structured error naming the loop. A whole-object run fills the rest and lists each such loop by ID and reason in its report. No loop is ever silently skipped or fan-filled. Fairing (smooth curvature blending) is a stretch goal.
+**MF-OP-002: Hole-fill quality.** `fill_holes` uses a minimum-weight triangulation of the boundary loop (dynamic programming, minimizing worst dihedral then area, after Liepa 2003). It never uses a chord that is already a mesh edge, or a zero-area triangle. It then **refines** the patch so its interior edge lengths match the mean boundary edge length. Fan triangulation is not acceptable as the Phase 0 algorithm. A selected loop that can't be filled (above `max_loop_edges`, default 500 and at most 1000; self-touching; or untriangulable, such as a collinear slit) fails with a structured error naming the loop. A whole-object run fills the rest and lists each such loop by ID and reason in its report. No loop is ever silently skipped or fan-filled. **Fill styles:**
+- `flat`: triangulate and refine only.
+- `smooth`, the default: bi-Laplacian fairing (Δ²x = 0) of the patch interior, with the boundary and 1-ring fixed, so the patch meets the surface with matching slope (C1).
+- `curvature`: tri-Laplacian (Δ³x = 0), 2 rings fixed (C2).
+
+`smooth` and `curvature` always refine (fairing moves the added vertices; without them the patch would be flat). Fairing moves only the patch's interior vertices, is deterministic, and fails by name if it can't converge. It never silently falls back to flat. Records of `fill_holes` version 1 mean `flat`. Known limit (MF-ISSUE-055, open): `curvature` is accurate to 1% of the surface only on holes of up to 60 edges; a curvature fill of a larger hole keeps its style, marks the loop `curvature_less_accurate` in the report and adds a plain-language `warnings` entry recommending `smooth`.
 *Accept:*
+- On a 44-edge hole in a unit-radius sphere (the cap within 30° of a pole removed), every patch vertex is within 2% of the radius with `smooth`, and within 1% with `curvature`. The limit depends on the cap: the continuous Δ² solution overshoots by ≈ 1.04% of the radius at 30° and ≈ 2.0% at 35°, so a change in refinement density can move the measurement by a few tenths of a percent.
 - On procedural holes, the patch's mean edge length is within ±25% of the boundary's mean, and no patch triangle has a minimum angle below 5°.
 - On the real scan fixture, every targeted loop closes, the result is manifold around each patch, and an offscreen render is captured for review.
 
@@ -230,6 +240,16 @@ Measured by an automated orbit benchmark on the *damaged* fixtures. Every benchm
 
 **MF-RENDER-004: Picking.** Face picking takes < 16 ms at 5M triangles. Boundary-loop picking (clicking near a highlighted boundary) resolves to a `BoundaryLoopId`.
 
+**MF-RENDER-006: Many defects.** Models with hundreds or thousands of holes stay workable:
+- holes are grouped by size, with a count and an action per group;
+- batch fill up to a size, with a preview count, as one undoable command;
+- marking intentional openings (persistent, excluded from counts and bulk fills);
+- next/previous navigation;
+- multi-select and box select in the viewport;
+- an overview that makes tiny holes visible when zoomed out.
+
+*Accept:* the GUI tests on a 300-hole fixture, and the M4 demo.
+
 **MF-RENDER-005: Diagnostic overlays.** Boundary loops, non-manifold edges and small components are highlighted, each one clickable to select it.
 
 ## 9. I/O, platform and legal
@@ -253,7 +273,86 @@ Measured by an automated orbit benchmark on the *damaged* fixtures. Every benchm
 
 ## 11. Non-goals for Phase 0
 
-STEP/B-rep, fillets/chamfers, remeshing, smoothing, booleans, point clouds, textures, surface text, pattern recognition, semantic tags, branch navigation UI, parameter editing UI, plugins, scripting, LLM planning, installers and signing, and visual polish. None may be blocked by Phase 0 design. Where a Phase 0 choice touches one, the relevant **Evolves:** note says how.
+STEP/B-rep, fillets/chamfers, remeshing, smoothing, booleans (see §11b), point clouds, textures, surface text, pattern recognition, semantic tags, branch navigation UI, parameter editing UI, plugins and scripting (see §11b), LLM planning, installers and signing, and visual polish. None may be blocked by Phase 0 design. Where a Phase 0 choice touches one, the relevant **Evolves:** note says how.
+
+## 11a. Phase 1 requirements captured now: sculpting and carving
+
+These requirements aren't implemented in Phase 0. They're recorded so Phase 0's design doesn't block them, and the M4 final review checks that it doesn't. A Meshmixer successor needs direct surface editing as well as repair.
+
+**MF-SCULPT-001: Brushes.**
+- **Brush set:** smooth, inflate/deflate, flatten, drag/move, pinch, crease, and carve (displace inward along the normal).
+- **Brush settings:** radius (screen or world), strength, falloff curve, symmetry (X/Y/Z, with a pivot), and pen pressure where available.
+- **Masking:** a freeze mask, plus the option to limit a brush to the current selection.
+
+**MF-SCULPT-002: Detail where it's needed.** Local, dynamic re-triangulation under the brush (split, collapse and flip within the brush footprint) keeps triangle density close to a target edge length. Nothing outside the footprint is touched (MF-OP-003 applies per stroke).
+
+**MF-SCULPT-003: Strokes are commands.**
+- A stroke (press to release) is one command. Its record holds the brush parameters and the sampled path in a remappable form (MF-HIST-002), never raw vertex positions.
+- Provenance lists the moved, created and removed elements.
+- One undo per stroke. Replay is Exact on the same build.
+
+**MF-SCULPT-004: Responsiveness.**
+- At 5M triangles, a dab affects the screen within one frame at ≥ 60 fps on the reference machine.
+- Only the GPU chunks a stroke touches are re-uploaded (MF-RENDER-003).
+- History of 1,000 strokes stays within 1.5× of one revision, plus the stroke footprints (MF-DOC-002).
+
+**MF-SCULPT-005: Carving and booleans (later).** Carving by brush is MF-SCULPT-001. Boolean subtract/union with a tool mesh is a separate later requirement, and isn't required for Phase 1's first release.
+
+## 11b. Phase 1+ requirements captured now: modelling tools, plugins and scripting
+
+These aren't implemented in Phase 0 and aren't assigned to a phase yet. They're recorded so Phase 0's design doesn't block them; the M4 and M5 reviews check that it doesn't.
+
+Every tool below is a spec-driven operation like the repair tools (MF-SPEC-*). That means:
+- one definition gives the GUI panel, the CLI command and the MCP schema;
+- it is targetable where that makes sense;
+- it records provenance;
+- it is undoable, and replays Exact on the same build;
+- it never silently falls back.
+
+Printing-oriented parameters, such as clearances, are in document units.
+
+**MF-OBJ-001: Object transform gizmo.**
+- Move, rotate and scale whole objects in the viewport: drag handles, numeric entry, snapping (grid, angle, to the build plate), and "drop to plate".
+- Transforms are commands (undoable, replayable) and are stored in the document and in 3MF.
+
+**MF-MODEL-001: Booleans.**
+- Union, subtract and intersect between objects, or a selected part and an object.
+- Robust on real-world input: exact or adaptive predicates for every orientation and intersection decision; open, non-manifold or self-intersecting inputs are handled or refused by name.
+- The output is closed and manifold whenever the inputs are, and provenance says which input each output face came from.
+- *Accept:* boolean results on the M4 messy-model collection are either valid or named refusals, and a 1M × 1M union completes interactively (target set when the phase is planned).
+
+**MF-MODEL-002: Intersection analysis.**
+- Detects where objects intersect each other and where an object intersects itself (BVH-accelerated; shares machinery with MF-ISSUE-049).
+- The results show as an overlay and a defect list, with an obvious next action: union, subtract, or move apart.
+
+**MF-MODEL-003: Split with alignment pegs and joints.**
+- Cut an object with a plane, or with a drawn path/region, into parts that are each capped closed.
+- Optionally add alignment features across the cut: pegs and matching holes (round, square or keyed) or a keyed/dovetail joint. Each has a size, a count or automatic placement, and a printing **clearance**.
+- Parts stay as separate objects in the document and in 3MF.
+- *Accept:* split parts re-assemble with the requested clearance, measured on the meshes, and each part is closed and manifold.
+
+**MF-MODEL-004: Kitbashing (adding parts to a model).**
+- A part library with built-in and user-added parts. Drag a part onto a model's surface, where it snaps to the surface normal; then place, rotate and scale it with the gizmo.
+- Attach the part as a separate object, merge it by boolean union, or **blend** it with a smooth transition zone (in the spirit of Meshmixer's "Meshmix"; uses fairing from MF-OP-002).
+- Parts carry their own snap points (attach face, orientation, default scale).
+
+**MF-MODEL-005: Parametric connectors.**
+- Generated, printing-aware joints placed on or between objects: print-in-place pin hinges, snap-fit hinges, clasps and latches, ball-and-socket joints, pins, and dovetails.
+- Parameters include the size, the **clearance**, the rotation range where relevant, and the orientation relative to the build plate.
+- A connector is placed like a kitbash part (MF-MODEL-004) and merged or cut into the models it joins (MF-MODEL-001/003).
+- *Accept:* each connector type prints and moves as intended on a reference printer at the default clearance. This is a manual check, recorded with photos.
+
+**MF-PLUG-001: Plugins.**
+- A plugin adds operations, kitbash parts or connectors. Each operation is defined by the same spec-file format as built-in operations, so it gets a GUI panel, a CLI command and an MCP schema for free.
+- **Sandboxed:** plugin code (for example WebAssembly) can't crash the app, read arbitrary files or reach the network without a permission the user grants.
+- **Edits go through the engine:** plugins edit geometry only through the engine's edit interface, so provenance, undo, replay and `untouched_outside_target` hold for plugin operations too.
+- **Versioned interface:** a stable, versioned plugin API. A plugin built for one API version keeps working, or is refused by name.
+- Install, update, disable and remove from inside the app; each plugin shows its source and permissions.
+
+**MF-SCRIPT-001: Scripting.**
+- Automate any operation sequence from a script (Python first): open, inspect, select, run operations, export.
+- Scripts reuse the same command layer, so a script's run produces an ordinary command log that replays Exact.
+- Scripts run headless (CLI) or inside the app with progress and cancel.
 
 ## 12. Exit criteria
 

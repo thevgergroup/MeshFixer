@@ -17,10 +17,11 @@ pub fn subcommand_name(spec: &OperationSpec) -> String {
 pub fn to_command(spec: &OperationSpec) -> Command {
     let mut cmd = Command::new(subcommand_name(spec)).about(spec.summary.clone());
     for p in &spec.parameters {
-        let (value_name, default) = match &p.kind {
-            ParamKind::Integer { default, .. } => ("INT", default.to_string()),
-            ParamKind::Float { default, .. } => ("NUMBER", default.to_string()),
-            ParamKind::Bool { default } => ("true|false", default.to_string()),
+        let (value_name, default): (String, String) = match &p.kind {
+            ParamKind::Integer { default, .. } => ("INT".into(), default.to_string()),
+            ParamKind::Float { default, .. } => ("NUMBER".into(), default.to_string()),
+            ParamKind::Bool { default } => ("true|false".into(), default.to_string()),
+            ParamKind::Choice { default, values } => (values.join("|"), default.clone()),
         };
         let unit = p
             .unit

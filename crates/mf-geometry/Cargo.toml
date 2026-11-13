@@ -9,6 +9,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+mf-runtime.workspace = true
 rayon.workspace = true
 blake3.workspace = true
 serde.workspace = true

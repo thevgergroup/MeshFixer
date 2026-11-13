@@ -114,10 +114,12 @@ fn mesh_vertices_build_matches_helpers() {
     let origin = DVec3::from(m.bounding_box().unwrap().center());
     assert_eq!(v.origin, origin);
     assert_eq!(v.triangle_count, 10);
-    assert_eq!(v.surface, surface_vertices(&m, origin));
+    assert_eq!(v.surface(), surface_vertices(&m, origin));
     assert_eq!(v.lines, boundary_line_vertices(&m, origin));
     assert_eq!(
-        mf_render::MeshVertices::build(&Mesh::empty()).surface.len(),
+        mf_render::MeshVertices::build(&Mesh::empty())
+            .surface()
+            .len(),
         0
     );
 }

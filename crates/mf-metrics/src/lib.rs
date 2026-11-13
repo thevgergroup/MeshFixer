@@ -1,15 +1,29 @@
-//! Memory and timing instrumentation (MF-RT-005, MF-ISSUE-013).
+//! Memory and timing instrumentation (MF-RT-001, MF-RT-005, MF-ISSUE-013).
 //!
 //! [`CountingAlloc`] counts live and peak heap bytes when a binary installs
 //! it as its `#[global_allocator]`. [`measure`] reports a phase's wall time,
 //! its peak heap above the starting level, and the bytes it retained.
 //! Phases are meant to run one after another: `measure` resets the peak.
+//! [`FrameTimes`] records the desktop app's recent frames.
 
 mod alloc;
+mod frames;
+mod gate;
+mod process;
+mod summary;
 
 use std::time::Instant;
 
 use serde::Serialize;
+
+pub use gate::{GateVerdict, GatedFrame, frame_gate, judge_frames};
+pub use process::{ProcessMemory, page_ins, process_memory, process_rss_bytes};
+pub use summary::{
+    CONTINUOUS_GAP, DurationStats, FrameSummary, GpuBufferBytes, GpuStats, MemoryBreakdown,
+    ProcessSampler, duration_ms, fps,
+};
+
+pub use frames::{FRAME_HISTORY, FrameSample, FrameTimes, GpuSummary, GpuTime, Percentiles};
 
 pub use alloc::{
     CountingAlloc, is_installed, live_bytes, peak_bytes, peak_bytes_since_start, reset_peak,

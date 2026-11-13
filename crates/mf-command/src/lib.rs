@@ -5,6 +5,8 @@
 //! `commit` (back on the owner's thread). Nothing is committed if any step
 //! fails (MF-CMD-006).
 
+#[cfg(feature = "test-position-jitter")]
+mod jitter;
 mod log;
 mod record;
 mod replay;

@@ -55,10 +55,16 @@ fn open_inspect_apply_undo_redo() {
         unwelded: 0,
         seed: 2,
     };
-    mf_io::write_path(&damaged_sphere(&spec), &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &damaged_sphere(&spec),
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
 
     let mut harness = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
 
@@ -78,10 +84,14 @@ fn open_inspect_apply_undo_redo() {
     harness.run_steps(5);
     assert_eq!(harness.state().viewport.frames_rendered, rendered);
 
-    // Choose the operation explicitly; the panel's default is the first spec.
-    harness.state_mut().selected_op = "mesh.remove_small_components".into();
+    // Nothing is selected, so Properties offers the whole-object tools:
+    // open "Remove loose pieces" and apply it.
+    harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
+    // 20 of 21 pieces, but specks (under 2% of the triangles): no question
+    // (MF-ISSUE-052).
+    assert!(harness.state().confirmation().is_none());
     wait_until(&mut harness, "operation + re-analysis", |a| {
         a.session.history_labels().len() == 3 && components(a).is_some_and(|c| c < before)
     });
@@ -118,6 +128,7 @@ fn open_inspect_apply_undo_redo() {
         .params_for("mesh.remove_small_components")
         .insert("max_triangles".into(), mf_spec::ParamValue::Int(6));
     harness.get_by_label("Apply").click();
+    assert!(harness.state().confirmation().is_none());
     wait_until(&mut harness, "branch apply", |a| {
         a.session.current() != base && components(a).is_some()
     });

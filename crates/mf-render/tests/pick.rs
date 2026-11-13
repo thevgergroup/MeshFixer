@@ -1,12 +1,14 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
 //! Picking (MF-RENDER-004/005 for M3): boundary loops in screen space, faces
-//! by ray cast.
+//! by ray cast. Object-space picking is the `DMat4::IDENTITY` case of the
+//! transform-aware API (MF-ISSUE-042; see `transforms.rs` for translated,
+//! rotated and mirrored objects).
 
-use glam::DVec3;
+use glam::{DMat4, DVec3};
 use mf_fixtures::{cube, cube_with_missing_face};
 use mf_geometry::FaceId;
-use mf_render::{OrbitCamera, pick_loop, ray_pick, screen_position};
+use mf_render::{Bvh, OrbitCamera, pick_loop, ray_pick, screen_position};
 
 #[test]
 fn loop_pick_finds_nearest_edge_within_tolerance() {
@@ -22,16 +24,43 @@ fn loop_pick_finds_nearest_edge_within_tolerance() {
     let b = DVec3::from(m.corner_position(hole.vertices[1]));
     let mid = screen_position(&cam, origin, size, ((a + b) * 0.5).to_array()).unwrap();
     assert_eq!(
-        pick_loop(&m, &cam, origin, size, (mid.0 + 3.0, mid.1 - 2.0), 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            (mid.0 + 3.0, mid.1 - 2.0),
+            8.0
+        ),
         Some(hole.id)
     );
     assert_eq!(
-        pick_loop(&m, &cam, origin, size, (5.0, 5.0), 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            (5.0, 5.0),
+            8.0
+        ),
         None,
         "far from every loop"
     );
     assert_eq!(
-        pick_loop(&cube(1.0), &cam, origin, size, (mid.0, mid.1), 8.0),
+        pick_loop(
+            &cube(1.0),
+            &bvh_of(&cube(1.0)),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            (mid.0, mid.1),
+            8.0
+        ),
         None,
         "closed mesh has no loops"
     );
@@ -41,16 +70,16 @@ fn loop_pick_finds_nearest_edge_within_tolerance() {
 fn ray_pick_finds_nearest_face() {
     let m = cube(1.0);
     // Straight down onto the top face (faces 2 and 3 are z = 1).
-    let hit = ray_pick(&m, [0.3, 0.6, 5.0], [0.0, 0.0, -1.0]).unwrap();
+    let hit = ray_pick(&m, &DMat4::IDENTITY, [0.3, 0.6, 5.0], [0.0, 0.0, -1.0]).unwrap();
     assert!(hit.0 == FaceId(2) || hit.0 == FaceId(3), "{hit:?}");
     assert!((hit.1 - 4.0).abs() < 1e-12);
     assert_eq!(
-        ray_pick(&m, [3.0, 3.0, 5.0], [0.0, 0.0, -1.0]),
+        ray_pick(&m, &DMat4::IDENTITY, [3.0, 3.0, 5.0], [0.0, 0.0, -1.0]),
         None,
         "misses"
     );
     assert_eq!(
-        ray_pick(&m, [0.5, 0.5, 5.0], [0.0, 0.0, 1.0]),
+        ray_pick(&m, &DMat4::IDENTITY, [0.5, 0.5, 5.0], [0.0, 0.0, 1.0]),
         None,
         "pointing away"
     );
@@ -66,7 +95,7 @@ fn camera_ray_through_a_projected_point_hits_it() {
     let target = [0.5, 0.5, 1.0];
     let px = screen_position(&cam, origin, size, target).unwrap();
     let (o, d) = cam.ray(origin, size, px);
-    let (_, t) = ray_pick(&m, o, d).unwrap();
+    let (_, t) = ray_pick(&m, &DMat4::IDENTITY, o, d).unwrap();
     let p = [o[0] + d[0] * t, o[1] + d[1] * t, o[2] + d[2] * t];
     assert!((0..3).all(|k| (p[k] - target[k]).abs() < 1e-6), "{p:?}");
 }
@@ -88,15 +117,38 @@ fn loop_pick_ignores_edges_behind_the_surface() {
 
     let mid = screen_position(&cam, origin, size, mid_world).unwrap();
     assert_eq!(
-        pick_loop(&m, &cam, origin, size, mid, 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            mid,
+            8.0
+        ),
         Some(hole.id),
         "visible from above"
     );
     cam.pitch = -60f64.to_radians();
     let mid = screen_position(&cam, origin, size, mid_world).unwrap();
     assert_eq!(
-        pick_loop(&m, &cam, origin, size, mid, 8.0),
+        pick_loop(
+            &m,
+            &bvh_of(&m),
+            &DMat4::IDENTITY,
+            &cam,
+            origin,
+            size,
+            mid,
+            8.0
+        ),
         None,
         "hidden from below"
     );
+}
+
+/// The BVH picking uses for `mesh`.
+fn bvh_of(mesh: &mf_geometry::Mesh) -> Bvh {
+    Bvh::build(mesh, &mf_runtime::RunContext::none()).unwrap()
 }

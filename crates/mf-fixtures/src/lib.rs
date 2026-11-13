@@ -335,3 +335,110 @@ pub fn grid(n: u32) -> Mesh {
     }
     Mesh::new(positions, tris).expect("valid")
 }
+
+/// `mesh` with every position multiplied by `s`.
+pub fn scaled(mesh: &Mesh, s: f64) -> Mesh {
+    let (positions, triangles) = mesh.to_arrays();
+    let positions = positions.iter().map(|p| p.map(|c| c * s)).collect();
+    Mesh::new(positions, triangles).expect("valid")
+}
+
+/// A flat 40 × 40 mm plate (10 × 10 cells of 4 mm) with one of each defect
+/// the tree lists besides loose pieces: its open rim and a punched hole
+/// (holes), a slit whose two sides touch (a narrow crack), and a fin
+/// standing on an interior edge (a tangled, non-manifold edge).
+pub fn plate_with_defects() -> Mesh {
+    let n = 10u32;
+    let cell = 4.0;
+    let v = |i: u32, j: u32| j * (n + 1) + i;
+    let mut positions: Vec<[f64; 3]> = (0..=n)
+        .flat_map(|j| (0..=n).map(move |i| [i as f64 * cell, j as f64 * cell, 0.0]))
+        .collect();
+    let mut triangles = Vec::new();
+    for j in 0..n {
+        for i in 0..n {
+            if (i, j) == (2, 6) {
+                continue; // the punched hole
+            }
+            triangles.push([v(i, j), v(i + 1, j), v(i + 1, j + 1)]);
+            triangles.push([v(i, j), v(i + 1, j + 1), v(i, j + 1)]);
+        }
+    }
+    // The slit: cells right of x = 6 cells use their own copies of the
+    // vertices (6, 3..=5), so the plate is cut along x = 6 from j = 2 to 6.
+    let mut copy = std::collections::BTreeMap::new();
+    for j in 3..=5 {
+        positions.push(positions[v(6, j) as usize]);
+        copy.insert(v(6, j), positions.len() as u32 - 1);
+    }
+    for j in 2..6 {
+        for k in [2 * (j * n + 6), 2 * (j * n + 6) + 1] {
+            // Face index among kept faces: cells before (2, 6) in row order
+            // are unaffected because the slit's rows (2..6) precede row 6.
+            let t: &mut [u32; 3] = &mut triangles[k as usize];
+            for c in t.iter_mut() {
+                if let Some(&d) = copy.get(c) {
+                    *c = d;
+                }
+            }
+        }
+    }
+    // The fin: a third face on the diagonal edge of cell (7, 7).
+    positions.push([7.5 * cell, 7.5 * cell, 6.0]);
+    let top = positions.len() as u32 - 1;
+    triangles.push([v(7, 7), v(8, 8), top]);
+    Mesh::new(positions, triangles).expect("valid")
+}
+
+/// A row-major 3×4 3MF transform: rotation by `degrees` about the axis
+/// (`axis`: 0 = x, 1 = y, 2 = z), then translation by `t`.
+pub fn rotation_translation(axis: usize, degrees: f64, t: [f64; 3]) -> [f64; 12] {
+    let (s, c) = degrees.to_radians().sin_cos();
+    // Column-vector rotation matrix rows.
+    let r = match axis {
+        0 => [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+        1 => [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+        _ => [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+    };
+    // 3MF stores the transpose of the linear part, row by row (m00 m01 m02
+    // m10 … are the columns of the column-vector matrix), then translation.
+    [
+        r[0][0], r[1][0], r[2][0], r[0][1], r[1][1], r[2][1], r[0][2], r[1][2], r[2][2], t[0],
+        t[1], t[2],
+    ]
+}
+
+/// The Checkpoint A / demo scene: two objects at their own transforms, in
+/// millimetres. "scan": a damaged sphere of radius 20 (holes, plus three
+/// loose 2 mm cubes floating off it), turned 25° about z and moved left;
+/// "plate": [`plate_with_defects`], tilted 35° about x and moved right.
+pub fn demo_scene() -> Vec<(String, Mesh, [f64; 12])> {
+    let sphere = scaled(
+        &damaged_sphere(&DamageSpec {
+            rings: 32,
+            segments: 64,
+            holes: 4,
+            islands: 0,
+            unwelded: 0,
+            seed: 3,
+        }),
+        20.0,
+    );
+    let mut parts = vec![sphere];
+    for d in [[23.0, 0.0, 4.0], [-6.0, 22.0, -8.0], [4.0, -9.0, 21.0]] {
+        parts.push(translated(&cube(2.0), d));
+    }
+    let scan = merge(&parts);
+    vec![
+        (
+            "scan".to_owned(),
+            scan,
+            rotation_translation(2, 25.0, [-32.0, 0.0, 20.0]),
+        ),
+        (
+            "plate".to_owned(),
+            plate_with_defects(),
+            rotation_translation(0, 35.0, [16.0, -20.0, 0.0]),
+        ),
+    ]
+}

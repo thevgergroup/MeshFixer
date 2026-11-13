@@ -25,14 +25,18 @@ fn fill(
     target: Target,
     pairs: &[(&str, &str)],
 ) -> Result<(Mesh, mf_geometry::Provenance, serde_json::Value), OpError> {
-    let out = find("mesh.fill_holes")
-        .unwrap()
-        .execute(m, &target, &params(pairs))?;
+    let out = find("mesh.fill_holes").unwrap().execute(
+        m,
+        &target,
+        &params(pairs),
+        &mf_operations::RunContext::none(),
+    )?;
     let (mesh, prov) = out.change.expect("fill_holes changed the mesh");
     Ok((mesh, prov, out.report))
 }
 
-const NO_REFINE: &[(&str, &str)] = &[("refine", "false")];
+/// The bare triangulation: flat (a non-flat style always refines).
+const NO_REFINE: &[(&str, &str)] = &[("refine", "false"), ("fill_style", "flat")];
 
 /// MF-OP-003: every input face keeps its ID and indices; every input vertex
 /// keeps its position bit-for-bit.
@@ -150,7 +154,11 @@ fn loop_too_large_fails_by_name() {
     let err = fill(
         &m,
         Target::Loops(vec![id]),
-        &[("refine", "false"), ("max_loop_edges", "3")],
+        &[
+            ("refine", "false"),
+            ("max_loop_edges", "3"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap_err();
     match err {
@@ -171,7 +179,11 @@ fn whole_object_reports_skipped_loops() {
     let (out, _, report) = fill(
         &m,
         Target::WholeObject,
-        &[("refine", "false"), ("max_loop_edges", "10")],
+        &[
+            ("refine", "false"),
+            ("max_loop_edges", "10"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap();
     assert_eq!(report["filled_loops"].as_array().unwrap().len(), 2);
@@ -248,7 +260,12 @@ fn collinear_loop_is_never_filled_with_a_zero_area_triangle() {
         // Whole object: skipped and reported, and nothing degenerate added.
         let out = find("mesh.fill_holes")
             .unwrap()
-            .execute(&m, &Target::WholeObject, &params(&p))
+            .execute(
+                &m,
+                &Target::WholeObject,
+                &params(&p),
+                &mf_operations::RunContext::none(),
+            )
             .unwrap();
         let skipped = out.report["skipped_loops"].as_array().unwrap();
         assert!(
@@ -347,7 +364,20 @@ mod refinement {
             "hole has {} edges",
             hole.edge_count
         );
-        let (out, prov, _) = fill(&m, Target::Loops(vec![hole.id]), &[("refine", "true")]).unwrap();
+        // Every fill style: fairing moves vertices, so the quality limits
+        // hold after it too (MF-OP-002).
+        for style in ["flat", "smooth", "curvature"] {
+            check_density(&m, &hole, style);
+        }
+    }
+
+    fn check_density(m: &Mesh, hole: &mf_geometry::BoundaryLoop, style: &str) {
+        let (out, prov, _) = fill(
+            m,
+            Target::Loops(vec![hole.id]),
+            &[("refine", "true"), ("fill_style", style)],
+        )
+        .unwrap();
         assert!(
             !prov.created_vertices.is_empty(),
             "refinement added vertices"
@@ -379,7 +409,10 @@ mod refinement {
                 }
             }
             let angle = min_angle_deg(&out, t);
-            assert!(angle >= 5.0, "patch triangle {f:?} has a {angle:.2}° angle");
+            assert!(
+                angle >= 5.0,
+                "{style}: patch triangle {f:?} has a {angle:.2}° angle"
+            );
         }
         let patch_mean: f64 = interior
             .iter()
@@ -393,21 +426,21 @@ mod refinement {
             .map(|(f, _)| min_angle_deg(&out, out.face(*f).unwrap()))
             .fold(180.0, f64::min);
         eprintln!(
-            "hole {} edges: {} patch faces, {} new vertices, edge ratio {ratio:.3}, min angle {worst_angle:.1}°",
+            "{style}: hole {} edges: {} patch faces, {} new vertices, edge ratio {ratio:.3}, min angle {worst_angle:.1}°",
             hole.edge_count,
             prov.created_faces.len(),
             prov.created_vertices.len()
         );
         assert!(
             (0.75..=1.25).contains(&ratio),
-            "patch/boundary edge length ratio {ratio:.3}"
+            "{style}: patch/boundary edge length ratio {ratio:.3}"
         );
         let d = inspect(&out);
         assert!(
             d.is_manifold && d.inconsistent_orientation_edges == 0,
             "{d:?}"
         );
-        assert_untouched_outside_target(&m, &out);
+        assert_untouched_outside_target(m, &out);
     }
 
     #[test]
@@ -416,7 +449,11 @@ mod refinement {
         let (_, prov, _) = fill(
             &m,
             Target::WholeObject,
-            &[("refine", "false"), ("max_loop_edges", "200")],
+            &[
+                ("refine", "false"),
+                ("max_loop_edges", "200"),
+                ("fill_style", "flat"),
+            ],
         )
         .unwrap();
         assert!(prov.created_vertices.is_empty());
@@ -483,10 +520,504 @@ fn max_loop_edges_is_capped_where_the_triangulation_stays_interactive() {
     let (out, _, _) = fill(
         &m,
         Target::Loops(vec![hole]),
-        &[("max_loop_edges", "1000"), ("refine", "false")],
+        &[
+            ("max_loop_edges", "1000"),
+            ("refine", "false"),
+            ("fill_style", "flat"),
+        ],
     )
     .unwrap();
     let elapsed = start.elapsed();
     assert_eq!(out.topology().boundary_loops.len(), 1, "only the outer rim");
     assert!(elapsed < std::time::Duration::from_secs(30), "{elapsed:?}");
+}
+
+/// Fill styles (MF-OP-002): `smooth` and `curvature` fair the patch's
+/// interior so it follows the surface around the hole; `flat` doesn't.
+mod fairing {
+    use super::*;
+
+    /// A unit UV sphere with its north cap (everything within 30° of the
+    /// pole) removed: one round hole of exactly 44 edges. The 2% / 1%
+    /// limits (MF-OP-002) are sensitive to the cap angle: the continuous
+    /// Δ² solution (a paraboloid matching height and slope at the rim)
+    /// overshoots the sphere by ≈ 1.04% of the radius at 30° and ≈ 2.0% at
+    /// 35°, so a change in refinement density can move the measured value
+    /// by a few tenths of a percent without fairing being wrong.
+    fn capped_sphere() -> Mesh {
+        let base = uv_sphere(36, 44);
+        let cut = 30f64.to_radians().cos() - 1e-9;
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            if t.iter().all(|&v| base.corner_position(v)[2] >= cut) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        let m = e.finish().unwrap().0;
+        let loops = &m.topology().boundary_loops;
+        assert_eq!(loops.len(), 1);
+        assert_eq!(loops[0].edge_count, 44);
+        m
+    }
+
+    /// Largest |radius − 1| over the patch's new vertices.
+    fn max_radial_deviation(m: &Mesh, style: &str) -> f64 {
+        let (out, prov, _) = fill(m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+        assert!(
+            prov.created_vertices.len() >= 10,
+            "{style}: refinement added {} vertices",
+            prov.created_vertices.len()
+        );
+        prov.created_vertices
+            .iter()
+            .map(|&v| {
+                let p = out.position(v).unwrap();
+                ((p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() - 1.0).abs()
+            })
+            .fold(0.0, f64::max)
+    }
+
+    #[test]
+    fn smooth_fill_follows_a_sphere() {
+        let m = capped_sphere();
+        let flat = max_radial_deviation(&m, "flat");
+        let smooth = max_radial_deviation(&m, "smooth");
+        eprintln!("44-edge cap, max radial deviation: flat {flat:.4}, smooth {smooth:.4}");
+        assert!(smooth <= 0.02, "smooth: {smooth:.4} of the radius");
+        assert!(flat > 3.0 * smooth, "flat {flat:.4} vs smooth {smooth:.4}");
+    }
+
+    #[test]
+    fn curvature_fill_follows_a_sphere_closer() {
+        let m = capped_sphere();
+        let curvature = max_radial_deviation(&m, "curvature");
+        eprintln!("44-edge cap, max radial deviation: curvature {curvature:.4}");
+        assert!(curvature <= 0.01, "curvature: {curvature:.4} of the radius");
+    }
+
+    /// Only the patch's own new vertices move: the hole's rim and the
+    /// existing rings the solve reads stay bit-for-bit where they were
+    /// (MF-OP-003), and no existing vertex is reported moved.
+    #[test]
+    fn fairing_moves_only_patch_interior_vertices() {
+        let m = capped_sphere();
+        let (flat, _, _) = fill(&m, Target::WholeObject, &[("fill_style", "flat")]).unwrap();
+        for style in ["smooth", "curvature"] {
+            let (out, prov, _) = fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+            assert_untouched_outside_target(&m, &out);
+            assert!(prov.moved_vertices.is_empty(), "{style}");
+            assert!(prov.modified_faces.is_empty(), "{style}");
+            // Same patch topology as flat; the new vertices are what moved.
+            assert_eq!(out.face_count(), flat.face_count(), "{style}");
+            let moved = prov
+                .created_vertices
+                .iter()
+                .filter(|&&v| out.position(v) != flat.position(v))
+                .count();
+            assert_eq!(moved, prov.created_vertices.len(), "{style}");
+            let d = inspect(&out);
+            assert!(
+                d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+                "{style}: {d:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fairing_is_deterministic_across_thread_counts() {
+        // Several holes of different sizes, filled in one run.
+        let base = uv_sphere(40, 80);
+        let centres: [[f64; 3]; 4] = [
+            [1.0, 0.0, 0.0],
+            [-1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, -0.6, 0.8],
+        ];
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            let c =
+                [0, 1, 2].map(|k| t.iter().map(|&v| base.corner_position(v)[k]).sum::<f64>() / 3.0);
+            let len = (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt();
+            if centres.iter().enumerate().any(|(i, a)| {
+                (c[0] * a[0] + c[1] * a[1] + c[2] * a[2]) / len > (0.12 + 0.05 * i as f64).cos()
+            }) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        let m = e.finish().unwrap().0;
+        assert_eq!(m.topology().boundary_loops.len(), 4);
+        for style in ["smooth", "curvature"] {
+            let run = |threads| {
+                let pool = rayon::ThreadPoolBuilder::new()
+                    .num_threads(threads)
+                    .build()
+                    .unwrap();
+                pool.install(|| {
+                    fill(&m, Target::WholeObject, &[("fill_style", style)])
+                        .unwrap()
+                        .0
+                        .content_hash()
+                })
+            };
+            let one = run(1);
+            assert_eq!(one, run(8), "{style}");
+            assert_eq!(one, run(3), "{style}");
+        }
+    }
+
+    /// The report says how many vertices each patch's fairing moved.
+    #[test]
+    fn fairing_reports_the_vertices_it_moved() {
+        let m = capped_sphere();
+        let (_, prov, report) = fill(&m, Target::WholeObject, &[("fill_style", "smooth")]).unwrap();
+        let n = report["filled_loops"][0]["faired_vertices"].as_u64();
+        assert_eq!(n, Some(prov.created_vertices.len() as u64), "{report}");
+        let (_, _, report) = fill(&m, Target::WholeObject, &[("fill_style", "flat")]).unwrap();
+        assert!(
+            report["filled_loops"][0].get("faired_vertices").is_none(),
+            "{report}"
+        );
+    }
+
+    /// A non-flat style always refines: a smooth fill asked for without
+    /// refinement still gets new vertices to shape (never a flat patch in
+    /// disguise), and the report says refinement was applied.
+    #[test]
+    fn smooth_styles_always_refine() {
+        let m = capped_sphere();
+        for style in ["smooth", "curvature"] {
+            let (with, _, report_with) =
+                fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+            let (without, prov, report) = fill(
+                &m,
+                Target::WholeObject,
+                &[("fill_style", style), ("refine", "false")],
+            )
+            .unwrap();
+            assert!(!prov.created_vertices.is_empty(), "{style}");
+            assert_eq!(with.content_hash(), without.content_hash(), "{style}");
+            assert_eq!(report["refined"], true, "{style}: {report}");
+            assert_eq!(report_with["refined"], true, "{style}");
+        }
+        let (_, prov, report) = fill(
+            &m,
+            Target::WholeObject,
+            &[("fill_style", "flat"), ("refine", "false")],
+        )
+        .unwrap();
+        assert!(prov.created_vertices.is_empty());
+        assert_eq!(report["refined"], false, "{report}");
+    }
+
+    /// A unit sphere with a polar cap (z > 0.7) cut off: one round hole of
+    /// `edges` boundary edges, refined to thousands of new vertices.
+    fn big_cap(edges: u32) -> Mesh {
+        let base = uv_sphere(edges / 2, edges);
+        let mut e = base.edit();
+        for (id, t) in base.faces() {
+            if t.iter().all(|&v| base.corner_position(v)[2] > 0.7) {
+                e.remove_face(id).unwrap();
+            }
+        }
+        e.finish().unwrap().0
+    }
+
+    /// MF-ISSUE-053: fairing the largest holes the limit allows (500 and
+    /// 1000 edges; ~12,700 and ~52,400 new vertices) by a direct solve.
+    /// Was minutes with Jacobi-CG, and curvature didn't converge at all.
+    /// Measured on the M2 Max, fairing over the flat fill: 500 edges
+    /// ≈ 0.05 s smooth, ≈ 0.12 s curvature; 1000 edges ≈ 0.5 s smooth,
+    /// ≈ 1.2 s curvature (the 3·10⁹ multiply-adds of its factorisation).
+    /// Gated at 1 s for 500 edges and 3 s for 1000 (CI runners are slower).
+    /// The run still checks for cancellation at least every 100 ms
+    /// (MF-RT-002).
+    #[test]
+    fn large_holes_fair_quickly() {
+        let run = |m: &Mesh, style: &str| {
+            let p = params(&[("fill_style", style), ("max_loop_edges", "1000")]);
+            let (ctx, probe) = mf_operations::RunContext::instrumented();
+            let start = std::time::Instant::now();
+            let out = find("mesh.fill_holes")
+                .unwrap()
+                .execute(m, &Target::WholeObject, &p, &ctx)
+                .unwrap();
+            let took = start.elapsed();
+            assert_eq!(
+                out.report["skipped_loops"],
+                serde_json::json!([]),
+                "{style}"
+            );
+            (took, probe.max_gap())
+        };
+        let mut failures = Vec::new();
+        for (edges, limit) in [(500, 1.0), (1000, 3.0)] {
+            let m = big_cap(edges);
+            let (flat, _) = run(&m, "flat");
+            for style in ["smooth", "curvature"] {
+                let (took, gap) = run(&m, style);
+                let fairing = took.saturating_sub(flat);
+                eprintln!(
+                    "{edges}-edge hole, {style}: {took:?} ({fairing:?} over flat {flat:?}), longest checkpoint gap {gap:?}"
+                );
+                if fairing.as_secs_f64() >= limit {
+                    failures.push(format!("{edges} edges {style}: fairing took {fairing:?}"));
+                }
+                if gap > std::time::Duration::from_millis(100) {
+                    failures.push(format!("{edges} edges {style}: checkpoint gap {gap:?}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:#?}");
+    }
+}
+
+/// Two 4-edge holes that share two non-adjacent vertices (x, y): an oblate
+/// "octahedron" (poles x and y close together, equator a, c, d, b) made of
+/// two 2-triangle pieces that touch only at the poles. Each hole is
+/// cheapest to close across the short chord x–y, so without coordination
+/// both would use it and x–y would get four faces.
+fn holes_sharing_a_chord() -> Mesh {
+    holes_sharing_a_chord_with([0.0, 0.0, 1.0], [-1.0, 0.0, 0.0])
+}
+
+/// As [`holes_sharing_a_chord`], with the second piece's vertices c and d
+/// placed at `c_at` and `d_at`.
+fn holes_sharing_a_chord_with(c_at: [f64; 3], d_at: [f64; 3]) -> Mesh {
+    let h = 0.2;
+    let positions = vec![
+        [0.0, h, 0.0],    // 0 x
+        [0.0, -h, 0.0],   // 1 y
+        [1.0, 0.0, 0.0],  // 2 a
+        [0.0, 0.0, -1.0], // 3 b
+        c_at,             // 4 c
+        d_at,             // 5 d
+    ];
+    let (x, y, a, b, c, d) = (0, 1, 2, 3, 4, 5);
+    let triangles = vec![
+        // Piece 1, on (x, a, y, b), joined across a–b.
+        [x, a, b],
+        [y, b, a],
+        // Piece 2, on (x, d, y, c), joined across c–d.
+        [y, c, d],
+        [x, d, c],
+    ];
+    Mesh::new(positions, triangles).unwrap()
+}
+
+/// MF-ISSUE-038: in one whole-object run, a chord an earlier loop's patch
+/// used is excluded for later loops, so no edge gets more than two faces.
+#[test]
+fn a_chord_used_by_an_earlier_loop_is_excluded_for_later_loops() {
+    let m = holes_sharing_a_chord();
+    let loops = &m.topology().boundary_loops;
+    assert_eq!(loops.len(), 2, "{loops:?}");
+    for l in loops {
+        assert_eq!(l.edge_count, 4, "{l:?}");
+        assert!(l.vertices.contains(&0) && l.vertices.contains(&1), "{l:?}");
+    }
+    // Each hole alone closes across x–y.
+    for l in loops {
+        let (one, _, _) = fill(&m, Target::Loops(vec![l.id]), NO_REFINE).unwrap();
+        let uses_chord = one
+            .faces()
+            .filter(|(_, t)| t.contains(&0) && t.contains(&1))
+            .count();
+        assert_eq!(uses_chord, 2, "loop {} alone", l.id);
+    }
+    for style in [NO_REFINE, &[][..]] {
+        let (after, _, report) = fill(&m, Target::WholeObject, style).unwrap();
+        let d = inspect(&after);
+        assert_eq!(d.non_manifold_edges, 0, "{report}");
+        let on_chord = after
+            .faces()
+            .filter(|(_, t)| t.contains(&0) && t.contains(&1))
+            .count();
+        assert!(on_chord <= 2, "x–y has {on_chord} faces: {report}");
+        assert!(d.is_closed && d.is_manifold, "{d:?} {report}");
+    }
+}
+
+/// MF-ISSUE-038 fix round 1: a hole whose only way across is a chord an
+/// earlier hole's fill already took is reported with its own reason and
+/// plain words naming both holes and the edge, not as a slit.
+#[test]
+fn a_hole_whose_only_chord_was_taken_says_so() {
+    // The second piece on top of the first (c at a, d at b): each hole's
+    // other diagonal (a–c, d–b) has zero length, so x–y is the only way
+    // across either. The first hole takes it.
+    let m = holes_sharing_a_chord_with([1.0, 0.0, 0.0], [0.0, 0.0, -1.0]);
+    let ids: Vec<u32> = m.topology().boundary_loops.iter().map(|l| l.id).collect();
+    let (first, second) = (ids[0], ids[1]);
+    // Whole object: the first hole fills, the second is skipped by name.
+    let (_, _, report) = fill(&m, Target::WholeObject, NO_REFINE).unwrap();
+    let skipped = report["skipped_loops"].as_array().unwrap();
+    assert_eq!(skipped.len(), 1, "{report}");
+    let s = &skipped[0];
+    assert_eq!(s["id"], second, "{report}");
+    assert_eq!(s["reason"], "chord_used_by_another_hole", "{report}");
+    assert_eq!(s["by"], first, "{report}");
+    assert_eq!(s["edge"], serde_json::json!([0, 1]), "{report}");
+    let expected = format!(
+        "Hole {second} can't be closed: the only way across it uses the edge between \
+         vertices 0 and 1, which hole {first}'s fill already uses. Fill hole {second} \
+         first, on its own, or leave it open."
+    );
+    assert_eq!(s["message"], expected.as_str(), "{report}");
+    // Both selected: an error with the same words, never the slit message.
+    match fill(&m, Target::Loops(vec![first, second]), NO_REFINE) {
+        Err(OpError::Failed { code, message }) => {
+            assert_eq!(code, "loop_chord_used_by_another_hole");
+            assert_eq!(message, expected);
+            assert!(!message.contains("flat"), "{message}");
+        }
+        other => panic!("{:?}", other.map(|r| r.2)),
+    }
+}
+
+/// MF-ISSUE-055: the owner's demo sphere (`artifacts/m4/demo/
+/// sphere-three-holes.obj`): a 192×96 UV sphere of radius 50 with round
+/// holes cut around `holes` (unit direction, angular radius in degrees),
+/// removing every face whose centroid lies within the radius.
+fn holed_sphere(holes: &[([f64; 3], f64)]) -> Mesh {
+    let unit = |p: [f64; 3]| {
+        let n = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        p.map(|x| x / n)
+    };
+    let s = uv_sphere(96, 192);
+    let positions: Vec<[f64; 3]> = s.vertices().map(|(_, p)| p.map(|x| 50.0 * x)).collect();
+    let kept: Vec<[u32; 3]> = s
+        .faces()
+        .map(|(_, t)| t)
+        .filter(|t| {
+            let c = unit([0, 1, 2].map(|k| t.iter().map(|&v| positions[v as usize][k]).sum()));
+            !holes.iter().any(|&(d, r)| {
+                let d = unit(d);
+                c[0] * d[0] + c[1] * d[1] + c[2] * d[2] > r.to_radians().cos()
+            })
+        })
+        .collect();
+    // Drop the vertices inside the holes, renumbering the rest.
+    let mut new_id = vec![u32::MAX; positions.len()];
+    let mut out = Vec::new();
+    for t in &kept {
+        for &v in t {
+            if new_id[v as usize] == u32::MAX {
+                new_id[v as usize] = out.len() as u32;
+                out.push(positions[v as usize]);
+            }
+        }
+    }
+    let tris = kept.iter().map(|t| t.map(|v| new_id[v as usize])).collect();
+    Mesh::new(out, tris).unwrap()
+}
+
+fn sphere_dir(theta: f64, phi: f64) -> [f64; 3] {
+    let (t, p) = (theta.to_radians(), phi.to_radians());
+    [t.sin() * p.cos(), t.sin() * p.sin(), t.cos()]
+}
+
+/// Per hole (in `holes` order): its edge count and the worst radial
+/// deviation of its fill's new vertices from the sphere, relative to R.
+fn sphere_fill_deviation(
+    holes: &[([f64; 3], f64)],
+    style: &str,
+) -> (Vec<(usize, f64)>, Mesh, serde_json::Value) {
+    let m = holed_sphere(holes);
+    let (out, prov, report) = fill(&m, Target::WholeObject, &[("fill_style", style)]).unwrap();
+    let mut worst = vec![0.0f64; holes.len()];
+    for v in &prov.created_vertices {
+        let p = out.position(*v).unwrap();
+        let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+        let nearest = (0..holes.len())
+            .max_by(|&a, &b| {
+                let dot = |d: [f64; 3]| (d[0] * p[0] + d[1] * p[1] + d[2] * p[2]) / r;
+                dot(holes[a].0).total_cmp(&dot(holes[b].0))
+            })
+            .unwrap();
+        worst[nearest] = worst[nearest].max((r - 50.0).abs() / 50.0);
+    }
+    let mut edges = vec![0usize; holes.len()];
+    for l in &m.topology().boundary_loops {
+        let p = m.position(VertexId(l.vertices[0])).unwrap();
+        let nearest = (0..holes.len())
+            .max_by(|&a, &b| {
+                let dot = |d: [f64; 3]| d[0] * p[0] + d[1] * p[1] + d[2] * p[2];
+                dot(holes[a].0).total_cmp(&dot(holes[b].0))
+            })
+            .unwrap();
+        edges[nearest] = l.edge_count;
+    }
+    (edges.into_iter().zip(worst).collect(), out, report)
+}
+
+/// MF-ISSUE-055 (open, moved to M5 as an algorithm limit): on the owner's
+/// three-hole sphere, smooth fills every hole to within 1% of R; curvature
+/// does on the small hole, and the holes over the measured limit carry a
+/// plain-language warning recommending smooth (the style is kept).
+#[test]
+fn curvature_fill_on_large_holes_is_labelled_less_accurate() {
+    let demo = [
+        (sphere_dir(78.71, 0.0), 12.0),
+        (sphere_dir(89.98, 120.45), 22.0),
+        (sphere_dir(142.0, -116.57), 32.0),
+    ];
+    let (smooth, out, report) = sphere_fill_deviation(&demo, "smooth");
+    let edges: Vec<usize> = smooth.iter().map(|&(e, _)| e).collect();
+    assert_eq!(edges, [55, 94, 198]);
+    for &(e, d) in &smooth {
+        assert!(d < 0.01, "smooth, {e}-edge hole: {:.3}% of R", 100.0 * d);
+    }
+    let d = inspect(&out);
+    assert!(
+        d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+        "{d:?}"
+    );
+    assert!(report.get("warnings").is_none(), "{report}");
+
+    let (curvature, out, report) = sphere_fill_deviation(&demo, "curvature");
+    let d = inspect(&out);
+    assert!(
+        d.is_closed && d.is_manifold && d.inconsistent_orientation_edges == 0,
+        "{d:?}"
+    );
+    for &(e, d) in &curvature {
+        if e <= mf_operations::CURVATURE_ACCURATE_EDGES {
+            assert!(d < 0.01, "curvature, {e}-edge hole: {:.3}% of R", 100.0 * d);
+        }
+    }
+    // The two large holes are past the limit: labelled, still curvature.
+    assert_eq!(
+        report["warnings"],
+        serde_json::json!([mf_operations::curvature_limit_warning(2)])
+    );
+    assert_eq!(
+        mf_operations::curvature_limit_warning(2),
+        "Curvature matching is less accurate on large holes: 2 holes filled here have more \
+         than 60 edges, and the fill may bulge away from the surface. Smooth fill is \
+         recommended for holes this size."
+    );
+    let flagged: Vec<bool> = report["filled_loops"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|l| l["curvature_less_accurate"] == true)
+        .collect();
+    assert_eq!(flagged.iter().filter(|&&f| f).count(), 2, "{report}");
+    for l in report["filled_loops"].as_array().unwrap() {
+        let flagged = l["curvature_less_accurate"] == true;
+        let over = l["edges"].as_u64().unwrap() as usize > mf_operations::CURVATURE_ACCURATE_EDGES;
+        assert_eq!(flagged, over, "{l}");
+        assert!(l["faired_vertices"].as_u64().unwrap() > 0, "{l}");
+    }
+}
+
+/// Just under the limit (a 60-edge hole) curvature stays within 1% of R
+/// and carries no warning.
+#[test]
+fn curvature_fill_at_the_limit_is_within_one_percent() {
+    let holes = [(sphere_dir(90.0, 0.0), 15.0)];
+    let (dev, _, report) = sphere_fill_deviation(&holes, "curvature");
+    assert_eq!(dev[0].0, mf_operations::CURVATURE_ACCURATE_EDGES);
+    assert!(dev[0].1 < 0.01, "{:.3}% of R", 100.0 * dev[0].1);
+    assert!(report.get("warnings").is_none(), "{report}");
 }

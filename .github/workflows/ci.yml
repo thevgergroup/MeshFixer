@@ -1,7 +1,11 @@
 name: CI
+# Manual only (owner ruling, 2026-11-11): GitHub Actions minutes are not to be
+# spent automatically. Verification is local: scripts/check.sh (fast gate) at
+# every commit, and scripts/check.sh --full on demand at milestone close.
+# This workflow, heavy.yml and fuzz.yml run only when started by hand from the
+# Actions tab.
 on:
-  push:
-  pull_request:
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: never
@@ -44,6 +48,9 @@ jobs:
         with:
           path: fixtures/real
           key: real-fixtures-${{ hashFiles('fixtures/manifest.txt') }}
+      - name: Fixture fetcher tests (hash checks, plain-file entries)
+        if: runner.os == 'Linux'
+        run: scripts/test-fetch-fixtures.sh
       - name: Fetch real scan fixtures
         if: runner.os == 'Linux'
         run: scripts/fetch-fixtures.sh
@@ -54,11 +61,14 @@ jobs:
         run: |
           scripts/test-check-swallowed.sh
           scripts/check-swallowed-defaults.sh
-      - name: Test
+      - name: Test (fast suite; heavy/timing/5M groups run on demand in heavy.yml)
         shell: bash
         run: |
           set -o pipefail
-          cargo test --workspace 2>&1 | tee test-output.txt
+          # Owner ruling (2026-11-09): heavy, timing and 5M tests run on demand,
+          # after work is complete and proven (workflow "Heavy tests", heavy.yml),
+          # never on every push.
+          scripts/run-tests.sh --fast 2>&1 | tee test-output.txt
       - name: Test summary
         if: always()
         shell: bash
@@ -71,81 +81,6 @@ jobs:
             test-output.txt
             skipped-tests.txt
           if-no-files-found: warn
-
-  evidence:
-    # Durable milestone evidence: screenshots, sample repaired model,
-    # diagnostics and benchmark numbers with machine info.
-    runs-on: ubuntu-24.04
-    env:
-      MF_REQUIRE_GPU: "1"
-      MF_REQUIRE_FIXTURES: "1"
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
-      - run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libgtk-3-dev mesa-vulkan-drivers
-      - run: cargo build --release -p mf-cli
-      - name: Generate evidence
-        run: scripts/evidence.sh evidence
-      - name: GUI workflow screenshots
-        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-desktop --test workflow
-      - name: Real scan fixtures (hash-verified)
-        uses: actions/cache@v6
-        with:
-          path: fixtures/real
-          key: real-fixtures-${{ hashFiles('fixtures/manifest.txt') }}
-      - name: Fetch real scan fixtures
-        run: scripts/fetch-fixtures.sh
-      - name: Real scan before/after renders
-        run: MF_ARTIFACTS=$PWD/evidence cargo test -p mf-operations --test real_scan
-      - name: Surgical GUI frames (select hole, fill, undo, refill)
-        run: |
-          mkdir -p evidence/surgical
-          MF_ARTIFACTS=$PWD/evidence/surgical cargo test -p mf-desktop --test surgical
-      - uses: actions/upload-artifact@v7
-        with:
-          name: milestone-evidence
-          path: evidence/
-      - name: Command log for cross-OS replay
-        run: |
-          mkdir -p xos
-          target/release/meshfixer gen-fixture damaged xos/scan.stl --triangles 200000 --seed 5
-          target/release/meshfixer run xos/scan.stl \
-            --op mesh.remove_small_components --param max_triangles=100 \
-            --op mesh.fill_holes --param refine=true \
-            --save-log xos/session.mfx.log -o xos/linux-result.stl
-          target/release/meshfixer replay xos/session.mfx.log
-      - uses: actions/upload-artifact@v7
-        with:
-          name: replay-fixture
-          path: xos/
-
-  replay-cross-os:
-    # MF-CMD-005 cross-platform level: a log written on Linux must replay on
-    # macOS and Windows as Exact or Equivalent (the summary says which). The
-    # log includes a refined fill_holes, which computes new vertex positions
-    # (MF-ISSUE-025).
-    needs: evidence
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@1.99.1
-      - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p mf-cli
-      - uses: actions/download-artifact@v8
-        with:
-          name: replay-fixture
-          path: xos
-      - name: Replay Linux log
-        shell: bash
-        run: |
-          set -o pipefail
-          target/release/meshfixer replay xos/session.mfx.log | tee replay.txt
-          { echo "### Cross-OS replay on ${RUNNER_OS}"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
   deny:
     runs-on: ubuntu-24.04

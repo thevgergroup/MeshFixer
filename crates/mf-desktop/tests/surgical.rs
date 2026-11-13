@@ -48,7 +48,13 @@ fn two_hole_grid(dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     e.remove_face(FaceId(2 * (n + 1))).unwrap(); // cell (1,1): hole at vertex (1,1) = 8
     e.remove_face(FaceId(2 * (4 * n + 4))).unwrap(); // cell (4,4): hole at vertex (4,4) = 32
     let (m, _) = e.finish().unwrap();
-    mf_io::write_path(&m, &path, mf_io::Format::Obj).unwrap();
+    mf_io::write_path(
+        &m,
+        &path,
+        mf_io::Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     path
 }
 
@@ -106,7 +112,7 @@ fn select_hole_fill_undo_refill() {
     let path = two_hole_grid(dir.path(), "two_holes.obj");
 
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| loops(a).is_some());
@@ -129,11 +135,12 @@ fn select_hole_fill_undo_refill() {
     assert_eq!(h.state().highlighted_loops(), Some(sel.ids.clone()));
     save(&mut h, "01-hole-selected");
 
-    // 2. Fill only that hole (no refinement).
-    h.state_mut().selected_op = "mesh.fill_holes".into();
-    h.state_mut()
-        .params_for("mesh.fill_holes")
-        .insert("refine".into(), ParamValue::Bool(false));
+    // 2. Fill only that hole (no refinement). Properties offers the one
+    // operation valid for a hole, already open.
+    h.get_by_label("Fill hole");
+    let params = h.state_mut().params_for("mesh.fill_holes");
+    params.insert("refine".into(), ParamValue::Bool(false));
+    params.insert("fill_style".into(), ParamValue::Text("flat".into()));
     h.run_steps(2);
     let before = h.state().session.current();
     h.get_by_label("Apply").click();
@@ -145,14 +152,12 @@ fn select_hole_fill_undo_refill() {
         h.state().selection.is_none(),
         "the filled loop's selection is cleared"
     );
+    // The fill's own result stays (M4 final UX I1): "selection cleared"
+    // would only repeat it.
+    let status = h.state().status.clone().unwrap_or_default();
     assert!(
-        h.state()
-            .status
-            .as_deref()
-            .unwrap_or("")
-            .contains("Hole filled"),
-        "{:?}",
-        h.state().status
+        status.starts_with("Filled 1 hole") && !status.contains("selection cleared"),
+        "{status:?}"
     );
     assert_eq!(
         hole_through(h.state(), 8),
@@ -213,7 +218,7 @@ fn selection_belongs_to_the_active_object() {
     let first = two_hole_grid(dir.path(), "first.obj");
     let second = two_hole_grid(dir.path(), "second.obj");
     let mut h = Harness::builder()
-        .with_size((1400.0, 900.0))
+        .with_size((1440.0, 900.0))
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, Some(first.clone())).unwrap());
     wait_until(&mut h, "import + analysis", |a| loops(a).is_some());
@@ -224,8 +229,7 @@ fn selection_belongs_to_the_active_object() {
 
     // Opening another file makes it active: the old selection (another
     // object's loop IDs) must not be drawn on it or applied to it.
-    let ctx = h.ctx.clone();
-    h.state_mut().open(&ctx, second);
+    h.state_mut().open(second);
     wait_until(&mut h, "second import + analysis", |a| {
         a.active != Some(first_id) && loops(a).is_some()
     });

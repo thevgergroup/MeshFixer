@@ -14,3 +14,9 @@ unwrap_used = "warn"
 
 [dependencies]
 serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libc.workspace = true

@@ -2,7 +2,7 @@
 
 use mf_fixtures::{cube, uv_sphere};
 use mf_geometry::Mesh;
-use mf_io::{Format, IoError, SourcePrecision, obj, read_path, stl, write_path};
+use mf_io::{Format, IoError, SourcePrecision, obj, read_model, read_path, stl, write_path};
 
 #[test]
 fn stl_binary_roundtrip() {
@@ -132,7 +132,7 @@ fn read_write_paths() {
     let mesh = uv_sphere(8, 16);
     for (name, fmt) in [("a.stl", Format::StlBinary), ("b.obj", Format::Obj)] {
         let p = dir.path().join(name);
-        write_path(&mesh, &p, fmt).unwrap();
+        write_path(&mesh, &p, fmt, mf_io::threemf::Unit::Millimeter).unwrap();
         let imp = read_path(&p).unwrap();
         assert_eq!(imp.mesh.triangle_count(), mesh.triangle_count());
         assert_eq!(imp.source.format, fmt);
@@ -169,7 +169,13 @@ fn failed_export_leaves_existing_file_intact() {
         vec![[0, 1, 2]],
     )
     .unwrap();
-    let err = write_path(&bad, &p, Format::StlBinary).unwrap_err();
+    let err = write_path(
+        &bad,
+        &p,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap_err();
     assert!(matches!(err, IoError::Export { .. }), "{err:?}");
     assert_eq!(std::fs::read(&p).unwrap(), b"ORIGINAL");
     assert_eq!(
@@ -184,7 +190,13 @@ fn export_replaces_existing_file_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("out.obj");
     std::fs::write(&p, b"OLD").unwrap();
-    write_path(&cube(1.0), &p, Format::Obj).unwrap();
+    write_path(
+        &cube(1.0),
+        &p,
+        Format::Obj,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
     assert_eq!(read_path(&p).unwrap().mesh.triangle_count(), 12);
     assert_eq!(files_in(dir.path()), vec!["out.obj"]);
 }
@@ -216,7 +228,7 @@ fn export_skips_tombstoned_faces() {
         ("a.stl", Format::StlAscii),
     ] {
         let p = dir.path().join(name);
-        write_path(&open, &p, fmt).unwrap();
+        write_path(&open, &p, fmt, mf_io::threemf::Unit::Millimeter).unwrap();
         let back = read_path(&p).unwrap().mesh;
         assert_eq!(back.triangle_count(), 10, "{name}");
         assert_eq!(
@@ -277,4 +289,132 @@ mod stl_header_cases {
         assert!(msg.contains("binary STL") && msg.contains("solid"), "{msg}");
         assert!(!msg.contains("UTF-8"), "{msg}");
     }
+}
+
+/// MF-ISSUE-035: STL/OBJ export applies an object's transform (positions in
+/// f64, winding flipped for a mirrored transform so normals stay outward),
+/// and `write_path(ThreeMf)` takes the document's unit instead of hard-coding
+/// millimetres.
+#[test]
+fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
+    let dir = tempfile::tempdir().unwrap();
+    let mesh = cube(1.0);
+
+    // A rotation + translation: STL export must write the transformed
+    // positions, not the object-space ones.
+    let transform = mf_fixtures::rotation_translation(2, 25.0, [10.0, -2.0, 3.0]);
+    let none = mf_runtime::RunContext::none();
+    let moved = mf_io::transform_mesh(&mesh, &transform, &none).unwrap();
+    let p = dir.path().join("moved.stl");
+    mf_io::write_path(
+        &moved,
+        &p,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
+    let back = read_path(&p).unwrap().mesh;
+    let mut back_pos = back.to_arrays().0;
+    let mut want_pos = moved.to_arrays().0;
+    back_pos.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    want_pos.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    for (b, w) in back_pos.iter().zip(&want_pos) {
+        for i in 0..3 {
+            // Binary STL stores f32: tolerance matches that precision, not
+            // f64 exactness.
+            assert!((b[i] - w[i]).abs() < 1e-5, "{b:?} vs {w:?}");
+        }
+    }
+    // The transform actually moved it: object-space positions aren't a match.
+    let mut orig_pos = mesh.to_arrays().0;
+    orig_pos.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    assert_ne!(back_pos, orig_pos);
+
+    // A mirrored transform (negative determinant) flips winding so normals
+    // stay outward: the transformed cube's signed volume stays positive.
+    let mirror: [f64; 12] = [-1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+    let mirrored = mf_io::transform_mesh(&mesh, &mirror, &none).unwrap();
+    let vol = mf_geometry::inspect(&mirrored).signed_volume.unwrap();
+    assert!(vol > 0.0, "mirrored mesh's winding wasn't flipped: {vol}");
+
+    // `write_path(ThreeMf)` takes the document's unit, not a hard-coded mm.
+    let p3 = dir.path().join("out.3mf");
+    mf_io::write_path(&mesh, &p3, Format::ThreeMf, mf_io::threemf::Unit::Inch).unwrap();
+    let model = read_model(&p3).unwrap();
+    assert_eq!(model.unit, mf_io::threemf::Unit::Inch);
+}
+
+/// M4 final review I3: applying an object's transform for an STL/OBJ export
+/// runs in the export job, so it reports progress, stops when cancelled,
+/// and fails by name (never panics) when the transform puts a vertex out
+/// of range, as a corrupt or hostile 3MF scale can.
+#[test]
+fn transform_mesh_reports_progress_is_cancellable_and_names_an_out_of_range_transform() {
+    let mesh = cube(1.0);
+    let scale = |s: f64| [s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0, s, 0.0, 0.0, 0.0];
+
+    let ctx = mf_runtime::RunContext::none();
+    let moved = mf_io::transform_mesh(&mesh, &scale(2.0), &ctx).unwrap();
+    assert_eq!(moved.triangle_count(), mesh.triangle_count());
+    assert_eq!(ctx.progress.snapshot(), (mf_io::TRANSFORMING, 1.0));
+
+    let cancelled = mf_runtime::RunContext::none();
+    cancelled.cancel.cancel();
+    let r = mf_io::transform_mesh(&mesh, &scale(2.0), &cancelled);
+    assert!(matches!(r, Err(IoError::Cancelled)), "{r:?}");
+
+    // The cube's corners are at ±0.5 (or 0..1): scaled by 1e308 times
+    // 1e10 they overflow to infinity.
+    let r = mf_io::transform_mesh(&mesh, &scale(1e308), &ctx)
+        .and_then(|m| mf_io::transform_mesh(&m, &scale(1e10), &ctx));
+    match r {
+        Err(e @ IoError::TransformOutOfRange { .. }) => {
+            let msg = e.to_string();
+            assert!(msg.contains("transform"), "{msg}");
+        }
+        other => panic!("expected TransformOutOfRange, got {other:?}"),
+    }
+}
+
+/// A cancelled export writes nothing: no file at the path (an existing one
+/// is unchanged) and no temp file (MF-RT-002).
+#[test]
+fn cancelled_export_leaves_nothing_behind() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("out.stl");
+    let mesh = mf_fixtures::cube(1.0);
+    let ctx = mf_runtime::RunContext::none();
+    ctx.cancel.cancel();
+    for format in [Format::StlBinary, Format::Obj, Format::ThreeMf] {
+        let r =
+            mf_io::write_path_with(&mesh, &path, format, mf_io::threemf::Unit::Millimeter, &ctx);
+        assert!(matches!(r, Err(IoError::Cancelled)), "{format:?}: {r:?}");
+    }
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+
+    // An existing file is left as it was.
+    std::fs::write(&path, b"keep").unwrap();
+    let r = mf_io::write_path_with(
+        &mesh,
+        &path,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+        &ctx,
+    );
+    assert!(matches!(r, Err(IoError::Cancelled)));
+    assert_eq!(std::fs::read(&path).unwrap(), b"keep");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+
+    // Not cancelled: written, and the progress ends at "writing" 1.0.
+    let ctx = mf_runtime::RunContext::none();
+    mf_io::write_path_with(
+        &mesh,
+        &path,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(ctx.progress.snapshot(), (mf_io::WRITING, 1.0));
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
 }

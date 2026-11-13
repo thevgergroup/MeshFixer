@@ -3,9 +3,19 @@
 
 use mf_geometry::Mesh;
 
-use crate::{IoError, SourcePrecision, significant_digits};
+use mf_runtime::{RunContext, TICK_INTERVAL};
+
+use crate::{IoError, READING, SourcePrecision, parsed, significant_digits};
 
 pub fn read(text: &str) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError> {
+    read_with(text, &RunContext::none())
+}
+
+/// As [`read`], cancellable, reporting stage `"reading"` by bytes parsed.
+pub fn read_with(
+    text: &str,
+    ctx: &RunContext,
+) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError> {
     let mut positions: Vec<[f64; 3]> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     let mut skipped: Vec<(String, usize)> = Vec::new();
@@ -13,6 +23,9 @@ pub fn read(text: &str) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError>
     let mut poly: Vec<u32> = Vec::new();
 
     for (i, line) in text.lines().enumerate() {
+        if i.is_multiple_of(TICK_INTERVAL as usize) {
+            parsed(ctx, text, line)?;
+        }
         let line_no = i + 1;
         let err = |message: String| IoError::Parse {
             line: line_no,
@@ -72,8 +85,10 @@ pub fn read(text: &str) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError>
         .into_iter()
         .map(|(k, n)| format!("skipped {n} '{k}' line(s): only v/f are imported"))
         .collect();
+    let mesh = Mesh::new_with(positions, triangles, ctx)??;
+    ctx.progress.report(READING, 1.0);
     Ok((
-        Mesh::new(positions, triangles)?,
+        mesh,
         SourcePrecision::Decimal {
             max_significant_digits: digits,
         },

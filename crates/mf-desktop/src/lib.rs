@@ -3,8 +3,14 @@
 
 pub mod analysis;
 pub mod app;
+pub mod defects;
+pub mod framing;
+pub mod gpu;
+pub mod import_dialog;
+pub mod metrics;
 mod panels;
+pub mod theme;
 pub mod viewport;
-mod worker;
+pub mod worker;
 
-pub use app::MeshFixerApp;
+pub use app::{MeshFixerApp, Settings, TreeItem};

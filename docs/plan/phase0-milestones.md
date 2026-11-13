@@ -1,6 +1,6 @@
 # Phase 0 Milestones
 
-Spec: `docs/spec/phase0-spec.md` (v0.3). Each milestone ends with a **demonstration**, **pass/fail gates** and **evidence**: a screen recording, benchmark JSON with device info, and a sample model, stored in `artifacts/<milestone>/` and summarized in `docs/milestones/<milestone>.md`. A milestone isn't closed by passing tests alone.
+Spec: `docs/spec/phase0-spec.md` (v0.5). Each milestone ends with a **demonstration**, **pass/fail gates** and **evidence**: a screen recording, benchmark JSON with device info, and a sample model, stored in `artifacts/<milestone>/` and summarized in `docs/milestones/<milestone>.md`. A milestone isn't closed by passing tests alone.
 
 Detailed task plans are written when each milestone starts, so they build on what the previous milestone taught us. M1: `docs/superpowers/plans/2026-11-08-m1-vertical-slice.md`.
 
@@ -57,8 +57,27 @@ Commits are small and reference requirement IDs (e.g. `feat(io): binary STL read
 
 ## M5: Architecture validation and Phase 0 exit
 
+**Repair tools for messy models** (added 2026-11-09 at the owner's request; planned as one group because they share edge-level surgery and provenance):
+- unzip non-manifold ("tangled") edges, MF-ISSUE-047;
+- fix flipped faces, MF-ISSUE-018;
+- stitch or weld narrow cracks, MF-ISSUE-032;
+- remove degenerate and duplicate faces, MF-ISSUE-048;
+- detect self-intersections, MF-ISSUE-049.
+
+Each is targetable (selection, or the whole object), keeps `untouched_outside_target`, and is measured on the M4 messy-model collection.
+
 **Scope:** `meshfixer schema --mcp` with a golden CLI/MCP consistency test, the spec-propagation test (add a parameter, see it in all three interfaces), a cross-OS equivalence CI job, `simplify` (stretch goal), and the exit report.
 
 **Demo:** Run through all nine exit criteria end to end in one recording.
 
 **Gates:** MF-SPEC-003, MF-CMD-005 (cross-platform level), every exit criterion in spec §12, and OD-2 status reported honestly.
+
+## After Phase 0: modelling roadmap (owner-approved order, 2026-11-09)
+
+The requirements are in spec v0.5 §11b (and §11a for sculpting). Each phase gets its own spec, plan, checkpoints and demo, the same way as Phase 0.
+
+| Phase | Order | Why this order |
+|---|---|---|
+| **Phase 1** | 1. Object transform gizmo (MF-OBJ-001) → 2. Intersection detection (MF-MODEL-002) and booleans (MF-MODEL-001) → 3. Split with alignment pegs and joints (MF-MODEL-003) → 4. Sculpting and carving (MF-SCULPT-*) | Everything needs objects that can be moved. Splitting depends on booleans. Sculpting relies on the M4 incremental-update work |
+| **Phase 2** | 1. Kitbashing and a parts library (MF-MODEL-004) → 2. Parametric connectors: hinges, clasps, joints (MF-MODEL-005) → 3. Plugins (MF-PLUG-001) and scripting (MF-SCRIPT-001) | Connectors are placed like kitbash parts and joined with booleans, which makes them the first test of the plugin system |
+

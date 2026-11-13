@@ -33,7 +33,10 @@ fn remove(target: ObjectId, max: &str) -> Invocation {
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,
-        raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),
+        raw_params: BTreeMap::from([
+            ("max_triangles".to_string(), max.to_string()),
+            ("max_relative_size".to_string(), "100".to_string()),
+        ]),
     }
 }
 
@@ -78,7 +81,7 @@ fn record_is_complete_and_roundtrips_json() {
     assert_eq!(records.len(), 1);
     let r: &CommandRecord = &records[0];
     assert_eq!(r.op_id, "mesh.remove_small_components");
-    assert_eq!(r.op_version, 1);
+    assert_eq!(r.op_version, 2);
     assert_eq!(r.target, id);
     assert_eq!(r.input_revision, input_rev);
     assert_eq!(r.output_revision, s.current());

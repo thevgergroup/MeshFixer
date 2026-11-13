@@ -44,10 +44,14 @@ pub enum TranslateError {
     AllLost {
         lost: Vec<u32>,
     },
-    /// The selected boundary loop was closed by these faces.
+    /// The selected boundary loop was closed by these faces (never empty).
     LoopClosed {
         faces: Vec<FaceId>,
     },
+    /// The selected boundary loop is gone because the faces around it were
+    /// removed (for example its island was deleted); nothing closed it
+    /// (MF-ISSUE-036).
+    LoopRemoved,
     KindNotTranslatable,
     /// These IDs don't name live elements of the selection's own revision.
     NotInSource {
@@ -405,8 +409,9 @@ fn resolve_loops(
             .collect();
         let part = match candidates.len() {
             0 => {
-                // The loop no longer exists: report the created faces that
-                // use its surviving vertices, i.e. the faces that closed it.
+                // The loop no longer exists. If created faces use its
+                // surviving vertices, they closed it: report them. If none
+                // do, its surroundings were removed instead (MF-ISSUE-036).
                 let wanted: BTreeSet<u32> =
                     mapped_edges.iter().flat_map(|&(a, b)| [a, b]).collect();
                 let mut faces: Vec<FaceId> = steps
@@ -424,7 +429,11 @@ fn resolve_loops(
                     .collect();
                 faces.sort_unstable();
                 faces.dedup();
-                Part::Gone(TranslateError::LoopClosed { faces })
+                if faces.is_empty() {
+                    Part::Gone(TranslateError::LoopRemoved)
+                } else {
+                    Part::Gone(TranslateError::LoopClosed { faces })
+                }
             }
             1 => {
                 let id = *candidates.first().expect("exactly one candidate");

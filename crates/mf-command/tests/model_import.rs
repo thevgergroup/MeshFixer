@@ -63,7 +63,10 @@ fn log_importing_a_multi_object_3mf_replays_exactly() {
         op_id: "mesh.remove_small_components".into(),
         target: ids[0],
         selection: None,
-        raw_params: BTreeMap::from([("max_triangles".to_string(), "5".to_string())]),
+        raw_params: BTreeMap::from([
+            ("max_triangles".to_string(), "5".to_string()),
+            ("max_relative_size".to_string(), "100".to_string()),
+        ]),
     })
     .unwrap();
     let log = dir.path().join("s.mfx.log");

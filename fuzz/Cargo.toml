@@ -1,0 +1,47 @@
+[package]
+name = "mf-io-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.mf-io]
+path = "../crates/mf-io"
+
+[dependencies.mf-runtime]
+path = "../crates/mf-runtime"
+
+# Independent workspace: this crate is excluded from the main workspace
+# (cargo-fuzz's standard layout) so its nightly-only dependency on
+# libfuzzer-sys never touches the stable build.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "stl"
+path = "fuzz_targets/stl.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "obj"
+path = "fuzz_targets/obj.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "threemf"
+path = "fuzz_targets/threemf.rs"
+test = false
+doc = false
+bench = false

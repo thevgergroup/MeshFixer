@@ -11,6 +11,8 @@
 
 use std::collections::BTreeSet;
 
+use mf_runtime::{Cancelled, RunContext};
+
 /// Weight of a (partial) triangulation.
 #[derive(Clone, Copy, PartialEq)]
 struct Weight {
@@ -73,6 +75,14 @@ fn dihedral(n1: [f64; 3], n2: [f64; 3]) -> f64 {
     dot(n1, n2).clamp(-1.0, 1.0).acos()
 }
 
+/// Heap bytes of the dynamic-programming tables for an `n`-vertex loop.
+pub fn table_bytes(n: usize) -> u64 {
+    let per_cell = std::mem::size_of::<Weight>()
+        + std::mem::size_of::<usize>()
+        + std::mem::size_of::<[f64; 3]>();
+    (per_cell * n * n) as u64
+}
+
 /// Triangulate the polygon `p[0..n]` (the loop's vertices in loop order).
 /// `outer[k]` is the unit normal of the existing face across boundary edge
 /// `k → k+1` (`k = n-1` is the closing edge `n-1 → 0`).
@@ -90,7 +100,8 @@ pub fn triangulate(
     outer: &[[f64; 3]],
     existing: &BTreeSet<(usize, usize)>,
     min_area: f64,
-) -> Option<Vec<[usize; 3]>> {
+    ctx: &RunContext,
+) -> Result<Option<Vec<[usize; 3]>>, Cancelled> {
     let n = p.len();
     assert!(n >= 3 && outer.len() == n);
     // w[i][j], choice[i][j] for 0 <= i < j < n.
@@ -111,6 +122,9 @@ pub fn triangulate(
         }
     };
     for len in 2..n {
+        // At most n²/4 inner steps per length: milliseconds even at the
+        // 1000-edge limit.
+        ctx.checkpoint()?;
         for i in 0..n - len {
             let j = i + len;
             // (0, n-1) is the closing boundary edge, not a chord.
@@ -155,7 +169,7 @@ pub fn triangulate(
         }
     }
     if choice[idx(0, n - 1)] == usize::MAX {
-        return None;
+        return Ok(None);
     }
     let mut out = Vec::with_capacity(n - 2);
     let mut stack = vec![(0usize, n - 1)];
@@ -168,7 +182,7 @@ pub fn triangulate(
         stack.push((i, m));
         stack.push((m, j));
     }
-    Some(out)
+    Ok(Some(out))
 }
 
 #[cfg(test)]
@@ -179,6 +193,10 @@ mod tests {
     use super::*;
 
     const UP: [f64; 3] = [0.0, 0.0, 1.0];
+
+    fn none() -> RunContext {
+        RunContext::none()
+    }
 
     fn chords(tris: &[[usize; 3]]) -> BTreeSet<(usize, usize)> {
         let mut out = BTreeSet::new();
@@ -201,14 +219,20 @@ mod tests {
             [1.0, 1.0, 0.0],
             [0.0, 1.0, 0.0],
         ];
-        let free = chords(&triangulate(&p, &[UP; 4], &BTreeSet::new(), 0.0).unwrap());
+        let free = chords(
+            &triangulate(&p, &[UP; 4], &BTreeSet::new(), 0.0, &none())
+                .unwrap()
+                .unwrap(),
+        );
         let (used, other) = if free.contains(&(0, 2)) {
             ((0, 2), (1, 3))
         } else {
             ((1, 3), (0, 2))
         };
         assert!(free.contains(&used));
-        let tris = triangulate(&p, &[UP; 4], &BTreeSet::from([used]), 0.0).unwrap();
+        let tris = triangulate(&p, &[UP; 4], &BTreeSet::from([used]), 0.0, &none())
+            .unwrap()
+            .unwrap();
         assert!(!chords(&tris).contains(&used), "{tris:?}");
         assert!(chords(&tris).contains(&other));
     }
@@ -216,7 +240,11 @@ mod tests {
     #[test]
     fn collinear_points_have_no_triangulation() {
         let p = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]];
-        assert!(triangulate(&p, &[UP; 3], &BTreeSet::new(), 1e-12).is_none());
+        assert!(
+            triangulate(&p, &[UP; 3], &BTreeSet::new(), 1e-12, &none())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -228,6 +256,10 @@ mod tests {
             [0.0, 1.0, 0.0],
         ];
         let existing = BTreeSet::from([(0, 2), (1, 3)]);
-        assert!(triangulate(&p, &[UP; 4], &existing, 0.0).is_none());
+        assert!(
+            triangulate(&p, &[UP; 4], &existing, 0.0, &none())
+                .unwrap()
+                .is_none()
+        );
     }
 }

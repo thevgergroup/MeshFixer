@@ -29,7 +29,10 @@ fn remove(target: ObjectId, max: &str) -> Invocation {
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,
-        raw_params: BTreeMap::from([("max_triangles".to_string(), max.to_string())]),
+        raw_params: BTreeMap::from([
+            ("max_triangles".to_string(), max.to_string()),
+            ("max_relative_size".to_string(), "100".to_string()),
+        ]),
     }
 }
 
@@ -109,7 +112,7 @@ fn stale_commit_rejected() {
     let mut s = Session::new();
     let id = s.import(imported(damaged()), "part".into());
     let prepared = s.prepare(remove(id, "5")).unwrap();
-    let completed = std::thread::spawn(move || prepared.run())
+    let completed = std::thread::spawn(move || prepared.run(&mf_runtime::RunContext::none()))
         .join()
         .unwrap()
         .unwrap();
@@ -131,7 +134,7 @@ fn stale_after_undo_then_new_command() {
     let prepared = s.prepare(remove(id, "5")).unwrap();
     s.undo();
     s.execute(remove(id, "3")).unwrap();
-    let completed = prepared.run().unwrap();
+    let completed = prepared.run(&mf_runtime::RunContext::none()).unwrap();
     assert!(matches!(
         s.commit(completed),
         Err(CommandError::StaleInput { .. })

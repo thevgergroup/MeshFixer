@@ -46,6 +46,10 @@ pub struct Object {
     /// are the translation). Stored and exported; Phase 0 tools edit geometry
     /// in object space and the viewer draws the active object untransformed.
     pub transform: [f64; 12],
+    /// Holes marked as intentional openings (M4 Task 12): boundary-loop
+    /// ids of this revision's mesh, sorted. Commands that change the mesh
+    /// translate them to the new revision's ids.
+    pub openings: Vec<u32>,
 }
 
 impl Object {
@@ -88,6 +92,16 @@ impl Document {
         let mut d = self.clone();
         d.objects.push(object);
         d
+    }
+
+    /// A new document with one object's intentional openings replaced
+    /// (sorted), or `None` if the object doesn't exist.
+    pub fn with_openings(&self, id: ObjectId, mut openings: Vec<u32>) -> Option<Document> {
+        openings.sort_unstable();
+        openings.dedup();
+        let mut d = self.clone();
+        d.objects.iter_mut().find(|o| o.id == id)?.openings = openings;
+        Some(d)
     }
 
     /// A new document with one object's geometry replaced, or `None` if the

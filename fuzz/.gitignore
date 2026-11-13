@@ -1,0 +1,13 @@
+target/
+artifacts/
+coverage/
+
+# Corpus directories accumulate libFuzzer-generated, hash-named inputs
+# during smoke/fuzz runs. Only small, hand-picked, named seed files are
+# committed (see corpus/*/*.{stl,obj,3mf}); ignore everything else so a
+# local or CI fuzz run never dirties the tree with megabytes of generated
+# corpus (MF-IO-002).
+corpus/*/*
+!corpus/*/*.stl
+!corpus/*/*.obj
+!corpus/*/*.3mf
