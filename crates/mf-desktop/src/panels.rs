@@ -1252,52 +1252,320 @@ pub fn settings_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     app.show_settings = open;
 }
 
-fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let objects: Vec<_> = app
-        .session
-        .document()
-        .objects()
-        .iter()
-        .map(|o| {
-            (
-                o.id,
-                o.name.clone(),
-                o.mesh().map_or(0, |m| m.triangle_count()),
-            )
-        })
-        .collect();
-    if objects.is_empty() {
-        ui.add_space(theme::SPACE_S);
-        widgets::caption(ui, t!("browser.empty"));
-    }
-    for (id, name, tris) in objects {
-        let active = app.active == Some(id);
-        let hole = app.is_hole(id);
-        // The accessible label says the role too ("peg (hole)").
-        let label = if hole {
-            t!("role.row_hole", name = name)
-        } else {
-            name.clone()
-        };
-        let text = if active {
-            RichText::new(&name).color(theme::TEXT_STRONG)
-        } else {
-            RichText::new(&name).color(theme::TEXT_MUTED)
-        };
-        let tip = format!(
-            "{}{} · Shift-click to select it too · double-click to frame it · right-click for more",
-            count(tris, "triangle"),
-            if active {
-                ""
-            } else {
-                " · click to work on it"
-            }
+/// Search/filter field at the top of the Browser (project organisation
+/// brief, step 2): filters rows by name, case-insensitively. A group
+/// that doesn't match by its own name still shows if any descendant does
+/// (so filtering never hides a match inside a closed-looking folder).
+fn browser_search(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
+        ui.label(RichText::new(icons::INSPECT).font(icons::font(theme::ICON_SIZE - 4.0)));
+        ui.add_sized(
+            egui::vec2(ui.available_width(), 22.0),
+            egui::TextEdit::singleline(&mut app.browser_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
         );
-        object_row(app, ui, id, &name, text, &label, &tip);
-        if app.tree_expanded() == Some(id) {
-            ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+/// `name` matches the Browser's search field (always true when it's
+/// empty).
+fn matches_search(app: &MeshFixerApp, name: &str) -> bool {
+    app.browser_search.is_empty()
+        || name
+            .to_lowercase()
+            .contains(&app.browser_search.to_lowercase())
+}
+
+/// True if `entry` (or, for a group, any of its descendants) matches the
+/// search field.
+fn entry_matches_search(app: &MeshFixerApp, entry: mf_command::Entry) -> bool {
+    match entry {
+        mf_command::Entry::Object(id) => app
+            .session
+            .document()
+            .object(id)
+            .is_some_and(|o| matches_search(app, &o.name)),
+        mf_command::Entry::Group(g) => {
+            let org = app.session.document().organisation();
+            let Some(group) = org.group(g) else {
+                return false;
+            };
+            matches_search(app, &group.name)
+                || group
+                    .order
+                    .iter()
+                    .any(|&e| entry_matches_search(app, e))
         }
     }
+}
+
+fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    browser_search(app, ui);
+    let empty = app.session.document().objects().is_empty();
+    if empty {
+        ui.add_space(theme::SPACE_S);
+        widgets::caption(ui, t!("browser.empty"));
+        return;
+    }
+    let root = app.session.document().organisation().root_order().to_vec();
+    entries_tree(app, ui, &root, None);
+}
+
+/// One level of the Browser tree: every entry of `entries` (the root's,
+/// or one group's `order`). `into` is the group these entries belong to
+/// (`None`: the root), for each row's Move up/down and Move into/out of
+/// group context actions (project organisation brief, step 2: reordering
+/// and moving between groups).
+fn entries_tree(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    entries: &[mf_command::Entry],
+    into: Option<mf_command::GroupId>,
+) {
+    let shown: Vec<mf_command::Entry> = entries
+        .iter()
+        .copied()
+        .filter(|&e| entry_matches_search(app, e))
+        .collect();
+    let n = shown.len();
+    for (shown_index, &entry) in shown.iter().enumerate() {
+        // The real index in `entries` (not `shown`), so Move up/down
+        // target the unfiltered order the document actually keeps.
+        let index = entries.iter().position(|&e| e == entry).unwrap_or(0);
+        let reorder = Reorder {
+            into,
+            index,
+            at_start: shown_index == 0,
+            at_end: shown_index + 1 == n,
+        };
+        match entry {
+            mf_command::Entry::Object(id) => object_entry(app, ui, id, reorder),
+            mf_command::Entry::Group(g) => group_entry(app, ui, g, reorder),
+        }
+    }
+}
+
+/// Where a row sits among its siblings, for its Move up/down actions:
+/// the group it's in (`None`: the root), its index there, and whether
+/// it's first or last among the rows currently shown (so the actions
+/// that would do nothing are left off the menu).
+#[derive(Debug, Clone, Copy)]
+struct Reorder {
+    into: Option<mf_command::GroupId>,
+    index: usize,
+    at_start: bool,
+    at_end: bool,
+}
+
+/// "Move up" / "Move down" (reorder within the same group or the root)
+/// and, inside a group, "Move out of group" (to just after the group, at
+/// the root): the Browser row's right-click menu (project organisation
+/// brief, step 2). Plain, explicit actions rather than a pointer drag,
+/// so reordering is as reliable and accessible as every other action
+/// here.
+fn reorder_actions(app: &mut MeshFixerApp, ui: &mut egui::Ui, entry: mf_command::Entry, r: Reorder) {
+    if !r.at_start
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move up"))
+            .clicked()
+    {
+        app.move_entry(entry, r.into, r.index.saturating_sub(1));
+        ui.close();
+    }
+    if !r.at_end
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move down"))
+            .clicked()
+    {
+        app.move_entry(entry, r.into, r.index + 2);
+        ui.close();
+    }
+    if let Some(g) = r.into
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move out of group"))
+            .clicked()
+    {
+        let outer = app
+            .session
+            .document()
+            .organisation()
+            .parent_of(mf_command::Entry::Group(g));
+        let end = match outer {
+            Some(o) => app
+                .session
+                .document()
+                .organisation()
+                .group(o)
+                .map_or(0, |p| p.order.len()),
+            None => app.session.document().organisation().root_order().len(),
+        };
+        app.move_entry(entry, outer, end);
+        ui.close();
+    }
+}
+
+fn object_entry(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    id: mf_command::ObjectId,
+    reorder: Reorder,
+) {
+    let active = app.active == Some(id);
+    let hole = app.is_hole(id);
+    let Some(name) = app.session.document().object(id).map(|o| o.name.clone()) else {
+        return;
+    };
+    let tris = app
+        .session
+        .document()
+        .object(id)
+        .and_then(|o| o.mesh())
+        .map_or(0, |m| m.triangle_count());
+    // The accessible label says the role too ("peg (hole)").
+    let label = if hole {
+        t!("role.row_hole", name = name)
+    } else {
+        name.clone()
+    };
+    let text = if active {
+        RichText::new(&name).color(theme::TEXT_STRONG)
+    } else {
+        RichText::new(&name).color(theme::TEXT_MUTED)
+    };
+    let tip = format!(
+        "{}{} · Shift-click to select it too · double-click to frame it · right-click for \
+         more; the reorder menu moves it",
+        count(tris, "triangle"),
+        if active { "" } else { " · click to work on it" }
+    );
+    object_row(app, ui, id, &name, text, &label, &tip, reorder);
+    if app.tree_expanded() == Some(id) {
+        ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
+    }
+}
+
+/// A group (folder) row: its own icon and name, a swatch-free hide/lock
+/// pair acting on every member, and its own members indented underneath
+/// (always expanded; collapsing is left for later). Clicking the row
+/// selects every member (project organisation brief, step 2).
+fn group_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, g: mf_command::GroupId, reorder: Reorder) {
+    let Some(group) = app.session.document().organisation().group(g).cloned() else {
+        return;
+    };
+    let members = app.session.document().organisation().members(g);
+    let any_hidden = members.iter().any(|&id| app.is_hidden(id));
+    let any_locked = members.iter().any(|&id| app.is_locked(id));
+    let full_width = ui.available_width();
+    let row_rect =
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
+    let row_hovered = ui.rect_contains_pointer(row_rect);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.scope(|ui| {
+            ui.set_width(SWATCH_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+        });
+        ui.scope(|ui| {
+            ui.set_width(
+                full_width
+                    - SWATCH_WIDTH
+                    - HIDE_TOGGLE_WIDTH
+                    - LOCK_TOGGLE_WIDTH
+                    - ROLE_TOGGLE_WIDTH
+                    - DELETE_BUTTON_WIDTH
+                    - MOVE_MENU_WIDTH,
+            );
+            let selected = app.tree_selected(&TreeItem::Group(g));
+            tree_row(
+                app,
+                ui,
+                &TreeItem::Group(g),
+                Row {
+                    icon: Some((icons::GROUP, theme::TEXT_MUTED)),
+                    text: if selected {
+                        RichText::new(&group.name).color(theme::TEXT_STRONG)
+                    } else {
+                        RichText::new(&group.name).color(theme::TEXT_MUTED)
+                    },
+                    size: None,
+                    label: &group.name,
+                },
+                |ui| {
+                    ui.label(format!(
+                        "{} · click to select every member",
+                        count(members.len(), "object")
+                    ));
+                },
+            );
+        });
+        let hide_label = format!("{} group {}", if any_hidden { "Show" } else { "Hide" }, group.name);
+        ui.scope(|ui| {
+            ui.set_width(HIDE_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || any_hidden {
+                if widgets::icon_button(
+                    ui,
+                    if any_hidden { icons::HIDDEN } else { icons::SHOWN },
+                    &hide_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if any_hidden { "Show" } else { "Hide" })
+                .clicked()
+                {
+                    app.set_hidden(&members, !any_hidden);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        let lock_label = format!("{} group {}", if any_locked { "Unlock" } else { "Lock" }, group.name);
+        ui.scope(|ui| {
+            ui.set_width(LOCK_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || any_locked {
+                if widgets::icon_button(
+                    ui,
+                    if any_locked { icons::LOCKED } else { icons::UNLOCKED },
+                    &lock_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if any_locked { "Unlock" } else { "Lock" })
+                .clicked()
+                {
+                    app.set_locked(&members, !any_locked);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(ROLE_TOGGLE_WIDTH + DELETE_BUTTON_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+        });
+        let group_name = group.name.clone();
+        ui.scope(|ui| {
+            ui.set_width(MOVE_MENU_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                ui.menu_button(
+                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
+                    |ui| reorder_actions(app, ui, mf_command::Entry::Group(g), reorder),
+                )
+                .response
+                .on_hover_text(format!("Reorder group {group_name}"));
+            } else {
+                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
+            }
+        });
+    });
+    ui.indent(("group", g.0), |ui| {
+        entries_tree(app, ui, &group.order, Some(g));
+    });
 }
 
 /// The width `object_row` reserves for its Solid/Hole toggle.
@@ -1306,6 +1574,18 @@ const ROLE_TOGGLE_WIDTH: f32 = 26.0;
 /// role toggle (owner 2026-11-12: "Delete a split part... using both
 /// the Backspace key and the trash button").
 const DELETE_BUTTON_WIDTH: f32 = 26.0;
+/// The width it reserves for its colour swatch (project organisation
+/// brief, step 2): always shown, so the viewport's per-object colour has
+/// a legend right on the row.
+const SWATCH_WIDTH: f32 = 18.0;
+/// The width it reserves for its show/hide toggle, left of the lock
+/// toggle: both hover-only, like the role and delete buttons.
+const HIDE_TOGGLE_WIDTH: f32 = 22.0;
+/// The width it reserves for its lock toggle.
+const LOCK_TOGGLE_WIDTH: f32 = 22.0;
+/// The width it reserves for its reorder menu (Move up/down/out of
+/// group: project organisation brief, step 2).
+const MOVE_MENU_WIDTH: f32 = 18.0;
 
 /// `id`'s row while it is being renamed (double-click, F2, or Cmd+G's
 /// opposite number): a text field at the row's height, pre-filled with
@@ -1344,6 +1624,7 @@ fn rename_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::ObjectI
 /// hovered, so rows stay clean otherwise. One click is one undo step
 /// ([`MeshFixerApp::toggle_role`]), the same change H and the Browser's
 /// menu make.
+#[allow(clippy::too_many_arguments)]
 fn object_row(
     app: &mut MeshFixerApp,
     ui: &mut egui::Ui,
@@ -1352,6 +1633,7 @@ fn object_row(
     text: RichText,
     label: &str,
     tip: &str,
+    reorder: Reorder,
 ) {
     let hole = app.is_hole(id);
     let full_width = ui.available_width();
@@ -1359,10 +1641,30 @@ fn object_row(
         egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
     let row_hovered = ui.rect_contains_pointer(row_rect);
     let renaming = app.renaming.as_ref().is_some_and(|(o, _)| *o == id);
+    let hidden = app.is_hidden(id);
+    let locked = app.is_locked(id);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.scope(|ui| {
-            ui.set_width(full_width - ROLE_TOGGLE_WIDTH - DELETE_BUTTON_WIDTH);
+            ui.set_width(SWATCH_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            ui.centered_and_justified(|ui| match app.object_swatch(id) {
+                Some(c) => swatch(ui, c),
+                None => {
+                    ui.allocate_space(egui::vec2(10.0, 10.0));
+                }
+            });
+        });
+        ui.scope(|ui| {
+            ui.set_width(
+                full_width
+                    - SWATCH_WIDTH
+                    - HIDE_TOGGLE_WIDTH
+                    - LOCK_TOGGLE_WIDTH
+                    - ROLE_TOGGLE_WIDTH
+                    - DELETE_BUTTON_WIDTH
+                    - MOVE_MENU_WIDTH,
+            );
             if renaming {
                 rename_row(app, ui, id);
             } else {
@@ -1385,6 +1687,50 @@ fn object_row(
                         ui.label(tip);
                     },
                 );
+            }
+        });
+        let hide_label = format!("{} {name}", if hidden { "Show" } else { "Hide" });
+        ui.scope(|ui| {
+            ui.set_width(HIDE_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            // Hidden stays visible even when the row isn't hovered, so a
+            // hidden object's row still says so at a glance.
+            if row_hovered || hidden {
+                if widgets::icon_button(
+                    ui,
+                    if hidden { icons::HIDDEN } else { icons::SHOWN },
+                    &hide_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if hidden { "Show" } else { "Hide" })
+                .clicked()
+                {
+                    app.set_hidden(&[id], !hidden);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        let lock_label = format!("{} {name}", if locked { "Unlock" } else { "Lock" });
+        ui.scope(|ui| {
+            ui.set_width(LOCK_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || locked {
+                if widgets::icon_button(
+                    ui,
+                    if locked { icons::LOCKED } else { icons::UNLOCKED },
+                    &lock_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if locked { "Unlock" } else { "Lock" })
+                .clicked()
+                {
+                    app.set_locked(&[id], !locked);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
             }
         });
         let action = if hole {
@@ -1432,6 +1778,20 @@ fn object_row(
                 }
             } else {
                 ui.allocate_space(egui::vec2(22.0, 22.0));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(MOVE_MENU_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                ui.menu_button(
+                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
+                    |ui| reorder_actions(app, ui, mf_command::Entry::Object(id), reorder),
+                )
+                .response
+                .on_hover_text(format!("Reorder {name}"));
+            } else {
+                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
             }
         });
     });
@@ -1617,6 +1977,7 @@ fn item_key(item: &TreeItem) -> (u8, u64, [u32; 2]) {
             Defect::LoosePiece { component, .. } => (4, id.0, [*component, 0]),
             Defect::Tangled { edge, .. } => (5, id.0, *edge),
         },
+        TreeItem::Group(g) => (6, g.0, [0; 2]),
     }
 }
 

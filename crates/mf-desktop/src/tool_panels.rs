@@ -344,7 +344,8 @@ fn context_actions() -> Vec<ContextAction> {
         },
         ContextAction {
             id: "item.frame",
-            applies_to: |_, _| true,
+            // A group has no single place to frame the camera on.
+            applies_to: |_, item| !matches!(item, TreeItem::Group(_)),
             title: |app, item| {
                 let name = match item {
                     TreeItem::Object(id) | TreeItem::Model(id) => app
@@ -354,6 +355,7 @@ fn context_actions() -> Vec<ContextAction> {
                         .map(|o| o.name.clone())
                         .expect("a Browser row's object exists"),
                     TreeItem::Defect(..) => row_name(app, item),
+                    TreeItem::Group(_) => String::new(),
                 };
                 t!("ctx.frame", name = name)
             },

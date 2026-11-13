@@ -154,6 +154,10 @@ pub enum TreeItem {
     Model(ObjectId),
     /// A defect of the active object.
     Defect(ObjectId, Defect),
+    /// A Browser group (folder): selecting it selects every member
+    /// (project organisation brief, step 2), so Move, Hide, Export and
+    /// Delete act on the whole group.
+    Group(mf_command::GroupId),
 }
 
 /// A row double-clicked: frame its item once what that needs is ready (its
@@ -584,6 +588,9 @@ pub struct MeshFixerApp {
     /// Browser row's F2/double-click): which object, and the text so far.
     /// Committed on Enter or losing focus; Esc cancels it.
     pub renaming: Option<(ObjectId, String)>,
+    /// The Browser's search field (project organisation brief, step 2):
+    /// filters rows by name; empty shows everything.
+    pub browser_search: String,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -892,6 +899,7 @@ impl MeshFixerApp {
             intersection_query: None,
             intersections: None,
             renaming: None,
+            browser_search: String::new(),
         };
         if let Some(path) = initial {
             app.open(path);
@@ -1554,10 +1562,14 @@ impl MeshFixerApp {
     /// active object once analysed, its defects. O(objects).
     fn pick_targets(&self) -> Vec<PickTarget> {
         let analysis = self.current_analysis();
+        let org = self.session.document().organisation();
         self.session
             .document()
             .objects()
             .iter()
+            // Hidden objects don't render or pick; locked ones can't be
+            // selected in the view (Task "Project organisation" step 2).
+            .filter(|o| !org.is_hidden(o.id) && !org.is_locked(o.id))
             .filter_map(|o| {
                 let mesh = o.mesh()?;
                 let active = Some(o.id) == self.active;
@@ -2284,11 +2296,26 @@ impl MeshFixerApp {
             .is_some_and(|o| o.is_hole())
     }
 
+    /// `id`'s colour swatch for the Browser row (the same colour its
+    /// viewport draw uses, [`object_color_for`]): `None` for a Hole (its
+    /// row shows the neutral Hole icon instead of a colour) or if the
+    /// Colour objects view is off.
+    pub fn object_swatch(&self, id: ObjectId) -> Option<egui::Color32> {
+        let doc = self.session.document();
+        let o = doc.object(id)?;
+        let mesh = o.mesh()?;
+        if !self.object_colors || o.is_hole() || mesh.has_materials() {
+            return None;
+        }
+        let group = o.properties.get(mf_command::GROUP).map(String::as_str);
+        Some(theme::object_color(o.id.0, group))
+    }
+
     /// Toggle the Solid/Hole role of `ids` (H, or the Browser's menu) as
     /// one undoable step: all become solids if every one is a hole,
     /// otherwise all become holes.
     pub fn toggle_role(&mut self, ids: &[ObjectId]) {
-        if self.busy.is_some() || ids.is_empty() {
+        if self.busy.is_some() || ids.is_empty() || ids.iter().any(|&id| self.is_locked(id)) {
             return;
         }
         let to_hole = !ids.iter().all(|&id| self.is_hole(id));
@@ -2309,6 +2336,105 @@ impl MeshFixerApp {
         if self.session.set_properties(changes, label.clone()) {
             self.after_history_move();
             self.status = Some(label);
+        }
+    }
+
+    /// Every object a Browser row's item stands for: a group selects all
+    /// its members (recursively), an object just itself.
+    pub fn entry_objects(&self, entry: mf_command::Entry) -> Vec<ObjectId> {
+        match entry {
+            mf_command::Entry::Object(id) => vec![id],
+            mf_command::Entry::Group(g) => self.session.document().organisation().members(g),
+        }
+    }
+
+    /// True if `id` is hidden (doesn't render or pick): the Browser's
+    /// show/hide toggle, document state.
+    pub fn is_hidden(&self, id: ObjectId) -> bool {
+        self.session.document().organisation().is_hidden(id)
+    }
+
+    /// True if `id` is locked (can't be selected in the view or edited):
+    /// the Browser's lock toggle, document state.
+    pub fn is_locked(&self, id: ObjectId) -> bool {
+        self.session.document().organisation().is_locked(id)
+    }
+
+    /// Sets `ids`' hidden flag as one undo step (the Browser's eye icon,
+    /// or a group's, which hides every member). All become hidden if any
+    /// isn't yet, otherwise all become shown (matching `toggle_role`'s
+    /// own all-or-nothing rule).
+    pub fn set_hidden(&mut self, ids: &[ObjectId], hidden: bool) {
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let mut org = self.session.document().organisation().clone();
+        for &id in ids {
+            org = org.with_hidden(id, hidden);
+        }
+        let label = if hidden { "Hide" } else { "Show" }.to_owned();
+        if self.session.set_organisation(org, label.clone()) {
+            self.after_history_move();
+            self.status = Some(label);
+        }
+    }
+
+    /// Sets `ids`' locked flag as one undo step (the Browser's padlock).
+    pub fn set_locked(&mut self, ids: &[ObjectId], locked: bool) {
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let mut org = self.session.document().organisation().clone();
+        for &id in ids {
+            org = org.with_locked(id, locked);
+        }
+        let label = if locked { "Lock" } else { "Unlock" }.to_owned();
+        if self.session.set_organisation(org, label.clone()) {
+            self.after_history_move();
+            self.status = Some(label);
+        }
+    }
+
+    /// Groups the selected objects (Cmd+G): a new folder holding them, in
+    /// the selection's own order, one undo step. Does nothing with fewer
+    /// than one object selected.
+    pub fn group_selection(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        let ids = self.selected_objects();
+        if ids.is_empty() {
+            return;
+        }
+        let org = self.session.document().organisation().clone();
+        let entries: Vec<mf_command::Entry> =
+            ids.iter().map(|&id| mf_command::Entry::Object(id)).collect();
+        let (org, _group) = org.with_new_group("Group".to_owned(), &entries);
+        if self.session.set_organisation(org, "Group".to_owned()) {
+            self.after_history_move();
+            self.status = Some("Group".to_owned());
+        }
+    }
+
+    /// Moves `entry` to sit at `index` of `into`'s order (`None`: the
+    /// root): the Browser row's Move up/down/out-of-group menu, one undo
+    /// step. Does nothing if the move is refused (a cycle, or an unknown
+    /// group).
+    pub fn move_entry(
+        &mut self,
+        entry: mf_command::Entry,
+        into: Option<mf_command::GroupId>,
+        index: usize,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        let org = self.session.document().organisation().clone();
+        let Ok(org) = org.with_moved(entry, into, index) else {
+            return;
+        };
+        if self.session.set_organisation(org, "Reorder".to_owned()) {
+            self.after_history_move();
         }
     }
 
@@ -2376,7 +2502,7 @@ impl MeshFixerApp {
     /// button, which acts on the row it's on regardless of which object
     /// is active): the same `object.delete` command, undoable.
     pub fn delete_object(&mut self, id: ObjectId) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.is_locked(id) {
             return;
         }
         self.run_invocation(
@@ -2396,7 +2522,7 @@ impl MeshFixerApp {
     /// undo step. Blank or unchanged names are left alone (no revision).
     pub fn rename_object(&mut self, id: ObjectId, name: String) {
         let trimmed = name.trim();
-        if trimmed.is_empty() || self.busy.is_some() {
+        if trimmed.is_empty() || self.busy.is_some() || self.is_locked(id) {
             return;
         }
         if self
@@ -3099,8 +3225,12 @@ impl MeshFixerApp {
     /// object whose render mesh is ready (MF-ISSUE-042).
     pub fn object_views(&self) -> Vec<ObjectView> {
         let doc = self.session.document();
+        let org = doc.organisation();
         doc.objects()
             .iter()
+            // Hidden objects don't render (Task "Project organisation"
+            // step 2).
+            .filter(|o| !org.is_hidden(o.id))
             .filter_map(|o| {
                 let active = Some(o.id) == self.active;
                 let render = if active
@@ -3342,6 +3472,16 @@ impl MeshFixerApp {
                 self.set_active(*id);
                 self.select_defect(d);
             }
+            TreeItem::Group(g) => {
+                // Selecting a group selects every member (Move, Hide,
+                // Export and Delete then act on the whole group).
+                let members = self.session.document().organisation().members(*g);
+                self.picked = members;
+                if let Some(&last) = self.picked.last() {
+                    self.set_active(last);
+                }
+                self.clear_selection();
+            }
         }
     }
 
@@ -3351,6 +3491,11 @@ impl MeshFixerApp {
     /// ([`PULSE_SECONDS`]) so the eye finds it.
     pub fn tree_find(&mut self, item: &TreeItem) {
         self.tree_select(item);
+        // A group has no single place to frame the camera on (its
+        // members can sit anywhere); double-clicking it only selects.
+        if matches!(item, TreeItem::Group(_)) {
+            return;
+        }
         let mesh = match item {
             TreeItem::Defect(..) => self.active_mesh().cloned(),
             _ => None,
@@ -3368,10 +3513,12 @@ impl MeshFixerApp {
     /// The pointer is over a row of the tree this frame: highlight its
     /// item in the view (its outline or glow; the camera stays).
     pub fn tree_hover(&mut self, item: &TreeItem) {
-        self.hover = Some(match item {
-            TreeItem::Object(id) | TreeItem::Model(id) => (*id, OverlayTarget::Object),
-            TreeItem::Defect(id, d) => (*id, defect_target(d)),
-        });
+        self.hover = match item {
+            TreeItem::Object(id) | TreeItem::Model(id) => Some((*id, OverlayTarget::Object)),
+            TreeItem::Defect(id, d) => Some((*id, defect_target(d))),
+            // A group has no single object to outline in the view.
+            TreeItem::Group(_) => None,
+        };
     }
 
     /// The object whose defects the tree lists under its row: the active
@@ -3407,6 +3554,12 @@ impl MeshFixerApp {
                 (None, _) => self.current_inspected().is_some_and(|i| i.defect == *d),
                 _ => false,
             },
+            // A group shows selected once every member is among the
+            // objects picked together (and there's at least one).
+            TreeItem::Group(g) => {
+                let members = self.session.document().organisation().members(*g);
+                !members.is_empty() && members.iter().all(|m| self.picked.contains(m))
+            }
         }
     }
 
@@ -3492,6 +3645,11 @@ impl MeshFixerApp {
                     return;
                 }
                 crate::framing::defect_view(&cam, &place, &scene, |o, d| self.ray_hit(o, d))
+            }
+            // `tree_find` never starts a `Find` for a group.
+            TreeItem::Group(_) => {
+                self.find = None;
+                return;
             }
         };
         self.find = None;
@@ -4967,7 +5125,7 @@ impl MeshFixerApp {
     /// `object.set_transform` (one undo step), run like any command. The
     /// object is drawn there meanwhile; `status` says what changed.
     pub fn commit_transform(&mut self, object: ObjectId, transform: [f64; 12], status: String) {
-        if self.busy.is_some() || self.active != Some(object) {
+        if self.busy.is_some() || self.active != Some(object) || self.is_locked(object) {
             return;
         }
         if self.move_group(object, transform, &status) {
@@ -5451,6 +5609,14 @@ impl MeshFixerApp {
             && let Some(name) = self.session.document().object(id).map(|o| o.name.clone())
         {
             self.renaming = Some((id, name));
+        }
+        // Cmd/Ctrl+G: group the selected objects (Task "Project
+        // organisation" step 2).
+        let group = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::G));
+        if group {
+            self.group_selection();
         }
         if !typing && !ctx.egui_wants_keyboard_input() {
             self.tool_keys(&ctx);

@@ -1629,6 +1629,35 @@ impl Session {
         true
     }
 
+    /// Replaces the Browser's organisation (groups, order, hidden,
+    /// locked: project organisation brief, step 2) as ONE document step
+    /// that changes no geometry, undone like any other. `label` names
+    /// the history step. False (and no step) if `organisation` is
+    /// exactly what's already there.
+    pub fn set_organisation(
+        &mut self,
+        organisation: mf_document::Organisation,
+        label: String,
+    ) -> bool {
+        if *self.document().organisation() == organisation {
+            return false;
+        }
+        let document = self.document().with_organisation(organisation);
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: None,
+            properties: Vec::new(),
+        });
+        true
+    }
+
     pub fn can_undo(&self) -> bool {
         self.current_node().parent.is_some()
     }

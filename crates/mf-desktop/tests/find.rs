@@ -133,6 +133,35 @@ fn double_click_row(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     double_click_at(h, pos);
 }
 
+/// Selects and frames an object's row: a click, then focusing it (as Tab
+/// would) and Enter, which `tree_row` treats as a click too and always
+/// frames (M4 Task 8a). An object row's own double-click now renames it
+/// in place instead (Task "Project organisation" step 1), so Enter is
+/// this row kind's way to do what double-click still does for every
+/// other row (Model, a defect).
+fn frame_object_row(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
+    let pos = row_pos(h, label);
+    click_at(h, pos);
+    h.run_steps(2);
+    h.get_all_by_label(label).next().unwrap().focus();
+    h.run_steps(2);
+    h.event(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: true,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.event(egui::Event::Key {
+        key: egui::Key::Enter,
+        physical_key: None,
+        pressed: false,
+        repeat: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+}
+
 /// The input time of the frame just run (seconds).
 fn now(h: &Harness<'_, MeshFixerApp>) -> f64 {
     h.ctx.input(|i| i.time)
@@ -584,6 +613,9 @@ fn rows_show_piece_size_and_hole_measurements() {
     assert_eq!(copy.row, "Hole 1 · 4 edges · 80.0 in");
 }
 
+/// Framing an object row (click then Enter; its own double-click renames
+/// it in place instead, Task "Project organisation" step 1) activates
+/// and frames it.
 #[test]
 fn double_click_on_an_object_row_frames_that_object_and_activates_it() {
     require_gpu!("double_click_on_an_object_row_frames_that_object_and_activates_it");
@@ -607,7 +639,7 @@ fn double_click_on_an_object_row_frames_that_object_and_activates_it() {
     let (_, before) = on_screen(h.state(), &points);
     assert!(before < 0.1, "small at first: {before}");
 
-    double_click_row(&mut h, "far");
+    frame_object_row(&mut h, "far");
     assert_eq!(h.state().active, Some(far), "it becomes the active object");
     finish_move(&mut h);
     let (off_centre, size) = on_screen(h.state(), &points);
@@ -716,13 +748,14 @@ fn every_row_kind_uses_the_shared_row_behaviour() {
     let (off_centre, _) = on_screen(h.state(), &object_points(h.state(), plate));
     assert!(off_centre < 0.05, "Model at the view centre: {off_centre}");
 
-    // An object row: hovering another object lights it up, double-click
-    // activates and frames it.
+    // An object row: hovering another object lights it up; clicking it
+    // then Enter activates and frames it (its own double-click renames
+    // it in place instead, Task "Project organisation" step 1).
     let all: Vec<u32> = (0..12).collect();
     let pos = row_pos(&h, "other");
     h.event(egui::Event::PointerMoved(pos));
     wait_until(&mut h, "hover on other", |a| hover_shown(a, other, &all));
-    double_click_at(&mut h, pos);
+    frame_object_row(&mut h, "other");
     assert_eq!(h.state().active, Some(other));
     finish_move(&mut h);
     let (off_centre, _) = on_screen(h.state(), &object_points(h.state(), other));
@@ -966,9 +999,11 @@ fn corners_for(cam: &OrbitCamera, rect: egui::Rect, points: &[DVec3]) -> Vec<egu
         .collect()
 }
 
-/// Fix round 1, I2: an object row double-clicked while the view is edge-on
-/// to a flat object turns to show its broad side (its projected area is
-/// at least 40% of a face-on view's), keeping "up".
+/// Fix round 1, I2: framing an object row (click then Enter; its own
+/// double-click renames it in place instead, Task "Project organisation"
+/// step 1) while the view is edge-on to a flat object turns to show its
+/// broad side (its projected area is at least 40% of a face-on view's),
+/// keeping "up".
 #[test]
 fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
     require_gpu!("double_click_on_an_object_row_shows_a_flat_object_face_on");
@@ -985,7 +1020,7 @@ fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
     // One object with nothing to fix: the Browser starts folded away.
     h.get_by_label("Show Browser").click();
     h.run_steps(3);
-    double_click_row(&mut h, "slab");
+    frame_object_row(&mut h, "slab");
     finish_move(&mut h);
     let cam = h.state().camera.unwrap();
     let rect = h.state().viewport.last_rect.unwrap();
@@ -1003,13 +1038,14 @@ fn double_click_on_an_object_row_shows_a_flat_object_face_on() {
     assert!(off_centre < 0.05, "{off_centre}");
 }
 
-/// Fix round 1, P2: double-clicking an object's row frames the object and
-/// doesn't pulse whatever was selected on it. Later (`2372f44`, "object-
-/// row clicks clear stale sub-selections"): the object row is a whole-
-/// object pick, so it also clears a leftover sub-selection from before
-/// (a hole's boundary loop, here) rather than leaving it to silently
-/// block Delete and whole-object tools with nothing in the row to say
-/// why.
+/// Fix round 1, P2: framing an object's row doesn't pulse whatever was
+/// selected on it. Later (`2372f44`, "object-row clicks clear stale
+/// sub-selections"): the object row is a whole-object pick, so a plain
+/// click on it already clears a leftover sub-selection from before (a
+/// hole's boundary loop, here) rather than leaving it to silently block
+/// Delete and whole-object tools with nothing in the row to say why.
+/// (The row's own double-click now renames it in place instead, Task
+/// "Project organisation" step 1, so framing it is a click then Enter.)
 #[test]
 fn double_click_on_an_object_row_does_not_pulse_the_selection() {
     require_gpu!("double_click_on_an_object_row_does_not_pulse_the_selection");
@@ -1025,9 +1061,7 @@ fn double_click_on_an_object_row_does_not_pulse_the_selection() {
     // Somewhere else first, so framing the object moves the camera.
     h.state_mut().camera.as_mut().unwrap().zoom(0.2);
     h.step();
-    // Right after the click on the hole's row: egui counts the next two
-    // clicks as a triple-click.
-    double_click_row(&mut h, "plate");
+    frame_object_row(&mut h, "plate");
     let (cameras, pulse) = finish_move(&mut h);
     assert!(cameras.windows(2).any(|w| w[0] != w[1]), "framed");
     assert!(
