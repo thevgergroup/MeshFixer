@@ -14,19 +14,23 @@ fn three_part(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("parts.3mf");
     let shifted = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 20.0, 0.0, 0.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Inch,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "base".into(),
                 mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "lid".into(),
                 mesh: cube(0.5),
                 transform: shifted,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "pin".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,
@@ -60,6 +64,7 @@ fn log_importing_a_multi_object_3mf_replays_exactly() {
     let mut s = Session::new();
     let (ids, _) = s.import_model(read_model(&three_part(dir.path())).unwrap());
     s.execute(Invocation {
+        operands: Vec::new(),
         op_id: "mesh.remove_small_components".into(),
         target: ids[0],
         selection: None,

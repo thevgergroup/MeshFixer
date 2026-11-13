@@ -381,14 +381,17 @@ fn run_on_3mf_keeps_every_object() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("in.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "a".into(),
                 mesh: merge(&[cube(1.0), translated(&tetrahedron(), [5.0, 0.0, 0.0])]),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "b".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,
@@ -487,8 +490,10 @@ fn run_applies_a_mirrored_transform_and_keeps_normals_outward() {
         -1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0,
     ];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "box".into(),
             mesh: cube(1.0),
             transform: mirror,
@@ -529,8 +534,10 @@ fn translated_cube_log(dir: &Path) -> std::path::PathBuf {
     use mf_io::threemf::{Model, ModelObject, Unit};
     let input = dir.join("moved.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "box".into(),
             mesh: cube(1.0),
             transform: [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 100.0, 0.0, 0.0],
@@ -608,14 +615,17 @@ fn replay_refuses_to_write_several_objects_to_one_stl() {
     let input = dir.path().join("pair.3mf");
     let at = |x: f64| [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, 0.0, 0.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "left".into(),
                 mesh: cube(1.0),
                 transform: at(0.0),
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "right".into(),
                 mesh: cube(1.0),
                 transform: at(10.0),
@@ -966,8 +976,10 @@ fn units_flag_on_a_3mf_is_a_usage_error() {
     let input = dir.path().join("in.3mf");
     mf_io::write_model_path(
         &mf_io::threemf::Model {
+            metadata: Default::default(),
             unit: mf_io::threemf::Unit::Millimeter,
             objects: vec![mf_io::threemf::ModelObject {
+                metadata: Default::default(),
                 name: "a".into(),
                 mesh: cube(1.0),
                 transform: mf_io::threemf::IDENTITY,
@@ -984,4 +996,395 @@ fn units_flag_on_a_3mf_is_a_usage_error() {
         String::from_utf8_lossy(&r.stderr)
     );
     assert!(String::from_utf8_lossy(&r.stderr).contains("--units"));
+}
+
+/// Two objects in a 3MF, for the object operations.
+fn two_objects(dir: &Path) -> std::path::PathBuf {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+    let input = dir.join("two.3mf");
+    let model = Model {
+        metadata: Default::default(),
+        unit: Unit::Millimeter,
+        objects: vec![
+            ModelObject {
+                metadata: Default::default(),
+                name: "a".into(),
+                mesh: cube(1.0),
+                transform: IDENTITY,
+            },
+            ModelObject {
+                metadata: Default::default(),
+                name: "b".into(),
+                mesh: tetrahedron(),
+                transform: IDENTITY,
+            },
+        ],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    input
+}
+
+/// MF-OBJ-001, D7: `run --op object.set_transform --param transform=…`
+/// then `object.drop_to_plate` writes the placement to the 3MF bit for
+/// bit, leaves the other object alone, and the saved log replays exactly.
+#[test]
+fn run_sets_a_transform_and_drops_to_the_plate() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    let log = dir.path().join("s.mfx.log");
+    // 90 degrees about x (world z = y + 5), then dropped: z translation 0.
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "object.set_transform",
+        "--param",
+        "transform=1,0,0,0,0,1,0,-1,0,0.25,-7.5,5",
+        "--op",
+        "object.drop_to_plate",
+        "--save-log",
+        log.to_str().unwrap(),
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    assert_eq!(back.objects.len(), 2);
+    let want = [
+        1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, -1.0, 0.0, 0.25, -7.5, 0.0,
+    ];
+    assert_eq!(
+        back.objects[0].transform.map(f64::to_bits),
+        want.map(f64::to_bits)
+    );
+    assert_eq!(back.objects[1].transform, mf_io::threemf::IDENTITY);
+    let replayed = meshfixer(&["replay", log.to_str().unwrap()]);
+    let text = String::from_utf8_lossy(&replayed.stdout);
+    assert!(replayed.status.success(), "{text}");
+    assert!(text.contains("verdicts: 2 exact"), "{text}");
+}
+
+/// `--operand name=<index>` is checked against the operation's spec and
+/// the input's objects before anything is written.
+#[test]
+fn run_operand_mistakes_are_usage_errors() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    for operand in ["tool=1", "tool", "tool=x"] {
+        let r = meshfixer(&[
+            "run",
+            input.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--op",
+            "object.drop_to_plate",
+            "--operand",
+            operand,
+        ]);
+        assert_eq!(
+            r.status.code(),
+            Some(2),
+            "{operand}: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert!(!out.exists());
+    }
+}
+
+/// Review I3: no operation writes over its input, however the output path
+/// is spelled; the input is left as it was.
+#[test]
+fn an_output_that_is_the_input_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let before = std::fs::read(&input).unwrap();
+    let sub = dir.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    let spelled = sub.join("..").join("two.3mf");
+    for output in [input.to_str().unwrap(), spelled.to_str().unwrap()] {
+        for args in [
+            vec!["delete", input.to_str().unwrap(), "-o", output],
+            vec![
+                "run",
+                input.to_str().unwrap(),
+                "-o",
+                output,
+                "--op",
+                "object.drop_to_plate",
+            ],
+        ] {
+            let r = meshfixer(&args);
+            assert_eq!(
+                r.status.code(),
+                Some(2),
+                "{args:?}: {}",
+                String::from_utf8_lossy(&r.stderr)
+            );
+            assert!(String::from_utf8_lossy(&r.stderr).contains("is the input file"));
+        }
+    }
+    assert_eq!(std::fs::read(&input).unwrap(), before, "input untouched");
+}
+
+/// Review I3: `delete --object` picks the object by position or name; the
+/// 3MF keeps the others. Deleting the last object refuses to write an
+/// empty document, by name.
+#[test]
+fn delete_chooses_its_object_and_never_writes_an_empty_document() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    for (choice, kept) in [("1", "a"), ("a", "b")] {
+        let out = dir.path().join(format!("out-{choice}.3mf"));
+        let r = meshfixer(&[
+            "delete",
+            input.to_str().unwrap(),
+            "--object",
+            choice,
+            "-o",
+            out.to_str().unwrap(),
+        ]);
+        assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+        let back = mf_io::read_model(&out).unwrap();
+        let names: Vec<&str> = back.objects.iter().map(|o| o.name.as_str()).collect();
+        assert_eq!(names, vec![kept]);
+    }
+    for bad in ["2", "nope"] {
+        let r = meshfixer(&[
+            "delete",
+            input.to_str().unwrap(),
+            "--object",
+            bad,
+            "-o",
+            dir.path().join("x.3mf").to_str().unwrap(),
+        ]);
+        assert_eq!(r.status.code(), Some(2), "{bad}");
+    }
+    // A one-object file: deleting it leaves nothing to write.
+    let single = dir.path().join("single.stl");
+    write_path(
+        &cube(1.0),
+        &single,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
+    let out = dir.path().join("empty.3mf");
+    let r = meshfixer(&[
+        "delete",
+        single.to_str().unwrap(),
+        "--units",
+        "mm",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert_eq!(r.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&r.stderr);
+    assert!(stderr.contains("every object was deleted"), "{stderr}");
+    assert!(!out.exists());
+}
+
+/// The boolean demo path (Phase 1 Tasks 8, 8a, 9): union and subtract a
+/// part, find intersections, the `operand_overlaps_itself` refusal with
+/// its next action, Make solid, then the boolean that was refused.
+#[test]
+fn boolean_make_solid_and_intersections_demo() {
+    let dir = tempfile::tempdir().unwrap();
+    let p = |n: &str| dir.path().join(n).to_string_lossy().into_owned();
+    let ok = |o: Output| {
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        o
+    };
+    ok(meshfixer(&["gen-fixture", "boolean-demo", &p("demo.3mf")]));
+    for op in ["union", "subtract", "intersect"] {
+        ok(meshfixer(&[
+            "boolean",
+            &p("demo.3mf"),
+            "--tool",
+            "1",
+            "--operation",
+            op,
+            "-o",
+            &p("out.3mf"),
+        ]));
+    }
+    let found = ok(meshfixer(&[
+        "intersections",
+        &p("demo.3mf"),
+        "--other",
+        "1",
+    ]));
+    let report: serde_json::Value = serde_json::from_slice(&found.stdout).unwrap();
+    assert!(report["pair_count"].as_u64().unwrap() > 0);
+    let refused = meshfixer(&[
+        "boolean",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("x.3mf"),
+    ]);
+    assert!(!refused.status.success());
+    let err = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        err.contains("operand_overlaps_itself") && err.contains("Run Make solid"),
+        "{err}"
+    );
+    ok(meshfixer(&[
+        "make-solid",
+        &p("demo.3mf"),
+        "--object",
+        "2",
+        "--cell-size",
+        "0.5",
+        "-o",
+        &p("solid.3mf"),
+    ]));
+    ok(meshfixer(&[
+        "boolean",
+        &p("solid.3mf"),
+        "--object",
+        "2",
+        "--tool",
+        "3",
+        "-o",
+        &p("joined.3mf"),
+    ]));
+}
+
+/// D20: `--fit-profile` fills the parameters the user didn't set from a
+/// saved profile, and the log records those values.
+#[test]
+fn fit_profile_flag_sets_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("block.stl");
+    write_path(
+        &cube(10.0),
+        &input,
+        Format::StlBinary,
+        mf_io::threemf::Unit::Millimeter,
+    )
+    .unwrap();
+    let config = dir.path().join("config");
+    std::fs::create_dir_all(config.join("meshfixer")).unwrap();
+    std::fs::write(
+        config.join("meshfixer").join("fit-profiles.yaml"),
+        "active: Tight\nprofiles:\n  - name: Tight\n    peg_clearance: 0.15\n    length_allowance: 0.3\n    hinge_gap: 0.4\n    clasp_interference: 0.3\n",
+    )
+    .unwrap();
+    let run = |profile: Option<&str>, log: &Path, extra: &[&str]| {
+        let mut args = vec![
+            "run",
+            input.to_str().unwrap(),
+            "--op",
+            "mesh.split_plane",
+            "--param",
+            "plane_point=0,0,5",
+        ];
+        args.extend_from_slice(extra);
+        args.extend_from_slice(&["--save-log", log.to_str().unwrap()]);
+        let out_path = log.with_extension("3mf");
+        args.extend_from_slice(&["-o", out_path.to_str().unwrap()]);
+        if let Some(p) = profile {
+            args.extend_from_slice(&["--fit-profile", p]);
+        }
+        let out = Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+            .args(&args)
+            .env("MESHFIXER_CONFIG_DIR", &config)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        std::fs::read_to_string(log.join("commands.jsonl")).unwrap()
+    };
+    let tight = run(Some("Tight"), &dir.path().join("a.mfx.log"), &[]);
+    assert!(tight.contains("\"peg_clearance\":0.15"), "{tight}");
+    assert!(tight.contains("\"length_allowance\":0.3"), "{tight}");
+    // An explicit --param beats the profile.
+    let explicit = run(
+        Some("Tight"),
+        &dir.path().join("b.mfx.log"),
+        &["--param", "peg_clearance=0.05"],
+    );
+    assert!(explicit.contains("\"peg_clearance\":0.05"), "{explicit}");
+    // No flag: the built-in profile, whatever is active in Settings.
+    let builtin = run(None, &dir.path().join("c.mfx.log"), &[]);
+    assert!(builtin.contains("\"peg_clearance\":0.2"), "{builtin}");
+    // An unknown profile is a usage error naming the ones there are.
+    let out = Command::new(env!("CARGO_BIN_EXE_meshfixer"))
+        .args([
+            "run",
+            input.to_str().unwrap(),
+            "--op",
+            "mesh.split_plane",
+            "--fit-profile",
+            "Nope",
+            "-o",
+            dir.path().join("x.3mf").to_str().unwrap(),
+        ])
+        .env("MESHFIXER_CONFIG_DIR", &config)
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Nope") && err.contains("Tight"), "{err}");
+}
+
+/// Regression: `mesh.split_plane`'s target is `many` (every selected
+/// object, in one command, D11); extra targets are recorded as operands
+/// named `target` (the same name the command layer's `TARGET_OPERAND`
+/// uses). `run`'s `--operand` validation used to check every operand's
+/// name against the spec's `operands:` list, which never includes
+/// `target` (it's the implicit operand 0), so `--operand target=<n>`
+/// was always refused as "has no operand named 'target'", even though
+/// the command layer (and so the desktop Split panel, which builds the
+/// same `Invocation` directly) has always accepted it. `--operand
+/// target=<n>` must be accepted for an operation whose target is
+/// `many`, and still refused for one that isn't.
+#[test]
+fn run_accepts_target_as_an_operand_name_for_a_many_target_operation() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = two_objects(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "mesh.split_plane",
+        "--param",
+        "plane_point=0,0,0.5",
+        "--operand",
+        "target=1",
+    ]);
+    assert!(r.status.success(), "{}", String::from_utf8_lossy(&r.stderr));
+    let back = mf_io::read_model(&out).unwrap();
+    let mut names: Vec<&str> = back.objects.iter().map(|o| o.name.as_str()).collect();
+    names.sort_unstable();
+    assert_eq!(
+        names,
+        ["a (bottom)", "a (top)", "b (bottom)", "b (top)"],
+        "both targets were split in one command"
+    );
+    // An operation whose target isn't `many` still refuses `target` as
+    // an operand name.
+    let refused = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        dir.path().join("refused.3mf").to_str().unwrap(),
+        "--op",
+        "object.drop_to_plate",
+        "--operand",
+        "target=1",
+    ]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("has no operand named 'target'"));
 }

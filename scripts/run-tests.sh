@@ -39,6 +39,10 @@ timing=(
   "mf-command cancel checkpoints_at_least_every_100ms cancel_to_stop_within_250ms_on_5m_import_and_fill"
   "mf-desktop progress ui_frames_stay_under_50ms cancel_is_prompt cancel_button_stops_fill escape_cancels_the_job_first ui_frames_stay_under_50ms_while_hovering"
   "mf-desktop layout clicking_a_target_shows_its_operations_in_properties"
+  # The Transform tool on 30M triangles (Phase 1 Task 5): a gizmo drag
+  # costs no more than an orbit (+1 ms), and Drop to plate keeps UI frames
+  # under 50 ms. A 30M sphere in memory: alone.
+  "mf-desktop transform dragging_a_30m_object_keeps_frames_under_orbit_plus_1ms ui_frames_stay_under_50ms_while_dropping_30m_to_plate analysis_stays_available_after_moving_a_30m_object turning_a_30m_object_keeps_the_analysis_and_frames_under_50ms"
   # GUI timing under parallel load: the framing animation after
   # select_defect sometimes outlasts Harness::run's step budget when the
   # whole browser file runs in parallel (passes alone; seen in Task 12a).
@@ -46,6 +50,8 @@ timing=(
   # Fairing the largest holes (MF-ISSUE-053): seconds of single-threaded
   # solve, timed, with a 100 ms checkpoint gate.
   "mf-operations fill_holes large_holes_fair_quickly"
+  # mesh.split_plane on 5M and 30M (Phase 1 Task 12): each alone.
+  "mf-operations split_timing split_5m_under_2s split_30m_under_10s"
   # 5M memory measurements (5M requested, ≈4.8M actual): alone, so no other test's 5M mesh is in memory
   # at the same time (and the allocator counts only their own process).
   "mf-geometry topology_memory topology_build_peak_under_150mb_at_5m"
@@ -54,12 +60,37 @@ timing=(
   # The messy-model collection (15 real files, one of 5.7M triangles):
   # alone, so its recorded times and peak heap are its own.
   "mf-operations messy_corpus every_messy_model_imports_and_analyses every_messy_model_fills_or_refuses_by_name targeted_fill_on_messy_models_is_untouched_outside messy_results_are_recorded"
+  # mesh.boolean (Phase 1 Task 8): the messy corpus, and the D5 window's
+  # timing gates (30M scan ∪ 50k part ≤ 3 s, 1M ∪ 1M ≤ 10 s, cancel inside
+  # the kernel ≤ 250 ms). The 30M sphere in memory: alone.
+  "mf-operations boolean messy_corpus_booleans_are_valid_or_named union_30m_scan_with_50k_part_under_3s union_1m_by_1m_under_10s cancel_within_250ms_in_kernel"
+  # Seam blend on a 30M-scan-sized sphere (Phase 1 Task 22): the change
+  # window stays local. The 30M sphere in memory: alone.
+  "mf-operations blend blend_on_30m_scan_touches_only_the_window"
+  # Intersection analysis (Phase 1 Task 9): 30M vs 50k ≤ 1 s, and a
+  # cancellable 5M self-intersection pass. The 30M sphere in memory: alone.
+  "mf-geometry intersect intersections_30m_vs_50k_under_1s self_intersections_5m_cancellable"
+  # UC1 on the real scan (Phase 1 Task 16a): fill, make solid and three
+  # splits with dowels of a 1M-triangle scan, ~9 minutes.
+  "mf-cli uc1_split_pegs uc1_on_the_real_scan"
+  # mesh.make_solid on real self-intersecting scans (winged victory, 5.7M).
+  "mf-operations make_solid make_solid_on_real_self_intersecting_scans"
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,
   # so its frames don't compete with other GPU tests.
   "mf-cli bench_orbit bench_orbit_json_has_device_info_and_percentiles"
 )
 
+# Skipped here and run by nobody in this script: the boolean kernel
+# qualification (Phase 1 Tasks 7 and 7b, ADR-0002) is run by hand (heavy.yml
+# `kernel-qualification`, manual dispatch only; or locally with
+# `cargo test -p mf-boolean --features manifold-rust --test qualify`), so a
+# kernel's verdict doesn't turn a milestone's heavy run red.
+not_here=(qualify_corpus qualify_windows qualify_1m_union)
+
 skips=()
+for name in "${not_here[@]}"; do
+  skips+=(--skip "$name")
+done
 for entry in "${timing[@]}"; do
   read -r -a words <<<"$entry"
   for name in "${words[@]:2}"; do

@@ -1,0 +1,29 @@
+# Test-only (`test-kinds` feature, mirroring mf-document's cfg(feature =
+# "test-kinds") convention): a spec with a `unit: mm` parameter, so
+# mf-command's tests can exercise real unit-conversion wiring
+# (Session::prepare, replay, reexecute) without changing a real
+# operation's parameters. Compiled in only when mf-spec's "test-kinds"
+# feature is enabled (mf-command's dev-dependency only).
+id: test.unit_conversion
+version: 1
+summary: "Test-only operation with a unit: mm parameter (conversion wiring)."
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: clearance
+    type: float
+    default: 0.0
+    unit: mm
+    description: A length, converted to document units at prepare time
+# Declared geometry_changes (not read_only), so Session::commit creates
+# a CommandRecord a test can inspect; execute() always "changes" to an
+# identical copy with empty provenance (see test_unit_conversion.rs).
+preconditions: []
+postconditions:
+  - geometry unchanged
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true

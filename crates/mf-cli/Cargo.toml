@@ -17,6 +17,7 @@ mf-selection.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
+mf-parts.workspace = true
 mf-command.workspace = true
 mf-render.workspace = true
 mf-fixtures.workspace = true

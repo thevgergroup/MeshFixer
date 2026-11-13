@@ -26,6 +26,7 @@ fn island_first() -> Mesh {
 
 fn invocation(target: ObjectId, op: &str, params: &[(&str, &str)]) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: op.into(),
         target,

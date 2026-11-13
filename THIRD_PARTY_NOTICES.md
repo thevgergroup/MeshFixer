@@ -30,3 +30,60 @@ not the crate metadata. It's permissive but has reserved font names.
   We don't modify them.
 
 None of these licences place obligations on MeshFixer's own source code.
+
+## Boolean kernel (`mf-boolean`, Phase 1 D1 and D2)
+
+Added 2026-11-10 for the Task 7 kernel qualification (ADR-0002). All are
+on the `deny.toml` allowlist; no exception is needed.
+
+| Crate | Licence | Why |
+|---|---|---|
+| `manifold-rust` =0.19.2 | Apache-2.0 | the boolean kernel (robust engine only), D1 |
+| `clipper2-rust` 1.2 | BSL-1.0 | a `manifold-rust` dependency (2D polygon clipping) |
+| `dashu-int`, `dashu-ratio`, `dashu-base` 0.5 | MIT OR Apache-2.0 | the kernel's exact rational arithmetic |
+| `num-modular` 0.6 | Apache-2.0 | a `dashu` dependency |
+| `robust` 1.2 | MIT OR Apache-2.0 | exact predicates for `validate_solid`, D2 |
+| `spade` 2.15 | MIT OR Apache-2.0 | constrained Delaunay triangulation of cut caps (`mesh.split_plane`), D3; added in Phase 1 Task 12 |
+
+**Obligations when distributing MeshFixer binaries:** include the Apache-2.0
+licence text (already shipped as `LICENSE-APACHE`). `manifold-rust` 0.19.2
+has no `NOTICE` file. BSL-1.0 asks for its text only in source
+distributions, which `cargo vendor` keeps.
+
+### The C++ Manifold kernel (optional, Phase 1 Task 7b)
+
+Added 2026-11-10 for the Task 7b re-qualification (ADR-0002). Only the
+`mf-boolean` feature `manifold-cpp` (off by default) builds them, through
+`crates/mf-manifold-sys`; default builds and releases don't contain them.
+They are C++ sources fetched at build time (pinned), not crates, so
+`cargo deny` doesn't see them: their licences are recorded here.
+
+| Component | Licence | Why |
+|---|---|---|
+| Manifold v3.5.3 (`elalish/manifold`, commit `0edd9d5`) | Apache-2.0 | the alternative boolean kernel qualified in Task 7b |
+| oneTBB v2022.3.0 (`oneapi-src/oneTBB`, fetched by Manifold's CMake) | Apache-2.0 | Manifold's parallel backend |
+| `cmake` 0.1, `cc` 1.2 (build dependencies) | MIT OR Apache-2.0 | building the above |
+
+**Obligations if a build with `manifold-cpp` is ever distributed:** include
+the Apache-2.0 licence text (already shipped as `LICENSE-APACHE`); neither
+project ships a `NOTICE` file at these versions.
+
+## Icon font: Phosphor Icons (desktop app, Phase 1 design stream)
+
+Added 2026-11-10. The desktop app embeds the Phosphor icon font (regular
+weight) for its tool rail, tree, panels and toolbars.
+
+| File | Licence | Licence text |
+|---|---|---|
+| `crates/mf-desktop/assets/fonts/Phosphor.ttf` (Phosphor Icons 2.x, regular; sha256 `06b91e02…d173a10`) | MIT (Copyright (c) 2023 Phosphor Icons) | `licenses/third-party/phosphor/LICENSE.txt` |
+
+The font file was taken from the `egui-phosphor` 0.14.0 crate (MIT OR
+Apache-2.0), which packages it for egui. That crate targets egui 0.36, so it
+isn't a dependency: depending on it would pull a second egui into the build.
+The font is vendored instead and is not a crate, so `cargo deny` doesn't see
+it; MIT is on the `deny.toml` allowlist, so no exception is needed. The icon
+codepoints in `crates/mf-desktop/src/icons.rs` are Phosphor's.
+
+**Obligations when distributing MeshFixer binaries:** include the MIT licence
+text above with the distribution (tracked with the egui fonts under
+MF-ISSUE-016).

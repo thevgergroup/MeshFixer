@@ -16,7 +16,27 @@
       "required": ["whole_object", "kinds"],
       "properties": {
         "whole_object": { "type": "boolean" },
+        "many": { "type": "boolean" },
         "kinds": { "type": "array", "items": { "enum": ["face_set", "component", "boundary_loop"] } }
+      }
+    },
+    "operands": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "role", "kinds", "required"],
+        "properties": {
+          "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "role": { "enum": ["read", "consumed", "kept", "changed"] },
+          "kinds": {
+            "type": "array",
+            "items": { "enum": ["object", "face_set", "component"] },
+            "minItems": 1
+          },
+          "required": { "type": "boolean" },
+          "many": { "type": "boolean" }
+        }
       }
     },
     "parameters": {
@@ -27,19 +47,24 @@
         "required": ["name", "type", "default", "description"],
         "properties": {
           "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
-          "type": { "enum": ["integer", "float", "bool", "choice"] },
-          "default": { "type": ["number", "boolean", "string"] },
+          "type": { "enum": ["integer", "float", "bool", "choice", "vec3", "affine", "samples", "faces", "text"] },
+          "default": {
+            "$comment": "A vec3 default has 3 numbers and an affine default has 12 (row-major 3x4: the 3x3 linear part, then translation). The schema only checks that array elements are numbers; the exact element count per type is enforced in Rust deserialization (mf-spec::model::Scalar::as_f64_array, TryFrom<RawParam> for ParamSpec), which rejects a wrong count by name.",
+            "type": ["number", "boolean", "string", "array"],
+            "items": { "type": "number" }
+          },
           "values": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "minItems": 2, "uniqueItems": true },
           "min": { "type": "number" },
           "max": { "type": "number" },
           "unit": { "type": "string" },
+          "default_from": { "type": "string", "pattern": "^fit\\.[a-z_]+$" },
           "description": { "type": "string", "minLength": 1 }
         }
       }
     },
     "preconditions": { "type": "array", "items": { "type": "string" } },
     "postconditions": { "type": "array", "items": { "type": "string" } },
-    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements"] } },
+    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements", "transform_changes", "removes_objects", "creates_objects", "renames_objects"] } },
     "runtime": {
       "type": "object",
       "additionalProperties": false,

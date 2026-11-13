@@ -17,7 +17,9 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use clap::{Arg, ArgMatches, Command};
-use mf_command::{CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session};
+use mf_command::{
+    CommandError, CommitOutcome, Invocation, ObjectId, RevisionId, Session, TARGET_OPERAND,
+};
 use mf_io::{Format, IoError};
 use mf_metrics::{CountingAlloc, GpuBufferBytes, MemoryBreakdown, Phase, measure};
 use mf_runtime::{JobPool, PoolChoice, RunContext};
@@ -122,9 +124,12 @@ impl From<IoError> for Failure {
 impl From<CommandError> for Failure {
     fn from(e: CommandError) -> Self {
         match e {
-            CommandError::Spec(_) | CommandError::UnknownOperation(_) => {
-                Failure::Usage(e.to_string())
-            }
+            CommandError::Spec(_)
+            | CommandError::UnknownOperation(_)
+            | CommandError::UnknownOperand { .. }
+            | CommandError::MissingOperand { .. }
+            | CommandError::RepeatedOperand { .. }
+            | CommandError::RepeatedObject { .. } => Failure::Usage(e.to_string()),
             CommandError::Cancelled => Failure::Cancelled,
             _ => Failure::Runtime(e.to_string()),
         }
@@ -213,6 +218,16 @@ fn cli() -> Command {
                 ),
         )
         .arg(
+            Arg::new("fit-profile")
+                .long("fit-profile")
+                .global(true)
+                .value_name("NAME")
+                .help(
+                    "Print fit profile whose tolerances fill parameters you don't set (D20; saved \
+                     in Settings > Print fit). Default: the built-in 'Default FDM, 0.4 mm nozzle'",
+                ),
+        )
+        .arg(
             Arg::new("threads")
                 .long("threads")
                 .global(true)
@@ -268,11 +283,14 @@ fn cli() -> Command {
             .arg(
                 Arg::new("kind")
                     .required(true)
-                    .value_parser(["damaged", "scene"])
+                    .value_parser(["damaged", "scene", "boolean-demo"])
                     .help(
                         "damaged: UV sphere with holes, islands and unwelded corners; \
                          scene: the two-object demo (a damaged scan and a plate with a \
-                         hole, a crack and a tangled edge, each at its own transform), 3MF only",
+                         hole, a crack and a tangled edge, each at its own transform), 3MF only; \
+                         boolean-demo: 0 a sphere 'scan', 1 a 'part' (cube) sunk into its side, \
+                         2 a 'crossed scan' (a sphere with a box crossing its surface: it \
+                         overlaps itself), 3 a 'probe' (cube) where it crosses itself, 3MF only",
                     ),
             )
             .arg(output_positional())
@@ -400,7 +418,17 @@ fn cli() -> Command {
                         .action(clap::ArgAction::Append)
                         .help("name=value for the preceding --op (repeatable)"),
                 )
+                .arg(
+                    Arg::new("operand")
+                        .long("operand")
+                        .action(clap::ArgAction::Append)
+                        .help(
+                            "name=<object index> for the preceding --op (repeatable): another \
+                             object it uses, by its position in the input file (0 is the first)",
+                        ),
+                )
                 .arg(select_arg(true))
+                .arg(object_arg())
                 .arg(
                     Arg::new("save-log")
                         .long("save-log")
@@ -425,25 +453,94 @@ fn cli() -> Command {
                         .help("Export the replayed result of the first object"),
                 ),
         );
+    // `inspect` has its own command; every other operation gets one,
+    // with `--<operand> <object index>` for each operand it takes (e.g.
+    // `boolean --tool 1`). A read-only operation prints its report and
+    // needs no output.
     for spec in mf_spec::builtin::specs()
         .iter()
-        .filter(|s| !s.is_read_only())
+        .filter(|s| s.id != "mesh.inspect")
     {
-        cmd = cmd.subcommand(
-            mf_spec::cli::to_command(spec)
-                .arg(input_arg())
-                .arg(units_arg())
-                .arg(output_arg())
-                .arg(select_arg(false)),
-        );
+        let mut sub = mf_spec::cli::to_command(spec)
+            .arg(input_arg())
+            .arg(units_arg())
+            .arg(if spec.is_read_only() {
+                output_arg().required(false)
+            } else {
+                output_arg()
+            })
+            .arg(object_arg())
+            .arg(select_arg(false));
+        for o in &spec.operands {
+            sub = sub.arg(
+                Arg::new(o.name.clone())
+                    .long(o.name.clone())
+                    .required(o.required)
+                    .action(if o.many {
+                        clap::ArgAction::Append
+                    } else {
+                        clap::ArgAction::Set
+                    })
+                    .value_parser(clap::value_parser!(usize))
+                    .help(format!(
+                        "The '{}' object{} ({:?}): its position in the input file (0 is the \
+                         first){}",
+                        o.name,
+                        if o.many { "s" } else { "" },
+                        o.role,
+                        if o.many { "; repeat for each" } else { "" }
+                    )),
+            );
+        }
+        cmd = cmd.subcommand(sub);
     }
     cmd
 }
 
-/// Import every object of the file; commands act on the first one.
+/// `--object`: which object of the input a command acts on.
+fn object_arg() -> Arg {
+    Arg::new("object").long("object").help(
+        "Object to act on: its position in the input file (0 is the first) or its name \
+         (default: the first)",
+    )
+}
+
+/// Refuse to write over the input file (review I3): `-o` naming the input,
+/// however it's spelled (relative, `..`, a symlink), would destroy the
+/// source before the result is verified, and break the command log's
+/// source hash. Compares canonical paths; an output that doesn't exist
+/// yet is compared through its canonical parent directory.
+fn refuse_overwriting_input(input: &Path, output: &Path) -> Result<(), Failure> {
+    let canonical = |p: &Path| -> Option<PathBuf> {
+        if let Ok(c) = p.canonicalize() {
+            return Some(c);
+        }
+        let name = p.file_name()?;
+        let parent = match p.parent() {
+            Some(d) if !d.as_os_str().is_empty() => d.to_path_buf(),
+            _ => PathBuf::from("."),
+        };
+        Some(parent.canonicalize().ok()?.join(name)) // allow-swallow: a missing parent can't be the input's directory; the write then fails by name
+    };
+    let same = match (canonical(input), canonical(output)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    };
+    if same {
+        return Err(Failure::Usage(format!(
+            "the output {} is the input file; write the result to another file (-o)",
+            output.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Import every object of the file; commands act on the one `object`
+/// names (a position in the file or a name), by default the first.
 fn open(
     path: &Path,
     units: Option<mf_io::threemf::Unit>,
+    object: Option<&String>,
     metrics: &mut Metrics,
     ctx: &RunContext,
 ) -> Result<(Session, ObjectId), Failure> {
@@ -471,18 +568,56 @@ fn open(
     let first = *ids
         .first()
         .ok_or_else(|| Failure::Runtime(format!("{} contains no mesh objects", path.display())))?;
-    if ids.len() > 1 {
-        eprintln!(
-            "note: {} has {} objects; commands act on the first ('{}'), 3MF output keeps them all",
-            path.display(),
-            ids.len(),
-            session
-                .document()
-                .object(first)
-                .map_or("", |o| o.name.as_str())
-        );
-    }
-    Ok((session, first))
+    let Some(choice) = object else {
+        if ids.len() > 1 {
+            eprintln!(
+                "note: {} has {} objects; commands act on the first ('{}', choose another with \
+                 --object), 3MF output keeps them all",
+                path.display(),
+                ids.len(),
+                session
+                    .document()
+                    .object(first)
+                    .map_or("", |o| o.name.as_str())
+            );
+        }
+        return Ok((session, first));
+    };
+    let objects = session.document().objects();
+    let names: Vec<String> = objects.iter().map(|o| format!("'{}'", o.name)).collect();
+    let chosen = match choice.trim().parse::<usize>() {
+        Ok(index) => objects.get(index).map(|o| o.id).ok_or_else(|| {
+            Failure::Usage(format!(
+                "--object {index}: {} has {} object(s), numbered from 0",
+                path.display(),
+                objects.len()
+            ))
+        })?,
+        Err(_) => {
+            let matching: Vec<ObjectId> = objects
+                .iter()
+                .filter(|o| &o.name == choice)
+                .map(|o| o.id)
+                .collect();
+            match matching.as_slice() {
+                [one] => *one,
+                [] => {
+                    return Err(Failure::Usage(format!(
+                        "--object '{choice}': no object has that name (they are {})",
+                        names.join(", ")
+                    )));
+                }
+                _ => {
+                    return Err(Failure::Usage(format!(
+                        "--object '{choice}': several objects have that name; give its position \
+                         (0 to {}) instead",
+                        objects.len() - 1
+                    )));
+                }
+            }
+        }
+    };
+    Ok((session, chosen))
 }
 
 /// Write the result: every object (with transforms and units) for 3MF,
@@ -496,17 +631,30 @@ fn export(
     ctx: &RunContext,
 ) -> Result<(), Failure> {
     let doc = session.document();
-    let object = doc
-        .object(id)
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    let mesh = object
-        .mesh()
-        .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
-    metrics.structures(mesh);
+    if doc.objects().is_empty() {
+        return Err(Failure::Runtime(format!(
+            "nothing to write to {}: every object was deleted; delete a different object \
+             (--object), or leave the object.delete step out",
+            output.display()
+        )));
+    }
     if format == Format::ThreeMf {
+        if let Some(mesh) = doc.object(id).and_then(|o| o.mesh()) {
+            metrics.structures(mesh);
+        }
         let model = threemf_model(doc)?;
         metrics.record("export", || write_threemf(&model, output, ctx))?;
     } else {
+        let object = doc.object(id).ok_or_else(|| {
+            Failure::Runtime(format!(
+                "object {id} was deleted, so there is no mesh to write to {}; write a .3mf to keep the others",
+                output.display()
+            ))
+        })?;
+        let mesh = object
+            .mesh()
+            .ok_or_else(|| Failure::Runtime("only meshes can be exported".into()))?;
+        metrics.structures(mesh);
         // MF-ISSUE-035: STL/OBJ write a single mesh with no transform of
         // its own, so apply the object's here (mirrors
         // mf-desktop's App::export_to) and say so, like the desktop's
@@ -534,6 +682,7 @@ fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Fa
                 .mesh()
                 .ok_or_else(|| Failure::Runtime(format!("object '{}' is not a mesh", o.name)))?;
             Ok(mf_io::threemf::ModelObject {
+                metadata: o.metadata(),
                 name: o.name.clone(),
                 mesh: mesh.clone(),
                 transform: o.transform,
@@ -541,6 +690,9 @@ fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Fa
         })
         .collect::<Result<Vec<_>, Failure>>()?;
     Ok(mf_io::threemf::Model {
+        // The Browser's organisation and saved object ids, as the desktop
+        // writes them: a CLI run on an organised 3MF keeps it.
+        metadata: doc.model_metadata(),
         unit: doc.units(),
         objects,
     })
@@ -563,13 +715,14 @@ fn inspect(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<()
     let path = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let (mut session, id) = open(path, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(path, units_of(m), None, metrics, ctx)?;
     if let Some(mesh) = session.document().object(id).and_then(|o| o.mesh()) {
         let mesh = mesh.clone();
         metrics.record("topology", || mesh.topology_with(ctx))?;
         metrics.structures(&mesh);
     }
     let inv = Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: "mesh.inspect".into(),
         target: id,
@@ -621,6 +774,34 @@ fn render(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     Ok(())
 }
 
+/// `gen-fixture boolean-demo`: a sphere "scan" (radius 20 mm), a 10 mm
+/// cube "part" sunk into its +x side, a "crossed scan" (a sphere with a
+/// box crossing its surface, off to the side), and a "probe" cube where
+/// the crossed scan crosses itself.
+fn boolean_demo() -> Vec<(String, mf_geometry::Mesh, [f64; 12])> {
+    use mf_fixtures::{cube, merge, scaled, translated, uv_sphere};
+    let at = |x: f64, y: f64, z: f64| [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, x, y, z];
+    vec![
+        (
+            "scan".into(),
+            scaled(&uv_sphere(96, 192), 20.0),
+            at(0.0, 0.0, 20.0),
+        ),
+        ("part".into(), cube(10.0), at(15.0, -5.0, 15.0)),
+        (
+            "crossed scan".into(),
+            merge(&[
+                scaled(&uv_sphere(64, 128), 10.0),
+                translated(&cube(4.0), [-12.0, -2.0, -2.0]),
+            ]),
+            at(60.0, 0.0, 10.0),
+        ),
+        // Where the crossed scan crosses itself: booleans there are
+        // refused until Make solid.
+        ("probe".into(), cube(5.0), at(47.5, -2.5, 7.5)),
+    ]
+}
+
 fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let output = m
         .get_one::<PathBuf>("output")
@@ -628,17 +809,25 @@ fn gen_fixture(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
-    if m.get_one::<String>("kind").map(String::as_str) == Some("scene") {
+    let kind = m.get_one::<String>("kind").map(String::as_str);
+    if kind == Some("scene") || kind == Some("boolean-demo") {
         if format != Format::ThreeMf {
             return Err(Failure::Usage(
                 "the scene has several objects: write it as .3mf".into(),
             ));
         }
+        let scene = if kind == Some("scene") {
+            mf_fixtures::demo_scene()
+        } else {
+            boolean_demo()
+        };
         let model = mf_io::threemf::Model {
+            metadata: Default::default(),
             unit: mf_io::threemf::Unit::Millimeter,
-            objects: mf_fixtures::demo_scene()
+            objects: scene
                 .into_iter()
                 .map(|(name, mesh, transform)| mf_io::threemf::ModelObject {
+                    metadata: Default::default(),
                     name,
                     mesh,
                     transform,
@@ -1055,23 +1244,29 @@ fn selection_for(
     }
 }
 
-/// One `--op` with the `--param`s and optional `--select` that follow it.
+/// One `--op` with the `--param`s, `--operand`s and optional `--select`
+/// that follow it.
 struct Step {
     op: String,
     raw: BTreeMap<String, String>,
+    /// `(operand name, object index in the input file)`.
+    operands: Vec<(String, usize)>,
     select: Option<Select>,
 }
 
+/// `(position on the command line, value)` of every use of a repeatable
+/// argument.
+fn positioned(m: &ArgMatches, name: &str) -> Vec<(usize, String)> {
+    match (m.indices_of(name), m.get_many::<String>(name)) {
+        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
+        _ => Vec::new(),
+    }
+}
+
 fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
-    let ops: Vec<(usize, String)> = match (m.indices_of("op"), m.get_many::<String>("op")) {
-        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
-        _ => Vec::new(),
-    };
-    let params: Vec<(usize, String)> = match (m.indices_of("param"), m.get_many::<String>("param"))
-    {
-        (Some(i), Some(v)) => i.zip(v.cloned()).collect(),
-        _ => Vec::new(),
-    };
+    let ops = positioned(m, "op");
+    let params = positioned(m, "param");
+    let operands = positioned(m, "operand");
     if ops.is_empty() {
         return Err(Failure::Usage("run needs at least one --op".into()));
     }
@@ -1105,9 +1300,21 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
             )));
         }
         let select = mine.first().map(|v| parse_select(v)).transpose()?;
+        let mut step_operands = Vec::new();
+        for (oi, o) in operands.iter().filter(|(oi, _)| oi > idx && *oi < next) {
+            let usage = || {
+                Failure::Usage(format!(
+                    "--operand '{o}' (position {oi}) must be name=<object index>"
+                ))
+            };
+            let (name, index) = o.split_once('=').ok_or_else(usage)?;
+            let index = index.trim().parse::<usize>().map_err(|_| usage())?;
+            step_operands.push((name.to_owned(), index));
+        }
         seq.push(Step {
             op: op.clone(),
             raw,
+            operands: step_operands,
             select,
         });
     }
@@ -1115,11 +1322,31 @@ fn op_sequence(m: &ArgMatches) -> Result<Vec<Step>, Failure> {
     if let Some((_, p)) = params
         .iter()
         .chain(selects.iter())
+        .chain(operands.iter())
         .find(|(pi, _)| *pi < first_op)
     {
         return Err(Failure::Usage(format!("'{p}' comes before any --op")));
     }
     Ok(seq)
+}
+
+/// The print fit profile `--fit-profile` names, from the settings folder
+/// (D20). Without the flag, the built-in profile, so a command line means
+/// the same on every machine unless it names a profile.
+fn fit_profile(m: &ArgMatches) -> Result<mf_parts::FitProfile, Failure> {
+    let Some(name) = m.get_one::<String>("fit-profile") else {
+        return Ok(mf_parts::FitProfile::builtin());
+    };
+    let dir = mf_parts::dirs::meshfixer_dir().map_err(|e| Failure::Runtime(e.to_string()))?;
+    let profiles =
+        mf_parts::FitProfiles::load(&dir).map_err(|e| Failure::Runtime(e.to_string()))?;
+    profiles.lookup(name).cloned().ok_or_else(|| {
+        let names: Vec<&str> = profiles.profiles.iter().map(|p| p.name.as_str()).collect();
+        Failure::Usage(format!(
+            "--fit-profile '{name}': no such profile (have: {})",
+            names.join(", ")
+        ))
+    })
 }
 
 fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
@@ -1132,22 +1359,62 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
     let format = Format::from_path(output).ok_or_else(|| {
         Failure::Usage(format!("unsupported output format: {}", output.display()))
     })?;
-    let seq = op_sequence(m)?;
+    refuse_overwriting_input(input, output)?;
+    let mut seq = op_sequence(m)?;
+    let fit = fit_profile(m)?;
     // Validate every step before touching files.
-    for Step { op, raw, .. } in &seq {
+    for Step {
+        op, raw, operands, ..
+    } in &mut seq
+    {
         let spec = mf_spec::builtin::get(op)
             .ok_or_else(|| Failure::Usage(format!("unknown operation '{op}'")))?;
+        spec.fill_defaults(raw, &fit)
+            .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
         spec.validate(raw)
             .map_err(|e| Failure::Usage(format!("{op}: {e}")))?;
+        if let Some((name, _)) = operands.iter().find(|(name, _)| {
+            !spec.operands.iter().any(|o| &o.name == name)
+                && !(name == TARGET_OPERAND && spec.target.many)
+        }) {
+            return Err(Failure::Usage(format!(
+                "{op} has no operand named '{name}'"
+            )));
+        }
     }
-    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(
+        input,
+        units_of(m),
+        m.get_one::<String>("object"),
+        metrics,
+        ctx,
+    )?;
     let import = session.current();
-    for Step { op, raw, select } in seq {
+    // Objects in input-file order, for `--operand name=<index>`.
+    let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
+    for Step {
+        op,
+        raw,
+        operands,
+        select,
+    } in seq
+    {
         let selection = selection_for(&session, id, import, &select)?;
+        let operands = operands
+            .into_iter()
+            .map(|(name, index)| match objects.get(index) {
+                Some(&object) => Ok((name, object, None)),
+                None => Err(Failure::Usage(format!(
+                    "--operand {name}={index}: the input has {} object(s), numbered from 0",
+                    objects.len()
+                ))),
+            })
+            .collect::<Result<Vec<_>, _>>()?;
         let outcome = metrics.record("operation", || {
             execute(
                 &mut session,
                 Invocation {
+                    operands,
                     selection,
                     op_id: op.clone(),
                     target: id,
@@ -1248,27 +1515,60 @@ fn run_operation(
     let input = m
         .get_one::<PathBuf>("input")
         .ok_or_else(|| Failure::Usage("missing input".into()))?;
-    let output = m
-        .get_one::<PathBuf>("output")
-        .ok_or_else(|| Failure::Usage("missing output".into()))?;
-    let format = Format::from_path(output).ok_or_else(|| {
-        Failure::Usage(format!("unsupported output format: {}", output.display()))
-    })?;
+    let output = match m.get_one::<PathBuf>("output") {
+        Some(output) => {
+            let format = Format::from_path(output).ok_or_else(|| {
+                Failure::Usage(format!("unsupported output format: {}", output.display()))
+            })?;
+            refuse_overwriting_input(input, output)?;
+            Some((output, format))
+        }
+        None if spec.is_read_only() => None,
+        None => return Err(Failure::Usage("missing output".into())),
+    };
     // Validate parameters and selection before touching the filesystem.
     let select = m
         .get_one::<String>("select")
         .map(|s| parse_select(s))
         .transpose()?;
-    let raw_params = mf_spec::cli::raw_params(spec, m);
+    let mut raw_params = mf_spec::cli::raw_params(spec, m);
+    spec.fill_defaults(&mut raw_params, &fit_profile(m)?)
+        .map_err(|e| Failure::Usage(e.to_string()))?;
     spec.validate(&raw_params)
         .map_err(|e| Failure::Usage(e.to_string()))?;
 
-    let (mut session, id) = open(input, units_of(m), metrics, ctx)?;
+    let (mut session, id) = open(
+        input,
+        units_of(m),
+        m.get_one::<String>("object"),
+        metrics,
+        ctx,
+    )?;
     let selection = selection_for(&session, id, session.current(), &select)?;
+    // `--<operand> <index>`: objects in input-file order.
+    let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
+    let operands = spec
+        .operands
+        .iter()
+        .flat_map(|o| {
+            m.get_many::<usize>(&o.name)
+                .into_iter()
+                .flatten()
+                .map(|&i| (o.name.clone(), i))
+        })
+        .map(|(name, index)| match objects.get(index) {
+            Some(&object) => Ok((name, object, None)),
+            None => Err(Failure::Usage(format!(
+                "--{name} {index}: the input has {} object(s), numbered from 0",
+                objects.len()
+            ))),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let outcome = metrics.record("operation", || {
         execute(
             &mut session,
             Invocation {
+                operands,
                 selection,
                 op_id: spec.id.clone(),
                 target: id,
@@ -1277,10 +1577,15 @@ fn run_operation(
             ctx,
         )
     })?;
-    if let CommitOutcome::NewRevision { report } = outcome {
-        eprintln!("{}: {report}", spec.id);
+    match outcome {
+        CommitOutcome::NewRevision { report } => eprintln!("{}: {report}", spec.id),
+        CommitOutcome::Report(report) => println!("{report}"),
+        CommitOutcome::NoChange { report } => eprintln!("{}: no change ({report})", spec.id),
     }
-    export(&session, id, output, format, metrics, ctx)
+    match output {
+        Some((output, format)) => export(&session, id, output, format, metrics, ctx),
+        None => Ok(()),
+    }
 }
 
 /// Progress lines are at most this often (10 a second).

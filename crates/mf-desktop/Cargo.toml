@@ -25,14 +25,21 @@ mf-io.workspace = true
 mf-spec.workspace = true
 mf-command.workspace = true
 mf-operations.workspace = true
+mf-boolean.workspace = true
 mf-render.workspace = true
+mf-parts.workspace = true
 eframe.workspace = true
 
 wgpu.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
+image.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
+# The test-only generators, so the desktop suites can drive one through
+# the UI (never in a normal build: dev-dependencies only).
+mf-parts = { workspace = true, features = ["test-kinds"] }
 mf-selection.workspace = true
 mf-spec.workspace = true
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }
@@ -42,3 +49,4 @@ tempfile.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 sysinfo.workspace = true
+image.workspace = true

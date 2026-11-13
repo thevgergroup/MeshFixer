@@ -9,5 +9,8 @@ pub mod cli;
 mod model;
 mod params;
 
-pub use model::{OperationSpec, ParamKind, ParamSpec, RuntimeSpec, TargetSpec};
-pub use params::{ParamValue, Params, SpecError};
+pub use model::{
+    FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec, RuntimeSpec,
+    TargetSpec,
+};
+pub use params::{FaceList, ParamValue, Params, SpecError};

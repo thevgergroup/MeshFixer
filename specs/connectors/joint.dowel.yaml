@@ -1,0 +1,101 @@
+id: joint.dowel
+version: 1
+summary: "A loose dowel across a cut: a hole in both pieces at the same place, and the dowel itself printed as its own object."
+geometry_kinds: [mesh]
+# Local frame (every joint.* connector): z is the cut's normal, from the
+# piece the connector was placed on (side A) into the other piece (side
+# B); side A's cap is at z = -gap/2, side B's at z = +gap/2; the
+# connector's centre is at x = y = 0.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "Diameter of the holes"
+  - name: depth_on
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "How deep the hole goes into the piece the dowel was placed on"
+  - name: depth_other
+    type: float
+    default: 6.0
+    min: 0.5
+    unit: mm
+    description: "How deep the hole goes into the other piece"
+  - name: dowel_length
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Length of the dowel; 0 makes it the two depths plus the gap, less the length allowance"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    fit_role: hole
+    description: "The dowel is this much thinner than its holes (diametral: the chosen Fit class plus the Machine profile's hole compensation)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    description: "Room left at the holes' floors (for glue and the print's tolerance)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+  - name: shape
+    type: choice
+    default: round
+    values: [round, square, n_sided, keyed]
+    description: "Cross-section, as an anti-rotation shape (D22): round, square, N-sided (see sides) or keyed (a D, one flat); a placement records it as its index here"
+  - name: sides
+    type: float
+    default: 6.0
+    min: 3.0
+    max: 12.0
+    description: "Corners of the N-sided shape (only read when shape is 2)"
+  - name: hole_profile
+    type: choice
+    default: auto
+    values: [auto, round, teardrop, flat_top]
+    description: "The round holes' cross-section (D24): auto (teardrop when the hole prints sideways, within 45 degrees of horizontal), round, teardrop or flat-top"
+  - name: profile
+    type: float
+    default: 0.0
+    min: 0.0
+    max: 2.0
+    description: "What auto resolved to for this placement (0 round, 1 teardrop, 2 flat-top); recorded so replay is Exact"
+  - name: up_x
+    type: float
+    default: 0.0
+    min: -1.0
+    max: 1.0
+    description: "Which way a teardrop's point faces in the connector's own x/y (world up as seen from the hole), x part"
+  - name: up_y
+    type: float
+    default: 1.0
+    min: -1.0
+    max: 1.0
+    description: "Which way a teardrop's point faces in the connector's own x/y, y part"
+  - name: overhang
+    type: float
+    default: 45.0
+    min: 1.0
+    max: 89.0
+    unit: deg
+    description: "The steepest overhang the printer handles, from vertical (the teardrop's flank angle)"
+preconditions:
+  - the clearance is less than the diameter
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

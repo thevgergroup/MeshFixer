@@ -139,6 +139,9 @@ pub struct ImportedModel {
     pub unit: threemf::Unit,
     pub source: SourceInfo,
     pub warnings: Vec<String>,
+    /// The model's own `<metadata>` ([`threemf::Model::metadata`]): empty
+    /// for STL and OBJ, which have none.
+    pub metadata: std::collections::BTreeMap<String, String>,
 }
 
 pub fn read_model(path: &Path) -> Result<ImportedModel, IoError> {
@@ -163,12 +166,13 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
         .to_owned();
     let single = |mesh: Mesh| {
         vec![threemf::ModelObject {
+            metadata: Default::default(),
             name: stem.clone(),
             mesh,
             transform: threemf::IDENTITY,
         }]
     };
-    let (objects, unit, precision, format, warnings) = match format {
+    let (objects, unit, precision, format, warnings, metadata) = match format {
         Format::Obj => {
             let text = std::str::from_utf8(&bytes).map_err(|e| IoError::Parse {
                 line: 0,
@@ -181,6 +185,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 Format::Obj,
                 warnings,
+                Default::default(),
             )
         }
         Format::StlBinary | Format::StlAscii => {
@@ -195,6 +200,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 format,
                 warnings,
+                Default::default(),
             )
         }
         Format::ThreeMf => {
@@ -208,10 +214,12 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 precision,
                 Format::ThreeMf,
                 warnings,
+                model.metadata,
             )
         }
     };
     Ok(ImportedModel {
+        metadata,
         objects,
         unit,
         source: SourceInfo {
@@ -409,8 +417,10 @@ pub fn write_path_with(
         Format::Obj => obj::write(mesh).into_bytes(),
         Format::ThreeMf => {
             let model = threemf::Model {
+                metadata: Default::default(),
                 unit,
                 objects: vec![threemf::ModelObject {
+                    metadata: Default::default(),
                     name: "object".into(),
                     mesh: mesh.clone(),
                     transform: threemf::IDENTITY,
@@ -460,6 +470,7 @@ pub fn write_model_path_with(
     // Compared against the model with empty objects already left out
     // (MF-ISSUE-034), since those never make it into `bytes`.
     let kept = threemf::Model {
+        metadata: Default::default(),
         unit: model.unit,
         objects: model
             .objects

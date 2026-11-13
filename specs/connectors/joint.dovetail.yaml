@@ -1,0 +1,84 @@
+id: joint.dovetail
+version: 1
+summary: "A dovetail across a cut: a tail on the piece it was placed on, sliding into a groove in the other piece, flanks at 15 degrees."
+geometry_kinds: [mesh]
+# Local frame: see joint.dowel.yaml; the tail runs along x.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: diameter
+    type: float
+    default: 8.0
+    min: 0.5
+    unit: mm
+    description: "Width of the groove at the cut (the tail is the clearance narrower); both widen by tan 15 degrees per side with depth"
+  - name: length
+    type: float
+    default: 16.0
+    min: 0.5
+    unit: mm
+    description: "Length of the tail along its direction"
+  - name: groove_length
+    type: float
+    default: 200.0
+    min: 0.5
+    unit: mm
+    description: "Deprecated (D23): the pre-drag single symmetric groove span, kept only so a placement saved before groove_a/groove_b existed still reads the same shape. New placements use groove_a and groove_b instead."
+  - name: groove_a
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "How far the groove reaches from the placement's centre towards its drag line's start (the -x end, D23)"
+  - name: groove_b
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "How far the groove reaches from the placement's centre towards its drag line's end (the +x end, D23)"
+  - name: open_a
+    type: bool
+    default: true
+    description: "The -x end is through (reaches well past the cap so the assembly slides apart that way) or stopped (ends exactly at groove_a, short of the edge on purpose); a placement records it as 1 or 0"
+  - name: open_b
+    type: bool
+    default: true
+    description: "The +x end is through or stopped, see open_a"
+  - name: depth_on
+    type: float
+    default: 3.0
+    min: 0.1
+    unit: mm
+    description: "How far the tail's root is sunk into the piece it's attached to"
+  - name: depth_other
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "How deep the groove goes into the other piece"
+  - name: clearance
+    type: float
+    default: 0.2
+    unit: mm
+    fit_role: hole
+    description: "The tail is this much narrower than the groove across its flanks (both sides together)"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    description: "Room left at the groove's floor"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions:
+  - the clearance is less than the width
+  - the groove is deeper than the length allowance
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

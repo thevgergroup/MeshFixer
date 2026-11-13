@@ -1,0 +1,93 @@
+id: split.place_connectors
+version: 1
+summary: Add every connector placed on a cut's joint in one command - holes, pockets, pegs, tails and loose dowels - from the connector registry.
+geometry_kinds: [mesh]
+# The Split workflow's step 3 (owner 2026-11-11). The target is the
+# joint's piece a, side_b its piece b (the pieces a cut recorded as a
+# joint, see mesh.split_plane and mesh.split_box). Each connector is a
+# joint.* connector from the registry, placed on one side's cut face;
+# its counterpart on the other side comes from the same generated
+# connector. One command, one undo step; every value is recorded, so
+# replay is Exact.
+target:
+  whole_object: true
+  kinds: []
+operands:
+  - name: side_b
+    role: changed
+    kinds: [object]
+    required: true
+parameters:
+  - name: plane_point
+    type: vec3
+    default: [0, 0, 0]
+    description: "A point on the joint's mid-plane, in world space and document units: x,y,z"
+  - name: plane_normal
+    type: vec3
+    default: [0, 0, 1]
+    description: "The joint's normal in world space, from piece a (the target) into piece b (side_b)"
+  - name: plane_u
+    type: vec3
+    default: [1, 0, 0]
+    description: "The in-plane direction the connectors' 2D positions are measured along (its part in the plane is used; v is normal x u)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    description: "The joint's gap between the two cut faces, in document units (as the cut recorded it)"
+  - name: connectors
+    type: text
+    default: "[]"
+    description: "The connectors, as JSON: a list of {connector (a joint.* id), on (a or b, the side it was placed on), at ([u, v] in document units), angle (degrees), params (the connector's own parameters, mm)}"
+  - name: mm
+    type: float
+    default: 1.0
+    min: 0.0
+    unit: mm
+    description: "One millimetre in document units (filled in by the unit conversion at prepare time; leave at 1): the connectors are generated in mm and scaled by this"
+  - name: min_wall
+    type: float
+    default: 1.5
+    min: 0.0
+    unit: mm
+    description: "The thinnest wall the checks want around a hole (reported, not enforced)"
+  - name: fit_clearance
+    type: float
+    default: 0.2
+    min: -10.0
+    unit: mm
+    description: "The chosen Fit class's clearance, recorded for the fit check reported per connector"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    description: "The Machine profile's hole-undersize compensation, recorded for the fit check reported per connector"
+  - name: plate_width
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Width (x) of the build plate loose dowels are laid out on"
+  - name: plate_depth
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Depth (y) of the build plate loose dowels are laid out on"
+  - name: plate_spacing
+    type: float
+    default: 3.0
+    min: 0.0
+    unit: mm
+    description: "Gap kept between laid-out dowels and everything else on the plate"
+preconditions:
+  - both pieces have a cut face on the joint's plane
+  - every connector's centre is on both cut faces
+postconditions:
+  - every hole, pocket and groove is subtracted from its piece and every peg and tail unioned onto its piece, at the same 2D position on both cut faces
+  - each loose dowel is a new object standing upright on the plate, laid out clear of everything else
+  - the report gives each connector's exact fit check (the measured gap against the recorded fit class and machine tolerance)
+effects: [geometry_changes, topology_changes, creates_objects]
+runtime:
+  cancellable: true
+  progress: false

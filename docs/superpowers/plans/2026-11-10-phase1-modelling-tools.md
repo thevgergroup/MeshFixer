@@ -549,6 +549,54 @@ The owner delegated technical decisions (2026-11-10). Each entry gives the choic
 - [ ] **Step 2–4:** FAIL → implement → PASS.
 - [ ] **Step 5:** Commit `feat(boolean): mesh.boolean with local window and independent validation [MF-MODEL-001]`.
 
+**Controller amendment (2026-11-10, after Task 7b; ADR-0002 option B):**
+- **Kernel:**
+  - The kernel is `ManifoldCpp`, with the operand check.
+  - The `manifold-cpp` feature becomes the default for `mf-boolean`, and `mf-manifold-sys` joins the workspace. It is verified locally on macOS only (owner ruling 2026-11-11: no GitHub Actions). The Linux and Windows builds are an explicit, documented risk in ADR-0002 and the milestone report. Update the `run-qualify` label references in ADR-0002 and run-tests.sh to "manual dispatch only".
+  - `ManifoldRobust` stays behind its own off-by-default feature, for comparison only.
+- **Operand check:**
+  - The self-intersection check runs on the window operands (`clip_to_box` output), never on the whole model.
+  - Coincident vertices are welded exactly before the check.
+  - Clipping a model whose crossings lie outside the window must not report them.
+- **New refusal code** for the copy table: `operand_overlaps_itself`. Plain language: "This part of the model overlaps itself near the tool". Next action: "Run Make solid on it first, or move the tool".
+- **Extra tests:**
+  - `self_crossing_far_from_tool_doesnt_block_the_boolean` (a scan with a crossing on the far side, and a tool on the near side, gives a valid result);
+  - `self_crossing_inside_the_window_is_refused_with_make_solid_next_action`.
+
+### Task 8a: Make solid (voxel remesh), the Meshmixer route for messy scans
+
+Meshmixer users run Make Solid before booleans on messy scans. This task gives MeshFixer the same explicit, user-chosen tool, and it is the next action in the `operand_overlaps_itself` refusal. It is never applied silently.
+
+**Files:**
+- Create: `crates/mf-operations/src/make_solid.rs`, `specs/operations/mesh.make_solid.yaml`
+- Test: `crates/mf-operations/tests/make_solid.rs`
+
+**Behaviour:**
+- `mesh.make_solid` v1 works on a whole object or on a face-set region. For a region, the remeshed patch is stitched back along the region boundary. If that can't be done cleanly, it is refused by name.
+- The algorithm:
+  1. Compute a signed distance field, or a generalised winding number for open or self-intersecting input, on a sparse grid.
+  2. Extract the surface with dual contouring or marching cubes at that resolution.
+  3. Optionally smooth sharp features.
+  4. The output is closed, manifold and has no self-intersections, and it is validated by D4.
+- Params:
+  - `cell_size: float mm` (default: 1/256 of the bbox diagonal);
+  - `offset: float mm` (0);
+  - `preserve_sharp: bool` (true).
+- Deterministic across thread counts, so replay is Exact on one OS.
+- Cancellable, with stages "measuring", "building the field", "extracting the surface" and "checking the result".
+- Memory is bounded by a sparse grid. Refused by name if the cell count would exceed the budget, with the next action "use a larger cell size". It does not silently coarsen.
+- The UI states the trade-off in plain language: "Rebuilds the surface as one closed solid; fine detail smaller than the cell size is lost."
+
+**Tests:**
+- `make_solid_turns_self_intersecting_scan_into_valid_solid` (winged victory region, and a corpus model);
+- `make_solid_output_is_within_cell_size_of_input` (Hausdorff ≤ 1 cell on a sphere);
+- `make_solid_is_deterministic_at_1_and_n_threads`;
+- `make_solid_refuses_over_budget_grid_with_next_action`;
+- `make_solid_cancel_leaves_document_unchanged`;
+- `boolean_after_make_solid_succeeds_where_it_was_refused` (the end-to-end route).
+
+**Commit:** `feat(ops): mesh.make_solid voxel remesh [MF-MODEL-001]`
+
 ### Task 9: Intersection analysis (`mesh.intersections`)
 
 **Files:**

@@ -29,6 +29,7 @@ fn invocation(
     p: &[(&str, &str)],
 ) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         op_id: op.into(),
         target,
         selection: sel,

@@ -26,6 +26,7 @@ fn setup(dir: &Path) -> Session {
     let mut s = Session::new();
     let id = s.import(read_path(&src).unwrap(), "scan".into());
     s.execute(Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target: id,
@@ -91,6 +92,7 @@ fn v1_records_replay_as_flat_exactly() {
         let mut s = Session::new();
         let id = s.import(read_path(&src).unwrap(), "sphere".into());
         s.execute(Invocation {
+            operands: Vec::new(),
             selection: None,
             op_id: "mesh.fill_holes".into(),
             target: id,
@@ -364,6 +366,7 @@ fn small_holes(s: &Session, id: mf_command::ObjectId) -> Vec<u32> {
 
 fn fill(s: &mut Session, id: mf_command::ObjectId, hole: u32) {
     s.execute(Invocation {
+        operands: Vec::new(),
         selection: Some(mf_selection::Selection {
             object: id,
             revision: s.current(),

@@ -13,3 +13,4 @@ mf-geometry.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+mf-runtime.workspace = true

@@ -1,0 +1,84 @@
+id: mesh.sculpt_stroke
+version: 1
+summary: One sculpt stroke (press to release) of a brush along a sampled path.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: [face_set]
+parameters:
+  - name: brush
+    type: choice
+    default: inflate
+    values: [smooth, inflate, deflate, flatten, drag, pinch, crease, carve]
+    description: "What the brush does: smooth, inflate, deflate, flatten, drag, pinch, crease or carve"
+  - name: radius
+    type: float
+    default: 5.0
+    min: 0.0
+    unit: mm
+    description: "Radius of the brush in world space"
+  - name: strength
+    type: float
+    default: 0.5
+    min: 0.0
+    max: 1.0
+    description: "How much each dab does, from 0 to 1"
+  - name: falloff
+    type: choice
+    default: smooth
+    values: [smooth, sphere, sharp, flat]
+    description: "How the effect fades from the centre to the rim"
+  - name: symmetry_x
+    type: bool
+    default: false
+    description: "Mirror the stroke across the model's x axis through the pivot"
+  - name: symmetry_y
+    type: bool
+    default: false
+    description: "Mirror the stroke across the model's y axis through the pivot"
+  - name: symmetry_z
+    type: bool
+    default: false
+    description: "Mirror the stroke across the model's z axis through the pivot"
+  - name: pivot
+    type: vec3
+    default: [0, 0, 0]
+    unit: mm
+    description: "The point the symmetry planes pass through, in world space: x,y,z"
+  - name: view_dir
+    type: vec3
+    default: [0, 0, -1]
+    description: "The direction the stroke was drawn along (into the screen), in world space: x,y,z"
+  - name: samples
+    type: samples
+    default: []
+    description: "The stroke's dabs in order: face,b0,b1,b2,pressure each (a point on a face of the input revision), separated by ;"
+  - name: frozen
+    type: faces
+    default: []
+    description: "Faces that must not move (the freeze mask), comma-separated"
+  - name: detail_mode
+    type: choice
+    default: "off"
+    values: ["off", adaptive]
+    description: "Dynamic detail: off, or adaptive (split, collapse and flip under the brush toward the detail edge length)"
+  - name: detail
+    type: float
+    default: 0.25
+    min: 0.0
+    description: "With adaptive detail: the target edge length as a fraction of the radius (0 is off)"
+  - name: stay_on_surface
+    type: bool
+    default: true
+    description: "The brush affects only faces connected to the one under the cursor, without crossing a sharp crease or into another recorded face group (a split cap's); falloff follows the surface, not a 3D sphere"
+preconditions:
+  - every sample names a live face of the target
+postconditions:
+  - only vertices within the radius of a dab centre (or its mirror images) move
+  - vertices of frozen faces never move; with a face-set target, only its vertices move
+  - with stay_on_surface, a dab never moves a vertex it can't reach from the centre's face without crossing a sharp crease
+  - replaying the samples gives the same result bit for bit
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true

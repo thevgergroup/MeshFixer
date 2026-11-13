@@ -30,6 +30,7 @@ fn damaged() -> Mesh {
 
 fn remove(target: ObjectId, max: &str) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,

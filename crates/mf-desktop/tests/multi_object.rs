@@ -38,14 +38,17 @@ fn two_translated_cubes(dir: &std::path::Path) -> std::path::PathBuf {
         t
     };
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "left".into(),
                 mesh: cube(1.0),
                 transform: translate(-3.0),
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "right".into(),
                 mesh: cube(1.0),
                 transform: translate(3.0),
@@ -97,20 +100,25 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
     let pos_gap = h.state().screen_point(world_gap).unwrap();
     let frame = h.render().unwrap();
     let pixel_at = |p: egui::Pos2| frame.get_pixel(p.x as u32, p.y as u32).0;
-    assert_ne!(
-        pixel_at(pos_first),
+    // The stage is a vertical gradient between these two (UI plan §4).
+    let (lo, hi) = (
         mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
+        mf_desktop::theme::VIEWPORT_BACKGROUND_TOP.to_array(),
+    );
+    let background =
+        |p: [u8; 4]| (0..3).all(|k| p[k] + 1 >= lo[k].min(hi[k]) && p[k] <= lo[k].max(hi[k]) + 1);
+    assert!(
+        !background(pixel_at(pos_first)),
         "the active (first) object must be drawn"
     );
-    assert_ne!(
-        pixel_at(pos_second),
-        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
+    assert!(
+        !background(pixel_at(pos_second)),
         "the inactive (second) object must also be drawn, not skipped"
     );
-    assert_eq!(
-        pixel_at(pos_gap),
-        mf_desktop::theme::VIEWPORT_BACKGROUND.to_array(),
-        "the gap between the cubes must stay background"
+    assert!(
+        background(pixel_at(pos_gap)),
+        "the gap between the cubes must stay background: {:?}",
+        pixel_at(pos_gap)
     );
     if let Ok(dir) = std::env::var("MF_ARTIFACTS") {
         frame
@@ -170,14 +178,17 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
 fn cube_and_tetrahedron(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("cube_and_tetrahedron.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
+                metadata: Default::default(),
                 name: "cube".into(),
                 mesh: cube(1.0),
                 transform: IDENTITY,
             },
             ModelObject {
+                metadata: Default::default(),
                 name: "tetrahedron".into(),
                 mesh: tetrahedron(),
                 transform: IDENTITY,
@@ -272,8 +283,10 @@ fn single_translated_cube(dir: &std::path::Path, name: &str, d: [f64; 3]) -> std
     t[10] = d[1];
     t[11] = d[2];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "cube".into(),
             mesh: cube(1.0),
             transform: t,
@@ -368,4 +381,77 @@ fn picking_ready_includes_every_objects_topology() {
             o.name
         );
     }
+}
+
+fn press(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key, modifiers: egui::Modifiers) {
+    for pressed in [true, false] {
+        h.event(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        });
+    }
+    h.step();
+}
+
+/// Phase 1 Task 3 (review I4): the Delete key on an object target runs
+/// `object.delete` as an undoable command. The active object moves to one
+/// that exists; undo brings the deleted object back with its id, redo
+/// removes it again, and the app keeps drawing without the missing one.
+#[test]
+fn delete_key_deletes_the_active_object_undoably() {
+    if !mf_render::offscreen::gpu_available() {
+        mf_fixtures::skip::gpu_unavailable("delete_key_deletes_the_active_object_undoably");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = two_translated_cubes(dir.path());
+    let mut h = Harness::builder()
+        .with_size((1440.0, 900.0))
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, Some(path.clone())).unwrap());
+    wait_until(&mut h, "import + analysis", |a| {
+        a.session.document().objects().len() == 2 && a.current_analysis().is_some()
+    });
+    h.run_steps(4);
+    let (left, right) = {
+        let objects = h.state().session.document().objects().to_vec();
+        (objects[0].id, objects[1].id)
+    };
+    // Fixed frame counts, not `run` (which waits for repaints to stop): a
+    // newly active object's analysis keeps requesting frames, and under a
+    // parallel test load `run` can exceed its step budget.
+    h.state_mut().set_active(right);
+    h.run_steps(4);
+
+    press(&mut h, egui::Key::Delete, egui::Modifiers::NONE);
+    wait_until(&mut h, "the delete commits", |a| {
+        a.busy.is_none() && a.session.document().object(right).is_none()
+    });
+    assert_eq!(
+        h.state().active,
+        Some(left),
+        "the remaining object is active"
+    );
+    assert_eq!(h.state().object_views().len(), 1);
+
+    press(&mut h, egui::Key::Z, egui::Modifiers::COMMAND);
+    h.run_steps(4);
+    let doc = h.state().session.document();
+    assert_eq!(
+        doc.objects().iter().map(|o| o.id).collect::<Vec<_>>(),
+        vec![left, right],
+        "undo restores the object with its id"
+    );
+    assert!(h.state().active.is_some());
+
+    h.state_mut().redo();
+    h.run_steps(4);
+    assert!(h.state().session.document().object(right).is_none());
+    assert_eq!(h.state().active, Some(left));
+    h.state_mut().undo();
+    h.run_steps(4);
+    assert!(h.state().session.document().object(right).is_some());
 }

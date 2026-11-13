@@ -1,0 +1,30 @@
+id: object.add_shape
+version: 1
+summary: Add parametric shapes (library shapes, or a connector's linked parts) as new objects that keep their recipe, placed on the target.
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: shapes
+    type: text
+    default: "[]"
+    description: "The shapes to add, as JSON: a list of {generator: {id, version, params, part?}, name, hole}; each becomes one object, in order"
+  - name: transform
+    type: affine
+    default: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    description: "Where the shapes go: their absolute placement, 12 numbers (3x3 linear part row by row, then translation)"
+  - name: group
+    type: text
+    default: ""
+    description: "The linked group the new objects belong to (a connector placed as several objects); empty for none"
+preconditions:
+  - every recipe names a shape or connector this build has, at its recorded version
+postconditions:
+  - one new object per shape, at the given transform, with its recipe as its generator property
+  - a shape marked hole gets the Hole role
+  - the target is unchanged
+effects: [creates_objects]
+runtime:
+  cancellable: true
+  progress: false

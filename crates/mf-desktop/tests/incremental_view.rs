@@ -18,7 +18,9 @@ use mf_render::{ChunkVertices, UploadStats};
 
 fn model(mesh: Mesh) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![mf_io::threemf::ModelObject {
+            metadata: Default::default(),
             name: "sphere".into(),
             mesh,
             transform: mf_io::threemf::IDENTITY,
@@ -114,6 +116,9 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
     let full = opened.surface_bytes;
     let a = harness.state().session.current();
 
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Fill all holes").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
@@ -128,9 +133,12 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
         filled.surface_bytes
     );
     assert!(filled.surface_bytes > 0);
+    // Not a full rebuild: the new faces, and (smooth shading, UI plan
+    // step 3) the chunks holding faces around the filled holes' rims,
+    // which on this small, evenly holed sphere is most of them.
     assert!(
-        filled.surface_bytes < full / 2,
-        "the fill only appends: {filled:?} of {full}"
+        filled.surface_bytes < full,
+        "the fill re-uploads only touched chunks: {filled:?} of {full}"
     );
 
     harness.get_by_label("Undo").click();
@@ -139,6 +147,9 @@ fn the_view_uploads_only_changed_chunks_and_matches_a_full_rebuild() {
 
     // A branch off the original: its render mesh is built from what's on
     // screen (the original), not from the fill it doesn't descend from.
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    harness.get_by_label("Repair").click();
+    harness.run_steps(2);
     harness.get_by_label("Remove loose pieces").click();
     harness.run_steps(2);
     harness.get_by_label("Apply").click();
@@ -194,6 +205,9 @@ fn cached_revisions_are_bounded_by_gpu_bytes() {
             .state_mut()
             .import_model(model(damaged_sphere(&spec)));
         wait_shown(&mut harness, "import");
+        // Repair holds the whole-object repairs (ui-plan.md §7).
+        harness.get_by_label("Repair").click();
+        harness.run_steps(2);
         harness.get_by_label("Fill all holes").click();
         harness.run_steps(2);
         harness.get_by_label("Apply").click();

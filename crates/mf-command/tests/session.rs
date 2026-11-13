@@ -26,6 +26,7 @@ fn damaged() -> Mesh {
 
 fn remove(target: ObjectId, max: &str) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         selection: None,
         op_id: "mesh.remove_small_components".into(),
         target,
@@ -148,6 +149,7 @@ fn read_only_does_not_create_revision() {
     let rev = s.revision();
     let out = s
         .execute(Invocation {
+            operands: Vec::new(),
             selection: None,
             op_id: "mesh.inspect".into(),
             target: id,

@@ -8,12 +8,22 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only: a built-in spec with a `unit: mm` parameter
+# (`test.unit_conversion`), so `mf-command`'s tests can exercise real
+# unit-conversion wiring (`Session::prepare`, replay, reexecute) without
+# adding a `unit: mm` parameter to a real operation. Off in every normal
+# build; only `mf-command`'s dev-dependency enables it (as `mf-document`'s
+# `test-kinds` feature already does).
+test-kinds = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 serde-saphyr.workspace = true
 clap.workspace = true
 thiserror.workspace = true
+mf-io.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

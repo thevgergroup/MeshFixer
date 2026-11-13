@@ -2,6 +2,8 @@
 
 //! 3MF core: objects, build-item transforms, units (MF-IO-001, MF-DOC-004).
 
+use std::collections::BTreeMap;
+
 use mf_fixtures::{cube, tetrahedron, uv_sphere};
 use mf_geometry::FaceId;
 use mf_io::threemf::{self, Model, ModelObject, Unit};
@@ -11,6 +13,7 @@ const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0
 
 fn obj(name: &str, mesh: mf_geometry::Mesh, transform: [f64; 12]) -> ModelObject {
     ModelObject {
+        metadata: Default::default(),
         name: name.into(),
         mesh,
         transform,
@@ -21,6 +24,7 @@ fn obj(name: &str, mesh: mf_geometry::Mesh, transform: [f64; 12]) -> ModelObject
 fn threemf_roundtrip_three_objects() {
     let shifted = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 10.0, -2.5, 3.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Inch,
         objects: vec![
             obj("box", cube(1.0), IDENTITY),
@@ -169,14 +173,17 @@ fn export_verification_compares_triangle_indices_and_object_names() {
     // whose indices (or name) changed between what was asked for and what
     // comes back.
     let asked = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("part", cube(1.0), IDENTITY)],
     };
     let got_indices = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("part", rewound, IDENTITY)],
     };
     let got_name = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("other", cube(1.0), IDENTITY)],
     };
@@ -191,6 +198,7 @@ fn export_verification_compares_triangle_indices_and_object_names() {
     assert!(mf_io::models_match_for_verification(
         &asked,
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![obj("part", cube(1.0), IDENTITY)],
         }
@@ -225,6 +233,7 @@ fn threemf_read_is_linear_in_file_size() {
     // Locating each XML event by counting newlines from the start of the
     // file made reading quadratic: minutes for a 200k-triangle export.
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("sphere", uv_sphere(150, 300), threemf::IDENTITY)],
     };
@@ -268,8 +277,91 @@ fn threemf_extensions_and_properties_are_warned_never_silently_lost() {
         has("s:slicestack"),
         "non-core elements are named: {warnings:?}"
     );
-    assert!(has("material") && has("colour"), "{warnings:?}");
+    // Materials import now (MF-ISSUE-091): no "ignored" warning.
+    assert!(
+        !has("ignored; MeshFixer imports geometry only"),
+        "{warnings:?}"
+    );
+    assert_eq!(m.objects[0].mesh.materials()[0].name, "red");
+    assert_eq!(
+        m.objects[0].mesh.face_material(mf_geometry::FaceId(0)),
+        Some(0)
+    );
     assert!(has("object 2") && has("support"), "{warnings:?}");
+}
+
+/// MF-ISSUE-091: base materials and the Materials extension's colour
+/// groups import as per-face materials (object default plus per-triangle
+/// overrides), and survive an export and re-import.
+#[test]
+fn threemf_materials_and_colours_round_trip() {
+    let xml = r##"<?xml version="1.0"?>
+<model unit="millimeter" xmlns="http://schemas.microsoft.com/3dmanufacturing/core/2015/02"
+       xmlns:m="http://schemas.microsoft.com/3dmanufacturing/material/2015/02">
+  <resources>
+    <basematerials id="5"><base name="PLA white" displaycolor="#FFFFFF"/><base name="PLA red" displaycolor="#FF0000"/></basematerials>
+    <m:colorgroup id="6"><m:color color="#00FF0080"/><m:color color="#0000FF"/></m:colorgroup>
+    <object id="1" type="model" pid="5" pindex="0"><mesh>
+      <vertices><vertex x="0" y="0" z="0"/><vertex x="1" y="0" z="0"/><vertex x="0" y="1" z="0"/><vertex x="0" y="0" z="1"/></vertices>
+      <triangles>
+        <triangle v1="0" v2="2" v3="1"/>
+        <triangle v1="0" v2="1" v3="3" p1="1"/>
+        <triangle v1="1" v2="2" v3="3" pid="6" p1="0"/>
+        <triangle v1="0" v2="3" v3="2" pid="6" p1="1" p2="0"/>
+      </triangles></mesh></object>
+  </resources>
+  <build><item objectid="1"/></build>
+</model>"##;
+    let (m, warnings) = threemf::read(&zip_model(xml, true)).unwrap();
+    assert!(
+        warnings.iter().any(|w| w.contains("corner")),
+        "{warnings:?}"
+    );
+    let mesh = &m.objects[0].mesh;
+    let names: Vec<(String, [u8; 4])> = (0..4)
+        .map(|f| {
+            let mat =
+                &mesh.materials()[mesh.face_material(mf_geometry::FaceId(f)).unwrap() as usize];
+            (mat.name.clone(), mat.color)
+        })
+        .collect();
+    assert_eq!(
+        names,
+        vec![
+            ("PLA white".into(), [255, 255, 255, 255]),
+            ("PLA red".into(), [255, 0, 0, 255]),
+            (String::new(), [0, 255, 0, 128]),
+            (String::new(), [0, 0, 255, 255]),
+        ]
+    );
+    assert_eq!(mesh.default_material(), Some(0));
+    // Export and read back: the same colour on every face.
+    let bytes = threemf::write(&m).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let b = &back.objects[0].mesh;
+    for f in 0..4 {
+        let f = mf_geometry::FaceId(f);
+        let color =
+            |x: &mf_geometry::Mesh| x.materials()[x.face_material(f).unwrap() as usize].color;
+        assert_eq!(color(b), color(mesh), "{f:?}");
+    }
+    // A colour-free model still writes no properties at all.
+    let plain = Model {
+        metadata: Default::default(),
+        unit: Unit::Millimeter,
+        objects: vec![obj("plain", cube(1.0), IDENTITY)],
+    };
+    let (plain_back, _) = threemf::read(&threemf::write(&plain).unwrap()).unwrap();
+    assert!(!plain_back.objects[0].mesh.has_materials());
+    assert_eq!(
+        plain_back.objects[0].mesh.content_hash(),
+        cube(1.0).content_hash(),
+        "no materials: the same hash as before MF-ISSUE-091"
+    );
+    // A missing property group is a named error, not a silent default.
+    let bad = xml.replace(r#"pid="6" p1="0""#, r#"pid="9" p1="0""#);
+    assert!(threemf::read(&zip_model(&bad, true)).is_err());
 }
 
 /// MF-ISSUE-034: an empty mesh object (no vertices/triangles) is left out of
@@ -281,6 +373,7 @@ fn empty_objects_are_left_out_of_the_export_with_a_warning_naming_them() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("out.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             obj("solid", cube(1.0), IDENTITY),
@@ -341,4 +434,44 @@ fn only_a_missing_rels_falls_back_a_corrupt_one_is_a_named_error() {
             other.map(|(m, _)| m.unit)
         ),
     }
+}
+
+/// Object metadata (MeshFixer's `meshfixer:role`, and any other entry)
+/// round-trips through `<metadatagroup>`, escaped, with no warning.
+#[test]
+fn object_metadata_round_trips() {
+    let mut hole = obj("hole", cube(1.0), IDENTITY);
+    hole.metadata.insert("meshfixer:role".into(), "hole".into());
+    hole.metadata
+        .insert("meshfixer:note".into(), "a < b & \"c\"".into());
+    let model = Model {
+        metadata: Default::default(),
+        unit: Unit::Millimeter,
+        objects: vec![obj("solid", tetrahedron(), IDENTITY), hole],
+    };
+    let bytes = threemf::write(&model).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(back.objects[0].metadata.is_empty());
+    assert_eq!(back.objects[1].metadata, model.objects[1].metadata);
+}
+
+/// The model's own `<metadata>` (outside any `<object>`, such as the
+/// Browser's groups/order/hidden/locked state) round-trips too, separately
+/// from any object's.
+#[test]
+fn model_metadata_round_trips() {
+    let model = Model {
+        metadata: BTreeMap::from([(
+            "meshfixer:browser".into(),
+            "{\"groups\":[],\"note\":\"a < b & \\\"c\\\"\"}".into(),
+        )]),
+        unit: Unit::Millimeter,
+        objects: vec![obj("solid", tetrahedron(), IDENTITY)],
+    };
+    let bytes = threemf::write(&model).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(back.metadata, model.metadata);
+    assert!(back.objects[0].metadata.is_empty());
 }

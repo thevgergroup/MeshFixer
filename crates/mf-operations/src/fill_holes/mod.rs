@@ -6,7 +6,7 @@
 //! goes through `MeshEdit`, so kept geometry is untouched and provenance
 //! names the loop of every new face.
 
-mod fairing;
+pub(crate) mod fairing;
 mod refine;
 mod triangulate;
 
@@ -623,6 +623,7 @@ impl Operation for FillHoles {
                     Sources {
                         faces: vec![],
                         loops: vec![l.id],
+                        operands: vec![],
                     },
                 )
                 .map_err(|e| failed("invalid_edit", e.to_string()))?;

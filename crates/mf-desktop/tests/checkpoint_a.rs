@@ -154,10 +154,12 @@ fn key(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key) {
 fn scene(dir: &std::path::Path) -> PathBuf {
     let path = dir.join("checkpoint-a.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: mf_fixtures::demo_scene()
             .into_iter()
             .map(|(name, mesh, transform)| ModelObject {
+                metadata: Default::default(),
                 name,
                 mesh,
                 transform,
@@ -322,7 +324,9 @@ fn checkpoint_a_walkthrough() {
         h.state().selection.as_ref().map(|s| s.kind),
         Some(SelectionKind::BoundaryLoop)
     );
-    h.get_by_label("Fill hole");
+    // The inspector card names the operation; it opens in Repair.
+    click_label(&mut h, "Fill hole");
+    h.run();
     rec.still(&mut h, "11-hole-selected-properties", 2.0);
     hover(&mut h, view.right_top() + egui::vec2(-4.0, 4.0));
     let before_f = h.state().camera.unwrap();
@@ -364,6 +368,8 @@ fn checkpoint_a_walkthrough() {
         .rect()
         .center();
     click_at(&mut h, piece);
+    // In Repair already: the piece shows with its operation.
+    h.run();
     h.get_by_label("Remove piece");
     let before_f = h.state().camera.unwrap();
     key(&mut h, egui::Key::F);
@@ -390,12 +396,14 @@ fn checkpoint_a_walkthrough() {
     key(&mut h, egui::Key::Home);
     rec.still(&mut h, "15-piece-removed", 2.0);
 
-    // 7. Jump back through history with the breadcrumb, then forward.
+    // 7. Jump back through history (the History tab, in the right dock),
+    // then forward.
+    click_label(&mut h, "History");
     let crumb = |h: &Harness<'_, MeshFixerApp>, label: &str| {
         let view = h.state().viewport.last_rect.unwrap();
         h.get_all_by_label(label)
             .map(|n| n.rect())
-            .find(|r| r.top() >= view.bottom() - 1.0)
+            .find(|r| r.left() >= view.right() - 1.0)
             .unwrap()
             .center()
     };

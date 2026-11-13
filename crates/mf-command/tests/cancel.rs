@@ -58,6 +58,7 @@ fn imported(mesh: Mesh) -> Imported {
 
 fn fill(target: ObjectId) -> Invocation {
     Invocation {
+        operands: Vec::new(),
         op_id: "mesh.fill_holes".into(),
         target,
         selection: None,
@@ -417,6 +418,7 @@ fn progress_reaches_one_on_success() {
         let (s, id) = session_with(mesh);
         let prepared: Prepared = s
             .prepare(Invocation {
+                operands: Vec::new(),
                 op_id: op.into(),
                 target: id,
                 selection: None,
@@ -514,7 +516,10 @@ fn cancel_racing_completion_has_one_outcome() {
             .unwrap()
             .unwrap();
         runs.push(start.elapsed());
-        let hash = completed.output.change.as_ref().unwrap().0.content_hash();
+        let hash = match &completed.output.changes[..] {
+            [mf_operations::ObjectChange::Geometry { mesh, .. }] => mesh.content_hash(),
+            other => panic!("expected one geometry change, got {other:?}"),
+        };
         assert_eq!(
             *full_hash.get_or_insert(hash),
             hash,

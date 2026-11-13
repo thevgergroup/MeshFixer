@@ -12,13 +12,18 @@ mod record;
 mod replay;
 mod session;
 
-pub use log::{LOG_FORMAT, LogError};
+pub use log::{LOG_FORMAT, LogError, READABLE_LOG_FORMATS};
 pub use mf_document::RevisionId;
-pub use mf_document::{Document, Geometry, GeometryKind, Object, ObjectId};
+pub use mf_document::{
+    Document, Entry, GENERATOR, GROUP, Geometry, GeometryKind, Group, GroupId, HOLE, Object,
+    ObjectId, Organisation, OrganisationError, PARAMETRIC_KEYS, ROLE,
+};
 pub use record::{
     AffectedSummary, CommandId, CommandRecord, CommandStatus, GeometrySummary, ImportRecord,
+    ObjectOutput, RecordedOperand,
 };
 pub use replay::{ReplayReport, Verdict, replay};
 pub use session::{
-    CommandError, CommitOutcome, Completed, Invocation, Prepared, RevisionNode, Session, target_of,
+    CommandError, CommitOutcome, Completed, Invocation, Prepared, PropertyChange, RevisionNode,
+    SET_SHAPE_PARAMS, Session, TARGET_OPERAND, target_of,
 };

@@ -11,6 +11,28 @@ pub enum ParamValue {
     Float(f64),
     /// A `choice` parameter's word.
     Text(String),
+    /// A point or direction (D7): `[x, y, z]`, a JSON array in a command
+    /// log, comma-separated on the CLI.
+    Vec3([f64; 3]),
+    /// The absolute resulting transform (D7), row-major 3x4 (12 values:
+    /// the 3x3 linear part then the translation), recorded whole so
+    /// replay runs no trigonometry.
+    Affine([f64; 12]),
+    /// A sculpt stroke's sampled path (MF-SCULPT-003, MF-HIST-002): one
+    /// `[face, b0, b1, b2, pressure]` per dab, the face an input-revision
+    /// face id and `b` barycentric weights on it. A JSON array of arrays;
+    /// on the CLI, dabs separated by `;` and numbers by `,`.
+    Samples(Vec<[f64; 5]>),
+    /// A list of face ids (a sculpt stroke's frozen faces). Serialized as
+    /// `{"faces": [...]}` so a 3-face list can't be read as a `vec3`; on
+    /// the CLI, comma-separated.
+    Faces(FaceList),
+}
+
+/// See [`ParamValue::Faces`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FaceList {
+    pub faces: Vec<u32>,
 }
 
 impl fmt::Display for ParamValue {
@@ -20,6 +42,22 @@ impl fmt::Display for ParamValue {
             ParamValue::Int(i) => write!(f, "{i}"),
             ParamValue::Float(x) => write!(f, "{x}"),
             ParamValue::Text(t) => write!(f, "{t}"),
+            ParamValue::Vec3(v) => write!(f, "{},{},{}", v[0], v[1], v[2]),
+            ParamValue::Affine(m) => {
+                let parts: Vec<String> = m.iter().map(f64::to_string).collect();
+                write!(f, "{}", parts.join(","))
+            }
+            ParamValue::Samples(s) => {
+                let parts: Vec<String> = s
+                    .iter()
+                    .map(|d| d.iter().map(f64::to_string).collect::<Vec<_>>().join(","))
+                    .collect();
+                write!(f, "{}", parts.join(";"))
+            }
+            ParamValue::Faces(l) => {
+                let parts: Vec<String> = l.faces.iter().map(u32::to_string).collect();
+                write!(f, "{}", parts.join(","))
+            }
         }
     }
 }
@@ -80,6 +118,11 @@ impl Params {
         }
     }
 
+    /// A `text` parameter's value.
+    pub fn get_text(&self, name: &str) -> Result<&str, SpecError> {
+        self.get_choice(name)
+    }
+
     /// A `choice` parameter's word.
     pub fn get_choice(&self, name: &str) -> Result<&str, SpecError> {
         match self.0.get(name) {
@@ -93,6 +136,34 @@ impl Params {
         match self.get(name)? {
             ParamValue::Bool(b) => Ok(b),
             v => Err(Self::wrong(name, v, "a bool")),
+        }
+    }
+
+    pub fn get_vec3(&self, name: &str) -> Result<[f64; 3], SpecError> {
+        match self.get(name)? {
+            ParamValue::Vec3(v) => Ok(v),
+            v => Err(Self::wrong(name, v, "a vec3")),
+        }
+    }
+
+    pub fn get_samples(&self, name: &str) -> Result<Vec<[f64; 5]>, SpecError> {
+        match self.get(name)? {
+            ParamValue::Samples(s) => Ok(s),
+            v => Err(Self::wrong(name, v, "a list of samples")),
+        }
+    }
+
+    pub fn get_faces(&self, name: &str) -> Result<Vec<u32>, SpecError> {
+        match self.get(name)? {
+            ParamValue::Faces(l) => Ok(l.faces),
+            v => Err(Self::wrong(name, v, "a list of face ids")),
+        }
+    }
+
+    pub fn get_affine(&self, name: &str) -> Result<[f64; 12], SpecError> {
+        match self.get(name)? {
+            ParamValue::Affine(m) => Ok(m),
+            v => Err(Self::wrong(name, v, "an affine transform")),
         }
     }
 }

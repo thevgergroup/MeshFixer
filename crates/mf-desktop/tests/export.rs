@@ -46,7 +46,9 @@ fn opened(mesh: Mesh, transform: [f64; 12]) -> Harness<'static, MeshFixerApp> {
         .wgpu()
         .build_eframe(|cc| MeshFixerApp::new(cc, None).unwrap());
     h.state_mut().import_model(ImportedModel {
+        metadata: Default::default(),
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "placed".into(),
             mesh,
             transform,

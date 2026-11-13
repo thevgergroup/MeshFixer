@@ -94,10 +94,13 @@ pub fn render_image_with_chunk_limit(
     let gpu = GpuMesh::from_vertices_with_limit(&device, &crate::MeshVertices::build(mesh), limit);
     let camera = mesh.bounding_box().map(|bb| OrbitCamera::fit(&bb));
     let items = [DrawItem {
+        hole: false,
+        ghost: false,
         mesh: &gpu,
         model: DMat4::IDENTITY,
         inactive: false,
         shown_states: u32::from(crate::FaceStates::ALL),
+        object_color: None,
     }];
     let items = if mesh.is_empty() { &items[..0] } else { &items };
     target.draw(
@@ -124,21 +127,52 @@ pub fn render_objects(
     height: u32,
     show_boundaries: bool,
 ) -> Result<RgbaImage, RenderError> {
+    let items: Vec<(&Mesh, DMat4, bool)> = objects.iter().map(|(m, t)| (*m, *t, false)).collect();
+    render_roles(&items, cam, width, height, show_boundaries)
+}
+
+/// As [`render_objects`], each object with its role: `true` draws it as a
+/// Hole ([`DrawItem::hole`]).
+pub fn render_roles(
+    objects: &[(&Mesh, DMat4, bool)],
+    cam: &OrbitCamera,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+) -> Result<RgbaImage, RenderError> {
+    render_roles_xray(objects, cam, width, height, show_boundaries, true)
+}
+
+/// As [`render_roles`], with "Show holes through solids" ([`MeshRenderer::
+/// set_show_holes_through_solids`]) set explicitly, for tests comparing it
+/// on and off.
+pub fn render_roles_xray(
+    objects: &[(&Mesh, DMat4, bool)],
+    cam: &OrbitCamera,
+    width: u32,
+    height: u32,
+    show_boundaries: bool,
+    show_holes_through_solids: bool,
+) -> Result<RgbaImage, RenderError> {
     let (device, queue) = shared_device()?;
     let target = RenderTarget::new(&device, width, height, SAMPLES)?;
     let mut renderer = MeshRenderer::new(&device, RenderTarget::format(SAMPLES), Palette::HEADLESS);
+    renderer.set_show_holes_through_solids(show_holes_through_solids);
     let gpus: Vec<GpuMesh> = objects
         .iter()
-        .map(|(mesh, _)| GpuMesh::upload(&device, mesh))
+        .map(|(mesh, _, _)| GpuMesh::upload(&device, mesh))
         .collect();
     let items: Vec<DrawItem<'_>> = gpus
         .iter()
         .zip(objects)
-        .map(|(gpu, (_, model))| DrawItem {
+        .map(|(gpu, (_, model, hole))| DrawItem {
+            hole: *hole,
+            ghost: false,
             mesh: gpu,
             model: *model,
             inactive: false,
             shown_states: u32::from(crate::FaceStates::ALL),
+            object_color: None,
         })
         .collect();
     target.draw(

@@ -5,8 +5,18 @@ name: Heavy tests
 # tests) on all three OSes, the 400 MB memory gate, the evidence bundle and
 # the cross-OS replay check. Manual only (owner ruling, 2026-11-11: no
 # automatic GitHub Actions usage): started by hand from the Actions tab.
+#
+# The boolean kernel qualification (Phase 1 Tasks 7 and 7b, ADR-0002) is its
+# own job, `kernel-qualification`, which runs only when a dispatch has
+# `qualify` ticked. The full-test job skips it (see scripts/run-tests.sh), so a
+# kernel's verdict never turns a milestone's heavy run red.
 on:
   workflow_dispatch:
+    inputs:
+      qualify:
+        description: "Also run the boolean kernel qualification (kernel-qualification job)"
+        type: boolean
+        default: false
 
 env:
   CARGO_TERM_COLOR: never
@@ -205,3 +215,43 @@ jobs:
           counts=$(grep '^verdicts: ' replay.txt)
           echo "${RUNNER_OS}: ${counts}"
           { echo "### Cross-OS replay on ${RUNNER_OS}"; echo "**${counts}**"; echo '```'; cat replay.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  kernel-qualification:
+    # Phase 1 Tasks 7 and 7b (ADR-0002): both kernels (manifold-rust, and
+    # C++ Manifold through the `manifold-cpp` feature, which builds C++
+    # Manifold v3.5.3 and oneTBB from source with CMake) through the
+    # qualification gates, on the real models. On demand only.
+    if: github.event_name == 'workflow_dispatch' && inputs.qualify
+    runs-on: macos-latest
+    env:
+      MF_REQUIRE_FIXTURES: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Real scan fixtures (hash-verified)
+        uses: actions/cache@v6
+        with:
+          path: fixtures/real
+          key: real-fixtures-${{ hashFiles('fixtures/manifest.txt') }}
+      - name: Fetch real scan fixtures
+        run: scripts/fetch-fixtures.sh
+      - name: Fast gates (determinism, provenance) and the adapters
+        run: cargo test -p mf-boolean --features manifold-cpp
+      - name: Qualification gates (one at a time; times and peak heap are their own)
+        shell: bash
+        run: |
+          set -o pipefail
+          status=0
+          for t in qualify_windows qualify_corpus qualify_1m_union; do
+            MF_ARTIFACTS=$PWD/qualify cargo test -p mf-boolean --features manifold-rust --test qualify -- --test-threads=1 --nocapture --exact "$t" 2>&1 | tee -a qualify-output.txt || status=1
+          done
+          exit $status
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: kernel-qualification
+          path: |
+            qualify/
+            qualify-output.txt
+          if-no-files-found: warn

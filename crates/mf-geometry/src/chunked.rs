@@ -37,35 +37,56 @@ impl ChunkBytes for [u32; 3] {
     }
 }
 
+impl ChunkBytes for u32 {
+    fn hash_into(&self, h: &mut blake3::Hasher) {
+        h.update(&self.to_le_bytes());
+    }
+}
+
 impl ChunkBytes for u64 {
     fn hash_into(&self, h: &mut blake3::Hasher) {
         h.update(&self.to_le_bytes());
     }
 }
 
-/// One chunk of elements plus its cached hash. Cloning (copy-on-write)
-/// starts with an empty cache, so a copied chunk can never carry a stale hash.
-pub struct Chunk<T> {
-    data: Vec<T>,
+/// Elements per **group**: the unit a hash is cached for and the GPU's
+/// face chunk (MF-RENDER-003). A group is a run of storage chunks.
+pub const CHUNK: usize = 32_768;
+
+/// Elements per **storage chunk**: the copy-on-write unit (MF-DOC-002).
+/// Small, so one moved vertex copies 24 KB rather than a whole group
+/// (Phase 1 Task 16b, M4 review I2): a 1,000-stroke sculpt history stays
+/// near one revision plus the stroke footprints, while hashes and GPU
+/// buffers stay per group.
+pub const STORAGE_CHUNK: usize = 1_024;
+
+const PER_GROUP: usize = CHUNK / STORAGE_CHUNK;
+
+/// One group's storage chunks plus the group's cached hash. Cloning (copy
+/// on write) starts with an empty cache, and every write clears it, so a
+/// changed group never carries a stale hash.
+pub struct Group<T> {
+    chunks: Vec<Arc<Vec<T>>>,
     hash: OnceLock<[u8; 32]>,
 }
 
-impl<T: Clone> Clone for Chunk<T> {
+impl<T> Clone for Group<T> {
     fn clone(&self) -> Self {
-        Chunk {
-            data: self.data.clone(),
+        Group {
+            chunks: self.chunks.clone(),
             hash: OnceLock::new(),
         }
     }
 }
 
-impl<T: ChunkBytes> Chunk<T> {
-    /// The chunk's hash, computed on first use.
+impl<T: ChunkBytes> Group<T> {
+    /// The group's hash: BLAKE3 over its elements in order (the same bytes
+    /// whatever the storage chunk size), computed on first use.
     fn digest(&self) -> &[u8; 32] {
         self.hash.get_or_init(|| {
             CHUNK_HASHES.fetch_add(1, Ordering::Relaxed);
             let mut ch = blake3::Hasher::new();
-            for x in &self.data {
+            for x in self.chunks.iter().flat_map(|c| c.iter()) {
                 x.hash_into(&mut ch);
             }
             *ch.finalize().as_bytes()
@@ -73,161 +94,248 @@ impl<T: ChunkBytes> Chunk<T> {
     }
 }
 
-impl<T> Chunk<T> {
-    fn new(data: Vec<T>) -> Self {
-        Chunk {
-            data,
+impl<T: Copy> Group<T> {
+    fn from_slice(items: &[T]) -> Self {
+        Group {
+            chunks: items
+                .chunks(STORAGE_CHUNK)
+                .map(|c| Arc::new(c.to_vec()))
+                .collect(),
             hash: OnceLock::new(),
         }
     }
 
-    /// Mutable access; clears the cached hash.
-    fn data_mut(&mut self) -> &mut Vec<T> {
-        self.hash = OnceLock::new();
-        &mut self.data
+    fn iter(&self) -> impl Iterator<Item = &T> + '_ {
+        self.chunks.iter().flat_map(|c| c.iter())
     }
 }
 
-/// Elements per chunk.
-pub const CHUNK: usize = 32_768;
-
 #[allow(clippy::len_without_is_empty)] // crate-internal
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct Chunked<T> {
-    chunks: Vec<Arc<Chunk<T>>>,
+    groups: Vec<Arc<Group<T>>>,
     len: usize,
+}
+
+impl<T> Default for Chunked<T> {
+    fn default() -> Self {
+        Chunked {
+            groups: Vec::new(),
+            len: 0,
+        }
+    }
 }
 
 impl<T: Copy> Chunked<T> {
     pub fn from_vec(v: Vec<T>) -> Self {
         let len = v.len();
-        let chunks = v
+        let groups = v
             .chunks(CHUNK)
-            .map(|c| Arc::new(Chunk::new(c.to_vec())))
+            .map(|c| Arc::new(Group::from_slice(c)))
             .collect();
-        Chunked { chunks, len }
+        Chunked { groups, len }
     }
 
-    /// As [`Chunked::from_vec`], checking for cancellation between chunks.
+    /// As [`Chunked::from_vec`], checking for cancellation between groups.
     pub fn from_vec_with(v: Vec<T>, ctx: &RunContext) -> Result<Self, Cancelled> {
         let len = v.len();
-        let mut chunks = Vec::with_capacity(len.div_ceil(CHUNK));
+        let mut groups = Vec::with_capacity(len.div_ceil(CHUNK));
         for c in v.chunks(CHUNK) {
             ctx.checkpoint()?;
-            chunks.push(Arc::new(Chunk::new(c.to_vec())));
+            groups.push(Arc::new(Group::from_slice(c)));
         }
-        Ok(Chunked { chunks, len })
+        Ok(Chunked { groups, len })
     }
 
     /// Collect `items` straight into chunks, checking for cancellation
-    /// between chunks. Unlike [`Chunked::from_vec_with`] there's no whole
-    /// `Vec` to copy from, so the transient cost is one chunk.
+    /// between groups. Unlike [`Chunked::from_vec_with`] there's no whole
+    /// `Vec` to copy from, so the transient cost is one storage chunk.
     pub fn from_iter_with(
         items: impl IntoIterator<Item = T>,
         ctx: &RunContext,
     ) -> Result<Self, Cancelled> {
-        let mut chunks = Vec::new();
-        let mut len = 0;
-        let mut current = Vec::with_capacity(CHUNK);
+        let mut out = Chunked::default();
+        let mut current: Vec<T> = Vec::with_capacity(STORAGE_CHUNK);
         for x in items {
             current.push(x);
-            if current.len() == CHUNK {
-                ctx.checkpoint()?;
-                len += CHUNK;
-                let full = std::mem::replace(&mut current, Vec::with_capacity(CHUNK));
-                chunks.push(Arc::new(Chunk::new(full)));
+            if current.len() == STORAGE_CHUNK {
+                let full = std::mem::replace(&mut current, Vec::with_capacity(STORAGE_CHUNK));
+                out.push_chunk(full);
+                if out.len.is_multiple_of(CHUNK) {
+                    ctx.checkpoint()?;
+                }
             }
         }
         if !current.is_empty() {
-            len += current.len();
             current.shrink_to_fit();
-            chunks.push(Arc::new(Chunk::new(current)));
+            out.push_chunk(current);
         }
-        Ok(Chunked { chunks, len })
+        Ok(out)
+    }
+
+    /// Append a storage chunk; `self.len` must be a multiple of
+    /// [`STORAGE_CHUNK`].
+    fn push_chunk(&mut self, chunk: Vec<T>) {
+        debug_assert!(self.len.is_multiple_of(STORAGE_CHUNK));
+        if self.len.is_multiple_of(CHUNK) {
+            self.groups.push(Arc::new(Group {
+                chunks: Vec::with_capacity(PER_GROUP),
+                hash: OnceLock::new(),
+            }));
+        }
+        self.len += chunk.len();
+        let g = self.last_group_mut();
+        g.chunks.push(Arc::new(chunk));
+    }
+
+    /// The last group, unshared, with its hash cleared.
+    fn last_group_mut(&mut self) -> &mut Group<T> {
+        let g = Arc::make_mut(self.groups.last_mut().expect("there is a last group"));
+        g.hash = OnceLock::new();
+        g
     }
 
     pub fn len(&self) -> usize {
         self.len
     }
 
+    #[inline]
     pub fn get(&self, i: usize) -> T {
-        self.chunks[i / CHUNK].data[i % CHUNK]
+        self.groups[i / CHUNK].chunks[(i % CHUNK) / STORAGE_CHUNK][i % STORAGE_CHUNK]
     }
 
     pub fn iter(&self) -> impl Iterator<Item = T> + '_ {
-        self.chunks.iter().flat_map(|c| c.data.iter().copied())
+        self.groups.iter().flat_map(|g| g.iter().copied())
     }
 
-    /// Write one element, copying its chunk first if another revision shares it.
+    /// Write one element, copying its storage chunk (and its group's index)
+    /// first if another revision shares them.
     pub fn set(&mut self, i: usize, value: T) {
-        Arc::make_mut(&mut self.chunks[i / CHUNK]).data_mut()[i % CHUNK] = value;
+        let g = Arc::make_mut(&mut self.groups[i / CHUNK]);
+        g.hash = OnceLock::new();
+        Arc::make_mut(&mut g.chunks[(i % CHUNK) / STORAGE_CHUNK])[i % STORAGE_CHUNK] = value;
     }
 
     pub fn push(&mut self, value: T) {
-        if self.len.is_multiple_of(CHUNK) {
-            self.chunks.push(Arc::new(Chunk::new(Vec::new())));
-        }
-        if let Some(last) = self.chunks.last_mut() {
-            Arc::make_mut(last).data_mut().push(value);
+        if self.len.is_multiple_of(STORAGE_CHUNK) {
+            self.push_chunk(vec![value]);
+            return;
         }
         self.len += 1;
+        let g = self.last_group_mut();
+        let last = g.chunks.last_mut().expect("a partial chunk exists");
+        Arc::make_mut(last).push(value);
     }
 
+    /// Groups ([`CHUNK`] elements each, the last possibly fewer).
     pub fn chunk_count(&self) -> usize {
-        self.chunks.len()
+        self.groups.len()
     }
 
-    /// The elements of chunk `i` (empty past the end).
-    pub fn chunk(&self, i: usize) -> &[T] {
-        self.chunks.get(i).map_or(&[], |c| &c.data)
+    /// The elements of group `i`, in order (empty past the end).
+    pub fn chunk_iter(&self, i: usize) -> impl Iterator<Item = &T> + '_ {
+        self.groups.get(i).into_iter().flat_map(|g| g.iter())
     }
 
+    /// Number of elements in group `i` (0 past the end).
+    pub fn chunk_len(&self, i: usize) -> usize {
+        if i < self.groups.len() {
+            (self.len - i * CHUNK).min(CHUNK)
+        } else {
+            0
+        }
+    }
+
+    /// True if group `i` holds the same storage in both: one shared group,
+    /// or every storage chunk of it shared. False past either end.
     pub fn shares_chunk(&self, other: &Chunked<T>, i: usize) -> bool {
-        match (self.chunks.get(i), other.chunks.get(i)) {
-            (Some(a), Some(b)) => Arc::ptr_eq(a, b),
+        match (self.groups.get(i), other.groups.get(i)) {
+            (Some(a), Some(b)) => {
+                Arc::ptr_eq(a, b)
+                    || (a.chunks.len() == b.chunks.len()
+                        && a.chunks
+                            .iter()
+                            .zip(&b.chunks)
+                            .all(|(x, y)| Arc::ptr_eq(x, y)))
+            }
             _ => false,
         }
     }
 
-    /// Feed every chunk's (cached) hash into `h`, plus the length.
+    /// Storage chunks ([`STORAGE_CHUNK`] elements each).
+    pub fn storage_chunk_count(&self) -> usize {
+        self.len.div_ceil(STORAGE_CHUNK)
+    }
+
+    /// Storage chunk `k` (elements `k·STORAGE_CHUNK..`; empty past the end).
+    pub fn storage_chunk(&self, k: usize) -> &[T] {
+        self.groups
+            .get(k / PER_GROUP)
+            .and_then(|g| g.chunks.get(k % PER_GROUP))
+            .map_or(&[], |c| c.as_slice())
+    }
+
+    /// True if storage chunk `k` is the same storage in both. False past
+    /// either end.
+    pub fn shares_storage_chunk(&self, other: &Chunked<T>, k: usize) -> bool {
+        let get = |c: &Chunked<T>| {
+            c.groups
+                .get(k / PER_GROUP)
+                .and_then(|g| g.chunks.get(k % PER_GROUP))
+                .cloned()
+        };
+        match (get(self), get(other)) {
+            (Some(a), Some(b)) => Arc::ptr_eq(&a, &b),
+            _ => false,
+        }
+    }
+
+    /// Feed every group's (cached) hash into `h`, plus the length.
     pub fn hash_into(&self, h: &mut blake3::Hasher)
     where
         T: ChunkBytes,
     {
         h.update(&(self.len as u64).to_le_bytes());
-        for c in &self.chunks {
-            h.update(c.digest());
+        for g in &self.groups {
+            h.update(g.digest());
         }
     }
 
-    /// Compute and cache every chunk's hash, in parallel, checking for
-    /// cancellation between chunks. Cached hashes are kept either way, so
+    /// Compute and cache every group's hash, in parallel, checking for
+    /// cancellation between groups. Cached hashes are kept either way, so
     /// a cancelled call loses no work.
     pub fn warm_hashes(&self, ctx: &RunContext) -> Result<(), Cancelled>
     where
         T: ChunkBytes + Send + Sync,
     {
-        self.chunks.par_iter().try_for_each(|c| {
+        self.groups.par_iter().try_for_each(|g| {
             ctx.checkpoint()?;
-            c.digest();
+            g.digest();
             Ok(())
         })
     }
 
-    /// Heap bytes of chunks not already in `seen` (chunk identity by address).
+    /// Heap bytes of groups and storage chunks not already in `seen`
+    /// (identity by address).
     pub fn unique_heap_bytes(&self, seen: &mut HashSet<usize>) -> u64 {
-        let own = self.chunks.capacity() * std::mem::size_of::<Arc<Chunk<T>>>();
-        let chunks: usize = self
-            .chunks
-            .iter()
-            .filter(|c| seen.insert(Arc::as_ptr(c) as usize))
-            .map(|c| {
-                c.data.capacity() * std::mem::size_of::<T>()
-                    + std::mem::size_of::<Chunk<T>>()
-                    + 2 * std::mem::size_of::<usize>()
-            })
-            .sum();
-        (own + chunks) as u64
+        let arc = 2 * std::mem::size_of::<usize>();
+        let mut total = self.groups.capacity() * std::mem::size_of::<Arc<Group<T>>>();
+        for g in &self.groups {
+            if !seen.insert(Arc::as_ptr(g) as usize) {
+                continue;
+            }
+            total += std::mem::size_of::<Group<T>>()
+                + arc
+                + g.chunks.capacity() * std::mem::size_of::<Arc<Vec<T>>>();
+            for c in &g.chunks {
+                if seen.insert(Arc::as_ptr(c) as usize) {
+                    total += c.capacity() * std::mem::size_of::<T>()
+                        + std::mem::size_of::<Vec<T>>()
+                        + arc;
+                }
+            }
+        }
+        total as u64
     }
 }
 

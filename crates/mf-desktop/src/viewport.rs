@@ -18,6 +18,21 @@ use crate::worker::RenderMesh;
 
 pub const MSAA_SAMPLES: u32 = 4;
 
+/// One drawn object's dirty-check key: identity of its render mesh, its
+/// face-state generation (a selection change redraws), the states shown,
+/// whether it's dimmed, its Hole/ghost roles, and its palette colour
+/// (bits; View ▸ Colour objects toggling redraws).
+type ObjectKey = (
+    ObjectId,
+    usize,
+    u64,
+    u32,
+    bool,
+    bool,
+    bool,
+    Option<[u32; 4]>,
+);
+
 #[derive(Clone, PartialEq)]
 struct FrameKey {
     camera: OrbitCamera,
@@ -25,15 +40,21 @@ struct FrameKey {
     size: (u32, u32),
     /// Which object is active (desaturation depends on this).
     active: Option<ObjectId>,
-    /// Each object drawn: the identity of its render mesh, its face-state
-    /// generation (a selection change redraws), the states shown and
-    /// whether it's dimmed.
-    objects: Vec<(ObjectId, usize, u64, u32, bool)>,
+    objects: Vec<ObjectKey>,
     /// Identity, colour, x-ray and emphasis (bits) of each overlay layer,
     /// in draw order.
     layers: Vec<(ObjectId, usize, [u8; 4], bool, u32)>,
     /// The selection cue: emphasis (bits) and x-ray.
     cue: (u32, bool),
+    /// Each object's transform (bits): a gizmo drag redraws.
+    transforms: Vec<[u64; 12]>,
+    /// The gizmo's handles (target pixels) and the highlighted one.
+    gizmo: Option<(Vec<mf_render::HandleShape>, Option<mf_render::Handle>)>,
+    plate: Option<mf_render::Plate>,
+    /// "Show holes through solids" (View ▸ Overlays): a toggle redraws.
+    show_holes_through_solids: bool,
+    /// Identity of each intersection curve drawn (a new curve redraws).
+    intersections: Vec<usize>,
 }
 
 /// One line overlay to draw on an object (built by a worker; see app.rs).
@@ -52,6 +73,13 @@ pub struct ViewLayer {
     pub emphasis: f32,
 }
 
+/// Where a Hole's surface crosses a Solid's (`mesh.intersections`): the
+/// exact curve, already in world space (built by a worker), drawn in the
+/// `INTERSECTION` token over everything with no depth test.
+pub struct IntersectionView {
+    pub lines: Arc<GpuLines>,
+}
+
 /// One object to draw this frame, at its own transform (MF-ISSUE-042).
 pub struct ObjectView {
     pub id: ObjectId,
@@ -64,6 +92,18 @@ pub struct ObjectView {
     pub hovered: bool,
     /// Which face-state flags tint it (`mf_render::FaceStates`).
     pub shown_states: u32,
+    /// One of several objects selected together (Shift-click): drawn
+    /// undimmed like the active one.
+    pub picked: bool,
+    /// Its role is Hole: drawn translucent with a grey hatch.
+    pub hole: bool,
+    /// Drawn see-through: the Split workflow's transparent piece.
+    pub ghost: bool,
+    /// View ▸ Colour objects (UI plan §11): this object's own palette
+    /// shade, or `None` for Clay, a Hole (which always keeps its hatch
+    /// instead) or a mesh carrying its own 3MF material or colour (which
+    /// always overrides the palette).
+    pub color: Option<[f32; 4]>,
 }
 
 /// How to draw the view this frame.
@@ -81,6 +121,49 @@ pub struct ViewOptions<'a> {
     pub cue: SelectionCue,
     /// The hole overview's markers (window points), drawn over the view.
     pub markers: Option<Arc<egui::Mesh>>,
+    /// The transform gizmo to draw over everything, and its highlighted
+    /// handle (the one hovered or dragged).
+    pub gizmo: Option<(mf_render::Gizmo, Option<mf_render::Handle>)>,
+    /// The build plate to draw under the model.
+    pub plate: Option<mf_render::Plate>,
+    /// The open interactive tool's line at the view's top-left.
+    pub tool_hint: Option<&'a str>,
+    /// How the surface is shaded (the View menu's presets and wireframe).
+    pub shading: mf_render::Shading,
+    /// Split's plane (point, normal; world): the two sides are shaded
+    /// apart and the cut line drawn on the model.
+    pub split_preview: Option<(glam::DVec3, glam::DVec3)>,
+    /// View ▸ Overlays ▸ "Show holes through solids" (on by default): a
+    /// Hole's hidden part — buried inside or behind a solid — draws as a
+    /// fainter ghost.
+    pub show_holes_through_solids: bool,
+    /// Every overlapping Solid/Hole pair's exact crossing curve.
+    pub intersections: Vec<IntersectionView>,
+}
+
+/// What [`Viewport::input`] found, for [`Viewport::paint`].
+pub struct ViewInput {
+    rect: egui::Rect,
+    /// Something can be drawn (a camera, and objects to draw).
+    drawn: bool,
+    /// The input part of this frame's output.
+    pub out: ViewOutput,
+}
+
+/// The pointer, for the open interactive tool (points from the view's
+/// top-left).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ToolPointer {
+    /// A drag the tool claimed started where the button went down, and
+    /// the pointer is now at `at`.
+    Start { from: (f64, f64), at: (f64, f64) },
+    /// The tool's drag continues.
+    Move((f64, f64)),
+    /// The tool's drag ended (the button was released).
+    End((f64, f64)),
+    /// A plain click (no drag) where the tool claims the press: the
+    /// tool's, not a pick (a sculpt dab, a handle clicked).
+    Click((f64, f64)),
 }
 
 /// A box dragged in Select mode (or after B): `rect` in points from the
@@ -118,6 +201,10 @@ pub enum NavMode {
 pub enum NavAction {
     FrameSelection,
     ResetView,
+    /// The Overlays popover (what each colour means).
+    Overlays,
+    /// The wireframe on or off.
+    Wireframe,
 }
 
 /// What happened in the viewport this frame.
@@ -130,6 +217,11 @@ pub struct ViewOutput {
     pub pointer: Option<((f64, f64), (f64, f64))>,
     /// A box selection finished this frame.
     pub box_select: Option<BoxSelect>,
+    /// The open interactive tool's drag, this frame.
+    pub tool: Option<ToolPointer>,
+    /// Where the pointer is over the view (points from its top-left),
+    /// held button or not: what an interactive tool highlights under.
+    pub tool_hover: Option<(f64, f64)>,
 }
 
 /// One zoom step of the zoom buttons and keys.
@@ -160,6 +252,12 @@ pub struct Viewport {
     pub box_once: bool,
     /// Where the box being dragged started (window points).
     box_from: Option<egui::Pos2>,
+    /// The primary drag under way belongs to the open interactive tool.
+    tool_drag: bool,
+    /// Where the navigation bar was last drawn (it is dim until hovered).
+    nav_rect: Option<egui::Rect>,
+    /// The wireframe is on (the navigation bar's toggle shows it).
+    wireframe_on: bool,
     /// Times the 3D view's pass on the GPU; `None` when the device can't.
     timer: Option<GpuTimer>,
     /// The last frame that redrew the 3D view, and whether it was timed.
@@ -190,62 +288,93 @@ impl Viewport {
             frames_rendered: 0,
             box_once: false,
             box_from: None,
+            tool_drag: false,
+            nav_rect: None,
+            wireframe_on: false,
         }
     }
 
-    /// Draw the viewport into the remaining space and handle camera input.
-    /// Every object of `objects` is drawn at its own transform
-    /// (MF-ISSUE-042): the active one full colour, the rest dimmed.
-    pub fn show(
+    /// Take the viewport's space and handle its input this frame: the
+    /// camera moves, and clicks, boxes and the open interactive tool's
+    /// pointer are reported (`drawable`: there is something to draw). Then
+    /// [`Self::paint`] draws it, so a tool's drag moves what is drawn in
+    /// the same frame.
+    pub fn input(
         &mut self,
         ui: &mut egui::Ui,
         camera: &mut Option<OrbitCamera>,
-        objects: &[ObjectView],
-        options: ViewOptions<'_>,
-    ) -> ViewOutput {
-        let ViewOptions {
-            show_boundaries,
-            layers,
-            updating,
-            placeholder,
-            frame,
-            cue,
-            markers,
-        } = options;
+        drawable: bool,
+        tool_grabs: Option<&dyn Fn((f64, f64)) -> bool>,
+    ) -> ViewInput {
         let (rect, response) =
             ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
-        let (Some(cam), false) = (camera.as_mut(), objects.is_empty()) else {
+        let (Some(cam), true) = (camera.as_mut(), drawable) else {
             // Nothing ready to draw yet (no camera, or no object's vertices
             // are in hand): release GPU buffers for a vanished document
             // (MF-ISSUE-009).
             self.last_frame = None;
             self.last_rect = None;
-            let size = self.target_size(ui, rect);
-            self.ensure_target(size);
-            // Laid out, not painted, so the first frame that draws a model
-            // doesn't also rasterize this text's glyphs (MF-RT-001).
-            let _warm = (controls_hint(ui), updating_text(ui));
-            ui.painter()
-                .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
-            ui.painter().text(
-                rect.center(),
-                egui::Align2::CENTER_CENTER,
-                placeholder,
-                egui::FontId::proportional(16.0),
-                theme::TEXT_MUTED,
-            );
-            return ViewOutput::default();
+            self.tool_drag = false;
+            return ViewInput {
+                rect,
+                drawn: false,
+                out: ViewOutput::default(),
+            };
         };
         self.last_rect = Some(rect);
-        let click = response
+        let local = |p: egui::Pos2| ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64);
+        // An open interactive tool gets the primary drag first (I8), where
+        // it claims the press; Alt and Shift camera drags always win.
+        let (alt, shift) = ui.input(|i| (i.modifiers.alt, i.modifiers.shift));
+        let mut tool = None;
+        if response.drag_started_by(egui::PointerButton::Primary)
+            && !alt
+            && !shift
+            && let (Some(grabs), Some(origin)) =
+                (tool_grabs, ui.input(|i| i.pointer.press_origin()))
+            && grabs(local(origin))
+        {
+            self.tool_drag = true;
+            let at = response.interact_pointer_pos().unwrap_or(origin);
+            tool = Some(ToolPointer::Start {
+                from: local(origin),
+                at: local(at),
+            });
+        } else if self.tool_drag {
+            let at = response
+                .interact_pointer_pos()
+                .or_else(|| ui.input(|i| i.pointer.latest_pos()));
+            if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+                self.tool_drag = false;
+                tool = at.map(|p| ToolPointer::End(local(p)));
+            } else if let Some(p) = at {
+                tool = Some(ToolPointer::Move(local(p)));
+            }
+        }
+        let tool_hover = response
+            .hover_pos()
+            .or_else(|| {
+                self.tool_drag
+                    .then(|| ui.input(|i| i.pointer.latest_pos()))
+                    .flatten()
+            })
+            .map(local);
+        let claimed = |p: egui::Pos2| tool_grabs.is_some_and(|grabs| grabs(local(p)));
+        let clicked = response
             .clicked()
             .then(|| response.interact_pointer_pos())
-            .flatten()
-            .map(|p| Click {
-                px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
-                size: (rect.width() as f64, rect.height() as f64),
-                shift: ui.input(|i| i.modifiers.shift),
-            });
+            .flatten();
+        // A click the tool claims is the tool's, not a pick.
+        if let Some(p) = clicked.filter(|p| claimed(*p))
+            && tool.is_none()
+        {
+            tool = Some(ToolPointer::Click(local(p)));
+        }
+        let click = clicked.filter(|p| !claimed(*p)).map(|p| Click {
+            px: ((p.x - rect.left()) as f64, (p.y - rect.top()) as f64),
+            size: (rect.width() as f64, rect.height() as f64),
+            shift: ui.input(|i| i.modifiers.shift),
+        });
         let pointer = response
             .hover_pos()
             .filter(|_| !ui.input(|i| i.pointer.any_down()))
@@ -255,7 +384,9 @@ impl Viewport {
                     (rect.width() as f64, rect.height() as f64),
                 )
             });
-        let selecting = self.box_once || self.nav_mode == NavMode::Select;
+        let selecting = (self.box_once || self.nav_mode == NavMode::Select)
+            && !self.tool_drag
+            && tool.is_none();
         let mut box_select = None;
         if selecting && response.drag_started_by(egui::PointerButton::Primary) {
             self.box_from = ui.input(|i| i.pointer.press_origin());
@@ -284,25 +415,139 @@ impl Viewport {
                 );
             }
         }
-        handle_input(ui, &response, rect, cam, self.nav_mode, selecting);
+        // While the tool drags, the camera holds still: no orbit, pan,
+        // wheel or pinch (the drag maps the pointer through this camera).
+        let owned =
+            self.tool_drag || matches!(tool, Some(ToolPointer::Start { .. } | ToolPointer::End(_)));
+        if !owned {
+            handle_input(ui, &response, rect, cam, self.nav_mode, selecting);
+        }
+        ViewInput {
+            rect,
+            drawn: true,
+            out: ViewOutput {
+                click,
+                action: None,
+                pointer,
+                box_select,
+                tool,
+                tool_hover,
+            },
+        }
+    }
+
+    /// Draw the view [`Self::input`] laid out: every object of `objects`
+    /// at its own transform (MF-ISSUE-042), the active one full colour and
+    /// the rest dimmed, then the overlays, the gizmo and the navigation
+    /// bar. Returns what happened this frame.
+    pub fn paint(
+        &mut self,
+        ui: &mut egui::Ui,
+        input: ViewInput,
+        camera: &mut Option<OrbitCamera>,
+        objects: &[ObjectView],
+        options: ViewOptions<'_>,
+    ) -> ViewOutput {
+        let ViewOptions {
+            show_boundaries,
+            layers,
+            updating,
+            placeholder,
+            frame,
+            cue,
+            markers,
+            gizmo,
+            plate,
+            tool_hint,
+            shading,
+            split_preview,
+            show_holes_through_solids,
+            intersections,
+        } = options;
+        let rect = input.rect;
+        let (Some(cam), true) = (camera.as_mut(), input.drawn && !objects.is_empty()) else {
+            let size = self.target_size(ui, rect);
+            self.ensure_target(size);
+            // Laid out, not painted, so the first frame that draws a model
+            // doesn't also rasterize this text's glyphs (MF-RT-001).
+            let _warm = (controls_hint(ui), updating_text(ui));
+            ui.painter()
+                .rect_filled(rect, 0.0, theme::VIEWPORT_BACKGROUND);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                placeholder,
+                egui::FontId::proportional(16.0),
+                theme::TEXT_MUTED,
+            );
+            return ViewOutput::default();
+        };
+        let ViewOutput {
+            click,
+            pointer,
+            box_select,
+            tool,
+            tool_hover,
+            ..
+        } = input.out;
 
         self.renderer
             .set_pixels_per_point(ui.ctx().pixels_per_point());
         let size = self.target_size(ui, rect);
         self.renderer.set_selection_cue(cue);
-        let texture = self.render(*cam, objects, show_boundaries, &layers, size, frame);
+        self.renderer.set_shading(shading);
+        self.renderer.set_split_preview(split_preview);
+        self.renderer
+            .set_show_holes_through_solids(show_holes_through_solids);
+        self.wireframe_on = shading.wireframe;
+        let ppp = f64::from(ui.ctx().pixels_per_point());
+        let view = (rect.width() as f64, rect.height() as f64);
+        // The gizmo is laid out in points (its size is in points); the
+        // renderer draws in target pixels.
+        let gizmo = gizmo.map(|(g, highlight)| {
+            let shapes: Vec<mf_render::HandleShape> = g
+                .shapes(cam, view, highlight)
+                .into_iter()
+                .map(|s| scaled_shape(s, ppp))
+                .collect();
+            (shapes, highlight)
+        });
+        let texture = self.render(
+            *cam,
+            objects,
+            show_boundaries,
+            &layers,
+            size,
+            frame,
+            gizmo.as_ref().map(|(s, h)| (s.as_slice(), *h)),
+            plate,
+            show_holes_through_solids,
+            &intersections,
+        );
         ui.painter().image(
             texture,
             rect,
             egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
+        let mut top = rect.left_top() + egui::vec2(8.0, 8.0);
         if updating {
-            ui.painter().galley(
-                rect.left_top() + egui::vec2(8.0, 8.0),
-                updating_text(ui),
-                theme::TEXT_MUTED,
+            let text = updating_text(ui);
+            let h = text.size().y;
+            ui.painter().galley(top, text, theme::TEXT_MUTED);
+            top.y += h + 4.0;
+        }
+        // The open interactive tool says so, and how to leave it (I8).
+        if let Some(hint) = tool_hint {
+            let text = ui.painter().layout_no_wrap(
+                hint.to_owned(),
+                egui::FontId::proportional(13.0),
+                theme::TEXT,
             );
+            let area = egui::Rect::from_min_size(top, text.size()).expand(4.0);
+            ui.painter()
+                .rect_filled(area, 4.0, theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85));
+            ui.painter().galley(top, text, theme::TEXT);
         }
         // The controls hint, on a backdrop so it reads over the model. Kept
         // short so it clears the navigation bar at the bottom-right; Help >
@@ -333,69 +578,96 @@ impl Viewport {
             action,
             pointer,
             box_select,
+            tool,
+            tool_hover,
         }
     }
 
-    /// The on-screen navigation bar at the view's bottom-right, for people
-    /// without a mouse wheel: drag mode (Orbit / Pan / Zoom), zoom out / in
-    /// (hold to repeat), frame selection and reset view. Camera maths only.
-    /// In a narrow view (a laptop window with both panels open) it takes
-    /// two rows, so it fits. Returns the action and where the bar is.
+    /// The navigation bar at the view's bottom centre (ui-plan.md §3), for
+    /// people without a mouse wheel: drag mode (Orbit / Pan / Zoom / Box
+    /// select), zoom out / in (hold to repeat), frame selection, reset
+    /// view and the Overlays popover, as icons with accessible names and
+    /// tooltips. Dim until the pointer is over it. Camera maths only.
+    /// Returns the action and where the bar is.
     fn navigation_bar(
         &mut self,
         ui: &egui::Ui,
         rect: egui::Rect,
         cam: &mut OrbitCamera,
     ) -> (Option<NavAction>, egui::Rect) {
+        use crate::{icons, t, widgets};
         let mut action = None;
         let mut zoom_steps = 0i32;
         let mut held = None;
-        let two_rows = rect.width() < NARROW_VIEW;
+        let hovered = self.nav_rect.is_some_and(|r| {
+            ui.ctx()
+                .pointer_hover_pos()
+                .is_some_and(|p| r.expand(6.0).contains(p))
+        });
         let bar = egui::Area::new(egui::Id::unique("navigation bar"))
             .order(egui::Order::Middle)
-            .pivot(egui::Align2::RIGHT_BOTTOM)
-            .fixed_pos(rect.right_bottom() - egui::vec2(10.0, 10.0))
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(rect.center_bottom() - egui::vec2(0.0, theme::SPACE_M))
             .constrain_to(rect)
             .show(ui.ctx(), |ui| {
+                if !hovered {
+                    ui.multiply_opacity(0.6);
+                }
                 egui::Frame::new()
-                    .fill(theme::VIEWPORT_BACKGROUND.gamma_multiply(0.92))
-                    .stroke(egui::Stroke::new(
-                        1.0,
-                        theme::TEXT_MUTED.gamma_multiply(0.4),
-                    ))
-                    .corner_radius(6.0)
-                    .inner_margin(6.0)
+                    .fill(theme::CARD.gamma_multiply(0.92))
+                    .stroke(egui::Stroke::new(1.0, theme::SEPARATOR))
+                    .corner_radius(theme::RADIUS + 2.0)
+                    .inner_margin(4.0)
                     .show(ui, |ui| {
-                        let modes = |ui: &mut egui::Ui, nav_mode: &mut NavMode| {
-                            for (mode, label, tip) in [
-                                (NavMode::Orbit, "Orbit", "Drag orbits"),
-                                (NavMode::Pan, "Pan", "Drag pans (or Shift + drag)"),
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            const SIZE: f32 = 28.0;
+                            for (mode, icon, label, tip) in [
+                                (
+                                    NavMode::Orbit,
+                                    icons::ORBIT,
+                                    t!("nav.orbit"),
+                                    t!("nav.orbit.tip"),
+                                ),
+                                (NavMode::Pan, icons::PAN, t!("nav.pan"), t!("nav.pan.tip")),
                                 (
                                     NavMode::Zoom,
-                                    "Zoom",
-                                    "Drag up/down zooms (or Option/Alt + drag)",
+                                    icons::ZOOM,
+                                    t!("nav.zoom"),
+                                    t!("nav.zoom.tip"),
                                 ),
                                 (
                                     NavMode::Select,
-                                    "Select",
-                                    "Drag a box: selects the visible holes in it (B for one box; Shift adds)",
+                                    icons::BOX_SELECT,
+                                    t!("nav.box"),
+                                    t!("nav.box.tip"),
                                 ),
                             ] {
-                                if ui
-                                    .selectable_label(*nav_mode == mode, label)
+                                let on = self.nav_mode == mode;
+                                if widgets::icon_button(ui, icon, &label, Some(on), SIZE)
                                     .on_hover_text(tip)
                                     .clicked()
                                 {
-                                    *nav_mode = mode;
+                                    self.nav_mode = mode;
                                 }
                             }
-                        };
-                        let mut buttons = |ui: &mut egui::Ui| {
-                            for (zoom_in, text, label, tip) in [
-                                (false, "−", "Zoom out", "Zoom out (−); hold to repeat"),
-                                (true, "+", "Zoom in", "Zoom in (+ or =); hold to repeat"),
+                            divider(ui);
+                            for (zoom_in, icon, label, tip) in [
+                                (
+                                    false,
+                                    icons::ZOOM_OUT,
+                                    t!("nav.zoom_out"),
+                                    t!("nav.zoom_out.tip"),
+                                ),
+                                (
+                                    true,
+                                    icons::ZOOM_IN,
+                                    t!("nav.zoom_in"),
+                                    t!("nav.zoom_in.tip"),
+                                ),
                             ] {
-                                let r = labelled(ui.button(text), label).on_hover_text(tip);
+                                let r = widgets::icon_button(ui, icon, &label, None, SIZE)
+                                    .on_hover_text(tip);
                                 if r.clicked() {
                                     zoom_steps += if zoom_in { 1 } else { -1 };
                                 }
@@ -403,36 +675,56 @@ impl Viewport {
                                     held = Some(zoom_in);
                                 }
                             }
-                            ui.separator();
-                            if labelled(ui.button("Frame"), "Frame selection")
-                                .on_hover_text("Frame selection (F)")
+                            divider(ui);
+                            if widgets::icon_button(ui, icons::FRAME, &t!("cmd.frame"), None, SIZE)
+                                .on_hover_text(t!("nav.frame.tip"))
                                 .clicked()
                             {
                                 action = Some(NavAction::FrameSelection);
                             }
-                            if labelled(ui.button("Reset"), "Reset view")
-                                .on_hover_text("Reset view (Home, or Cmd/Ctrl+0)")
-                                .clicked()
+                            if widgets::icon_button(
+                                ui,
+                                icons::HOME,
+                                &t!("cmd.reset_view"),
+                                None,
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.reset.tip"))
+                            .clicked()
                             {
                                 action = Some(NavAction::ResetView);
                             }
-                        };
-                        if two_rows {
-                            ui.vertical(|ui| {
-                                ui.horizontal(|ui| modes(ui, &mut self.nav_mode));
-                                ui.horizontal(&mut buttons);
-                            });
-                        } else {
-                            ui.horizontal(|ui| {
-                                modes(ui, &mut self.nav_mode);
-                                ui.separator();
-                                buttons(ui);
-                            });
-                        }
+                            divider(ui);
+                            if widgets::icon_button(
+                                ui,
+                                icons::WIREFRAME,
+                                &t!("nav.wireframe"),
+                                Some(self.wireframe_on),
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.wireframe.tip"))
+                            .clicked()
+                            {
+                                action = Some(NavAction::Wireframe);
+                            }
+                            if widgets::icon_button(
+                                ui,
+                                icons::OVERLAYS,
+                                &t!("nav.overlays"),
+                                None,
+                                SIZE,
+                            )
+                            .on_hover_text(t!("nav.overlays.tip"))
+                            .clicked()
+                            {
+                                action = Some(NavAction::Overlays);
+                            }
+                        });
                     });
             })
             .response
             .rect;
+        self.nav_rect = Some(bar);
         // Holding a zoom button repeats the step.
         let now = ui.input(|i| i.time);
         match (held, self.hold) {
@@ -459,6 +751,7 @@ impl Viewport {
         (action, bar)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn render(
         &mut self,
         camera: OrbitCamera,
@@ -467,6 +760,10 @@ impl Viewport {
         layers: &[ViewLayer],
         size: (u32, u32),
         frame: u64,
+        gizmo: Option<(&[mf_render::HandleShape], Option<mf_render::Handle>)>,
+        plate: Option<mf_render::Plate>,
+        show_holes_through_solids: bool,
+        intersections: &[IntersectionView],
     ) -> egui::TextureId {
         let mut dirty = self.ensure_target(size);
         let cue = self.renderer.selection_cue();
@@ -493,7 +790,10 @@ impl Viewport {
                         Arc::as_ptr(&o.render) as usize,
                         o.render.gpu.state_generation(),
                         o.shown_states,
-                        !(o.active || o.hovered),
+                        !(o.active || o.hovered || o.picked),
+                        o.hole,
+                        o.ghost,
+                        o.color.map(|c| c.map(f32::to_bits)),
                     )
                 })
                 .collect(),
@@ -510,6 +810,17 @@ impl Viewport {
                 })
                 .collect(),
             cue: (cue.emphasis.to_bits(), cue.xray_faces),
+            transforms: objects
+                .iter()
+                .map(|o| o.transform.map(f64::to_bits))
+                .collect(),
+            gizmo: gizmo.map(|(shapes, h)| (shapes.to_vec(), h)),
+            plate,
+            show_holes_through_solids,
+            intersections: intersections
+                .iter()
+                .map(|i| Arc::as_ptr(&i.lines) as usize)
+                .collect(),
         };
         dirty |= self.last_frame.as_ref() != Some(&key);
 
@@ -517,10 +828,13 @@ impl Viewport {
             let items: Vec<mf_render::DrawItem<'_>> = objects
                 .iter()
                 .map(|o| mf_render::DrawItem {
+                    hole: o.hole,
+                    ghost: o.ghost,
                     mesh: &o.render.gpu,
                     model: model_matrix(&o.transform),
-                    inactive: !(o.active || o.hovered),
+                    inactive: !(o.active || o.hovered || o.picked),
                     shown_states: o.shown_states,
+                    object_color: o.color,
                 })
                 .collect();
             let gpu_layers: Vec<Layer<'_>> = drawn
@@ -537,7 +851,29 @@ impl Viewport {
                     })
                 })
                 .collect();
-            let timed = target.draw_timed(
+            // Already in world space (built on a worker): an identity
+            // model and origin, like the build plate.
+            let gpu_intersections: Vec<Layer<'_>> = intersections
+                .iter()
+                .map(|i| Layer {
+                    lines: &i.lines,
+                    model: glam::DMat4::IDENTITY,
+                    mesh_origin: glam::DVec3::ZERO,
+                    color: theme::rgba(theme::INTERSECTION),
+                    xray: false,
+                    emphasis: 0.0,
+                })
+                .collect();
+            let palette = theme::gizmo_palette();
+            let extras = mf_render::SceneExtras {
+                plate: plate.as_ref(),
+                gizmo: gizmo.map(|(shapes, highlight)| mf_render::GizmoDraw {
+                    shapes,
+                    highlight,
+                    palette: &palette,
+                }),
+            };
+            let timed = target.draw_with(
                 device,
                 &self.render_state.queue,
                 &mut self.renderer,
@@ -545,6 +881,8 @@ impl Viewport {
                 &items,
                 show_boundaries,
                 &gpu_layers,
+                &gpu_intersections,
+                &extras,
                 self.timer.as_mut().map(|t| (t, frame)),
             );
             self.redrawn = Some((frame, timed));
@@ -658,6 +996,7 @@ fn handle_input(
     rect: egui::Rect,
     cam: &mut OrbitCamera,
     mode: NavMode,
+    // A box selection owns the primary drag.
     selecting: bool,
 ) {
     let h = rect.height().max(1.0) as f64;
@@ -762,10 +1101,13 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     let camera = OrbitCamera::fit(&mesh.bounding_box().expect("a triangle has bounds"));
     let model = glam::DMat4::IDENTITY;
     let items = [false, true].map(|inactive| mf_render::DrawItem {
+        hole: false,
+        ghost: false,
         mesh: &gpu,
         model,
         inactive,
         shown_states: u32::from(mf_render::FaceStates::ALL),
+        object_color: None,
     });
     let layers = [Layer {
         lines: &lines,
@@ -792,8 +1134,14 @@ fn warm_up(device: &wgpu::Device, queue: &wgpu::Queue, renderer: &mut MeshRender
     renderer.set_selection_cue(SelectionCue::default());
 }
 
-/// Below this width (points) the navigation bar takes two rows.
-const NARROW_VIEW: f32 = 640.0;
+/// A thin vertical rule between groups of the navigation bar.
+fn divider(ui: &mut egui::Ui) {
+    let (r, _) = ui.allocate_exact_size(egui::vec2(9.0, 20.0), egui::Sense::hover());
+    ui.painter().line_segment(
+        [r.center_top(), r.center_bottom()],
+        egui::Stroke::new(1.0, theme::SEPARATOR),
+    );
+}
 
 /// The controls hint at the view's bottom-left.
 fn controls_hint(ui: &egui::Ui) -> Arc<egui::Galley> {
@@ -813,9 +1161,44 @@ fn updating_text(ui: &egui::Ui) -> Arc<egui::Galley> {
     )
 }
 
-/// Give a symbol button an accessible name (and the name tests find it by).
-fn labelled(response: egui::Response, label: &str) -> egui::Response {
-    let enabled = response.enabled();
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, label));
-    response
+/// `shape` laid out in points, in target pixels (`ppp` pixels per point).
+fn scaled_shape(shape: mf_render::HandleShape, ppp: f64) -> mf_render::HandleShape {
+    use mf_render::HandleGeometry as G;
+    let p = |(x, y): (f64, f64)| (x * ppp, y * ppp);
+    let geometry = match shape.geometry {
+        G::Arrow {
+            shaft_start,
+            shaft_end,
+            tip,
+            head,
+        } => G::Arrow {
+            shaft_start: p(shaft_start),
+            shaft_end: p(shaft_end),
+            tip: p(tip),
+            head: head.into_iter().map(p).collect(),
+        },
+        G::Ring { points, front } => G::Ring {
+            points: points.into_iter().map(p).collect(),
+            front,
+        },
+        G::RingGrip { arc, heads } => G::RingGrip {
+            arc: arc.into_iter().map(p).collect(),
+            heads: heads.map(|h| h.map(p)),
+        },
+        G::Circle { center, radius_px } => G::Circle {
+            center: p(center),
+            radius_px: radius_px * ppp,
+        },
+        G::Plane { corners } => G::Plane {
+            corners: corners.map(p),
+        },
+        G::Point { center, radius_px } => G::Point {
+            center: p(center),
+            radius_px: radius_px * ppp,
+        },
+    };
+    mf_render::HandleShape {
+        handle: shape.handle,
+        geometry,
+    }
 }

@@ -143,6 +143,20 @@ impl<V: GpuHeld> AnalysisCache<V> {
             .map(|(_, v)| v)
     }
 
+    /// Change `mesh`'s entry with `f` (a re-measurement after a move): a
+    /// use, so it also becomes the most recently used. Returns whether it
+    /// was cached. O(entries).
+    pub fn update(&mut self, mesh: &Mesh, f: impl FnOnce(&mut V)) -> bool {
+        self.touch(mesh);
+        match self.entries.last_mut() {
+            Some((m, v)) if Mesh::ptr_eq(m, mesh) => {
+                f(v);
+                true
+            }
+            _ => false,
+        }
+    }
+
     /// Revisions cached.
     pub fn len(&self) -> usize {
         self.entries.len()
@@ -242,6 +256,30 @@ mod tests {
 
     fn revision() -> Mesh {
         mf_fixtures::cube(1.0)
+    }
+
+    /// Fix round 2 (F3): re-measuring a revision is a use of it, so it
+    /// moves to the most recently used end and outlives older ones.
+    #[test]
+    fn updating_a_revision_makes_it_the_most_recently_used() {
+        let mut cache = AnalysisCache::new(100);
+        let (current, b, c, d) = (revision(), revision(), revision(), revision());
+        let pinned = |m: &Mesh| Mesh::ptr_eq(m, &current);
+        cache.insert(current.clone(), Held(vec![(1, 1000)]), pinned);
+        cache.insert(b.clone(), Held(vec![(2, 40)]), pinned);
+        cache.insert(c.clone(), Held(vec![(3, 40)]), pinned);
+        let mut changed = false;
+        assert!(cache.update(&b, |_| changed = true));
+        assert!(changed);
+        assert!(!cache.update(&d, |_| panic!("not cached")));
+        // Over budget: c, now the least recently used, goes; b stays.
+        let evicted = cache.insert(d.clone(), Held(vec![(4, 40)]), pinned);
+        assert_eq!(evicted.len(), 1);
+        assert!(Mesh::ptr_eq(&evicted[0].0, &c));
+        assert_eq!(
+            cached(&cache, &[&current, &b, &c, &d]),
+            [true, true, false, true]
+        );
     }
 
     fn cached(cache: &AnalysisCache<Held>, meshes: &[&Mesh]) -> Vec<bool> {

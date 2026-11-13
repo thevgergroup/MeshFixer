@@ -2,10 +2,10 @@
 //! the model unit. Unsupported features (components, extensions) produce
 //! warnings rather than silent loss.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Write};
 
-use mf_geometry::Mesh;
+use mf_geometry::{Material, Mesh, NO_MATERIAL};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use serde::{Deserialize, Serialize};
@@ -60,20 +60,41 @@ pub struct ModelObject {
     pub name: String,
     pub mesh: Mesh,
     pub transform: [f64; 12],
+    /// The object's `<metadata>` (in its `<metadatagroup>`): name to
+    /// value. MeshFixer's own entries are named `meshfixer:<key>` (see
+    /// [`MESHFIXER_NS`]), such as `meshfixer:role` = `hole`.
+    pub metadata: BTreeMap<String, String>,
 }
+
+/// The namespace of MeshFixer's own object metadata names
+/// (`meshfixer:<key>`), declared on `<model>` when an object has any.
+pub const MESHFIXER_NS: &str = "https://thevgergroup.com/meshfixer/3mf/2026";
 
 #[derive(Debug, Clone)]
 pub struct Model {
     pub unit: Unit,
     pub objects: Vec<ModelObject>,
+    /// The model's own `<metadata>` (outside any `<object>`): name to
+    /// value. MeshFixer's own entries are named `meshfixer:<key>` (see
+    /// [`MESHFIXER_NS`]), such as `meshfixer:browser` = the Browser's
+    /// groups, order, hidden and locked state as JSON.
+    pub metadata: BTreeMap<String, String>,
 }
 
 const CORE_NS: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
+/// The Materials and Properties extension (colour groups).
+const MATERIAL_NS: &str = "http://schemas.microsoft.com/3dmanufacturing/material/2015/02";
 const MODEL_REL: &str = "http://schemas.microsoft.com/3dmanufacturing/2013/01/3dmodel";
 const DEFAULT_MODEL_PATH: &str = "3D/3dmodel.model";
 
 fn not_3mf(message: String) -> IoError {
     IoError::Parse { line: 0, message }
+}
+
+fn parse_u32(raw: &str, name: &str) -> Result<u32, String> {
+    raw.trim()
+        .parse::<u32>()
+        .map_err(|_| format!("{name}=\"{raw}\" is not a whole number"))
 }
 
 /// 1-based line of byte offsets into `text`, for offsets that only grow:
@@ -110,6 +131,17 @@ impl<'a> LineCounter<'a> {
 /// the default namespace). With no default namespace declared, unprefixed
 /// elements are taken as core.
 fn core_namespace_prefixes(e: &BytesStart) -> Result<BTreeSet<Option<String>>, String> {
+    namespace_prefixes(e, CORE_NS, true)
+}
+
+/// The prefixes bound to `ns` on `e` (`None`: the default namespace).
+/// With `default_if_undeclared`, an element with no default namespace
+/// declaration counts its unprefixed names as `ns`.
+fn namespace_prefixes(
+    e: &BytesStart,
+    ns: &str,
+    default_if_undeclared: bool,
+) -> Result<BTreeSet<Option<String>>, String> {
     let mut core = BTreeSet::new();
     let mut default_declared = false;
     for a in e.attributes() {
@@ -126,11 +158,11 @@ fn core_namespace_prefixes(e: &BytesStart) -> Result<BTreeSet<Option<String>>, S
         let uri = a
             .normalized_value(XmlVersion::Implicit1_0)
             .map_err(|err| format!("namespace {key} has an invalid value: {err}"))?;
-        if uri == CORE_NS {
+        if uri == ns {
             core.insert(prefix);
         }
     }
-    if !default_declared {
+    if !default_declared && default_if_undeclared {
         core.insert(None);
     }
     Ok(core)
@@ -290,7 +322,19 @@ pub fn read_with_limits(
         has_mesh: bool,
         has_components: bool,
         line: usize,
+        /// The object's default property: (pid, pindex).
+        property: Option<(u32, u32)>,
+        /// Per triangle: its own (pid, p1), if it names one.
+        triangle_properties: Vec<Option<(u32, u32)>>,
+        /// Its `<metadatagroup>`'s entries.
+        metadata: BTreeMap<String, String>,
     }
+    // The object metadata entry being read: its name and text so far.
+    let mut open_metadata: Option<(String, String)> = None;
+    // The model-level metadata entry being read (a `<metadata>` directly
+    // under `<model>`, outside any `<object>`): its name and text so far.
+    let mut open_model_metadata: Option<(String, String)> = None;
+    let mut model_metadata: BTreeMap<String, String> = BTreeMap::new();
     let mut unit = Unit::Millimeter;
     let mut objects: Vec<Obj> = Vec::new();
     let mut current: Option<Obj> = None;
@@ -302,7 +346,13 @@ pub fn read_with_limits(
     // and named in a warning, never parsed as core elements.
     let mut core_prefixes: BTreeSet<Option<String>> = BTreeSet::from([None]);
     let mut ignored_elements: BTreeSet<String> = BTreeSet::new();
-    let mut has_properties = false;
+    let mut material_prefixes: BTreeSet<Option<String>> = BTreeSet::new();
+    // Property groups by id: colours and materials (MF-ISSUE-091).
+    let mut groups: BTreeMap<u32, Vec<Material>> = BTreeMap::new();
+    let mut open_group: Option<u32> = None;
+    // Property resources MeshFixer doesn't import (textures, composites).
+    let mut unsupported_groups: BTreeSet<u32> = BTreeSet::new();
+    let mut gradient_triangles = 0usize;
     let mut reader = quick_xml::Reader::from_str(&text);
     let mut lines = LineCounter::new(&text);
     let xml = ctx.span(READING, XML_FROM, 1.0, text.len());
@@ -343,7 +393,41 @@ pub fn read_with_limits(
         let (e, is_empty) = match event {
             Event::Start(e) => (Some(e), false),
             Event::Empty(e) => (Some(e), true),
+            Event::Text(t) => {
+                if let Some((_, value)) = open_metadata.as_mut() {
+                    value.push_str(&t.xml10_content());
+                } else if let Some((_, value)) = open_model_metadata.as_mut() {
+                    value.push_str(&t.xml10_content());
+                }
+                (None, false)
+            }
+            Event::GeneralRef(r) => {
+                if open_metadata.is_some() || open_model_metadata.is_some() {
+                    let name = r.xml10_content();
+                    let raw = format!("&{name};");
+                    let text = quick_xml::escape::unescape(&raw)
+                        .map_err(|e| parse_err(format!("<metadata> text: {e}")))?;
+                    if let Some((_, value)) = open_metadata.as_mut() {
+                        value.push_str(&text);
+                    } else if let Some((_, value)) = open_model_metadata.as_mut() {
+                        value.push_str(&text);
+                    }
+                }
+                (None, false)
+            }
             Event::End(end) => {
+                if matches!(end.local_name().as_ref(), "basematerials" | "colorgroup") {
+                    open_group = None;
+                }
+                if end.local_name().as_ref() == "metadata" {
+                    if let Some((name, value)) = open_metadata.take() {
+                        if let Some(o) = current.as_mut() {
+                            o.metadata.insert(name, value);
+                        }
+                    } else if let Some((name, value)) = open_model_metadata.take() {
+                        model_metadata.insert(name, value);
+                    }
+                }
                 if end.local_name().as_ref() == "object"
                     && let Some(o) = current.take()
                 {
@@ -357,8 +441,49 @@ pub fn read_with_limits(
         if let Some(e) = e {
             if e.local_name().as_ref() == "model" {
                 core_prefixes = core_namespace_prefixes(&e).map_err(parse_err)?;
+                material_prefixes =
+                    namespace_prefixes(&e, MATERIAL_NS, false).map_err(parse_err)?;
             }
             let prefix = e.name().prefix().map(|p| p.as_ref().to_owned());
+            if material_prefixes.contains(&prefix) {
+                match e.local_name().as_ref() {
+                    "colorgroup" => {
+                        let id = attr(&e, "id")
+                            .map_err(parse_err)?
+                            // allow-swallow: a non-numeric id becomes the named error on the next line
+                            .and_then(|v| v.trim().parse().ok())
+                            .ok_or_else(|| parse_err("<colorgroup> needs a numeric id".into()))?;
+                        groups.insert(id, Vec::new());
+                        open_group = (!is_empty).then_some(id);
+                    }
+                    "color" => {
+                        let raw = attr(&e, "color")
+                            .map_err(parse_err)?
+                            .ok_or_else(|| parse_err("<color> is missing color".into()))?;
+                        let color = Material::parse_color(&raw).ok_or_else(|| {
+                            parse_err(format!("color=\"{raw}\" is not #RRGGBB[AA]"))
+                        })?;
+                        let group = open_group
+                            .and_then(|g| groups.get_mut(&g))
+                            .ok_or_else(|| parse_err("<color> outside a <colorgroup>".into()))?;
+                        group.push(Material {
+                            name: String::new(),
+                            color,
+                        });
+                    }
+                    _ => {
+                        if let Some(id) = attr(&e, "id")
+                            .map_err(parse_err)?
+                            // allow-swallow: only used to name the group in a warning
+                            .and_then(|v| v.trim().parse().ok())
+                        {
+                            unsupported_groups.insert(id);
+                        }
+                        ignored_elements.insert(e.name().as_ref().to_owned());
+                    }
+                }
+                continue;
+            }
             if !core_prefixes.contains(&prefix) {
                 ignored_elements.insert(e.name().as_ref().to_owned());
                 continue;
@@ -388,11 +513,21 @@ pub fn read_with_limits(
                             "object {id} has type '{t}'; MeshFixer imports it as an ordinary model"
                         ));
                     }
-                    has_properties |= attr(&e, "pid").map_err(parse_err)?.is_some();
+                    let property = match attr(&e, "pid").map_err(parse_err)? {
+                        None => None,
+                        Some(pid) => Some((
+                            parse_u32(&pid, "pid").map_err(parse_err)?,
+                            match attr(&e, "pindex").map_err(parse_err)? {
+                                Some(i) => parse_u32(&i, "pindex").map_err(parse_err)?,
+                                None => 0,
+                            },
+                        )),
+                    };
                     let obj = Obj {
                         id,
                         name: attr(&e, "name").map_err(parse_err)?,
                         line,
+                        property,
                         ..Obj::default()
                     };
                     if is_empty {
@@ -420,20 +555,92 @@ pub fn read_with_limits(
                 }
                 "triangle" => {
                     let t = [index(&e, "v1")?, index(&e, "v2")?, index(&e, "v3")?];
-                    has_properties |= attr(&e, "pid").map_err(parse_err)?.is_some()
-                        || attr(&e, "p1").map_err(parse_err)?.is_some();
-                    current
+                    let get = |name: &str| -> Result<Option<u32>, IoError> {
+                        match attr(&e, name).map_err(parse_err)? {
+                            None => Ok(None),
+                            Some(v) => parse_u32(&v, name).map(Some).map_err(parse_err),
+                        }
+                    };
+                    let (pid, p1, p2, p3) = (get("pid")?, get("p1")?, get("p2")?, get("p3")?);
+                    let o = current
                         .as_mut()
-                        .ok_or_else(|| parse_err("<triangle> outside an object".into()))?
-                        .triangles
-                        .push(t);
+                        .ok_or_else(|| parse_err("<triangle> outside an object".into()))?;
+                    // A triangle names its own property with p1 (and its
+                    // own pid, or the object's); one with neither uses the
+                    // object's default.
+                    let own = match (pid, p1) {
+                        (None, None) => None,
+                        (pid, p1) => {
+                            let group = pid.or(o.property.map(|p| p.0)).ok_or_else(|| {
+                                parse_err(
+                                    "<triangle> has p1 but neither it nor its object has a pid"
+                                        .into(),
+                                )
+                            })?;
+                            // allow-swallow: 3MF: a triangle pid without p1 means entry 0 of that group
+                            Some((group, p1.or(o.property.map(|p| p.1)).unwrap_or(0)))
+                        }
+                    };
+                    if own.is_some()
+                        && (p2.is_some_and(|p| Some(p) != p1) || p3.is_some_and(|p| Some(p) != p1))
+                    {
+                        gradient_triangles += 1;
+                    }
+                    o.triangles.push(t);
+                    o.triangle_properties.push(own);
+                }
+                "metadata" if current.is_some() => {
+                    let name = attr(&e, "name")
+                        .map_err(parse_err)?
+                        .ok_or_else(|| parse_err("<metadata> is missing name".into()))?;
+                    if is_empty {
+                        if let Some(o) = current.as_mut() {
+                            o.metadata.insert(name, String::new());
+                        }
+                    } else {
+                        open_metadata = Some((name, String::new()));
+                    }
+                }
+                // A `<metadata>` outside any `<object>` is the model's own
+                // (MeshFixer's Browser organisation: `meshfixer:browser`).
+                "metadata" => {
+                    let name = attr(&e, "name")
+                        .map_err(parse_err)?
+                        .ok_or_else(|| parse_err("<metadata> is missing name".into()))?;
+                    if is_empty {
+                        model_metadata.insert(name, String::new());
+                    } else {
+                        open_model_metadata = Some((name, String::new()));
+                    }
                 }
                 "components" => {
                     if let Some(o) = current.as_mut() {
                         o.has_components = true;
                     }
                 }
-                "basematerials" => has_properties = true,
+                "basematerials" => {
+                    let id = attr(&e, "id")
+                        .map_err(parse_err)?
+                        // allow-swallow: a non-numeric id becomes the named error on the next line
+                        .and_then(|v| v.trim().parse().ok())
+                        .ok_or_else(|| parse_err("<basematerials> needs a numeric id".into()))?;
+                    groups.insert(id, Vec::new());
+                    open_group = (!is_empty).then_some(id);
+                }
+                "base" => {
+                    // allow-swallow: a nameless base material is still a colour; its name stays empty
+                    let name = attr(&e, "name").map_err(parse_err)?.unwrap_or_default();
+                    let raw = attr(&e, "displaycolor")
+                        .map_err(parse_err)?
+                        .ok_or_else(|| parse_err("<base> is missing displaycolor".into()))?;
+                    let color = Material::parse_color(&raw).ok_or_else(|| {
+                        parse_err(format!("displaycolor=\"{raw}\" is not #RRGGBB[AA]"))
+                    })?;
+                    let group = open_group
+                        .and_then(|g| groups.get_mut(&g))
+                        .ok_or_else(|| parse_err("<base> outside <basematerials>".into()))?;
+                    group.push(Material { name, color });
+                }
                 "build" => saw_build = true,
                 "item" => {
                     let id = attr(&e, "objectid")
@@ -463,11 +670,11 @@ pub fn read_with_limits(
         }
     }
 
-    if has_properties {
-        warnings.push(
-            "3MF material and colour properties are ignored; MeshFixer imports geometry only"
-                .into(),
-        );
+    if gradient_triangles > 0 {
+        warnings.push(format!(
+            "{gradient_triangles} triangles have a different colour at each corner; MeshFixer \
+             keeps one colour per triangle (the first corner's)"
+        ));
     }
     if !ignored_elements.is_empty() {
         warnings.push(format!(
@@ -476,14 +683,62 @@ pub fn read_with_limits(
         ));
     }
 
-    let to_model_object = |o: &Obj, transform: [f64; 12]| -> Result<ModelObject, IoError> {
+    let mut skipped_properties = 0usize;
+    let mut to_model_object = |o: &Obj, transform: [f64; 12]| -> Result<ModelObject, IoError> {
         let mesh = Mesh::new_with(o.positions.clone(), o.triangles.clone(), ctx)?.map_err(|e| {
             IoError::Parse {
                 line: o.line,
                 message: format!("object {}: {e}", o.id),
             }
         })?;
+        // Materials: a palette of the properties the object uses, in
+        // first-use order (its default first).
+        let mut palette: Vec<Material> = Vec::new();
+        let mut resolve = |p: (u32, u32)| -> Result<Option<u32>, IoError> {
+            if unsupported_groups.contains(&p.0) {
+                skipped_properties += 1;
+                return Ok(None);
+            }
+            let m = groups
+                .get(&p.0)
+                .ok_or_else(|| IoError::Parse {
+                    line: o.line,
+                    message: format!(
+                        "object {} uses property group {}, which doesn't exist",
+                        o.id, p.0
+                    ),
+                })?
+                .get(p.1 as usize)
+                .ok_or_else(|| IoError::Parse {
+                    line: o.line,
+                    message: format!(
+                        "object {} uses entry {} of property group {}, which has fewer",
+                        o.id, p.1, p.0
+                    ),
+                })?;
+            Ok(Some(match palette.iter().position(|q| q == m) {
+                Some(i) => i as u32,
+                None => {
+                    palette.push(m.clone());
+                    (palette.len() - 1) as u32
+                }
+            }))
+        };
+        let default = o.property.map(&mut resolve).transpose()?.flatten();
+        let mut faces = Vec::with_capacity(o.triangle_properties.len());
+        let mut own = false;
+        for p in &o.triangle_properties {
+            let m = p.map(&mut resolve).transpose()?.flatten();
+            own |= m.is_some() && m != default;
+            faces.push(m.unwrap_or(NO_MATERIAL));
+        }
+        let mesh = if palette.is_empty() {
+            mesh
+        } else {
+            mesh.with_materials(palette, default, own.then_some(faces))
+        };
         Ok(ModelObject {
+            metadata: o.metadata.clone(),
             name: o.name.clone().unwrap_or_else(|| format!("object {}", o.id)),
             mesh,
             transform,
@@ -518,8 +773,22 @@ pub fn read_with_limits(
             }
         }
     }
+    if skipped_properties > 0 || !unsupported_groups.is_empty() {
+        warnings.push(format!(
+            "3MF textures and composite materials aren't imported ({skipped_properties} uses); \
+             those faces keep their object's colour, if any"
+        ));
+    }
     ctx.progress.report(READING, 1.0);
-    Ok((Model { unit, objects: out }, digits, warnings))
+    Ok((
+        Model {
+            unit,
+            objects: out,
+            metadata: model_metadata,
+        },
+        digits,
+        warnings,
+    ))
 }
 
 pub fn read(bytes: &[u8]) -> Result<(Model, Vec<String>), IoError> {
@@ -566,16 +835,91 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
     let mut xml = String::from(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<model xmlns=\"http://schemas.microsoft.com/3dmanufacturing/core/2015/02\"",
     );
+    if kept
+        .iter()
+        .any(|o| o.metadata.keys().any(|k| k.starts_with("meshfixer:")))
+        || model.metadata.keys().any(|k| k.starts_with("meshfixer:"))
+    {
+        // allow-swallow: writing to a String can't fail
+        let _ = write!(xml, " xmlns:meshfixer=\"{MESHFIXER_NS}\"");
+    }
     // allow-swallow: writing to a String can't fail
-    let _ = write!(xml, " unit=\"{}\">\n <resources>\n", model.unit.as_attr());
+    let _ = writeln!(xml, " unit=\"{}\">", model.unit.as_attr());
+    for (name, value) in &model.metadata {
+        // allow-swallow: writing to a String can't fail
+        let _ = writeln!(
+            xml,
+            " <metadata name=\"{}\">{}</metadata>",
+            escape(name),
+            escape(value)
+        );
+    }
+    xml.push_str(" <resources>\n");
     for (k, o) in kept.iter().enumerate() {
         // allow-swallow: writing to a String can't fail
-        let _ = write!(
+        // Materials (MF-ISSUE-091): the object's palette as one
+        // <basematerials> group (id after every object's), its default as
+        // the object's pid/pindex, and each face that differs as pid/p1.
+        let group = kept.len() + k + 1;
+        let materials = o.mesh.materials();
+        let mut object_default = o.mesh.default_material();
+        if !materials.is_empty() {
+            // allow-swallow: writing to a String can't fail
+            let _ = writeln!(xml, "  <basematerials id=\"{group}\">");
+            for m in materials {
+                let name = if m.name.is_empty() {
+                    m.hex()
+                } else {
+                    m.name.clone()
+                };
+                // allow-swallow: writing to a String can't fail
+                let _ = writeln!(
+                    xml,
+                    "   <base name=\"{}\" displaycolor=\"{}\"/>",
+                    escape(&name),
+                    m.hex()
+                );
+            }
+            xml.push_str("  </basematerials>\n");
+            if object_default.is_none() {
+                // 3MF wants an object pid when triangles have one: use the
+                // most common face material.
+                let mut count = vec![0usize; materials.len()];
+                for (f, _) in o.mesh.faces() {
+                    if let Some(m) = o.mesh.face_material(f) {
+                        count[m as usize] += 1;
+                    }
+                }
+                object_default = (0..count.len())
+                    .max_by_key(|&i| (count[i], std::cmp::Reverse(i)))
+                    .map(|i| i as u32);
+            }
+        }
+        let properties = match object_default {
+            Some(d) if !materials.is_empty() => format!(" pid=\"{group}\" pindex=\"{d}\""),
+            _ => String::new(),
+        };
+        // allow-swallow: writing to a String can't fail
+        let _ = writeln!(
             xml,
-            "  <object id=\"{}\" type=\"model\" name=\"{}\">\n   <mesh>\n    <vertices>\n",
+            "  <object id=\"{}\" type=\"model\" name=\"{}\"{properties}>",
             k + 1,
             escape(&o.name)
         );
+        if !o.metadata.is_empty() {
+            xml.push_str("   <metadatagroup>\n");
+            for (name, value) in &o.metadata {
+                // allow-swallow: writing to a String can't fail
+                let _ = writeln!(
+                    xml,
+                    "    <metadata name=\"{}\">{}</metadata>",
+                    escape(name),
+                    escape(value)
+                );
+            }
+            xml.push_str("   </metadatagroup>\n");
+        }
+        xml.push_str("   <mesh>\n    <vertices>\n");
         let mut index = vec![0u32; o.mesh.vertex_slots() as usize];
         for (n, (id, p)) in o.mesh.vertices().enumerate() {
             index[id.0 as usize] = n as u32;
@@ -587,10 +931,17 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
             );
         }
         xml.push_str("    </vertices>\n    <triangles>\n");
-        for (_, t) in o.mesh.faces() {
+        for (f, t) in o.mesh.faces() {
             let [a, b, c] = t.map(|v| index[v as usize]);
+            let own = o.mesh.face_material(f);
+            let p = match own {
+                Some(m) if !materials.is_empty() && Some(m) != object_default => {
+                    format!(" pid=\"{group}\" p1=\"{m}\"")
+                }
+                _ => String::new(),
+            };
             // allow-swallow: writing to a String can't fail
-            let _ = writeln!(xml, "     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"/>");
+            let _ = writeln!(xml, "     <triangle v1=\"{a}\" v2=\"{b}\" v3=\"{c}\"{p}/>");
         }
         xml.push_str("    </triangles>\n   </mesh>\n  </object>\n");
     }

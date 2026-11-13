@@ -85,7 +85,9 @@ fn still(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
 
 fn model(name: &str, mesh: Mesh, warnings: Vec<String>) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: name.into(),
             mesh,
             transform: IDENTITY,
@@ -176,6 +178,13 @@ fn click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     h.run_steps(2);
 }
 
+/// Opens the Repair tool from the rail.
+fn open_repair(h: &mut Harness<'_, MeshFixerApp>) {
+    if h.state().active_tool != "repair" {
+        click(h, "Repair");
+    }
+}
+
 fn defects(h: &Harness<'_, MeshFixerApp>) -> std::sync::Arc<mf_desktop::defects::Defects> {
     h.state().current_analysis().unwrap().defects.clone()
 }
@@ -196,6 +205,8 @@ fn a_very_large_hole_says_what_it_means_and_can_be_marked_intentional() {
         .find(|h| matches!(h, Defect::OverCap { .. }))
         .unwrap()
         .clone();
+    // Repair lists the size groups, with what each needs.
+    open_repair(&mut h);
     assert!(
         h.get_all_by_label_contains("Very large holes (over 1000 edges)")
             .next()
@@ -324,8 +335,18 @@ fn each_thing_has_one_name() {
     ]);
     let mut h = opened("plate", mesh);
     h.get_by_label("Tangled edges (1)");
+    // The Overlays popover says the same.
+    click(&mut h, "Overlays");
     h.get_by_label("Tangled edges");
+    click(&mut h, "Overlays");
+    // A loose piece's right-click menu: "Remove".
+    let piece = defects(&h).loose[0].clone();
+    let row = mf_desktop::defects::defect_copy(&piece, mf_io::threemf::Unit::Millimeter).row;
+    h.get_by_label(&row).click_secondary();
+    h.run_steps(3);
     h.get_by_label("Remove Piece 1");
+    h.key_press(egui::Key::Escape);
+    h.run_steps(3);
     // The punched one-cell hole: 4 edges, a tiny hole, a tiny opening.
     let d = defects(&h);
     let tiny = d
@@ -412,6 +433,8 @@ fn the_curvature_warning_is_shown_before_and_survives_a_targeted_fill() {
         .clone();
     h.state_mut().select_defect(&rim);
     settle(&mut h);
+    // The card's "Fill hole" opens it in Repair.
+    click(&mut h, "Fill hole");
     choose_curvature(&mut h);
     h.get_by_label_contains("Less accurate on holes over 60 edges (this one has 80)");
     still(&mut h, "i1-curvature-before-apply");
@@ -437,6 +460,7 @@ fn the_curvature_warning_is_shown_before_and_survives_a_targeted_fill() {
 fn the_curvature_warning_is_readable_in_full_after_a_batch_fill() {
     require_gpu!("the_curvature_warning_is_readable_in_full_after_a_batch_fill");
     let mut h = opened("plate", wide_plate());
+    open_repair(&mut h);
     click(&mut h, "Fill all holes");
     choose_curvature(&mut h);
     h.get_by_label_contains("Less accurate on holes over 60 edges (1 of these is)");
@@ -478,8 +502,8 @@ fn import_warnings_can_be_read() {
     h.get_by_label("3 × a zero-area face was skipped");
     h.get_by_label("read as millimetres (the file has no units)");
     still(&mut h, "i2-import-warnings");
-    // And in Details.
-    click(&mut h, "Details");
+    // And in Inspect.
+    click(&mut h, "Inspect");
     h.get_by_label_contains("Import warnings (5)");
 }
 
@@ -495,6 +519,7 @@ fn hole_markers_are_on_by_default() {
         a.hole_markers().is_some_and(|m| !m.is_empty())
     });
     settle(&mut h);
+    click(&mut h, "Overlays");
     h.get_by_label("Hole markers");
     still(&mut h, "i6-hole-markers");
 }
@@ -550,19 +575,27 @@ fn laptop_sizes_keep_the_view_dominant_and_the_panels_collapsible() {
             100.0 * wide.width() / w
         );
         still(&mut h, &format!("i5-{name}-panels-hidden"));
-        click(&mut h, "Show Objects & Defects");
+        // Cmd/Ctrl+\ again brings them back.
+        h.event(egui::Event::Key {
+            key: egui::Key::Backslash,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::COMMAND,
+        });
         settle(&mut h);
-        h.get_by_label("Objects & Defects");
-        click(&mut h, "Show Properties & Tools");
-        settle(&mut h);
-        h.get_by_label("Properties & Tools");
+        h.get_by_label("Browser");
         let back = h.state().viewport.last_rect.unwrap();
         assert!(
             (back.width() - view.width()).abs() < 2.0,
             "{back:?} vs {view:?}"
         );
-        click(&mut h, "Hide Objects & Defects");
+        // The Browser folds to a strip, and back.
+        click(&mut h, "Hide Browser");
         settle(&mut h);
-        assert!(h.query_by_label("Objects & Defects").is_none());
+        assert!(h.query_by_label("Browser").is_none());
+        click(&mut h, "Show Browser");
+        settle(&mut h);
+        h.get_by_label("Browser");
     }
 }

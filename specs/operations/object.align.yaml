@@ -1,0 +1,45 @@
+id: object.align
+version: 1
+summary: Move objects by translation only so they share an edge, a centre or an even spacing along one axis (Tinkercad-style Align).
+geometry_kinds: [mesh]
+# Every object to align, in order (at least two): the first is the
+# target, the rest are extra targets.
+target:
+  whole_object: true
+  kinds: []
+  many: true
+operands:
+  # Its bounding box never moves; the rest align to it. Omitted: they
+  # align to the targets' own overall bounds. Read only (it may also be
+  # one of the targets, in which case it simply doesn't move).
+  - name: anchor
+    role: read
+    kinds: [object]
+    required: false
+parameters:
+  - name: axis
+    type: choice
+    values: ["x", "y", "z"]
+    default: "x"
+    description: "Which world axis the mode applies along"
+  - name: mode
+    type: choice
+    values: ["min", "centre", "max", "distribute_gaps", "distribute_centres"]
+    default: "centre"
+    description: "min/centre/max: every target's bounding-box edge or centre on that axis lands on the anchor's (or the overall bounds'); distribute_gaps/distribute_centres: the targets between the two outermost (by their own position on the axis) are spaced so the gaps between neighbours, or their centres, are equal"
+  - name: leaders
+    type: text
+    default: "[]"
+    description: "One entry per target, as JSON: null for a target whose own world bounding box decides its move, or the 0-based index of another target whose computed translation this one copies instead (a linked group's other members, moved with it, D-ALIGN-1)"
+preconditions:
+  - at least two targets with geometry (otherwise too_few_objects)
+  - a leader index refers to an earlier target that is not itself a follower
+postconditions:
+  - every target moves by translation only; no rotation or scale changes
+  - the anchor (named by the anchor operand, or the overall bounds of the targets with no anchor) does not move
+  - distribute_gaps/distribute_centres leave the two targets at the extremes of the axis in place and space the others evenly between them
+  - one command, one undo step; replay is Exact
+effects: [transform_changes]
+runtime:
+  cancellable: true
+  progress: false

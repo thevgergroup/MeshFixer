@@ -382,6 +382,43 @@ pub fn classify_numbered(
     out
 }
 
+/// `previous` (this mesh's defects measured at transform `from`), measured
+/// again at `to`: which holes, cracks, pieces and tangled edges there are
+/// depends only on the mesh, so only the measurements change (perimeters,
+/// sizes, where each defect is). A pure move shifts every place and keeps
+/// every size: O(defects). Any other change (rotate, scale) measures again
+/// with [`classify_numbered`] (no inspection, topology or GPU work).
+pub fn remeasured(
+    previous: &Defects,
+    mesh: &Mesh,
+    diagnostics: &Diagnostics,
+    from: &[f64; 12],
+    to: &[f64; 12],
+    fill_cap: usize,
+    numbers: &HoleNumbers,
+) -> Defects {
+    if from[..9] != to[..9] {
+        return classify_numbered(mesh, diagnostics, to, fill_cap, numbers);
+    }
+    let d = [to[9] - from[9], to[10] - from[10], to[11] - from[11]];
+    let mut out = previous.clone();
+    let places = &mut out.places;
+    for p in places
+        .holes
+        .iter_mut()
+        .chain(places.cracks.iter_mut())
+        .chain(places.loose.iter_mut())
+        .chain(places.tangled.iter_mut())
+        .flatten()
+    {
+        for (k, dk) in d.iter().enumerate() {
+            p.bounds.min[k] += dk;
+            p.bounds.max[k] += dk;
+        }
+    }
+    out
+}
+
 /// What identifies a hole across revisions: its lexicographically smallest
 /// corner (exact bits) and edge count. Kept elements keep their positions
 /// (ADR-0001), compaction included, so a hole another command didn't
@@ -1148,6 +1185,78 @@ mod tests {
         let mut e = mf_fixtures::grid(n).edit();
         e.remove_face(mf_geometry::FaceId(2 * (n + 1))).unwrap();
         e.finish().unwrap().0
+    }
+
+    /// A move only shifts where each defect is; a rotation measures again.
+    /// Either way the result is what a fresh analysis at the new
+    /// transform finds.
+    #[test]
+    fn remeasuring_after_a_move_or_turn_matches_a_fresh_analysis() {
+        // Every kind: holes, a crack, a tangled edge (the plate's fin) and
+        // a loose piece (a tetrahedron above the plate).
+        let piece = mf_fixtures::translated(
+            &mf_fixtures::scaled(&mf_fixtures::tetrahedron(), 4.0),
+            [10.0, 10.0, 8.0],
+        );
+        let mesh = mf_fixtures::merge(&[mf_fixtures::plate_with_defects(), piece]);
+        let diagnostics = mf_geometry::inspect(&mesh);
+        let numbers = HoleNumbers::default();
+        let before = classify_numbered(&mesh, &diagnostics, &IDENTITY, 1000, &numbers);
+        assert!(
+            !before.holes.is_empty()
+                && !before.cracks.is_empty()
+                && !before.loose.is_empty()
+                && !before.tangled.is_empty(),
+            "every kind of defect is here"
+        );
+        let mut moved = IDENTITY;
+        moved[9] = 4.0;
+        moved[11] = -2.5;
+        let mut turned = moved;
+        (turned[0], turned[1], turned[3], turned[4]) = (0.0, 1.0, -1.0, 0.0);
+        let close = |a: &[Option<Place>], b: &[Option<Place>]| {
+            assert_eq!(a.len(), b.len());
+            for (a, b) in a.iter().zip(b) {
+                let (a, b) = (a.unwrap(), b.unwrap());
+                for k in 0..3 {
+                    assert!((a.bounds.min[k] - b.bounds.min[k]).abs() < 1e-9);
+                    assert!((a.bounds.max[k] - b.bounds.max[k]).abs() < 1e-9);
+                }
+            }
+        };
+        for to in [moved, turned] {
+            let again = remeasured(&before, &mesh, &diagnostics, &IDENTITY, &to, 1000, &numbers);
+            let fresh = classify_numbered(&mesh, &diagnostics, &to, 1000, &numbers);
+            assert_eq!(again.holes, fresh.holes);
+            assert_eq!(again.cracks, fresh.cracks);
+            assert_eq!(again.tangled, fresh.tangled);
+            assert_eq!(again.loose.len(), fresh.loose.len());
+            for (a, b) in again.loose.iter().zip(&fresh.loose) {
+                match (a, b) {
+                    (
+                        Defect::LoosePiece {
+                            component: c1,
+                            triangles: t1,
+                            size: s1,
+                        },
+                        Defect::LoosePiece {
+                            component: c2,
+                            triangles: t2,
+                            size: s2,
+                        },
+                    ) => {
+                        assert_eq!((c1, t1), (c2, t2));
+                        assert!((s1.unwrap() - s2.unwrap()).abs() < 1e-9);
+                    }
+                    other => panic!("not pieces: {other:?}"),
+                }
+            }
+            assert_eq!(again.world_size, fresh.world_size);
+            close(&again.places.holes, &fresh.places.holes);
+            close(&again.places.cracks, &fresh.places.cracks);
+            close(&again.places.loose, &fresh.places.loose);
+            close(&again.places.tangled, &fresh.places.tangled);
+        }
     }
 
     fn hole_perimeter(d: &Defects, edges: usize) -> f64 {

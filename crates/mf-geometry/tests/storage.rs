@@ -60,6 +60,7 @@ fn edit_remove_and_add_keeps_ids() {
             Sources {
                 faces: vec![FaceId(2)],
                 loops: vec![],
+                operands: vec![],
             },
         )
         .unwrap();
@@ -354,6 +355,7 @@ fn sources_must_be_faces_of_the_input_revision() {
         Sources {
             faces: vec![a],
             loops: vec![],
+            operands: vec![],
         },
     );
     assert!(
@@ -365,6 +367,7 @@ fn sources_must_be_faces_of_the_input_revision() {
         Sources {
             faces: vec![FaceId(500)],
             loops: vec![],
+            operands: vec![],
         },
     );
     assert!(
@@ -378,7 +381,8 @@ fn sources_must_be_faces_of_the_input_revision() {
             [5, 6, v.0],
             Sources {
                 faces: vec![FaceId(2)],
-                loops: vec![]
+                loops: vec![],
+                operands: vec![],
             }
         )
         .is_ok()
@@ -441,4 +445,66 @@ fn vertex_chunk_kept_survives_appends_not_moves() {
     assert!(!moved.vertex_chunk_kept(&m, 1));
     assert!(!moved.vertex_chunk_kept(&appended, 1));
     assert!(!m.vertex_chunk_kept(&m, 2), "past the end");
+}
+
+/// Task 16b (M4 review I2, MF-SCULPT-004, MF-DOC-002): 1,000 small strokes,
+/// each a new revision moving a 7 × 7-vertex patch of a ~1M-triangle
+/// sphere, are held in at most 1.5 × one revision plus the strokes'
+/// footprints. A footprint is the position storage a stroke had to copy:
+/// the [`STORAGE_CHUNK`]s holding its moved vertices (24 KB each). A
+/// patch spans 7 rings of 1,000 vertices, so 7 storage chunks; with the
+/// old 32,768-element chunks the same history copies over 4× more (5.5×
+/// measured).
+#[test]
+fn thousand_small_strokes_history_within_budget() {
+    use mf_geometry::STORAGE_CHUNK;
+    let (rings, segments) = (500_u32, 1000_u32);
+    let base = uv_sphere(rings, segments);
+    let one = base.heap_bytes();
+    let vertex = |r: u32, s: u32| 1 + (r - 1) * segments + s % segments;
+    let mut seed = 0x5eed_u64;
+    let mut next = || {
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        seed >> 33
+    };
+    let mut history = vec![base.clone()];
+    let (mut footprint, mut old_footprint) = (0u64, 0u64);
+    let element = std::mem::size_of::<[f64; 3]>() as u64;
+    for _ in 0..1000 {
+        let prev = history.last().unwrap().clone();
+        let (r0, s0) = (4 + next() as u32 % (rings - 8), next() as u32 % segments);
+        let mut e = prev.edit();
+        let (mut chunks, mut groups) = (BTreeSet::new(), BTreeSet::new());
+        for r in r0 - 3..=r0 + 3 {
+            for s in s0..s0 + 7 {
+                let v = vertex(r, s);
+                let p = prev.corner_position(v);
+                e.move_vertex(VertexId(v), [p[0] * 1.001, p[1] * 1.001, p[2] * 1.001])
+                    .unwrap();
+                chunks.insert(v as usize / STORAGE_CHUNK);
+                groups.insert(v as usize / CHUNK);
+            }
+        }
+        footprint += chunks.len() as u64 * STORAGE_CHUNK as u64 * element;
+        old_footprint += groups.len() as u64 * CHUNK as u64 * element;
+        history.push(e.finish().unwrap().0);
+    }
+    let mut seen = HashSet::new();
+    let total: u64 = history.iter().map(|m| m.unique_heap_bytes(&mut seen)).sum();
+    let mb = |b: u64| b as f64 / (1 << 20) as f64;
+    eprintln!(
+        "1,000 strokes: history {:.1} MB; one revision {:.1} MB; footprints {:.1} MB \
+         (with 32,768-element chunks: {:.1} MB)",
+        mb(total),
+        mb(one),
+        mb(footprint),
+        mb(old_footprint)
+    );
+    assert!(
+        total as f64 <= 1.5 * one as f64 + footprint as f64,
+        "history {total} > 1.5 × {one} + {footprint}"
+    );
+    assert!(old_footprint > 4 * footprint);
 }

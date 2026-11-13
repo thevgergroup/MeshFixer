@@ -29,8 +29,12 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+glam.workspace = true
+mf-parts.workspace = true
+mf-boolean.workspace = true
 mf-fixtures.workspace = true
 mf-document = { workspace = true, features = ["test-kinds"] }
+mf-operations = { workspace = true, features = ["test-kinds"] }
 mf-selection.workspace = true
 tempfile.workspace = true
 rayon.workspace = true

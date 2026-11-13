@@ -34,6 +34,9 @@ pub struct CancelToken {
     /// Test instrumentation (see [`RunContext::instrumented`]); `None` in
     /// production, so checking costs one predictable branch.
     probe: Option<Arc<ProbeState>>,
+    /// Test instrumentation (see [`RunContext::cancelled_after`]): checks
+    /// left before the token cancels itself. `None` in production.
+    countdown: Option<Arc<AtomicU64>>,
 }
 
 impl CancelToken {
@@ -42,6 +45,7 @@ impl CancelToken {
         Self {
             cancelled: Arc::new(AtomicBool::new(false)),
             probe: None,
+            countdown: None,
         }
     }
 
@@ -59,6 +63,13 @@ impl CancelToken {
     pub fn is_cancelled(&self) -> bool {
         if let Some(probe) = &self.probe {
             probe.hit(std::panic::Location::caller());
+        }
+        if let Some(left) = &self.countdown
+            && left
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .is_err()
+        {
+            self.cancelled.store(true, Ordering::Relaxed);
         }
         self.cancelled.load(Ordering::Relaxed)
     }
@@ -126,6 +137,31 @@ impl RunContext {
             from,
             to,
             total: total.max(1),
+        }
+    }
+
+    /// A context that cancels itself the moment `stage` is reported on its
+    /// progress, synchronously, for tests that cancel deterministically at
+    /// each stage of an operation (Phase 1 Review Focus 3).
+    pub fn cancelling_at(stage: &'static str) -> RunContext {
+        let cancel = CancelToken::new();
+        let mut progress = Progress::new();
+        progress.trip = Some(Arc::new((stage, cancel.clone())));
+        RunContext { cancel, progress }
+    }
+
+    /// A context that cancels itself at its `n + 1`th cancellation check
+    /// (the first `n` pass), counted over every clone and thread. With the
+    /// number of checks a whole run makes (from
+    /// [`RunContext::instrumented`]'s [`CheckpointProbe::checkpoints`]),
+    /// a test can cancel a run at every checkpoint in turn (Review Focus
+    /// 3: cancel at any stage changes nothing).
+    pub fn cancelled_after(n: u64) -> RunContext {
+        let mut cancel = CancelToken::new();
+        cancel.countdown = Some(Arc::new(AtomicU64::new(n)));
+        RunContext {
+            cancel,
+            progress: Progress::new(),
         }
     }
 
@@ -529,6 +565,9 @@ pub struct Progress {
     // best-effort: a report must never fail just because no reader is
     // attached, or a reader was dropped.
     sink: ProgressSink,
+    /// Test instrumentation (see [`RunContext::cancelling_at`]): reporting
+    /// this stage cancels this token. `None` in production.
+    trip: Option<Arc<(&'static str, CancelToken)>>,
 }
 
 /// A receiver for every `(stage, fraction)` update sent to a [`Progress`],
@@ -566,6 +605,7 @@ impl Progress {
             state: Arc::new(AtomicU64::new(pack(empty_index, 0.0))),
             stages: Arc::new(stages),
             sink: Arc::new(std::sync::Mutex::new(None)),
+            trip: None,
         }
     }
 
@@ -582,6 +622,11 @@ impl Progress {
     /// and retries — it can never clobber a fresh stage's reset fraction
     /// with a stale value computed against the old stage.
     pub fn report(&self, stage: &'static str, fraction: f64) {
+        if let Some(trip) = &self.trip
+            && trip.0 == stage
+        {
+            trip.1.cancel();
+        }
         let clamped = fraction.clamp(0.0, 1.0);
         let stage_index = self.stages.index_of(stage);
 

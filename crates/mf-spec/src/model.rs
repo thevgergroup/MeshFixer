@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use mf_io::threemf::Unit;
+
 use crate::params::{ParamValue, Params, SpecError};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -11,6 +13,11 @@ pub struct OperationSpec {
     pub summary: String,
     pub geometry_kinds: Vec<String>,
     pub target: TargetSpec,
+    /// Other objects or selections the operation reads, consumes or keeps
+    /// (D6, MF-P1-CMD-001). Optional, so every spec YAML written before
+    /// Phase 1 still validates unchanged.
+    #[serde(default)]
+    pub operands: Vec<OperandSpec>,
     pub parameters: Vec<ParamSpec>,
     #[serde(default)]
     pub preconditions: Vec<String>,
@@ -24,6 +31,46 @@ pub struct OperationSpec {
 pub struct TargetSpec {
     pub whole_object: bool,
     pub kinds: Vec<String>,
+    /// The command may act on several targets at once (a split of every
+    /// selected object): the first is the invocation's `target`, the rest
+    /// are operands named `target`, in order. One command, one undo step.
+    #[serde(default)]
+    pub many: bool,
+}
+
+/// An operand other than the command's target (D6, MF-P1-SEL-001): names
+/// the operand, what happens to it, and what kinds of thing it can be.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OperandSpec {
+    pub name: String,
+    pub role: OperandRole,
+    pub kinds: Vec<String>,
+    /// For a single operand: it must be given. For a `many` operand: at
+    /// least one object must be given (otherwise any number, even none).
+    pub required: bool,
+    /// The operand is a list: an invocation may name it any number of
+    /// times, and each object is its own operand (its own provenance index,
+    /// recorded input and output), in the order given.
+    #[serde(default)]
+    pub many: bool,
+}
+
+/// What an operation does to an operand's object once the command
+/// commits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OperandRole {
+    /// Read for provenance or geometry, but not changed or removed.
+    Read,
+    /// Removed once the command commits (for example a boolean's tool,
+    /// unless `keep_tool` is set).
+    Consumed,
+    /// Read, and explicitly kept (for example `keep_tool: true`).
+    Kept,
+    /// Changed in place (its geometry or transform), never removed
+    /// (for example `connector.join`'s side_a/side_b, each folded
+    /// into by the connector's own parts but never consumed).
+    Changed,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -38,7 +85,60 @@ pub struct ParamSpec {
     pub name: String,
     pub kind: ParamKind,
     pub unit: Option<String>,
+    /// Where a frontend takes this parameter's default from instead of
+    /// `default`, when the caller didn't set it (D20): `fit.<field>` of
+    /// the active print fit profile. See [`OperationSpec::fill_defaults`].
+    pub default_from: Option<String>,
+    /// How a connector/shape generator's Fit class and Machine profile
+    /// pickers (the desktop's newer dual-pane fit system, distinct from
+    /// `default_from`'s older single `FitProfile`) fill this parameter,
+    /// so a generic filler can replace a per-connector `if id == ...`
+    /// match (parts-architecture-review.md's `fit_role`): one of
+    /// `"clearance"` (the class's own `clearance`, no machine
+    /// compensation), `"hole"`/`"outer_xy"`/`"z"` (the clearance
+    /// compensated by the machine profile's matching field,
+    /// `mf_parts::Compensation`), or `"fit_class_name"`/
+    /// `"machine_profile_name"` (the chosen class's or profile's own
+    /// name, recorded so a saved placement shows which pair it came
+    /// from). `mf-spec` only carries the string — it has no dependency
+    /// on `mf-parts`, which interprets it (`mf-desktop`'s
+    /// `connector_tool::fill_fit_role_params`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit_role: Option<String>,
     pub description: String,
+}
+
+/// Every `fit_role` a spec parameter may declare (kept as plain text in
+/// the spec itself, since `mf-spec` doesn't depend on `mf-parts`'s
+/// `Compensation`; validated against this list at parse time so a typo
+/// is refused by name rather than silently never filled).
+///
+/// `"clearance"`/`"hole"`/`"outer_xy"`/`"z"` are the Fit class's own
+/// `clearance`, resolved through the Machine profile's matching
+/// compensation (`mf_parts::Compensation::{None,Hole,OuterXy,Z}`) — the
+/// combined value every connector's own generated gap/clearance param
+/// already wants. `"machine_hole_undersize"` is the Machine profile's
+/// raw `hole_undersize` field on its own, uncompensated (Thread's and
+/// the dovetail's own `machine_tolerance`, which is *added to* an
+/// already-resolved `fit_clearance` rather than folded into one
+/// combined value). `"fit_class_name"`/`"machine_profile_name"` are the
+/// chosen pair's own names, recorded so a saved placement shows which
+/// pair it came from.
+pub const FIT_ROLES: &[&str] = &[
+    "clearance",
+    "hole",
+    "outer_xy",
+    "z",
+    "machine_hole_undersize",
+    "fit_class_name",
+    "machine_profile_name",
+];
+
+/// A source of print-fit values for [`OperationSpec::fill_defaults`]
+/// (D20), implemented by `mf_parts::FitProfile`. `field` is the part
+/// after `fit.` in a parameter's `default_from`, in mm.
+pub trait FitDefaults {
+    fn fit_value(&self, field: &str) -> Option<f64>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -61,6 +161,26 @@ pub enum ParamKind {
         default: String,
         values: Vec<String>,
     },
+    /// A point or direction (D7). A `unit` of `mm` marks it as a length,
+    /// converted by [`OperationSpec::to_document_units`].
+    Vec3 {
+        default: [f64; 3],
+    },
+    /// The absolute resulting transform (D7): row-major 3x4 (the 3x3
+    /// linear part, then translation), 12 values.
+    Affine {
+        default: [f64; 12],
+    },
+    /// Free text (`type: text`): a name or an id, such as a library part's.
+    Text {
+        default: String,
+    },
+    /// A sculpt stroke's dabs (`type: samples`, default `[]`); see
+    /// [`ParamValue::Samples`].
+    Samples,
+    /// A list of face ids (`type: faces`, default `[]`); see
+    /// [`ParamValue::Faces`].
+    Faces,
 }
 
 impl ParamKind {
@@ -70,6 +190,11 @@ impl ParamKind {
             ParamKind::Float { default, .. } => ParamValue::Float(*default),
             ParamKind::Bool { default } => ParamValue::Bool(*default),
             ParamKind::Choice { default, .. } => ParamValue::Text(default.clone()),
+            ParamKind::Vec3 { default } => ParamValue::Vec3(*default),
+            ParamKind::Affine { default } => ParamValue::Affine(*default),
+            ParamKind::Text { default } => ParamValue::Text(default.clone()),
+            ParamKind::Samples => ParamValue::Samples(Vec::new()),
+            ParamKind::Faces => ParamValue::Faces(Default::default()),
         }
     }
 }
@@ -89,6 +214,10 @@ struct RawParam {
     values: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     unit: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    default_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fit_role: Option<String>,
     description: String,
 }
 
@@ -99,6 +228,10 @@ enum Scalar {
     Int(i64),
     Float(f64),
     Text(String),
+    /// `default: [x, y, z]` (vec3) or the 12 values of an affine
+    /// transform. Elements may be written as integers in YAML (`[1, 0,
+    /// 0, ...]`), so this accepts either and widens to `f64`.
+    Array(Vec<Scalar>),
 }
 
 impl Scalar {
@@ -112,7 +245,26 @@ impl Scalar {
         match *self {
             Scalar::Int(i) => Ok(i as f64),
             Scalar::Float(f) => Ok(f),
-            Scalar::Bool(_) | Scalar::Text(_) => Err(format!("{field} must be a number")),
+            Scalar::Bool(_) | Scalar::Text(_) | Scalar::Array(_) => {
+                Err(format!("{field} must be a number"))
+            }
+        }
+    }
+
+    fn as_f64_array<const N: usize>(&self, field: &str) -> Result<[f64; N], String> {
+        match self {
+            Scalar::Array(items) if items.len() == N => {
+                let mut out = [0.0_f64; N];
+                for (slot, item) in out.iter_mut().zip(items) {
+                    *slot = item.as_f64(field)?;
+                }
+                Ok(out)
+            }
+            Scalar::Array(items) => Err(format!(
+                "{field} must have {N} numbers, found {}",
+                items.len()
+            )),
+            _ => Err(format!("{field} must be a list of {N} numbers")),
         }
     }
 }
@@ -145,12 +297,46 @@ impl TryFrom<RawParam> for ParamSpec {
                     _ => return Err("a choice's default must be one of its values".into()),
                 }
             }
+            "vec3" => ParamKind::Vec3 {
+                default: r.default.as_f64_array::<3>("default")?,
+            },
+            "affine" => ParamKind::Affine {
+                default: r.default.as_f64_array::<12>("default")?,
+            },
+            "text" => match r.default {
+                Scalar::Text(default) => ParamKind::Text { default },
+                _ => return Err("a text default must be a string".into()),
+            },
+            "samples" | "faces" => {
+                if !matches!(&r.default, Scalar::Array(a) if a.is_empty()) {
+                    return Err(format!("a {} parameter's default must be []", r.ty));
+                }
+                if r.ty == "samples" {
+                    ParamKind::Samples
+                } else {
+                    ParamKind::Faces
+                }
+            }
             other => return Err(format!("unknown parameter type '{other}'")),
         };
+        if let Some(from) = &r.default_from
+            && !(from.starts_with("fit.") && from.len() > 4)
+        {
+            return Err(format!(
+                "default_from '{from}' must name a print fit field (fit.<field>)"
+            ));
+        }
+        if let Some(role) = &r.fit_role
+            && !FIT_ROLES.contains(&role.as_str())
+        {
+            return Err(format!("fit_role '{role}' isn't one of {FIT_ROLES:?}"));
+        }
         Ok(ParamSpec {
             name: r.name,
             kind,
             unit: r.unit,
+            default_from: r.default_from,
+            fit_role: r.fit_role,
             description: r.description,
         })
     }
@@ -177,6 +363,21 @@ impl From<ParamSpec> for RawParam {
                 values = Some(v);
                 ("choice", Scalar::Text(default), None, None)
             }
+            ParamKind::Vec3 { default } => (
+                "vec3",
+                Scalar::Array(default.into_iter().map(Scalar::Float).collect()),
+                None,
+                None,
+            ),
+            ParamKind::Affine { default } => (
+                "affine",
+                Scalar::Array(default.into_iter().map(Scalar::Float).collect()),
+                None,
+                None,
+            ),
+            ParamKind::Text { default } => ("text", Scalar::Text(default), None, None),
+            ParamKind::Samples => ("samples", Scalar::Array(Vec::new()), None, None),
+            ParamKind::Faces => ("faces", Scalar::Array(Vec::new()), None, None),
         };
         RawParam {
             name: p.name,
@@ -186,6 +387,8 @@ impl From<ParamSpec> for RawParam {
             max,
             values,
             unit: p.unit,
+            default_from: p.default_from,
+            fit_role: p.fit_role,
             description: p.description,
         }
     }
@@ -196,8 +399,53 @@ impl OperationSpec {
         self.effects.iter().any(|e| e == "read_only")
     }
 
+    /// True for an operation on objects rather than one mesh (D6): it
+    /// places, removes or creates objects, or takes other operands. Such
+    /// an operation needs its own tool (the gizmo, Delete, a boolean's
+    /// tool picker), so frontends don't list it among a mesh's repairs.
+    pub fn acts_on_objects(&self) -> bool {
+        !self.operands.is_empty()
+            || self.effects.iter().any(|e| {
+                matches!(
+                    e.as_str(),
+                    "transform_changes" | "removes_objects" | "creates_objects" | "renames_objects"
+                )
+            })
+    }
+
     pub fn parameter(&self, name: &str) -> Option<&ParamSpec> {
         self.parameters.iter().find(|p| p.name == name)
+    }
+
+    /// Fill every parameter the caller didn't set whose spec says
+    /// `default_from: fit.<field>` from `fit` (D20), as text in mm, before
+    /// [`Self::validate`]. A frontend calls this at prepare time with the
+    /// active print fit profile, so the recorded parameters hold the values
+    /// used and replay never reads a profile. A parameter the caller set
+    /// is left alone. A field `fit` doesn't have is an error by name.
+    pub fn fill_defaults(
+        &self,
+        raw: &mut BTreeMap<String, String>,
+        fit: &dyn FitDefaults,
+    ) -> Result<(), SpecError> {
+        for p in &self.parameters {
+            let Some(from) = &p.default_from else {
+                continue;
+            };
+            if raw.contains_key(&p.name) {
+                continue;
+            }
+            let field = from.strip_prefix("fit.").unwrap_or(from);
+            let value = fit
+                .fit_value(field)
+                .ok_or_else(|| SpecError::InvalidValue {
+                    name: p.name.clone(),
+                    value: from.clone(),
+                    reason: "the print fit profile has no such field".into(),
+                })?;
+            raw.insert(p.name.clone(), value.to_string());
+        }
+        Ok(())
     }
 
     /// Parse and validate string parameters, filling defaults.
@@ -228,6 +476,50 @@ impl OperationSpec {
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect();
         self.validate(&raw)
+    }
+
+    /// Convert every parameter marked `unit: mm` (a length, D20) from
+    /// millimetres to the document's units, in place. Runs once, in
+    /// `prepare` (Global Constraints: "Printing parameters are in
+    /// document units... converted at prepare time. The converted value
+    /// is what's recorded"), so replay never re-reads a unit or a
+    /// profile.
+    ///
+    /// `float` parameters convert their number; `vec3` parameters
+    /// convert all three components (a length vec3, such as a point;
+    /// a direction vec3 has no `unit` and is left alone). Other
+    /// parameter kinds are never marked `unit: mm` and are untouched.
+    pub fn to_document_units(&self, params: &mut Params, unit: Unit) {
+        let mm_per_unit = millimetres_per(unit);
+        for p in &self.parameters {
+            if p.unit.as_deref() != Some("mm") {
+                continue;
+            }
+            match params.0.get_mut(&p.name) {
+                Some(ParamValue::Float(v)) => *v *= mm_per_unit,
+                Some(ParamValue::Vec3(v)) => {
+                    for c in v.iter_mut() {
+                        *c *= mm_per_unit;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// How many document units make up one millimetre. The document's own
+/// numbers are in `unit`, so a length given in mm is multiplied by this
+/// to land in document units (a metre document: 1 mm = 0.001 document
+/// units).
+fn millimetres_per(unit: Unit) -> f64 {
+    match unit {
+        Unit::Micron => 1000.0,
+        Unit::Millimeter => 1.0,
+        Unit::Centimeter => 0.1,
+        Unit::Meter => 0.001,
+        Unit::Inch => 1.0 / 25.4,
+        Unit::Foot => 1.0 / 304.8,
     }
 }
 
@@ -261,6 +553,19 @@ impl ParamSpec {
                     Err(invalid(&format!("expected {}", one_of(values))))
                 }
             }
+            ParamKind::Vec3 { .. } => parse_f64_csv::<3>(text)
+                .map(ParamValue::Vec3)
+                .ok_or_else(|| invalid("expected x,y,z")),
+            ParamKind::Text { .. } => Ok(ParamValue::Text(text.to_owned())),
+            ParamKind::Samples => parse_samples(text).map(ParamValue::Samples).ok_or_else(|| {
+                invalid("expected face,b0,b1,b2,pressure per dab, dabs separated by ;")
+            }),
+            ParamKind::Faces => parse_faces(text)
+                .map(|faces| ParamValue::Faces(crate::params::FaceList { faces }))
+                .ok_or_else(|| invalid("expected comma-separated face ids")),
+            ParamKind::Affine { .. } => parse_f64_csv::<12>(text)
+                .map(ParamValue::Affine)
+                .ok_or_else(|| invalid("expected 12 comma-separated numbers")),
         }
     }
 
@@ -291,4 +596,50 @@ pub(crate) fn one_of(values: &[String]) -> String {
         Some((last, rest)) => format!("{} or {last}", rest.join(", ")),
         None => String::new(),
     }
+}
+
+/// Sculpt samples: `face,b0,b1,b2,pressure` per dab, dabs separated by
+/// `;` (empty text: no dabs). The face must be a whole number.
+fn parse_samples(text: &str) -> Option<Vec<[f64; 5]>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    text.split(';')
+        .map(|d| {
+            let s = parse_f64_csv::<5>(d)?;
+            (s[0] >= 0.0 && s[0] <= u32::MAX as f64 && s[0].fract() == 0.0).then_some(s)
+        })
+        .collect()
+}
+
+/// Comma-separated face ids (empty text: none).
+fn parse_faces(text: &str) -> Option<Vec<u32>> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Some(Vec::new());
+    }
+    // allow-swallow: any unparsable id makes the whole value invalid; the caller reports it by name
+    text.split(',').map(|f| f.trim().parse().ok()).collect()
+}
+
+/// Parse exactly `N` comma-separated finite `f64`s (the CLI and
+/// command-log string form of `vec3` and `affine` parameters, D7).
+/// `None` on a wrong count, a non-finite value, or anything that doesn't
+/// parse, so the caller reports it by name rather than truncating.
+fn parse_f64_csv<const N: usize>(text: &str) -> Option<[f64; N]> {
+    let parts: Vec<&str> = text.trim().split(',').map(str::trim).collect();
+    if parts.len() != N {
+        return None;
+    }
+    let mut out = [0.0_f64; N];
+    for (slot, part) in out.iter_mut().zip(parts) {
+        // allow-swallow: any unparsable part makes the whole value invalid; the caller reports it by name (SpecError::InvalidValue) with the expected form
+        let v: f64 = part.parse().ok()?;
+        if !v.is_finite() {
+            return None;
+        }
+        *slot = v;
+    }
+    Some(out)
 }

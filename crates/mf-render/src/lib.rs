@@ -5,32 +5,43 @@
 //! are never read back as geometry.
 
 pub mod bench;
-mod bvh;
 mod camera;
+mod gizmo;
 mod gpu_mesh;
 pub mod offscreen;
+mod overlay;
 mod pick;
 mod renderer;
 mod target;
 mod timer;
 mod transform;
 
-pub use bvh::{Bvh, LEAF_MAX};
 pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
+pub use gizmo::{
+    Decomposed, Drag, GRIP_HALF_ARC_PX, GRIP_HEAD_HALF_WIDTH_PX, GRIP_HEAD_LENGTH_PX,
+    GRIP_SEPARATION_PX, Gizmo, GizmoMode, Handle, HandleGeometry, HandleShape,
+    POINT_HANDLE_RADIUS_PX, PlateSnap, RING_SEGMENTS, Snap, VIEW_RING_SCALE, compose, decompose,
+};
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
     SurfaceVertex, UploadStats, boundary_line_vertices, boundary_line_vertices_skipping,
     chunk_ranges, edge_line_vertices, loop_line_vertices, render_origin, surface_vertices,
     wait_for_submitted,
 };
+pub use mf_geometry::{Bvh, LEAF_MAX};
+pub use overlay::{
+    GIZMO_LINE_WIDTH_PT, GRIP_BAND_SCALE, GizmoFillVertex, GizmoLineVertex, GizmoPalette, Plate,
+    PlateVertex, gizmo_fill_vertices, gizmo_line_vertices, plate_vertices,
+};
 pub use pick::{
     EdgeCandidate, LoopEdgeCandidate, edge_candidates, edge_occluded, edge_occluded_with,
     loop_edge_candidates, pick_loop, ray_pick, ray_pick_with, screen_position,
 };
 pub use renderer::{
-    DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue,
+    DrawItem, FaceTints, Layer, MeshRenderer, Palette, RenderTargetFormat, SelectionCue, Shading,
+    ShadingPreset,
 };
-pub use target::RenderTarget;
+pub use target::{GizmoDraw, RenderTarget, SceneExtras};
 pub use timer::GpuTimer;
 pub use transform::model_matrix;
 

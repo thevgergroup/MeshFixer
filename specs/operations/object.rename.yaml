@@ -1,0 +1,23 @@
+id: object.rename
+version: 1
+summary: Give an object a new name (the Browser row, F2, or the selection panel's name field).
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: name
+    type: text
+    default: ""
+    description: "The object's new name"
+preconditions:
+  - target is a whole object
+  - name is not empty
+postconditions:
+  - the object's name is exactly the given text
+  - geometry and transform unchanged
+  - nothing changes (no revision) if the name is already exactly this
+effects: [renames_objects]
+runtime:
+  cancellable: false
+  progress: false

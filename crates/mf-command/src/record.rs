@@ -53,6 +53,68 @@ pub struct CommandRecord {
     pub platform: String,
     pub duration_ms: f64,
     pub status: CommandStatus,
+    /// Every operand the command read (MF-P1-SEL-001), index-aligned with
+    /// the operation's operands: entry 0 is the target (named `target`),
+    /// then any extra targets of a `many` target, then the spec's
+    /// `operands:` slots in order. A `many` slot is a list: consecutive
+    /// entries with the slot's name, in the order given (see
+    /// [`CommandRecord::operand_slot`]). Empty in records
+    /// written before Phase 1 (`mfx-log/1`), which had only the target.
+    #[serde(default)]
+    pub operands: Vec<RecordedOperand>,
+    /// Every object the command changed, created or removed, with what it
+    /// became (D6). A replay compares each, and the command's verdict is
+    /// the worst of them. Empty in `mfx-log/1` records, whose only output
+    /// is the target's (`output_hash`).
+    #[serde(default)]
+    pub outputs: Vec<ObjectOutput>,
+}
+
+impl CommandRecord {
+    /// Every object recorded for operand slot `name`, in order (`target`
+    /// lists the target and any extra targets). Empty for a slot the
+    /// command wasn't given, and for every slot of an `mfx-log/1` record.
+    pub fn operand_slot<'a>(&'a self, name: &'a str) -> impl Iterator<Item = &'a RecordedOperand> {
+        self.operands.iter().filter(move |o| o.name == name)
+    }
+}
+
+/// One operand of a recorded command, as it was read (MF-P1-SEL-001).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RecordedOperand {
+    /// `target` for operand 0; otherwise the spec's operand name.
+    pub name: String,
+    pub object: ObjectId,
+    /// `None` means the whole object.
+    pub selection: Option<Selection>,
+    /// Content hash (hex) of the operand's geometry when it was read.
+    pub input_revision_hash: String,
+    /// Structure hash (hex) of the same.
+    pub input_structure_hash: String,
+    /// The operand's placement when it was read (D7).
+    pub input_transform: [f64; 12],
+}
+
+/// One object a command changed, created or removed, as it was after the
+/// command (D6).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ObjectOutput {
+    pub object: ObjectId,
+    /// The command created this object.
+    pub created: bool,
+    /// The command removed this object; `hash` and `structure_hash` are
+    /// empty and `transform` is its last placement.
+    pub removed: bool,
+    /// Content hash (hex) of its geometry after the command (unchanged
+    /// geometry keeps its input hash).
+    pub hash: String,
+    pub structure_hash: String,
+    /// Its placement after the command.
+    pub transform: [f64; 12],
+    /// Extent and area, for an `Equivalent` verdict across platforms;
+    /// computed when the log is saved, like `output_summary`.
+    #[serde(default)]
+    pub summary: Option<GeometrySummary>,
 }
 
 /// How an object entered the session.

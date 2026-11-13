@@ -5,11 +5,15 @@
 //! state is through `mf-command` (MF-CMD-001).
 
 mod geometry;
+mod organisation;
+
+use std::collections::BTreeMap;
 
 use mf_io::SourceInfo;
 pub use mf_io::threemf::{IDENTITY as IDENTITY_TRANSFORM, Unit};
 
 pub use geometry::{Geometry, GeometryKind};
+pub use organisation::{Entry, Group, GroupId, Organisation, OrganisationError};
 
 /// A document state in a session's revision DAG (MF-HIST-001). Monotonic,
 /// never reused.
@@ -50,9 +54,69 @@ pub struct Object {
     /// ids of this revision's mesh, sorted. Commands that change the mesh
     /// translate them to the new revision's ids.
     pub openings: Vec<u32>,
+    /// Object properties (key to value), such as its Solid/Hole role
+    /// ([`ROLE`]). Saved in 3MF as `meshfixer:<key>` object metadata
+    /// ([`Object::metadata`]) and read back on import; changed only by an
+    /// undoable history step (`Session::set_property`). Geometry commands
+    /// keep an object's properties; objects they create have none.
+    pub properties: BTreeMap<String, String>,
+}
+
+/// The property naming an object's role in a combine: [`HOLE`], or absent
+/// for a solid (the default).
+pub const ROLE: &str = "role";
+/// The [`ROLE`] value of a hole: subtracted when combined.
+pub const HOLE: &str = "hole";
+/// The property holding a parametric shape's recipe (its generator id,
+/// version and params, as JSON; `mf_parts::GeneratorRecord`): present
+/// while the object is an editable shape, removed when a mesh operation
+/// bakes it into a plain mesh (parametric-shapes brief).
+pub const GENERATOR: &str = "generator";
+/// The property naming the linked group a parametric shape belongs to (a
+/// connector placed as several objects: a peg and its hole, a hinge's
+/// leaves and pin). Editing the group's params regenerates every member.
+pub const GROUP: &str = "group";
+/// The properties a mesh operation removes when it changes an object's
+/// geometry: what made it an editable shape (it is a plain mesh after).
+pub const PARAMETRIC_KEYS: [&str; 2] = [GENERATOR, GROUP];
+/// The 3MF metadata prefix of an object property.
+const METADATA_PREFIX: &str = "meshfixer:";
+/// The 3MF model metadata holding the Browser's organisation as JSON.
+pub const BROWSER_METADATA: &str = "meshfixer:browser";
+/// The 3MF model metadata listing each object's id when saved, in object
+/// order (comma separated): what the organisation and object properties
+/// that name objects (`attach_to`) mean, since a load numbers objects
+/// afresh (final review I1).
+pub const OBJECT_IDS_METADATA: &str = "meshfixer:object_ids";
+
+/// The object properties in 3MF object metadata (the `meshfixer:` entries,
+/// prefix removed); other entries are left alone.
+pub fn properties_from_metadata(metadata: &BTreeMap<String, String>) -> BTreeMap<String, String> {
+    metadata
+        .iter()
+        .filter_map(|(k, v)| Some((k.strip_prefix(METADATA_PREFIX)?.to_owned(), v.clone())))
+        .collect()
 }
 
 impl Object {
+    /// True if the object's role is [`HOLE`].
+    pub fn is_hole(&self) -> bool {
+        self.properties.get(ROLE).is_some_and(|r| r == HOLE)
+    }
+
+    /// True while the object is an editable shape (it has a recipe).
+    pub fn is_parametric(&self) -> bool {
+        self.properties.contains_key(GENERATOR)
+    }
+
+    /// The object's properties as 3MF object metadata (`meshfixer:<key>`).
+    pub fn metadata(&self) -> BTreeMap<String, String> {
+        self.properties
+            .iter()
+            .map(|(k, v)| (format!("{METADATA_PREFIX}{k}"), v.clone()))
+            .collect()
+    }
+
     /// The mesh, if this object's geometry is a mesh.
     pub fn mesh(&self) -> Option<&mf_geometry::Mesh> {
         self.geometry.as_mesh()
@@ -65,6 +129,10 @@ pub struct Document {
     objects: Vec<Object>,
     /// Model units (MF-DOC-004); millimetres unless an import says otherwise.
     units: Unit,
+    /// The Browser's organisation (project organisation brief, step 2):
+    /// groups, order, hidden and locked. Document state like everything
+    /// else here, so it's undoable, saved in 3MF metadata and replays.
+    organisation: Organisation,
 }
 
 impl Document {
@@ -87,10 +155,43 @@ impl Document {
         self.objects.iter().find(|o| o.id == id)
     }
 
-    /// A new document with `object` appended.
+    pub fn organisation(&self) -> &Organisation {
+        &self.organisation
+    }
+
+    /// The document's own 3MF model metadata: the Browser's organisation
+    /// ([`BROWSER_METADATA`]) when there's something to say (a group, a
+    /// hidden or locked object), and the saved object ids
+    /// ([`OBJECT_IDS_METADATA`]) whenever any metadata could name an
+    /// object. A plain document has none.
+    pub fn model_metadata(&self) -> BTreeMap<String, String> {
+        let mut metadata = BTreeMap::new();
+        if self.organisation != Organisation::default() {
+            metadata.insert(BROWSER_METADATA.to_owned(), self.organisation.to_json());
+        }
+        if !metadata.is_empty() || self.objects.iter().any(|o| !o.properties.is_empty()) {
+            let ids: Vec<String> = self.objects.iter().map(|o| o.id.0.to_string()).collect();
+            metadata.insert(OBJECT_IDS_METADATA.to_owned(), ids.join(","));
+        }
+        metadata
+    }
+
+    /// A new document with a different organisation (groups, order,
+    /// hidden, locked): the whole value replaces the old one, as every
+    /// `with_*` here replaces its one piece of state.
+    pub fn with_organisation(&self, organisation: Organisation) -> Document {
+        let mut d = self.clone();
+        d.organisation = organisation;
+        d
+    }
+
+    /// A new document with `object` appended, tracked in the
+    /// organisation (at the root, if it wasn't already placed somewhere).
     pub fn with_object(&self, object: Object) -> Document {
         let mut d = self.clone();
+        let id = object.id;
         d.objects.push(object);
+        d.organisation = d.organisation.with_object_tracked(id);
         d
     }
 
@@ -104,11 +205,126 @@ impl Document {
         Some(d)
     }
 
+    /// A new document with one object's property `key` set to `value`
+    /// (`None` removes it), or `None` if the object doesn't exist.
+    pub fn with_property(
+        &self,
+        id: ObjectId,
+        key: &str,
+        value: Option<String>,
+    ) -> Option<Document> {
+        let mut d = self.clone();
+        let props = &mut d.objects.iter_mut().find(|o| o.id == id)?.properties;
+        match value {
+            Some(v) => props.insert(key.to_owned(), v),
+            None => props.remove(key),
+        };
+        Some(d)
+    }
+
     /// A new document with one object's geometry replaced, or `None` if the
     /// object doesn't exist.
     pub fn with_geometry(&self, id: ObjectId, geometry: Geometry) -> Option<Document> {
         let mut d = self.clone();
         d.objects.iter_mut().find(|o| o.id == id)?.geometry = geometry;
         Some(d)
+    }
+
+    /// A new document with one object's placement replaced (the absolute
+    /// 3MF row-major 3×4 affine, D7), or `None` if the object doesn't
+    /// exist. The geometry is shared, not copied.
+    pub fn with_transform(&self, id: ObjectId, transform: [f64; 12]) -> Option<Document> {
+        let mut d = self.clone();
+        d.objects.iter_mut().find(|o| o.id == id)?.transform = transform;
+        Some(d)
+    }
+
+    /// A new document with one object renamed, or `None` if it doesn't
+    /// exist.
+    pub fn with_name(&self, id: ObjectId, name: String) -> Option<Document> {
+        let mut d = self.clone();
+        d.objects.iter_mut().find(|o| o.id == id)?.name = name;
+        Some(d)
+    }
+
+    /// A new document without one object, or `None` if it doesn't exist.
+    /// The original document still holds it, so undo restores it with the
+    /// same id, in the same place (its own revision's organisation,
+    /// included, since undo moves to that whole prior snapshot).
+    pub fn without_object(&self, id: ObjectId) -> Option<Document> {
+        let at = self.objects.iter().position(|o| o.id == id)?;
+        let mut d = self.clone();
+        d.objects.remove(at);
+        d.organisation = d.organisation.without_object(id);
+        Some(d)
+    }
+
+    /// A new document with a newly created object appended, or `None` if
+    /// an object with its id already exists (ids are never reused,
+    /// MF-DOC-004).
+    pub fn with_new_object(&self, object: Object) -> Option<Document> {
+        if self.object(object.id).is_some() {
+            return None;
+        }
+        Some(self.with_object(object))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
+
+    use super::*;
+
+    fn object(id: u64) -> Object {
+        let mesh = mf_geometry::Mesh::new(
+            vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            vec![[0, 1, 2]],
+        )
+        .unwrap();
+        Object {
+            id: ObjectId(id),
+            name: format!("o{id}"),
+            geometry: Geometry::Mesh(mesh),
+            source: None,
+            transform: IDENTITY_TRANSFORM,
+            openings: Vec::new(),
+            properties: BTreeMap::new(),
+        }
+    }
+
+    #[test]
+    fn object_changes_leave_the_original_document_alone() {
+        let doc = Document::default()
+            .with_object(object(1))
+            .with_object(object(2));
+        let mut t = IDENTITY_TRANSFORM;
+        t[11] = 5.0;
+        let moved = doc.with_transform(ObjectId(1), t).unwrap();
+        assert_eq!(moved.object(ObjectId(1)).unwrap().transform, t);
+        assert_eq!(
+            doc.object(ObjectId(1)).unwrap().transform,
+            IDENTITY_TRANSFORM
+        );
+        assert!(Geometry::ptr_eq(
+            &moved.object(ObjectId(1)).unwrap().geometry,
+            &doc.object(ObjectId(1)).unwrap().geometry
+        ));
+        assert!(doc.with_transform(ObjectId(9), t).is_none());
+
+        let without = doc.without_object(ObjectId(1)).unwrap();
+        assert!(without.object(ObjectId(1)).is_none());
+        assert!(doc.object(ObjectId(1)).is_some());
+        assert!(doc.without_object(ObjectId(9)).is_none());
+
+        let added = without.with_new_object(object(3)).unwrap();
+        assert_eq!(
+            added.objects().iter().map(|o| o.id).collect::<Vec<_>>(),
+            vec![ObjectId(2), ObjectId(3)]
+        );
+        assert!(
+            added.with_new_object(object(2)).is_none(),
+            "ids are never reused"
+        );
     }
 }

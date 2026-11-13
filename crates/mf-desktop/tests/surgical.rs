@@ -135,9 +135,10 @@ fn select_hole_fill_undo_refill() {
     assert_eq!(h.state().highlighted_loops(), Some(sel.ids.clone()));
     save(&mut h, "01-hole-selected");
 
-    // 2. Fill only that hole (no refinement). Properties offers the one
-    // operation valid for a hole, already open.
-    h.get_by_label("Fill hole");
+    // 2. Fill only that hole (no refinement). The inspector card offers
+    // the one operation valid for a hole; it opens in Repair.
+    h.get_by_label("Fill hole").click();
+    h.run();
     let params = h.state_mut().params_for("mesh.fill_holes");
     params.insert("refine".into(), ParamValue::Bool(false));
     params.insert("fill_style".into(), ParamValue::Text("flat".into()));

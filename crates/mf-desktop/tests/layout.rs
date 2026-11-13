@@ -69,6 +69,19 @@ fn two_hole_grid(dir: &std::path::Path) -> std::path::PathBuf {
     path
 }
 
+/// Opens the Repair tool from the rail (the whole-object repairs live
+/// there, ui-plan.md §7).
+fn open_repair(h: &mut Harness<'_, MeshFixerApp>) {
+    h.get_by_label("Repair").click();
+    h.run();
+}
+
+/// Shows the History tab of the right dock.
+fn open_history(h: &mut Harness<'_, MeshFixerApp>) {
+    h.get_by_label("History").click();
+    h.run();
+}
+
 fn open(path: std::path::PathBuf) -> Harness<'static, MeshFixerApp> {
     let mut h = Harness::builder()
         .with_size(WINDOW)
@@ -95,19 +108,20 @@ macro_rules! require_gpu {
 fn layout_has_viewport_tree_properties_and_history() {
     require_gpu!("layout_has_viewport_tree_properties_and_history");
     let dir = tempfile::tempdir().unwrap();
-    let h = open(two_hole_grid(dir.path()));
+    let mut h = open(two_hole_grid(dir.path()));
 
-    // The three named regions exist.
-    let tree = h.get_by_label("Objects & Defects").rect();
-    let props = h.get_by_label("Properties & Tools").rect();
+    // The named regions exist (ui-plan.md §3): the tool rail left of the
+    // view, the Browser right of it.
+    let rail = h.get_by_label("Transform").rect();
+    let tree = h.get_by_label("Browser").rect();
     let view = h.state().viewport.last_rect.expect("the 3D view is drawn");
     assert!(
-        tree.right() <= view.left() + 1.0,
-        "tree {tree:?} is left of the view {view:?}"
+        rail.right() <= view.left() + 1.0,
+        "the rail {rail:?} is left of the view {view:?}"
     );
     assert!(
-        props.left() >= view.right() - 1.0,
-        "properties {props:?} are right of the view {view:?}"
+        tree.left() >= view.right() - 1.0,
+        "the Browser {tree:?} is right of the view {view:?}"
     );
 
     // The tree counts every defect category of the model.
@@ -120,11 +134,19 @@ fn layout_has_viewport_tree_properties_and_history() {
         h.get_by_label(row);
     }
 
-    // The history breadcrumb sits below the view.
-    let crumb = h.get_by_label("Import two_holes").rect();
+    // History is a tab beside the Browser; Undo and Redo sit below the
+    // view.
+    let undo = h.get_by_label("Undo").rect();
     assert!(
-        crumb.top() >= view.bottom() - 1.0,
-        "breadcrumb {crumb:?} is below the view {view:?}"
+        undo.top() >= view.bottom() - 1.0,
+        "Undo {undo:?} is below the view {view:?}"
+    );
+    open_history(&mut h);
+    let crumb = h.get_by_label("Import two_holes").rect();
+    let view = h.state().viewport.last_rect.unwrap();
+    assert!(
+        crumb.left() >= view.right() - 1.0,
+        "the history step {crumb:?} is right of the view {view:?}"
     );
 
     // The viewport dominates: at least 60% of the window.
@@ -145,7 +167,8 @@ fn clicking_a_target_shows_its_operations_in_properties() {
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(two_hole_grid(dir.path()));
 
-    // Nothing selected: Properties shows the whole object and its tools.
+    // Nothing selected: Repair shows the whole object's repairs.
+    open_repair(&mut h);
     h.get_by_label("Fill all holes");
     h.get_by_label("Remove loose pieces");
     assert!(h.query_by_label("Fill hole").is_none());
@@ -206,6 +229,7 @@ fn history_breadcrumb_jumps_to_a_revision() {
     let mut h = open(two_hole_grid(dir.path()));
     let imported = h.state().session.current();
 
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run();
     h.get_by_label("Apply").click();
@@ -217,7 +241,8 @@ fn history_breadcrumb_jumps_to_a_revision() {
     // the rim and the two holes.
     const FILLED: &str = "Fill holes (3)";
 
-    // Both steps are in the breadcrumb, the current one highlighted.
+    // Both steps are in History, the current one highlighted.
+    open_history(&mut h);
     assert_eq!(crumb_selected(&h, FILLED), Some(true));
     assert_eq!(crumb_selected(&h, "Import two_holes"), Some(false));
 
@@ -299,25 +324,27 @@ fn hover_does_not_hide_the_selection() {
 }
 
 /// Cyan means "selected" only (fix round 1, P2): with a hole selected, the
-/// Properties panel (which has no selected widget) has no cyan in it.
+/// tool panel (which has no selected widget) has no cyan in it.
 #[test]
 fn properties_use_the_selection_colour_for_nothing() {
     require_gpu!("properties_use_the_selection_colour_for_nothing");
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(two_hole_grid(dir.path()));
     click_small_hole_row(&mut h);
-    h.get_by_label("Fill hole");
-    let props = h.get_by_label("Properties & Tools").rect();
+    h.get_by_label("Fill hole").click();
+    h.run();
+    let panel = h.get_by_label("Repair panel").rect();
+    let view = h.state().viewport.last_rect.unwrap();
     let image = h.render().unwrap();
     let c = mf_desktop::theme::SELECTED;
-    let cyan = (props.left() as u32..WINDOW.0 as u32)
-        .flat_map(|x| (props.top() as u32..props.top() as u32 + 400).map(move |y| (x, y)))
+    let cyan = (panel.left() as u32..view.left() as u32)
+        .flat_map(|x| (panel.top() as u32..panel.top() as u32 + 400).map(move |y| (x, y)))
         .filter(|&(x, y)| {
             let p = image.get_pixel(x, y).0;
             (0..3).all(|k| (i32::from(p[k]) - i32::from([c.r(), c.g(), c.b()][k])).abs() < 40)
         })
         .count();
-    assert_eq!(cyan, 0, "{cyan} cyan pixels in Properties");
+    assert_eq!(cyan, 0, "{cyan} cyan pixels in the tool panel");
 }
 
 /// The breadcrumb step labelled `label` (below the 3D view; a tool of the
@@ -326,7 +353,7 @@ fn crumb_rect(h: &Harness<'_, MeshFixerApp>, label: &str) -> (egui::Rect, Option
     let view = h.state().viewport.last_rect.unwrap();
     let found: Vec<_> = h
         .get_all_by_label(label)
-        .filter(|n| n.rect().top() >= view.bottom() - 1.0)
+        .filter(|n| n.rect().left() >= view.right() - 1.0)
         // egui reports a selectable button's state as accesskit "toggled".
         .map(|n| {
             let on = n
@@ -510,6 +537,7 @@ fn lots_of_unused_space_suggests_compacting() {
         "a fresh import is compact"
     );
 
+    open_repair(&mut h);
     h.get_by_label("Remove loose pieces").click();
     h.run();
     // A tetrahedron is a third of the cube: no relative limit here.
@@ -529,6 +557,9 @@ fn lots_of_unused_space_suggests_compacting() {
             && a.current_analysis()
                 .is_some_and(|x| x.diagnostics.dead_slot_ratio > 0.5)
     });
+    h.run();
+    // Back to Repair's list: Housekeeping says so.
+    h.get_by_label("All repairs").click();
     h.run();
     h.get_by_label(SUGGESTION);
 

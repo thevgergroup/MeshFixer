@@ -1,0 +1,47 @@
+# Object operations (MF-OBJ-001, D7): placement changes and removal.
+# Transforms are 3MF row-major 3x4 (m00,m01,m02,m10,m11,m12,m20,m21,m22,
+# then the translation); world z = m02 x + m12 y + m22 z + m32. The
+# `cube` fixture spans [0, 1] on every axis.
+- name: set_transform places the object exactly, geometry untouched
+  given: { fixture: cube }
+  when: { op: object.set_transform, params: { transform: "0,1,0,-1,0,0,0,0,1,2.5,-3,0.125" } }
+  expect:
+    changed: true
+    geometry_changed: false
+    transform: "0,1,0,-1,0,0,0,0,1,2.5,-3,0.125"
+
+- name: set_transform to the transform it already has changes nothing
+  given: { fixture: cube, transform: "2,0,0,0,2,0,0,0,2,1,1,1" }
+  when: { op: object.set_transform, params: { transform: "2,0,0,0,2,0,0,0,2,1,1,1" } }
+  expect: { changed: false }
+
+- name: a singular transform is refused by name
+  given: { fixture: cube }
+  when: { op: object.set_transform, params: { transform: "1,0,0,0,1,0,0,0,0,0,0,0" } }
+  expect: { error: singular_transform }
+
+- name: drop_to_plate lowers a rotated object onto the plate
+  # 90 degrees about x: world z = y + 5, lowest at 5.
+  given: { fixture: cube, transform: "1,0,0,0,0,1,0,-1,0,7,8,5" }
+  when: { op: object.drop_to_plate }
+  expect:
+    geometry_changed: false
+    world_min_z: 0.0
+    transform: "1,0,0,0,0,1,0,-1,0,7,8,0"
+
+- name: drop_to_plate lifts an object that sinks through the plate
+  given: { fixture: cube, transform: "2,0,0,0,2,0,0,0,2,1,2,-3" }
+  when: { op: object.drop_to_plate }
+  expect:
+    world_min_z: 0.0
+    transform: "2,0,0,0,2,0,0,0,2,1,2,0"
+
+- name: drop_to_plate on an object already resting changes nothing
+  given: { fixture: cube, transform: "1,0,0,0,1,0,0,0,1,4,4,0" }
+  when: { op: object.drop_to_plate }
+  expect: { changed: false }
+
+- name: delete removes the object and leaves its geometry alone
+  given: { fixture: cube }
+  when: { op: object.delete }
+  expect: { removed: true, geometry_changed: false }

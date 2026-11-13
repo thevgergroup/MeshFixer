@@ -1,0 +1,146 @@
+id: mesh.split_plane
+# Version 2 adds hole_profile (version 1 records replay round); version 3
+# adds cap (version 2 and older records replay capped, as they ran).
+version: 3
+summary: Cut a closed object in two along a plane and close each part with a flat cap.
+geometry_kinds: [mesh]
+# Every selected object (many): each one the plane crosses becomes its
+# "(top)" part (keeping its id) and a created "(bottom)" part; one the
+# plane misses is listed in the report's `missed`, unless it misses them
+# all (plane_misses_object). One command, one undo step.
+target:
+  whole_object: true
+  kinds: []
+  many: true
+parameters:
+  - name: plane_point
+    type: vec3
+    default: [0, 0, 0]
+    unit: mm
+    description: "A point on the cut plane, in world space (document units once prepared): x,y,z"
+  - name: plane_normal
+    type: vec3
+    default: [0, 0, 1]
+    description: "The cut plane's normal in world space, x,y,z (any length but zero). The part on the side it points to is the top part"
+  - name: keep
+    type: choice
+    default: both
+    values: [both, above, below]
+    description: "Which parts to keep: both (the top part keeps the object, the bottom part is a new object), or only the part above or below the plane"
+  - name: cut_gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "Thickness of the slab removed at the cut, centred on the plane, so the parts don't touch (D23; 0 cuts without a gap)"
+  - name: cap
+    type: bool
+    default: true
+    description: "Close each kept part with a flat cap where it was cut (on by default). Off leaves it open at the cut, with no cap faces and no joint recorded — for a vase or bowl. Version 2 always capped"
+  # Alignment holes and dowels (Task 13, D12); dovetail (Task 14): a
+  # groove of hole_diameter at the cut, hole_depth_below deep, flanks at
+  # 15 degrees, through the bottom part, and a matching tail on the top.
+  - name: pegs
+    type: choice
+    default: none
+    values: [none, dowels, attached, dovetail]
+    description: "Alignment: none, holes in both cut faces with loose dowels laid out on the plate, pegs attached to the top part, or a dovetail"
+  - name: peg_shape
+    type: choice
+    default: round
+    values: [round, square, keyed]
+    description: "Shape of the alignment holes and dowels"
+  - name: hole_profile
+    type: choice
+    default: auto
+    values: [auto, round, teardrop, flat_top]
+    description: "Cross-section of round alignment holes (D24): auto makes them teardrops when they print sideways (their axis, the cut's normal, within 45 degrees of horizontal), pointing up; round, teardrop or flat-top always. Version 1 had round holes only"
+  - name: hole_diameter
+    type: float
+    default: 5.0
+    min: 0.0
+    unit: mm
+    description: "Diameter (or width) of each alignment hole"
+  - name: hole_depth_above
+    type: float
+    default: 6.0
+    min: 0.0
+    unit: mm
+    description: "How deep each hole goes into the top part"
+  - name: hole_depth_below
+    type: float
+    default: 6.0
+    min: 0.0
+    unit: mm
+    description: "How deep each hole goes into the bottom part"
+  - name: peg_count
+    type: integer
+    default: 0
+    min: 0
+    description: "Holes per section region; 0 places them automatically"
+  - name: peg_clearance
+    type: float
+    default: 0.2
+    min: 0.0
+    unit: mm
+    default_from: fit.peg_clearance
+    description: "The dowel is this much thinner than its hole. Legacy single value (D20); a frontend on the Machine profile/Fit class path fills this from fit_clearance + machine_tolerance and records both below. Old logs that only set this keep working unchanged"
+  - name: length_allowance
+    type: float
+    default: 0.4
+    min: 0.0
+    unit: mm
+    default_from: fit.length_allowance
+    description: "The dowel is this much shorter than the two holes together (from the print fit profile)"
+  - name: fit_clearance
+    type: float
+    default: 0.2
+    min: -10.0
+    unit: mm
+    description: "D20 migration: the chosen Fit class's clearance (design intent), before machine tolerance. Recorded for audit; peg_clearance is what's actually used to size the hole and dowel. Negative is interference (a press fit)"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    description: "D20 migration: the active Machine profile's hole-undersize compensation added to fit_clearance to make peg_clearance. 0 on an uncalibrated machine. Recorded for audit alongside fit_clearance"
+  - name: min_wall
+    type: float
+    default: 1.5
+    min: 0.0
+    unit: mm
+    description: "Thinnest wall left between a hole and the outside"
+  # Where loose dowels are laid out (D21): the plate, centred on the
+  # origin, and the gap kept between parts.
+  - name: plate_width
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Width (x) of the build plate the dowels are laid out on"
+  - name: plate_depth
+    type: float
+    default: 256.0
+    min: 0.0
+    unit: mm
+    description: "Depth (y) of the build plate the dowels are laid out on"
+  - name: plate_spacing
+    type: float
+    default: 3.0
+    min: 0.0
+    unit: mm
+    description: "Gap kept between laid-out dowels and everything else on the plate"
+preconditions:
+  - target is a whole, closed, manifold object
+  - the plane crosses the object
+postconditions:
+  - each kept part is closed; its cap lies on the plane (offset by half the cut gap)
+  - faces away from the plane are kept with their ids, bit for bit
+  - with keep both, the target becomes "<name> (top)" and "<name> (bottom)" is created with the same transform
+  - the report lists each part's cap faces
+  - with pegs dowels, both cut faces get the same holes, and each dowel (diameter = hole - peg_clearance, length = hole_depth_above + hole_depth_below - length_allowance) is a new object standing upright on the plate (world min z 0), laid out clear of the split object; dowels that don't fit are placed beside the plate and reported
+  - with pegs dovetail, one dovetail per section along its principal axis; the tail is peg_clearance narrower than the groove across its flanks and length_allowance short of its floor, so the parts slide together
+  - with pegs attached, pegs of the dowel's diameter and hole_depth_below - length_allowance long stick out of the top part, and the bottom part has the holes
+effects: [geometry_changes, topology_changes, creates_objects]
+runtime:
+  cancellable: true
+  progress: true

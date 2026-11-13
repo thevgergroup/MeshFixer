@@ -141,6 +141,18 @@ fn double_click(h: &mut Harness<'_, MeshFixerApp>, rec: &mut Recorder, label: &s
         press(h, pos, true);
         press(h, pos, false);
     }
+    record_camera_move(h, rec);
+}
+
+/// Selects and frames an object's row with a double-click, like any other
+/// row (M4 Task 8a); see the same helper in `tests/find.rs`.
+fn frame_object_row(h: &mut Harness<'_, MeshFixerApp>, rec: &mut Recorder, label: &str) {
+    double_click(h, rec, label);
+}
+
+/// Steps through a camera move (and the pulse after it) started by a
+/// framing, recording every frame.
+fn record_camera_move(h: &mut Harness<'_, MeshFixerApp>, rec: &mut Recorder) {
     let mut steps = 0;
     while h.state().camera_animating() {
         steps += 1;
@@ -204,7 +216,7 @@ fn points(app: &MeshFixerApp, d: &Defect) -> Vec<DVec3> {
 /// Scrolls the tree (the wheel over it) until row `label` is in view, in
 /// its upper part.
 fn scroll_to(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
-    let heading = h.get_by_label("Objects & Defects").rect();
+    let heading = h.get_by_label("Browser").rect();
     let over = egui::pos2(heading.center().x, WINDOW.1 * 0.5);
     h.event(egui::Event::PointerMoved(over));
     h.step();
@@ -375,7 +387,7 @@ fn checkpoint_b_followup_real_scan() {
     // 3. The object's row: the whole scan, framed.
     let name = h.state().session.document().objects()[0].name.clone();
     scroll_to(&mut h, &name);
-    double_click(&mut h, &mut rec, &name);
+    frame_object_row(&mut h, &mut rec, &name);
     let all: Vec<DVec3> = {
         let app = h.state();
         let object = &app.session.document().objects()[0];

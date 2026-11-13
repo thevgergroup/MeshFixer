@@ -1,0 +1,35 @@
+[package]
+name = "mf-parts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[features]
+# Test-only generators (the acceptance connector that proves a new one
+# needs only its generator file, its spec and one registry line). Off in
+# every normal build; only tests' dev-dependencies enable it.
+test-kinds = []
+
+[dependencies]
+mf-spec.workspace = true
+mf-geometry.workspace = true
+mf-io.workspace = true
+mf-runtime.workspace = true
+blake3.workspace = true
+serde.workspace = true
+serde-saphyr.workspace = true
+thiserror.workspace = true
+glam.workspace = true
+serde_json.workspace = true
+mf-boolean.workspace = true
+
+[dev-dependencies]
+mf-command.workspace = true
+mf-fixtures.workspace = true
+mf-geometry.workspace = true
+mf-io.workspace = true
+tempfile.workspace = true

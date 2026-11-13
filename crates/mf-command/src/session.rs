@@ -1,18 +1,40 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, RevisionId, Unit};
+use mf_document::{
+    BROWSER_METADATA, Document, Geometry, IDENTITY_TRANSFORM, OBJECT_IDS_METADATA, Object,
+    ObjectId, RevisionId, Unit,
+};
 use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
-use mf_operations::{OpError, OpOutput, Operation, Target};
+use mf_operations::{
+    ChangeObject, DocOutput, ObjectChange, OpError, OperandInput, Operation, Target,
+};
 use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
-use mf_spec::{Params, SpecError};
+use mf_spec::{OperandRole, OperationSpec, Params, SpecError};
 
 use crate::record::{
-    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, platform,
+    AffectedSummary, CommandId, CommandRecord, CommandStatus, ImportRecord, ObjectOutput,
+    RecordedOperand, platform,
 };
+
+/// One object property set (`value`) or removed (`None`) by
+/// [`Session::set_properties`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PropertyChange {
+    pub object: ObjectId,
+    pub key: String,
+    pub value: Option<String>,
+}
+
+/// The command that regenerates a parametric shape from its recipe: the
+/// only geometry change that keeps an object's [`mf_document::GENERATOR`].
+pub const SET_SHAPE_PARAMS: &str = "object.set_shape_params";
+
+/// The name operand 0 (the command's target) is recorded under.
+pub const TARGET_OPERAND: &str = "target";
 
 /// A request to run an operation, as issued by any frontend.
 #[derive(Debug, Clone)]
@@ -22,6 +44,14 @@ pub struct Invocation {
     /// What part of the object to act on; `None` is the whole object. Must be
     /// bound to the current revision (translate it first).
     pub selection: Option<Selection>,
+    /// The command's other operands (D6): `(name, object, selection)`,
+    /// named as in the spec's `operands:` list. A `many` operand is a list:
+    /// name it once per object, in order (extra targets of a `many` target
+    /// are named `target`). Slots may come in any order; within a slot the
+    /// order is kept and recorded. A `None` selection is the whole object;
+    /// a selection must be bound to the current revision. Empty for
+    /// single-object operations.
+    pub operands: Vec<(String, ObjectId, Option<Selection>)>,
     pub raw_params: BTreeMap<String, String>,
 }
 
@@ -93,6 +123,30 @@ pub enum CommandError {
         recorded: u32,
         current: u32,
     },
+    #[error("{op} has no operand named '{name}'")]
+    UnknownOperand { op: String, name: String },
+    #[error("{op} needs its '{name}' operand")]
+    MissingOperand { op: String, name: String },
+    #[error("{op} was given operand '{name}' more than once")]
+    RepeatedOperand { op: String, name: String },
+    #[error("object {object} can't be two operands of one command ({op})")]
+    RepeatedObject { op: String, object: ObjectId },
+    /// A recorded object id (a replayed import, or an object a replayed or
+    /// re-executed command created) is already an object at this
+    /// revision: the log doesn't fit this history.
+    #[error("the log's recorded object {object} already exists in revision {revision}")]
+    RecordedIdTaken {
+        object: ObjectId,
+        revision: RevisionId,
+    },
+    /// A recorded object id is the largest id there is, so no later id
+    /// could follow it (a corrupt log).
+    #[error("the log's recorded object {object} is out of range (a corrupt log?)")]
+    RecordedIdOutOfRange { object: ObjectId },
+    /// The operation returned changes its spec doesn't allow (a defect in
+    /// the operation, refused rather than committed).
+    #[error("{op} returned invalid object changes: {reason}")]
+    InvalidChanges { op: String, reason: String },
 }
 
 impl From<mf_runtime::Cancelled> for CommandError {
@@ -137,23 +191,64 @@ fn untranslatable_reason(t: &Translation) -> String {
     }
 }
 
+/// One operand of a prepared command: operand 0 is the target.
+struct PreparedOperand {
+    name: String,
+    /// `None` for the target; the spec's role otherwise.
+    role: Option<OperandRole>,
+    object: ObjectId,
+    /// The object's name, which an operation may derive new names from.
+    object_name: String,
+    mesh: Mesh,
+    transform: [f64; 12],
+    target: Target,
+    selection: Option<Selection>,
+    /// The object's intentional openings at the input revision, translated
+    /// to the output by `run` if its geometry changes (on the worker: it
+    /// needs the new topology).
+    openings: Vec<u32>,
+}
+
 /// A validated command, ready to run on any thread.
 pub struct Prepared {
     base_revision: RevisionId,
-    target: ObjectId,
     op: &'static dyn Operation,
-    input: Mesh,
-    target_spec: Target,
-    selection: Option<Selection>,
+    /// Operand 0 is the target, then any extra targets, then each of the
+    /// spec's `operands:` slots in order (a `many` slot's objects in the
+    /// order given).
+    operands: Vec<PreparedOperand>,
     params: Params,
-    /// The target's intentional openings at the input revision, translated
-    /// to the output by `run` (on the worker: it needs the new topology).
-    openings: Vec<u32>,
+    /// The ids a recorded run of this command gave the objects it created
+    /// (replay and re-execution), so the same objects get the same ids.
+    created_ids: Option<Vec<ObjectId>>,
+    /// Every object at the base revision (shared geometry, cheap), for an
+    /// operation that reads the scene; its boxes are built in `run`, never
+    /// on the caller's thread (MF-RT-001).
+    scene: Vec<(ObjectId, Mesh, [f64; 12])>,
+}
+
+/// What `run` worked out for one [`ObjectChange`], so `commit` does no
+/// O(n) work (MF-RT-001).
+#[derive(Debug, Clone, Default)]
+struct ChangeInfo {
+    /// Output hashes (hex) of a geometry or created mesh.
+    hashes: Option<(String, String)>,
+    /// A geometry change's operand's openings, translated to the output.
+    openings: Option<Vec<u32>>,
 }
 
 impl Prepared {
     pub fn op_id(&self) -> &'static str {
         self.op.id()
+    }
+
+    /// The validated, already-converted parameters this will run with
+    /// (D20: a length is in document units by the time anything sees
+    /// `Prepared`). Exposed so callers — and tests proving `prepare`'s
+    /// conversion is idempotent — can inspect what was actually recorded
+    /// without re-deriving it.
+    pub fn params(&self) -> &Params {
+        &self.params
     }
 
     /// Run the operation. Safe on any thread. Hashing happens here too, so
@@ -165,67 +260,304 @@ impl Prepared {
     /// is exactly one outcome.
     pub fn run(self, ctx: &RunContext) -> Result<Completed, CommandError> {
         let start = Instant::now();
-        let output = self
-            .op
-            .execute(&self.input, &self.target_spec, &self.params, ctx)?;
+        let inputs: Vec<OperandInput> = self
+            .operands
+            .iter()
+            .map(|o| OperandInput {
+                slot: &o.name,
+                object: o.object,
+                name: &o.object_name,
+                mesh: &o.mesh,
+                transform: o.transform,
+                target: o.target.clone(),
+            })
+            .collect();
+        let output = if self.op.wants_scene() {
+            let mut scene = Vec::with_capacity(self.scene.len());
+            for (object, mesh, transform) in &self.scene {
+                scene.extend(mf_operations::SceneObject::of(
+                    *object, mesh, transform, ctx,
+                )?);
+            }
+            self.op.execute_scene(&inputs, &scene, &self.params, ctx)?
+        } else {
+            self.op.execute_doc(&inputs, &self.params, ctx)?
+        };
+        drop(inputs);
         #[cfg(feature = "test-position-jitter")]
         let output = crate::jitter::perturb(output);
+        check_changes(self.op.id(), &self.operands, &output.changes)?;
+        // Materials follow provenance (MF-ISSUE-091), for every operation.
+        let mut output = output;
+        {
+            let meshes: Vec<&Mesh> = self.operands.iter().map(|o| &o.mesh).collect();
+            let mut changes = Vec::with_capacity(output.changes.len());
+            for change in std::mem::take(&mut output.changes) {
+                changes.push(match change {
+                    ObjectChange::Geometry {
+                        operand,
+                        mesh,
+                        provenance,
+                    } => ObjectChange::Geometry {
+                        mesh: mf_operations::materials::inherit(
+                            mesh,
+                            &provenance,
+                            meshes.get(operand).copied(),
+                            &meshes,
+                            ctx,
+                        )?,
+                        operand,
+                        provenance,
+                    },
+                    ObjectChange::Create {
+                        name,
+                        mesh,
+                        transform,
+                        provenance,
+                    } => ObjectChange::Create {
+                        mesh: mf_operations::materials::inherit(
+                            mesh,
+                            &provenance,
+                            meshes.first().copied(),
+                            &meshes,
+                            ctx,
+                        )?,
+                        name,
+                        transform,
+                        provenance,
+                    },
+                    other => other,
+                });
+            }
+            output.changes = changes;
+        }
         // Cheap: built from per-chunk hashes cached on shared chunks, so only
         // the chunks this command copied are hashed (review I6). Still
         // cancellable: the first hash of a freshly imported mesh is O(n).
-        let (input_hash, input_structure_hash) = self.input.hashes_with(ctx)?;
-        let (input_hash, input_structure_hash) =
-            (input_hash.to_hex(), input_structure_hash.to_hex());
-        let output_hashes = match &output.change {
-            Some((m, _)) => {
-                let (content, structure) = m.hashes_with(ctx)?;
-                Some((content.to_hex(), structure.to_hex()))
-            }
-            None => None,
-        };
-        let kept = output
-            .change
-            .as_ref()
-            .map_or(0, |(m, p)| (m.face_count() - p.created_faces.len()) as u64);
-        let openings = match &output.change {
-            Some((m, p)) if !self.openings.is_empty() => {
-                let sel = Selection {
-                    object: self.target,
-                    revision: self.base_revision,
-                    kind: SelectionKind::BoundaryLoop,
-                    ids: self.openings.clone(),
-                };
-                // The output's revision id isn't known yet; only the ids matter.
-                match mf_selection::resolve(
-                    &sel,
-                    &self.input,
-                    m,
-                    &[Step::Forward(p)],
-                    self.base_revision,
-                ) {
-                    Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
-                    // Filled, removed or merged away: no longer a hole to mark.
-                    Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+        let mut recorded = Vec::with_capacity(self.operands.len());
+        for o in &self.operands {
+            let (content, structure) = o.mesh.hashes_with(ctx)?;
+            recorded.push(RecordedOperand {
+                name: o.name.clone(),
+                object: o.object,
+                selection: o.selection.clone(),
+                input_revision_hash: content.to_hex(),
+                input_structure_hash: structure.to_hex(),
+                input_transform: o.transform,
+            });
+        }
+        let mut info = Vec::with_capacity(output.changes.len());
+        for change in &output.changes {
+            info.push(match change {
+                ObjectChange::Geometry {
+                    operand,
+                    mesh,
+                    provenance,
+                } => {
+                    let (content, structure) = mesh.hashes_with(ctx)?;
+                    let o = &self.operands[*operand];
+                    ChangeInfo {
+                        hashes: Some((content.to_hex(), structure.to_hex())),
+                        openings: Some(translate_openings(o, self.base_revision, mesh, provenance)),
+                    }
                 }
-            }
-            _ => self.openings.clone(),
-        };
+                ObjectChange::Create { mesh, .. } => {
+                    let (content, structure) = mesh.hashes_with(ctx)?;
+                    ChangeInfo {
+                        hashes: Some((content.to_hex(), structure.to_hex())),
+                        openings: None,
+                    }
+                }
+                ObjectChange::Transform { .. }
+                | ObjectChange::Remove { .. }
+                | ObjectChange::Rename { .. }
+                | ObjectChange::Property { .. } => ChangeInfo::default(),
+            });
+        }
+        let target = &self.operands[0];
         Ok(Completed {
             base_revision: self.base_revision.0,
-            target: self.target,
+            target: target.object,
             op_id: self.op.id(),
             op_version: self.op.version(),
-            selection: self.selection,
+            selection: target.selection.clone(),
             params: self.params,
             output,
-            input_hash,
-            input_structure_hash,
-            output_hashes,
-            kept,
-            openings,
+            operands: recorded,
+            info,
+            created_ids: self.created_ids,
             duration: start.elapsed(),
         })
     }
+}
+
+/// The intentional openings of operand `o` translated through a geometry
+/// change to `output`.
+fn translate_openings(
+    o: &PreparedOperand,
+    base: RevisionId,
+    output: &Mesh,
+    provenance: &Provenance,
+) -> Vec<u32> {
+    if o.openings.is_empty() {
+        return Vec::new();
+    }
+    let sel = Selection {
+        object: o.object,
+        revision: base,
+        kind: SelectionKind::BoundaryLoop,
+        ids: o.openings.clone(),
+    };
+    // The output's revision id isn't known yet; only the ids matter.
+    match mf_selection::resolve(&sel, &o.mesh, output, &[Step::Forward(provenance)], base) {
+        Translation::Mapped(t) | Translation::Partial { mapped: t, .. } => t.ids,
+        // Filled, removed or merged away: no longer a hole to mark.
+        Translation::Failed(_) | Translation::Ambiguous { .. } => Vec::new(),
+    }
+}
+
+/// How many objects `changes` create.
+fn changes_creating(changes: &[ObjectChange]) -> usize {
+    changes
+        .iter()
+        .filter(|c| matches!(c, ObjectChange::Create { .. }))
+        .count()
+}
+
+/// Refuse changes an operation isn't allowed to make: an operand index out
+/// of range, two changes of one kind to one object, a change to a removed
+/// object, or any change to an operand the spec marks `read` or `kept`
+/// (and anything but removal of a `consumed` one).
+fn check_changes(
+    op: &str,
+    operands: &[PreparedOperand],
+    changes: &[ObjectChange],
+) -> Result<(), CommandError> {
+    let invalid = |reason: String| CommandError::InvalidChanges {
+        op: op.to_owned(),
+        reason,
+    };
+    // Every operand face a created face names must exist: an index in
+    // range and a live face of that operand's input (MF-P1-SEL-001).
+    for change in changes {
+        let provenance = match change {
+            ObjectChange::Geometry { provenance, .. } | ObjectChange::Create { provenance, .. } => {
+                provenance
+            }
+            ObjectChange::Transform { .. }
+            | ObjectChange::Remove { .. }
+            | ObjectChange::Rename { .. }
+            | ObjectChange::Property { .. } => continue,
+        };
+        for (_, sources) in &provenance.created_faces {
+            for &(k, face) in &sources.operands {
+                let o = operands.get(k as usize).ok_or_else(|| {
+                    invalid(format!(
+                        "a created face names operand {k}, but there are {}",
+                        operands.len()
+                    ))
+                })?;
+                if !o.mesh.is_face_live(face) {
+                    return Err(invalid(format!(
+                        "a created face names face {} of operand '{}', which isn't a face of it",
+                        face.0, o.name
+                    )));
+                }
+            }
+        }
+    }
+    // A property change names an operand that exists and may change, or
+    // an object created earlier in the same output; never a removed one.
+    let mut created_so_far = 0usize;
+    let removed: Vec<usize> = changes
+        .iter()
+        .filter_map(|c| match c {
+            ObjectChange::Remove { operand } => Some(*operand),
+            _ => None,
+        })
+        .collect();
+    for change in changes {
+        match change {
+            ObjectChange::Create { .. } => created_so_far += 1,
+            ObjectChange::Property {
+                object: ChangeObject::Created(n),
+                key,
+                ..
+            } if *n >= created_so_far => {
+                return Err(invalid(format!(
+                    "property '{key}' names created object {n}, which isn't created before it"
+                )));
+            }
+            ObjectChange::Property {
+                object: ChangeObject::Operand(k),
+                key,
+                ..
+            } => {
+                let o = operands.get(*k).ok_or_else(|| {
+                    invalid(format!(
+                        "property '{key}' names operand {k}, but there are {}",
+                        operands.len()
+                    ))
+                })?;
+                if !matches!(o.role, None | Some(OperandRole::Changed)) || removed.contains(k) {
+                    return Err(invalid(format!(
+                        "operand '{}' can't have its property '{key}' changed",
+                        o.name
+                    )));
+                }
+            }
+            _ => {}
+        }
+    }
+    // Per operand: (geometry, transform, removed, renamed).
+    let mut seen = vec![(false, false, false, false); operands.len()];
+    for change in changes {
+        let (operand, slot) = match change {
+            ObjectChange::Geometry { operand, .. } => (*operand, 0),
+            ObjectChange::Transform { operand, .. } => (*operand, 1),
+            ObjectChange::Remove { operand } => (*operand, 2),
+            ObjectChange::Rename { operand, .. } => (*operand, 3),
+            ObjectChange::Create { .. } | ObjectChange::Property { .. } => continue,
+        };
+        let o = operands.get(operand).ok_or_else(|| {
+            invalid(format!(
+                "operand {operand} doesn't exist (it has {})",
+                operands.len()
+            ))
+        })?;
+        match o.role {
+            None => {}
+            Some(OperandRole::Consumed) if slot == 2 => {}
+            Some(OperandRole::Changed) if slot != 2 => {}
+            Some(role) => {
+                return Err(invalid(format!(
+                    "operand '{}' is {role:?}, so it can't be changed{}",
+                    o.name,
+                    match role {
+                        OperandRole::Consumed => " (only removed)",
+                        OperandRole::Changed => " (it can't be removed)",
+                        _ => " or removed",
+                    }
+                )));
+            }
+        }
+        let s = &mut seen[operand];
+        let flags = [&mut s.0, &mut s.1, &mut s.2, &mut s.3];
+        if *flags[slot] {
+            return Err(invalid(format!(
+                "operand '{}' has two changes of one kind",
+                o.name
+            )));
+        }
+        *flags[slot] = true;
+        if s.2 && (s.0 || s.1 || s.3) {
+            return Err(invalid(format!(
+                "operand '{}' is both changed and removed",
+                o.name
+            )));
+        }
+    }
+    Ok(())
 }
 
 pub struct Completed {
@@ -235,13 +567,14 @@ pub struct Completed {
     pub op_version: u32,
     pub selection: Option<Selection>,
     pub params: Params,
-    pub output: OpOutput,
-    input_hash: String,
-    input_structure_hash: String,
-    output_hashes: Option<(String, String)>,
-    kept: u64,
-    /// The target's intentional openings, translated to the output.
-    pub openings: Vec<u32>,
+    /// The operation's object changes and report.
+    pub output: DocOutput,
+    /// Every operand as it was read (operand 0 is the target).
+    operands: Vec<RecordedOperand>,
+    /// Per entry of `output.changes`.
+    info: Vec<ChangeInfo>,
+    /// Recorded ids for the created objects (see `Prepared::created_ids`).
+    created_ids: Option<Vec<ObjectId>>,
     pub duration: Duration,
 }
 
@@ -274,6 +607,10 @@ pub struct RevisionNode {
     /// A "mark intentional openings" step: the object and the loop ids it
     /// set (logged, so replay reaches the same marks).
     pub openings: Option<(ObjectId, Vec<u32>)>,
+    /// A "set object properties" step (Solid/Hole roles): each object,
+    /// key and value it set (`None` removed it), all in one step; logged,
+    /// so replay reaches the same properties. Empty for any other step.
+    pub properties: Vec<PropertyChange>,
 }
 
 /// History as a DAG of immutable document states. Undo and redo move a
@@ -284,6 +621,11 @@ pub struct Session {
     cursor: RevisionId,
     next_object: u64,
     next_command: u64,
+    /// Named checkpoints (History "Name this point…"): a revision's own
+    /// label, shown as a marker in the history list, clicked to check
+    /// out that revision. Session-only (not document state: naming a
+    /// point doesn't change the model), so it isn't itself an undo step.
+    checkpoints: BTreeMap<RevisionId, String>,
 }
 
 impl Default for Session {
@@ -305,15 +647,47 @@ impl Session {
                 document: Document::default(),
                 provenance: BTreeMap::new(),
                 openings: None,
+                properties: Vec::new(),
             }],
             cursor: RevisionId(0),
             next_object: 1,
             next_command: 1,
+            checkpoints: BTreeMap::new(),
         }
     }
 
     pub fn node(&self, id: RevisionId) -> Option<&RevisionNode> {
         self.nodes.get(id.0 as usize)
+    }
+
+    /// `id`'s checkpoint name, if it was given one ("Name this
+    /// point…").
+    pub fn checkpoint_name(&self, id: RevisionId) -> Option<&str> {
+        self.checkpoints.get(&id).map(String::as_str)
+    }
+
+    /// Every named checkpoint, in revision order.
+    pub fn checkpoints(&self) -> impl Iterator<Item = (RevisionId, &str)> {
+        self.checkpoints
+            .iter()
+            .map(|(&id, name)| (id, name.as_str()))
+    }
+
+    /// Names `id` as a checkpoint ("Name this point…"), replacing its
+    /// name if it already had one; a blank name removes it. Does
+    /// nothing (returns false) if `id` isn't a real revision. Not an
+    /// undo step: naming a point doesn't change the document.
+    pub fn name_checkpoint(&mut self, id: RevisionId, name: String) -> bool {
+        if self.node(id).is_none() {
+            return false;
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            self.checkpoints.remove(&id);
+        } else {
+            self.checkpoints.insert(id, trimmed.to_owned());
+        }
+        true
     }
 
     pub fn revisions(&self) -> &[RevisionNode] {
@@ -330,6 +704,18 @@ impl Session {
 
     pub fn document(&self) -> &Document {
         &self.current_node().document
+    }
+
+    /// Replaces the *current* revision's organisation in place (no new
+    /// revision): used right after `import_model` restores the Browser's
+    /// groups/order/hidden/locked from the file's `meshfixer:browser`
+    /// metadata, folded into the last object's import revision exactly
+    /// as its unit is (`add_object_as`'s `with_units`), so importing one
+    /// file is still one step to undo, not many.
+    fn set_organisation_in_place(&mut self, organisation: mf_document::Organisation) {
+        let cursor = self.cursor;
+        let node = &mut self.nodes[cursor.0 as usize];
+        node.document = node.document.with_organisation(organisation);
     }
 
     /// Unique ID of the current state, as a number (for stale checks).
@@ -376,6 +762,7 @@ impl Session {
             0,
             IDENTITY_TRANSFORM,
             None,
+            BTreeMap::new(),
         )
     }
 
@@ -393,12 +780,108 @@ impl Session {
                 self.document().units()
             ));
         }
-        let ids = model
+        // What the file's ids were when saved (`meshfixer:object_ids`):
+        // a load numbers objects afresh, so the organisation and the
+        // properties that name objects (`attach_to`) are mapped onto the
+        // new ids (final review I1). A file from before the list existed
+        // is read as numbered from where the ids it names start.
+        let first_new = self.next_object;
+        let saved_ids: Option<Vec<ObjectId>> = match model.metadata.get(OBJECT_IDS_METADATA) {
+            None => None,
+            Some(text) => {
+                let parsed: Result<Vec<ObjectId>, _> = text
+                    .split(',')
+                    .map(|t| t.trim().parse::<u64>().map(ObjectId))
+                    .collect();
+                match parsed {
+                    Ok(ids) if ids.len() == model.objects.len() => Some(ids),
+                    Ok(ids) => {
+                        warnings.push(format!(
+                            "{OBJECT_IDS_METADATA} lists {} objects but the file has {}; \
+                             objects it names keep their saved numbers",
+                            ids.len(),
+                            model.objects.len()
+                        ));
+                        None
+                    }
+                    Err(e) => {
+                        warnings.push(format!(
+                            "{OBJECT_IDS_METADATA} is malformed ({e}); \
+                             objects it names keep their saved numbers"
+                        ));
+                        None
+                    }
+                }
+            }
+        };
+        let id_map: BTreeMap<ObjectId, ObjectId> = match &saved_ids {
+            Some(saved) => saved
+                .iter()
+                .enumerate()
+                .map(|(k, &old)| (old, ObjectId(first_new + k as u64)))
+                .collect(),
+            None => (0..model.objects.len() as u64)
+                .map(|k| (ObjectId(first_new + k), ObjectId(first_new + k)))
+                .collect(),
+        };
+        // Only a 3MF this document started from carries the Browser's own
+        // groups/order/hidden/locked (`meshfixer:browser`); merging a
+        // file into an existing document leaves the current organisation
+        // alone (its new objects just join the root, as `with_object`
+        // already does). Malformed or unfitting metadata is reported by
+        // name, never silently dropped.
+        let organisation = match first_import
+            .then(|| model.metadata.get(BROWSER_METADATA))
+            .flatten()
+        {
+            None => None,
+            Some(text) => match mf_document::Organisation::from_json(text) {
+                Err(e) => {
+                    warnings.push(format!(
+                        "{BROWSER_METADATA} is malformed ({e}); groups, hidden and locked \
+                         objects weren't restored"
+                    ));
+                    None
+                }
+                Ok(org) => match org.remapped(&id_map) {
+                    Ok(org) => Some(org),
+                    Err(missing) => {
+                        warnings.push(format!(
+                            "{BROWSER_METADATA} names object {missing}, which the file doesn't \
+                             have; groups, hidden and locked objects weren't restored"
+                        ));
+                        None
+                    }
+                },
+            },
+        };
+        let ids: Vec<ObjectId> = model
             .objects
             .into_iter()
             .enumerate()
             .map(|(part, o)| {
                 let units = first_import.then_some(model.unit);
+                let mut properties = mf_document::properties_from_metadata(&o.metadata);
+                let attach = mf_operations::shapes::ATTACH_TO;
+                if let Some(to) = properties.get(attach).cloned() {
+                    // allow-swallow: an unparsable or unknown attach_to is dropped with a warning naming it
+                    let saved = to.parse::<u64>().ok();
+                    match saved.and_then(|n| id_map.get(&ObjectId(n))) {
+                        Some(new) => {
+                            properties.insert(attach.to_owned(), new.0.to_string());
+                        }
+                        // Kept, it would name some other object of this
+                        // document: dropped, by name.
+                        None => {
+                            properties.remove(attach);
+                            warnings.push(format!(
+                                "object '{}' is attached to object {to}, which the file \
+                                 doesn't have; it was detached",
+                                o.name
+                            ));
+                        }
+                    }
+                }
                 self.add_object(
                     Geometry::Mesh(o.mesh),
                     o.name,
@@ -406,9 +889,21 @@ impl Session {
                     part,
                     o.transform,
                     units,
+                    properties,
                 )
             })
             .collect();
+        debug_assert!(
+            ids.iter()
+                .enumerate()
+                .all(|(k, id)| id.0 == first_new + k as u64),
+            "import_model's id map assumes consecutive new ids"
+        );
+        if let Some(organisation) = organisation
+            && !ids.is_empty()
+        {
+            self.set_organisation_in_place(organisation);
+        }
         (ids, warnings)
     }
 
@@ -428,7 +923,50 @@ impl Session {
             part,
             object.transform,
             units,
+            mf_document::properties_from_metadata(&object.metadata),
         )
+    }
+
+    /// As [`Session::import_object`], giving the object the id the command
+    /// log recorded for it (replay): ids an abandoned branch used before
+    /// this import leave a gap the log keeps (review I-A). Refused if that
+    /// id is already an object here or is out of range.
+    pub fn import_object_as(
+        &mut self,
+        object: ModelObject,
+        unit: Unit,
+        source: SourceInfo,
+        part: usize,
+        id: ObjectId,
+    ) -> Result<ObjectId, CommandError> {
+        self.claim_recorded_id(id)?;
+        let units = self.document().objects().is_empty().then_some(unit);
+        Ok(self.add_object_as(
+            id,
+            Geometry::Mesh(object.mesh),
+            object.name,
+            Some(source),
+            part,
+            object.transform,
+            units,
+            mf_document::properties_from_metadata(&object.metadata),
+        ))
+    }
+
+    /// Check a recorded id can be used now (no object has it, and an id
+    /// can follow it) and move the counter past it.
+    fn claim_recorded_id(&mut self, id: ObjectId) -> Result<(), CommandError> {
+        if self.document().object(id).is_some() {
+            return Err(CommandError::RecordedIdTaken {
+                object: id,
+                revision: self.cursor,
+            });
+        }
+        let after =
+            id.0.checked_add(1)
+                .ok_or(CommandError::RecordedIdOutOfRange { object: id })?;
+        self.next_object = self.next_object.max(after);
+        Ok(())
     }
 
     /// Add an object of any geometry kind (a history entry, like an import).
@@ -438,9 +976,18 @@ impl Session {
         name: String,
         source: Option<SourceInfo>,
     ) -> ObjectId {
-        self.add_object(geometry, name, source, 0, IDENTITY_TRANSFORM, None)
+        self.add_object(
+            geometry,
+            name,
+            source,
+            0,
+            IDENTITY_TRANSFORM,
+            None,
+            BTreeMap::new(),
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn add_object(
         &mut self,
         geometry: Geometry,
@@ -449,9 +996,28 @@ impl Session {
         part: usize,
         transform: [f64; 12],
         units: Option<Unit>,
+        properties: BTreeMap<String, String>,
     ) -> ObjectId {
         let id = ObjectId(self.next_object);
         self.next_object += 1;
+        self.add_object_as(
+            id, geometry, name, source, part, transform, units, properties,
+        )
+    }
+
+    /// As `add_object`, with the id already chosen.
+    #[allow(clippy::too_many_arguments)]
+    fn add_object_as(
+        &mut self,
+        id: ObjectId,
+        geometry: Geometry,
+        name: String,
+        source: Option<SourceInfo>,
+        part: usize,
+        transform: [f64; 12],
+        units: Option<Unit>,
+        properties: BTreeMap<String, String>,
+    ) -> ObjectId {
         let mut document = self.document().with_object(Object {
             id,
             name: name.clone(),
@@ -459,6 +1025,7 @@ impl Session {
             source: source.clone(),
             transform,
             openings: Vec::new(),
+            properties,
         });
         if let Some(u) = units {
             document = document.with_units(u);
@@ -478,15 +1045,24 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: None,
+            properties: Vec::new(),
         });
         id
     }
 
+    /// Validate a fresh invocation's raw (string) parameters and convert
+    /// every length (`unit: mm`) parameter to the document's units (D20;
+    /// Global Constraints: "converted at prepare time. The converted
+    /// value is what's recorded"). This runs exactly once, here: replay
+    /// (`replay::run_and_classify`) and [`Session::reexecute`] both carry
+    /// already-converted [`Params`] forward through [`Self::prepare_validated`]
+    /// directly, never back through this conversion.
     pub fn prepare(&self, inv: Invocation) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(&inv.op_id)
             .ok_or_else(|| CommandError::UnknownOperation(inv.op_id.clone()))?;
-        let params = spec.validate(&inv.raw_params)?;
-        self.prepare_validated(&inv.op_id, inv.target, inv.selection, params)
+        let mut params = spec.validate(&inv.raw_params)?;
+        spec.to_document_units(&mut params, self.document().units());
+        self.prepare_validated(&inv.op_id, inv.target, inv.selection, inv.operands, params)
     }
 
     /// As [`Session::prepare`], with parameters already validated.
@@ -495,16 +1071,136 @@ impl Session {
         op_id: &str,
         target: ObjectId,
         selection: Option<Selection>,
+        operands: Vec<(String, ObjectId, Option<Selection>)>,
         params: Params,
     ) -> Result<Prepared, CommandError> {
         let spec = mf_spec::builtin::get(op_id)
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
         let op = mf_operations::find(op_id)
             .ok_or_else(|| CommandError::UnknownOperation(op_id.to_owned()))?;
+        // Each operand slot's objects, in the order given: a `many` slot
+        // (and a `many` target's extra targets, named `target`) is a list.
+        let mut supplied: BTreeMap<String, Vec<(ObjectId, Option<Selection>)>> = BTreeMap::new();
+        for (name, object, sel) in operands {
+            let many = if name == TARGET_OPERAND {
+                if !spec.target.many {
+                    return Err(CommandError::RepeatedOperand {
+                        op: spec.id.clone(),
+                        name,
+                    });
+                }
+                true
+            } else {
+                match spec.operands.iter().find(|o| o.name == name) {
+                    Some(o) => o.many,
+                    None => {
+                        return Err(CommandError::UnknownOperand {
+                            op: spec.id.clone(),
+                            name,
+                        });
+                    }
+                }
+            };
+            let slot = supplied.entry(name.clone()).or_default();
+            if !many && !slot.is_empty() {
+                return Err(CommandError::RepeatedOperand {
+                    op: spec.id.clone(),
+                    name,
+                });
+            }
+            slot.push((object, sel));
+        }
+        let mut prepared = vec![self.prepare_operand(
+            spec,
+            TARGET_OPERAND,
+            None,
+            target,
+            selection,
+            spec.target.whole_object,
+            &spec.target.kinds,
+        )?];
+        let repeated = |prepared: &[PreparedOperand], object: ObjectId| {
+            if prepared.iter().any(|p| p.object == object) {
+                Err(CommandError::RepeatedObject {
+                    op: spec.id.clone(),
+                    object,
+                })
+            } else {
+                Ok(())
+            }
+        };
+        // allow-swallow: remove() returning None means no extra targets were supplied for this slot, the same as an empty Vec.
+        for (object, sel) in supplied.remove(TARGET_OPERAND).unwrap_or_default() {
+            repeated(&prepared, object)?;
+            prepared.push(self.prepare_operand(
+                spec,
+                TARGET_OPERAND,
+                None,
+                object,
+                sel,
+                spec.target.whole_object,
+                &spec.target.kinds,
+            )?);
+        }
+        for o in &spec.operands {
+            // allow-swallow: remove() returning None means no operands were supplied for this slot, the same as an empty Vec.
+            let given = supplied.remove(&o.name).unwrap_or_default();
+            if given.is_empty() && o.required {
+                return Err(CommandError::MissingOperand {
+                    op: spec.id.clone(),
+                    name: o.name.clone(),
+                });
+            }
+            let whole = o.kinds.iter().any(|k| k == "object");
+            for (object, sel) in given {
+                repeated(&prepared, object)?;
+                prepared.push(self.prepare_operand(
+                    spec,
+                    &o.name,
+                    Some(o.role),
+                    object,
+                    sel,
+                    whole,
+                    &o.kinds,
+                )?);
+            }
+        }
+        let scene = if op.wants_scene() {
+            self.document()
+                .objects()
+                .iter()
+                .filter_map(|o| o.mesh().map(|m| (o.id, m.clone(), o.transform)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(Prepared {
+            base_revision: self.cursor,
+            op,
+            operands: prepared,
+            params,
+            created_ids: None,
+            scene,
+        })
+    }
+
+    /// Check one operand (its object, geometry kind and selection) against
+    /// the spec and capture it for the run.
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_operand(
+        &self,
+        spec: &OperationSpec,
+        name: &str,
+        role: Option<OperandRole>,
+        object_id: ObjectId,
+        selection: Option<Selection>,
+        whole_object: bool,
+        kinds: &[String],
+    ) -> Result<PreparedOperand, CommandError> {
         let object = self
             .document()
-            .object(target)
-            .ok_or(CommandError::UnknownObject(target))?;
+            .object(object_id)
+            .ok_or(CommandError::UnknownObject(object_id))?;
         let kind = object.geometry.kind().as_str();
         let unsupported = || CommandError::UnsupportedGeometry {
             op: spec.id.clone(),
@@ -513,11 +1209,11 @@ impl Session {
         if !spec.geometry_kinds.iter().any(|k| k == kind) {
             return Err(unsupported());
         }
-        // Every Phase 0 operation is a mesh operation; the spec check above
+        // Every operation so far is a mesh operation; the spec check above
         // guarantees the object is a mesh here.
-        let input = object.mesh().ok_or_else(unsupported)?.clone();
-        let target_spec = match &selection {
-            None if spec.target.whole_object => Target::WholeObject,
+        let mesh = object.mesh().ok_or_else(unsupported)?.clone();
+        let target = match &selection {
+            None if whole_object => Target::WholeObject,
             None => {
                 return Err(CommandError::UnsupportedTarget {
                     op: spec.id.clone(),
@@ -525,10 +1221,10 @@ impl Session {
                 });
             }
             Some(sel) => {
-                if sel.object != target {
+                if sel.object != object_id {
                     return Err(CommandError::SelectionMismatch {
                         selection: sel.object,
-                        target,
+                        target: object_id,
                     });
                 }
                 if sel.revision != self.cursor {
@@ -538,8 +1234,8 @@ impl Session {
                     });
                 }
                 let allowed = match spec_kind(sel.kind) {
-                    None => spec.target.whole_object,
-                    Some(k) => spec.target.kinds.iter().any(|x| x == k),
+                    None => whole_object,
+                    Some(k) => kinds.iter().any(|x| x == k),
                 };
                 if !allowed {
                     return Err(CommandError::UnsupportedTarget {
@@ -550,20 +1246,22 @@ impl Session {
                 target_of(sel)
             }
         };
-        Ok(Prepared {
-            base_revision: self.cursor,
+        Ok(PreparedOperand {
+            name: name.to_owned(),
+            role,
+            object: object_id,
+            mesh,
+            transform: object.transform,
             target,
-            op,
-            input,
-            target_spec,
             selection,
-            params,
             openings: object.openings.clone(),
+            object_name: object.name.clone(),
         })
     }
 
-    /// The command whose revision last changed `object`'s geometry at or
-    /// before `rev`, or `None` if its current geometry came from the import.
+    /// The command whose revision last changed, placed or created `object`
+    /// at or before `rev`, or `None` if its current state came from the
+    /// import.
     fn producer(&self, object: ObjectId, rev: RevisionId) -> Option<CommandId> {
         let mut cur = Some(rev);
         while let Some(r) = cur {
@@ -571,16 +1269,24 @@ impl Session {
             if node.import.as_ref().is_some_and(|i| i.object == object) {
                 return None;
             }
-            if let Some(rec) = &node.record
-                && rec.target == object
-            {
-                return Some(rec.id);
+            if let Some(rec) = &node.record {
+                let produced = if rec.outputs.is_empty() {
+                    rec.target == object
+                } else {
+                    rec.outputs.iter().any(|o| o.object == object && !o.removed)
+                };
+                if produced {
+                    return Some(rec.id);
+                }
             }
             cur = node.parent;
         }
         None
     }
 
+    /// Commit a completed run as one new revision: every object change at
+    /// once, so one undo reverts them all (D6). O(changed objects): hashes
+    /// were computed by `run`, and unchanged geometry keeps its own.
     pub fn commit(&mut self, c: Completed) -> Result<CommitOutcome, CommandError> {
         if c.base_revision != self.cursor.0 {
             return Err(CommandError::StaleInput {
@@ -588,7 +1294,7 @@ impl Session {
                 actual: self.cursor.0,
             });
         }
-        let Some((mesh, provenance)) = c.output.change else {
+        if c.output.changes.is_empty() {
             let read_only = mf_spec::builtin::get(c.op_id).is_some_and(|s| s.is_read_only());
             return Ok(if read_only {
                 CommitOutcome::Report(c.output.report)
@@ -597,19 +1303,218 @@ impl Session {
                     report: c.output.report,
                 }
             });
+        }
+        let base = self.document().clone();
+        let mut document = base.clone();
+        let mut provenance = BTreeMap::new();
+        let mut next_object = self.next_object;
+        // A replayed or re-executed command gives its created objects the
+        // ids it recorded, so later commands (and selections) that name
+        // them still find them, whatever ids other branches took (review
+        // C1). Without a record, ids come from the session's counter.
+        let creates = changes_creating(&c.output.changes);
+        let mut recorded_ids = match c.created_ids {
+            Some(ids) if ids.len() == creates => {
+                if let Some(&taken) = ids.iter().find(|&&id| base.object(id).is_some()) {
+                    return Err(CommandError::RecordedIdTaken {
+                        object: taken,
+                        revision: self.cursor,
+                    });
+                }
+                Some(ids.into_iter())
+            }
+            // A different number of created objects: the replay's verdict
+            // reports the difference (the outputs won't match).
+            _ => None,
         };
-        let (output_hash, output_structure_hash) = c
-            .output_hashes
-            .clone()
-            .expect("a change always has output hashes");
-        let document = self
-            .document()
-            .with_geometry(c.target, Geometry::Mesh(mesh))
-            .and_then(|d| d.with_openings(c.target, c.openings.clone()))
-            .ok_or(CommandError::UnknownObject(c.target))?;
+        let mut affected = AffectedSummary {
+            removed: 0,
+            created: 0,
+            kept: 0,
+        };
+        // Per operand: (output hashes, removed); created objects separately.
+        let mut operand_out: Vec<Option<(String, String)>> = vec![None; c.operands.len()];
+        let mut operand_changed = vec![false; c.operands.len()];
+        let mut operand_removed = vec![false; c.operands.len()];
+        let mut created: Vec<ObjectOutput> = Vec::new();
+        let unknown = |id: ObjectId| CommandError::UnknownObject(id);
+        // Only regenerating a shape from its recipe keeps it parametric;
+        // any other geometry change bakes it into a plain mesh
+        // (parametric-shapes brief: combine, sculpt, split, make solid).
+        let keeps_recipe = c.op_id == SET_SHAPE_PARAMS;
+        let mut created_ids: Vec<ObjectId> = Vec::new();
+        let DocOutput { changes, report } = c.output;
+        for (change, info) in changes.into_iter().zip(c.info) {
+            match change {
+                ObjectChange::Geometry {
+                    operand,
+                    mesh,
+                    provenance: p,
+                } => {
+                    let id = c.operands[operand].object;
+                    affected.removed += p.removed_faces.len() as u64;
+                    affected.created += p.created_faces.len() as u64;
+                    affected.kept += (mesh.face_count() - p.created_faces.len()) as u64;
+                    let openings = info
+                        .openings
+                        .expect("run translates openings for every geometry change");
+                    document = document
+                        .with_geometry(id, Geometry::Mesh(mesh))
+                        .and_then(|d| d.with_openings(id, openings))
+                        .ok_or(unknown(id))?;
+                    if !keeps_recipe {
+                        for key in mf_document::PARAMETRIC_KEYS {
+                            document = document.with_property(id, key, None).ok_or(unknown(id))?;
+                        }
+                    }
+                    provenance.insert(id, p);
+                    operand_out[operand] = info.hashes;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Transform { operand, transform } => {
+                    let id = c.operands[operand].object;
+                    document = document.with_transform(id, transform).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Rename { operand, name } => {
+                    let id = c.operands[operand].object;
+                    document = document.with_name(id, name).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                }
+                ObjectChange::Property { object, key, value } => {
+                    let id = match object {
+                        ChangeObject::Operand(k) => {
+                            operand_changed[k] = true;
+                            c.operands[k].object
+                        }
+                        ChangeObject::Created(n) => {
+                            *created_ids
+                                .get(n)
+                                .ok_or_else(|| CommandError::InvalidChanges {
+                                    op: c.op_id.to_owned(),
+                                    reason: format!("property '{key}' names created object {n}"),
+                                })?
+                        }
+                    };
+                    document = document.with_property(id, &key, value).ok_or(unknown(id))?;
+                }
+                ObjectChange::Remove { operand } => {
+                    let id = c.operands[operand].object;
+                    affected.removed += base
+                        .object(id)
+                        .and_then(|o| o.mesh())
+                        .map_or(0, |m| m.face_count() as u64);
+                    document = document.without_object(id).ok_or(unknown(id))?;
+                    operand_changed[operand] = true;
+                    operand_removed[operand] = true;
+                }
+                ObjectChange::Create {
+                    name,
+                    mesh,
+                    transform,
+                    provenance: p,
+                } => {
+                    let id = match recorded_ids.as_mut().and_then(Iterator::next) {
+                        Some(id) => id,
+                        None => ObjectId(next_object),
+                    };
+                    let after = id.0.checked_add(1).ok_or_else(|| {
+                        CommandError::InvalidChanges {
+                            op: c.op_id.to_owned(),
+                            reason: format!(
+                                "the log's recorded object {id} is out of range (a corrupt log?)"
+                            ),
+                        }
+                    })?;
+                    next_object = next_object.max(after);
+                    affected.created += mesh.face_count() as u64;
+                    let (hash, structure_hash) =
+                        info.hashes.expect("run hashes every created mesh");
+                    document = document
+                        .with_new_object(Object {
+                            id,
+                            name,
+                            geometry: Geometry::Mesh(mesh),
+                            source: None,
+                            transform,
+                            openings: Vec::new(),
+                            properties: BTreeMap::new(),
+                        })
+                        .ok_or(CommandError::InvalidChanges {
+                            op: c.op_id.to_owned(),
+                            reason: format!("object {id} already exists"),
+                        })?;
+                    provenance.insert(id, p);
+                    created_ids.push(id);
+                    created.push(ObjectOutput {
+                        object: id,
+                        created: true,
+                        removed: false,
+                        hash,
+                        structure_hash,
+                        transform,
+                        summary: None,
+                    });
+                }
+            }
+        }
+        let mut outputs = Vec::new();
+        for (k, operand) in c.operands.iter().enumerate() {
+            if !operand_changed[k] {
+                continue;
+            }
+            let removed = operand_removed[k];
+            let (hash, structure_hash) = match (&operand_out[k], removed) {
+                (_, true) => (String::new(), String::new()),
+                (Some(h), false) => h.clone(),
+                // Transform only: the geometry and its hash are unchanged.
+                (None, false) => (
+                    operand.input_revision_hash.clone(),
+                    operand.input_structure_hash.clone(),
+                ),
+            };
+            if !removed && operand_out[k].is_none() {
+                affected.kept += base
+                    .object(operand.object)
+                    .and_then(|o| o.mesh())
+                    .map_or(0, |m| m.face_count() as u64);
+            }
+            let transform = document
+                .object(operand.object)
+                .map_or(operand.input_transform, |o| o.transform);
+            outputs.push(ObjectOutput {
+                object: operand.object,
+                created: false,
+                removed,
+                hash,
+                structure_hash,
+                transform,
+                summary: None,
+            });
+        }
+        outputs.extend(created);
+        let target = &c.operands[0];
+        let (output_hash, output_structure_hash) = outputs
+            .iter()
+            .find(|o| o.object == target.object)
+            .map_or_else(
+                || {
+                    (
+                        target.input_revision_hash.clone(),
+                        target.input_structure_hash.clone(),
+                    )
+                },
+                |o| (o.hash.clone(), o.structure_hash.clone()),
+            );
         let id = CommandId(self.next_command);
-        self.next_command += 1;
         let input_revision = self.cursor;
+        let mut depends_on: Vec<CommandId> = c
+            .operands
+            .iter()
+            .filter_map(|o| self.producer(o.object, input_revision))
+            .collect();
+        depends_on.sort_unstable();
+        depends_on.dedup();
         let record = CommandRecord {
             id,
             op_id: c.op_id.to_owned(),
@@ -618,27 +1523,24 @@ impl Session {
             selection: c.selection.clone(),
             params: c.params.clone(),
             input_revision,
-            input_hash: c.input_hash,
-            input_structure_hash: c.input_structure_hash,
+            input_hash: target.input_revision_hash.clone(),
+            input_structure_hash: target.input_structure_hash.clone(),
             output_revision: RevisionId(self.nodes.len() as u64),
             output_hash,
             output_structure_hash,
             output_summary: None,
-            depends_on: self
-                .producer(c.target, input_revision)
-                .into_iter()
-                .collect(),
-            affected_objects: vec![c.target],
-            affected: AffectedSummary {
-                removed: provenance.removed_faces.len() as u64,
-                created: provenance.created_faces.len() as u64,
-                kept: c.kept,
-            },
+            depends_on,
+            affected_objects: outputs.iter().map(|o| o.object).collect(),
+            affected,
             engine_version: env!("CARGO_PKG_VERSION").to_owned(),
             platform: platform(),
             duration_ms: c.duration.as_secs_f64() * 1000.0,
             status: CommandStatus::Ok,
+            operands: c.operands,
+            outputs,
         };
+        self.next_command += 1;
+        self.next_object = next_object;
         let params: Vec<String> = c.params.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
         self.push(RevisionNode {
             id: RevisionId(0),
@@ -648,16 +1550,54 @@ impl Session {
             record: Some(record),
             import: None,
             document,
-            provenance: BTreeMap::from([(c.target, provenance)]),
+            provenance,
             openings: None,
+            properties: Vec::new(),
         });
-        Ok(CommitOutcome::NewRevision {
-            report: c.output.report,
-        })
+        Ok(CommitOutcome::NewRevision { report })
     }
 
     pub fn execute(&mut self, inv: Invocation) -> Result<CommitOutcome, CommandError> {
         let completed = self.prepare(inv)?.run(&RunContext::none())?;
+        self.commit(completed)
+    }
+
+    /// Run already-converted, already-validated [`Params`] (a recorded
+    /// command's own `params`, as replay and [`Self::reexecute`] both
+    /// have them): no unit conversion, since a recorded length is
+    /// already in document units (D20) and converting it again would
+    /// corrupt it. This is the one path both replay and re-execution
+    /// use, so conversion happens exactly once, in [`Self::prepare`].
+    pub fn execute_recorded(
+        &mut self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        params: Params,
+    ) -> Result<CommitOutcome, CommandError> {
+        let completed = self
+            .prepare_validated(op_id, target, selection, Vec::new(), params)?
+            .run(&RunContext::none())?;
+        self.commit(completed)
+    }
+
+    /// As [`Self::execute_recorded`], with the command's other operands
+    /// (`(name, object, selection)`, as in [`Invocation::operands`]) and
+    /// the ids its recorded run gave the objects it created (empty if it
+    /// created none): a command that creates as many objects as were
+    /// recorded gives them those ids (review C1).
+    pub fn execute_recorded_with_operands(
+        &mut self,
+        op_id: &str,
+        target: ObjectId,
+        selection: Option<Selection>,
+        operands: Vec<(String, ObjectId, Option<Selection>)>,
+        params: Params,
+        created: Vec<ObjectId>,
+    ) -> Result<CommitOutcome, CommandError> {
+        let mut prepared = self.prepare_validated(op_id, target, selection, operands, params)?;
+        prepared.created_ids = Some(created);
+        let completed = prepared.run(&RunContext::none())?;
         self.commit(completed)
     }
 
@@ -697,12 +1637,40 @@ impl Session {
                 }
             },
         };
+        // The other operands (entry 0 is the target), their selections
+        // translated the same way.
+        let mut operands = Vec::new();
+        for o in record.operands.iter().skip(1) {
+            let sel = match &o.selection {
+                None => None,
+                Some(sel) => match self.translate(sel, onto) {
+                    Translation::Mapped(s) | Translation::Partial { mapped: s, .. } => Some(s),
+                    other => {
+                        return Err(CommandError::Untranslatable {
+                            onto,
+                            reason: untranslatable_reason(&other),
+                        });
+                    }
+                },
+            };
+            operands.push((o.name.clone(), o.object, sel));
+        }
         let back = self.cursor;
         self.checkout(onto);
-        let result = self
-            .prepare_validated(&record.op_id, record.target, selection, params)
-            .and_then(|p| p.run(&RunContext::none()))
-            .and_then(|c| self.commit(c));
+        let created = record
+            .outputs
+            .iter()
+            .filter(|o| o.created)
+            .map(|o| o.object)
+            .collect();
+        let result = self.execute_recorded_with_operands(
+            &record.op_id,
+            record.target,
+            selection,
+            operands,
+            params,
+            created,
+        );
         if result.is_err() {
             self.checkout(back);
         }
@@ -731,6 +1699,93 @@ impl Session {
             document,
             provenance: BTreeMap::new(),
             openings: Some((object, marks)),
+            properties: Vec::new(),
+        });
+        true
+    }
+
+    /// Set `object`'s property `key` to `value` (`None` removes it), such
+    /// as its role ([`mf_document::ROLE`]): see [`Self::set_properties`].
+    pub fn set_property(
+        &mut self,
+        object: ObjectId,
+        key: &str,
+        value: Option<String>,
+        label: String,
+    ) -> bool {
+        self.set_properties(
+            vec![PropertyChange {
+                object,
+                key: key.to_owned(),
+                value,
+            }],
+            label,
+        )
+    }
+
+    /// Apply every property change (a role set on several objects at
+    /// once) as ONE document step that changes no geometry, undone like
+    /// any other. `label` names the history step. Changes that set what
+    /// is already there are dropped; false (and no step) if nothing is
+    /// left or an object doesn't exist.
+    pub fn set_properties(&mut self, changes: Vec<PropertyChange>, label: String) -> bool {
+        let mut document = self.document().clone();
+        let mut applied = Vec::new();
+        for c in changes {
+            let Some(current) = document.object(c.object) else {
+                return false;
+            };
+            if current.properties.get(&c.key) == c.value.as_ref() {
+                continue;
+            }
+            document = document
+                .with_property(c.object, &c.key, c.value.clone())
+                .expect("the object exists");
+            applied.push(c);
+        }
+        if applied.is_empty() {
+            return false;
+        }
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: None,
+            properties: applied,
+        });
+        true
+    }
+
+    /// Replaces the Browser's organisation (groups, order, hidden,
+    /// locked: project organisation brief, step 2) as ONE document step
+    /// that changes no geometry, undone like any other. `label` names
+    /// the history step. False (and no step) if `organisation` is
+    /// exactly what's already there.
+    pub fn set_organisation(
+        &mut self,
+        organisation: mf_document::Organisation,
+        label: String,
+    ) -> bool {
+        if *self.document().organisation() == organisation {
+            return false;
+        }
+        let document = self.document().with_organisation(organisation);
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: None,
+            properties: Vec::new(),
         });
         true
     }

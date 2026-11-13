@@ -1,0 +1,25 @@
+id: object.set_shape_params
+version: 1
+summary: Regenerate editable shapes from new recipes, keeping each object's id, name, transform and role.
+geometry_kinds: [mesh]
+# Every member of a linked group at once: the first is the target, the
+# rest are extra targets, each with its own recipe in `generators`.
+target:
+  whole_object: true
+  kinds: []
+  many: true
+parameters:
+  - name: generators
+    type: text
+    default: "[]"
+    description: "The new recipes, as JSON: one {id, version, params, part?} per target, in order"
+preconditions:
+  - one recipe per target
+  - every recipe names a shape or connector this build has, at its recorded version
+postconditions:
+  - each target's mesh is regenerated from its recipe, and its generator property is that recipe
+  - one command, one undo step
+effects: [geometry_changes, topology_changes]
+runtime:
+  cancellable: true
+  progress: false

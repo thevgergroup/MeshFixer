@@ -1,0 +1,79 @@
+id: dovetail.slide
+version: 1
+summary: "A dovetail slide joint as a linked parametric pair: a tail (Solid) on the piece it's placed on, a groove (Hole) in the other piece, offset by the fit class's clearance plus the machine tolerance."
+geometry_kinds: [mesh]
+# Local frame: z is the cut's normal, from side A (the tail's piece) into
+# side B (the groove's piece); side A's cap at z = -gap/2, side B's at
+# z = +gap/2; the tail slides along local x, centred at x = y = 0.
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: width
+    type: float
+    default: 8.0
+    min: 0.5
+    unit: mm
+    description: "Width of the groove at the cut face; the tail is the fit clearance narrower"
+  - name: angle
+    type: float
+    default: 15.0
+    min: 1.0
+    max: 45.0
+    unit: deg
+    description: "Flank angle from the slide direction's normal: how much the dovetail widens per side with depth"
+  - name: depth
+    type: float
+    default: 5.0
+    min: 0.5
+    unit: mm
+    description: "How deep the tail's root (and the groove) run into their pieces"
+  - name: length
+    type: float
+    default: 16.0
+    min: 0.5
+    unit: mm
+    description: "Length of the tail along the slide direction; auto-extended when extend_through_edge is on"
+  - name: through
+    type: bool
+    default: true
+    description: "The tail slides all the way through the groove rather than stopping partway (a stopped dovetail can't slide back out once seated)"
+  - name: extend_through_edge
+    type: bool
+    default: true
+    description: "On by default: the length auto-extends along the slide axis until it passes the target piece's boundary by about 1 mm, re-evaluated on move or rotate"
+  - name: fit_class
+    type: text
+    default: "Snug"
+    fit_role: fit_class_name
+    description: "The Fit class the groove's clearance was resolved from"
+  - name: machine_profile
+    type: text
+    default: "Uncalibrated"
+    fit_role: machine_profile_name
+    description: "The Machine profile the groove's clearance was resolved from"
+  - name: fit_clearance
+    type: float
+    default: 0.0
+    unit: mm
+    fit_role: clearance
+    description: "The Fit class's own clearance, resolved and recorded (D20)"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    fit_role: machine_hole_undersize
+    description: "The Machine profile's hole undersize, resolved and recorded (D20)"
+  - name: gap
+    type: float
+    default: 0.0
+    min: 0.0
+    unit: mm
+    description: "The cut's own gap between the two caps"
+preconditions:
+  - the groove's clearance (fit_clearance plus machine_tolerance) is less than the width
+  - the depth is more than the length allowance
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false

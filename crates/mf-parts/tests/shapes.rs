@@ -1,0 +1,303 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
+
+//! The parametric shapes library (parametric-shapes brief, "Library
+//! additions"): every built-in builds a valid closed solid from its own
+//! defaults, regenerates the same mesh from its recorded recipe, and a
+//! plugin-registered shape joins the registry.
+
+use std::collections::BTreeMap;
+
+use mf_geometry::{Bvh, FaceId, Mesh};
+use mf_parts::{
+    GenContext, Generator, GeneratorRecord, ShapePart, ShapeRole, TargetSlot, find_generator,
+    generators, new_record, regenerate,
+};
+use mf_runtime::RunContext;
+use mf_spec::{OperationSpec, Params};
+
+fn assert_closed_solid(mesh: &Mesh, label: &str) {
+    let ctx = RunContext::none();
+    let bvh = Bvh::build(mesh, &ctx).unwrap();
+    let all: Vec<FaceId> = mesh.faces().map(|(f, _)| f).collect();
+    mf_geometry::validate_solid(mesh, &all, &bvh, &ctx)
+        .unwrap()
+        .unwrap_or_else(|d| panic!("{label}: not a valid solid: {d}"));
+}
+
+fn defaults(id: &str) -> GeneratorRecord {
+    new_record(find_generator(id).unwrap(), &BTreeMap::new()).unwrap()
+}
+
+fn with(id: &str, raw: &[(&str, &str)]) -> GeneratorRecord {
+    let raw = raw
+        .iter()
+        .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+        .collect();
+    new_record(find_generator(id).unwrap(), &raw).unwrap()
+}
+
+const LIBRARY: &[&str] = &[
+    "shape.box",
+    "shape.cylinder",
+    "shape.sphere",
+    "shape.cone",
+    "shape.torus",
+    "shape.capsule",
+    "shape.prism",
+    "shape.dovetail",
+    "shape.keyed_peg",
+    "shape.threaded_rod",
+    "shape.nut",
+    "shape.threaded_hole",
+    "shape.teardrop_cylinder",
+    "shape.magnet_pocket",
+    "shape.insert_pocket",
+];
+
+#[test]
+fn every_library_shape_is_a_closed_solid_from_its_defaults() {
+    let ctx = RunContext::none();
+    for id in LIBRARY {
+        let record = defaults(id);
+        let mesh = regenerate(&record, &ctx).unwrap();
+        assert_closed_solid(&mesh, id);
+        // Deterministic: the same recipe gives the same mesh.
+        let again = regenerate(&record, &ctx).unwrap();
+        assert_eq!(mesh.to_arrays(), again.to_arrays(), "{id}");
+        // The recipe round-trips through its JSON property.
+        assert_eq!(
+            GeneratorRecord::from_json(&record.to_json()).unwrap(),
+            record
+        );
+    }
+}
+
+#[test]
+fn solids_sit_on_the_plate_and_holes_reach_down_from_it() {
+    let ctx = RunContext::none();
+    for id in LIBRARY {
+        let shape = find_generator(id).unwrap();
+        let bb = regenerate(&defaults(id), &ctx)
+            .unwrap()
+            .bounding_box()
+            .unwrap();
+        match shape.role() {
+            ShapeRole::Solid => assert!(bb.min[2].abs() < 1e-6, "{id} sits on z = 0: {bb:?}"),
+            ShapeRole::Hole => {
+                assert!(bb.min[2] < -0.4, "{id} reaches down: {bb:?}");
+                assert!(bb.max[2] > 0.0, "{id} pokes above the surface: {bb:?}");
+            }
+        }
+    }
+}
+
+#[test]
+fn sizes_follow_the_params() {
+    let ctx = RunContext::none();
+    let bb = |r: &GeneratorRecord| regenerate(r, &ctx).unwrap().bounding_box().unwrap();
+    let b = bb(&with(
+        "shape.box",
+        &[("width", "30"), ("depth", "12"), ("height", "4")],
+    ));
+    assert!((b.max[0] - b.min[0] - 30.0).abs() < 1e-9);
+    assert!((b.max[1] - b.min[1] - 12.0).abs() < 1e-9);
+    assert!((b.max[2] - b.min[2] - 4.0).abs() < 1e-9);
+    // A magnet pocket is the magnet plus its fit, diametral.
+    let m = bb(&with(
+        "shape.magnet_pocket",
+        &[
+            ("magnet_diameter", "8"),
+            ("fit_clearance", "0.2"),
+            ("machine_tolerance", "0.1"),
+            ("hole_profile", "round"),
+        ],
+    ));
+    assert!((m.max[0] - m.min[0] - 8.3).abs() < 0.01, "{m:?}");
+    // A 7-sided prism really has 7 sides.
+    let p = regenerate(&with("shape.prism", &[("sides", "7")]), &ctx).unwrap();
+    assert_eq!(p.vertex_count(), 14);
+    // A cone with a top is a frustum.
+    let c = bb(&with(
+        "shape.cone",
+        &[("top_diameter", "4"), ("height", "9")],
+    ));
+    assert!((c.max[2] - 9.0).abs() < 1e-9);
+}
+
+#[test]
+fn the_teardrop_cylinder_points_where_its_params_say() {
+    let ctx = RunContext::none();
+    let up_y = regenerate(&defaults("shape.teardrop_cylinder"), &ctx)
+        .unwrap()
+        .bounding_box()
+        .unwrap();
+    // Default: 6 mm round part, teardrop to +y reaching r·√2.
+    let r = 3.0;
+    assert!(
+        (up_y.max[1] - r * std::f64::consts::SQRT_2).abs() < 1e-6,
+        "{up_y:?}"
+    );
+    assert!((up_y.min[1] + r).abs() < 0.02, "{up_y:?}");
+    let round = regenerate(
+        &with("shape.teardrop_cylinder", &[("hole_profile", "round")]),
+        &ctx,
+    )
+    .unwrap()
+    .bounding_box()
+    .unwrap();
+    assert!(round.max[1] <= r + 1e-9, "{round:?}");
+}
+
+#[test]
+fn bad_params_are_refused_by_name() {
+    let ctx = RunContext::none();
+    let tube = with("shape.torus", &[("diameter", "4"), ("tube_diameter", "6")]);
+    let err = regenerate(&tube, &ctx).unwrap_err();
+    assert!(err.to_string().contains("tube"), "{err}");
+    let mut old = defaults("shape.box");
+    old.version = 99;
+    let err = regenerate(&old, &ctx).unwrap_err();
+    assert!(err.to_string().contains("version 99"), "{err}");
+}
+
+struct Wedge;
+
+fn wedge_spec() -> &'static OperationSpec {
+    static S: std::sync::OnceLock<OperationSpec> = std::sync::OnceLock::new();
+    S.get_or_init(|| {
+        mf_parts::shape::spec_of(
+            "test.wedge",
+            "A test wedge.",
+            vec![mf_parts::shape::P::Mm("size", 5.0, 0.1, None, "Size")],
+        )
+    })
+}
+
+impl Generator for Wedge {
+    fn id(&self) -> &'static str {
+        "test.wedge"
+    }
+    fn name(&self) -> &'static str {
+        "Wedge"
+    }
+    fn version(&self) -> u32 {
+        1
+    }
+    fn spec(&self) -> &'static OperationSpec {
+        wedge_spec()
+    }
+    fn is_shape(&self) -> bool {
+        true
+    }
+    fn generate(
+        &self,
+        params: &Params,
+        _: &GenContext,
+    ) -> Result<Vec<ShapePart>, mf_parts::ConnectorError> {
+        let s = params.get_float("size").unwrap();
+        Ok(vec![ShapePart::new(
+            "shape",
+            ShapeRole::Solid,
+            TargetSlot::Neither,
+            Mesh::new(
+                vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
+                vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            )
+            .unwrap(),
+        )])
+    }
+}
+
+#[test]
+fn a_registered_shape_joins_the_registry_once() {
+    static WEDGE: Wedge = Wedge;
+    mf_parts::register_generator(&WEDGE).unwrap();
+    assert!(generators().iter().any(|s| s.id() == "test.wedge"));
+    let mesh = regenerate(&defaults("test.wedge"), &RunContext::none()).unwrap();
+    assert_closed_solid(&mesh, "wedge");
+    assert!(
+        mf_parts::register_generator(&WEDGE).is_err(),
+        "ids are unique"
+    );
+    // Built-ins come first, in library order.
+    let ids: Vec<&str> = generators().iter().map(|s| s.id()).collect();
+    assert_eq!(&ids[..LIBRARY.len()], LIBRARY);
+}
+
+/// Fix item 9: a hole-like shape defaults to Auto, which resolves to
+/// Teardrop when its axis is within 45° of horizontal for where it sits
+/// (pointing world up) and Round when it's upright; the resolution is
+/// recorded in its params, and a hole kept Round sideways is flagged.
+#[test]
+fn auto_hole_profiles_follow_the_placement_and_are_recorded() {
+    use glam::{DMat3, DVec3};
+    let ctx = RunContext::none();
+    let pocket = defaults("shape.magnet_pocket");
+    assert_eq!(pocket.params.get_choice("hole_profile").unwrap(), "auto");
+    // Upright (axis along world Z): round.
+    let upright = mf_parts::shape::orient_hole(&pocket, DMat3::IDENTITY);
+    assert_eq!(upright.params.get_float("profile").unwrap(), 0.0);
+    // Lying on its side (local z along world X): teardrop, its point
+    // facing world up (+Z), which is local y after the turn.
+    let sideways = DMat3::from_axis_angle(DVec3::Y, std::f64::consts::FRAC_PI_2);
+    let turned = mf_parts::shape::orient_hole(&pocket, sideways);
+    assert_eq!(turned.params.get_float("profile").unwrap(), 1.0);
+    let up = sideways
+        * DVec3::new(
+            turned.params.get_float("up_x").unwrap(),
+            turned.params.get_float("up_y").unwrap(),
+            0.0,
+        );
+    assert!((up - DVec3::Z).length() < 1e-9, "the point faces up: {up}");
+    // The mesh reaches past the round hole on the point's side only:
+    // world up is local -x after this turn.
+    let r = (6.0 + 0.0) / 2.0;
+    let round = regenerate(&upright, &ctx).unwrap().bounding_box().unwrap();
+    let tear = regenerate(&turned, &ctx).unwrap().bounding_box().unwrap();
+    assert!(round.min[0] >= -r - 1e-9);
+    assert!(
+        tear.min[0] < -r - 1.0 && tear.max[0] <= r + 1e-9,
+        "{tear:?}"
+    );
+    // Kept round on purpose but lying sideways: the live warning.
+    let mut kept = pocket.clone();
+    kept.params.0.insert(
+        "hole_profile".into(),
+        mf_spec::ParamValue::Text("round".into()),
+    );
+    assert!(mf_parts::shape::sags_sideways(&kept, sideways));
+    assert!(!mf_parts::shape::sags_sideways(&kept, DMat3::IDENTITY));
+    assert!(
+        !mf_parts::shape::sags_sideways(&turned, sideways),
+        "auto is a teardrop"
+    );
+}
+
+/// Fix item 9 in the joint connectors: a round dowel's holes take the
+/// placement's hole profile; a placement from before it existed stays
+/// round.
+#[test]
+fn joint_connector_holes_take_the_hole_profile() {
+    let ctx = RunContext::none();
+    let dowel = find_generator("joint.dowel").unwrap();
+    let hole = |raw: &[(&str, &str)]| {
+        let raw = raw
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let params = dowel.spec().validate(&raw).unwrap();
+        let parts = dowel.generate(&params, &GenContext::new(&ctx)).unwrap();
+        let mesh = &parts.iter().find(|p| p.name == "hole").unwrap().mesh;
+        mesh.bounding_box().unwrap()
+    };
+    let round = hole(&[]);
+    let tear = hole(&[("hole_profile", "teardrop"), ("up_x", "1"), ("up_y", "0")]);
+    assert!((round.max[0] - 2.5).abs() < 1e-6, "{round:?}");
+    assert!(
+        (tear.max[0] - 2.5 * std::f64::consts::SQRT_2).abs() < 1e-6,
+        "{tear:?}"
+    );
+    // Auto with nothing resolved yet (an old placement) is round.
+    let auto = hole(&[("hole_profile", "auto")]);
+    assert_eq!(auto, round);
+}

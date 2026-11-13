@@ -1,16 +1,34 @@
 //! MeshFixer desktop app: a thin client of the command/session core.
 //! Geometry work never runs on the UI thread (MF-RT-001).
 
+pub mod align_tool;
 pub mod analysis;
 pub mod app;
+pub mod connect_tool;
+pub mod connector_tool;
 pub mod defects;
+pub mod dovetail_tool;
 pub mod framing;
 pub mod gpu;
+pub mod hinge_tool;
+pub mod i18n;
+pub mod icons;
 pub mod import_dialog;
 pub mod metrics;
 mod panels;
+pub mod part_thumbs;
+pub mod parts_tool;
+pub mod sculpt_tool;
+pub mod shape_panel;
+pub mod shape_tools;
+pub mod shell;
+pub mod split_flow;
 pub mod theme;
+mod tool_panels;
+pub mod tools;
+pub mod transform_tool;
 pub mod viewport;
+pub mod widgets;
 pub mod worker;
 
-pub use app::{MeshFixerApp, Settings, TreeItem};
+pub use app::{MeshFixerApp, NarrowFocus, Settings, TreeItem};

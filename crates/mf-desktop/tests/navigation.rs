@@ -264,6 +264,9 @@ fn navigation_keys_ignored_while_typing_in_a_field() {
 
     // A text field has focus: open the "Fill all holes" tool and focus its
     // number field.
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    h.get_by_label("Repair").click();
+    h.run_steps(2);
     h.get_by_label("Fill all holes").click();
     h.run();
     h.get_by_role(egui::accesskit::Role::SpinButton).focus();

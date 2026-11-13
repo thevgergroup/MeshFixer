@@ -22,6 +22,11 @@ pub fn to_command(spec: &OperationSpec) -> Command {
             ParamKind::Float { default, .. } => ("NUMBER".into(), default.to_string()),
             ParamKind::Bool { default } => ("true|false".into(), default.to_string()),
             ParamKind::Choice { default, values } => (values.join("|"), default.clone()),
+            ParamKind::Vec3 { default } => ("X,Y,Z".into(), csv(default)),
+            ParamKind::Affine { default } => ("M00,...,M32 (12 values)".into(), csv(default)),
+            ParamKind::Text { default } => ("TEXT".into(), default.clone()),
+            ParamKind::Samples => ("FACE,B0,B1,B2,PRESSURE;...".into(), String::new()),
+            ParamKind::Faces => ("FACE,...".into(), String::new()),
         };
         let unit = p
             .unit
@@ -38,6 +43,15 @@ pub fn to_command(spec: &OperationSpec) -> Command {
         );
     }
     cmd
+}
+
+/// Comma-separated, as the CLI and command-log string form takes it.
+fn csv(values: &[f64]) -> String {
+    values
+        .iter()
+        .map(f64::to_string)
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 /// Collect the string values the user actually supplied.

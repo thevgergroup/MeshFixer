@@ -93,7 +93,9 @@ fn three_holes() -> Mesh {
 
 fn model(mesh: Mesh) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![ModelObject {
+            metadata: Default::default(),
             name: "plate".into(),
             mesh,
             transform: IDENTITY,
@@ -129,6 +131,43 @@ fn opened(mesh: Mesh) -> Harness<'static, MeshFixerApp> {
     h
 }
 
+/// Opens several named objects at once ([`several_objects`]), waiting on
+/// the first one's analysis the way [`opened`] does for its one object.
+fn opened_several(names: &[&str]) -> Harness<'static, MeshFixerApp> {
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, None).unwrap());
+    h.state_mut().import_model(several_objects(names));
+    wait_until(&mut h, "analysis, hole view and picking", |a| {
+        a.current_analysis().is_some()
+            && a.hole_view().is_some()
+            && a.shows_current_revision()
+            && a.picking_ready()
+            && a.camera.is_some()
+    });
+    h.run();
+    h.event(egui::Event::PointerGone);
+    h.run();
+    h
+}
+
+/// Saves the current frame as `<MF_ARTIFACTS>/browser-rows/<name>.png`
+/// (the row-layout fix's before/after evidence), a no-op without
+/// `MF_ARTIFACTS` set.
+fn still(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir).join("browser-rows");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.render()
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
+}
+
 fn press(h: &mut Harness<'_, MeshFixerApp>, pos: egui::Pos2, pressed: bool) {
     h.event(egui::Event::PointerButton {
         pos,
@@ -156,6 +195,24 @@ fn key(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key, modifiers: egui::Modif
             modifiers,
         });
     }
+    h.step();
+}
+
+/// Opens the Repair tool from the rail (its whole-object actions live
+/// there, ui-plan.md §7).
+fn open_repair(h: &mut Harness<'_, MeshFixerApp>) {
+    if h.state().active_tool != "repair" {
+        h.get_by_label("Repair").click();
+        h.run_steps(3);
+    }
+}
+
+/// Runs a Browser row's right-click action (its registered context
+/// action, e.g. "Fill Hole 3").
+fn row_action(h: &mut Harness<'_, MeshFixerApp>, row: &str, action: &str) {
+    h.get_by_label(row).click_secondary();
+    h.run_steps(3);
+    h.get_by_label(action).click();
     h.step();
 }
 
@@ -266,7 +323,9 @@ fn clicking_a_hole_in_the_viewport_opens_fill_options_for_it() {
             .next()
             .is_some()
     );
-    h.get_by_label("Fill hole");
+    // The inspector card offers its operation; it opens in Repair.
+    h.get_by_label("Fill hole").click();
+    h.run();
     h.get_by_label("Refine");
     h.get_by_label("Apply");
 }
@@ -306,8 +365,8 @@ fn one_click_fill_from_defect_list_fills_only_that_hole() {
         .find(|d| matches!(d, Defect::Hole { edges: 8, .. }))
         .unwrap();
     let rev = h.state().session.current();
-    h.get_by_label(&format!("Fill Hole {}", number(&hole)))
-        .click();
+    let label = row(h.state(), &hole);
+    row_action(&mut h, &label, &format!("Fill Hole {}", number(&hole)));
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -331,7 +390,9 @@ fn hole_numbers_stay_after_a_fill() {
     let holes = listed(h.state());
     let three = holes.iter().find(|d| number(d) == 3).unwrap().clone();
     let rev = h.state().session.current();
-    h.get_by_label("Fill Hole 1").click();
+    let one = holes.iter().find(|d| number(d) == 1).unwrap();
+    let label = row(h.state(), one);
+    row_action(&mut h, &label, "Fill Hole 1");
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -356,6 +417,7 @@ fn size_groups_count_and_fill_a_group_in_one_command() {
     assert_eq!(view.group(HoleGroup::Tiny).len(), 250);
     assert_eq!(view.group(HoleGroup::Small).len(), 50);
     assert_eq!(view.group(HoleGroup::Large).len(), 1, "the rim");
+    open_repair(&mut h);
     h.get_by_label("Tiny holes (up to 8 edges) · 250");
     h.get_by_label("Small holes (9–30 edges) · 50");
     let rev = h.state().session.current();
@@ -380,6 +442,7 @@ fn size_groups_count_and_fill_a_group_in_one_command() {
 fn batch_fill_slider_previews_count_and_undoes_in_one_step() {
     require_gpu!("batch_fill_slider_previews_count_and_undoes_in_one_step");
     let mut h = opened(three_hundred_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run();
     h.get_by_label("Fill holes up to");
@@ -434,8 +497,8 @@ fn intentional_openings_survive_edits_and_are_excluded_from_fill_all() {
         .find(|d| matches!(d, Defect::Hole { edges: 8, .. }))
         .unwrap();
     let rev = h.state().session.current();
-    h.get_by_label(&format!("Fill Hole {}", number(other)))
-        .click();
+    let label = row(h.state(), other);
+    row_action(&mut h, &label, &format!("Fill Hole {}", number(other)));
     wait_until(&mut h, "the fill", |a| {
         a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
     });
@@ -456,6 +519,7 @@ fn intentional_openings_survive_edits_and_are_excluded_from_fill_all() {
     // Fill all holes leaves it open.
     h.state_mut().clear_selection();
     h.run();
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run();
     let rev = h.state().session.current();
@@ -499,7 +563,8 @@ fn next_hole_selects_and_frames_in_order() {
         let c = centre(&loop_points(h.state(), want));
         assert!(off_centre(h.state(), c) < 0.05, "step {k}: framed");
     }
-    // The on-screen buttons do the same.
+    // Repair's buttons do the same.
+    open_repair(&mut h);
     h.get_by_label("Next hole").click();
     settle_camera(&mut h);
     assert_eq!(selected_loops(h.state()), vec![order[1]]);
@@ -693,6 +758,10 @@ fn every_operation_parameter_has_a_tooltip() {
         let Some(label) = mf_desktop::defects::operation_label(&spec.id, None) else {
             continue;
         };
+        if !mf_desktop::tools::CATALOGUE.iter().any(|e| e.id == spec.id) {
+            continue;
+        }
+        open_repair(&mut h);
         h.get_by_label(&label).click();
         h.run();
         for p in &spec.parameters {
@@ -713,7 +782,8 @@ fn every_operation_parameter_has_a_tooltip() {
             h.event(egui::Event::PointerGone);
             h.run();
         }
-        h.get_by_label(&label).click();
+        // Back to Repair's list.
+        h.get_by_label("All repairs").click();
         h.run();
     }
 }
@@ -785,11 +855,11 @@ fn next_hole_scrolls_the_tree_to_its_row() {
     h.run_steps(60);
     assert_eq!(selected_loops(h.state()), vec![loop_id(&last)]);
     let r = h.get_by_label(&label).rect();
-    let tree = h.get_by_label("Objects & Defects").rect();
+    let tree = h.get_by_label("Browser").rect();
     let view = h.state().viewport.last_rect.unwrap();
     assert!(
-        r.right() <= view.left() + 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
-        "the row is in view in the tree: {r:?}"
+        r.left() >= view.right() - 1.0 && r.top() >= tree.top() && r.bottom() <= view.bottom(),
+        "the row is in view in the Browser: {r:?}"
     );
 }
 
@@ -816,6 +886,10 @@ fn fill_style_choice_changes_the_patch() {
         h.state_mut().select_defect(&hole);
         // Selecting frames the hole with an animated move.
         h.run_steps(60);
+        if h.state().active_tool != "repair" {
+            h.get_by_label("Fill hole").click();
+            h.run();
+        }
         assert!(h.get_all_by_label("Fill hole").next().is_some());
         h.get_by_label(label).click();
         h.run_steps(2);
@@ -840,6 +914,8 @@ fn fill_style_choice_changes_the_patch() {
     };
     h.state_mut().select_defect(&hole);
     h.run_steps(60);
+    h.get_by_label("Fill hole").click();
+    h.run();
     // Each style: its name, then one plain line saying what it does.
     for (value, label, words) in [
         ("flat", "Flat", "flat"),
@@ -881,6 +957,7 @@ fn fill_style_choice_changes_the_patch() {
 fn smooth_styles_show_refine_as_always_on() {
     require_gpu!("smooth_styles_show_refine_as_always_on");
     let mut h = opened(three_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
     h.run_steps(2);
     let note = "Smooth and Curvature always add points so the patch can curve";
@@ -919,8 +996,9 @@ fn smooth_styles_show_refine_as_always_on() {
 fn batch_fill_uses_the_chosen_style() {
     require_gpu!("batch_fill_uses_the_chosen_style");
     let mut h = opened(three_hundred_holes());
+    open_repair(&mut h);
     h.get_by_label("Fill all holes").click();
-    h.run_steps(2);
+    h.run_steps(3);
     h.get_by_label("Curvature-matched").click();
     h.run_steps(2);
     let rev = h.state().session.current();
@@ -941,4 +1019,353 @@ fn batch_fill_uses_the_chosen_style() {
     );
     // The 300 holes and the 292-edge rim (under the 500-edge default).
     assert_eq!(record.selection.unwrap().ids.len(), 301);
+}
+
+/// A model of several named objects, each a small cube at its own place
+/// so they don't overlap on screen, with the first's mesh holed so there
+/// are defect rows (a category disclosure and a leaf hole) to check too.
+fn several_objects(names: &[&str]) -> ImportedModel {
+    let mut t = IDENTITY;
+    let objects = names
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| {
+            t[9] = i as f64 * 20.0; // the 12-element 3MF transform's translation x
+            let mesh = if i == 0 {
+                plate(6, 1.0, &[(1, 1, 1)])
+            } else {
+                mf_fixtures::cube(5.0)
+            };
+            ModelObject {
+                metadata: Default::default(),
+                name: name.to_owned(),
+                mesh,
+                transform: t,
+            }
+        })
+        .collect();
+    ImportedModel {
+        metadata: Default::default(),
+        objects,
+        unit: Unit::Millimeter,
+        source: SourceInfo {
+            path: "several.3mf".into(),
+            content_hash: ContentHash([0; 32]),
+            format: Format::ThreeMf,
+            precision: SourcePrecision::F32,
+        },
+        warnings: vec![],
+    }
+}
+
+/// The row node labelled `name`: an object or group row's is a
+/// [`Role::Button`] ([`tree_row`]'s), a defect category's is a
+/// [`Role::DisclosureTriangle`] ([`widgets::disclosure`]'s). Several
+/// nodes can share a label (a row's tooltip text, say), so this picks
+/// whichever of those two is the row's own click target.
+fn row_node<'a>(h: &'a Harness<'_, MeshFixerApp>, name: &'a str) -> egui_kittest::Node<'a> {
+    use egui::accesskit::Role;
+    h.get_all_by_label(name)
+        .find(|n| {
+            matches!(
+                n.accesskit_node().role(),
+                Role::Button | Role::DisclosureTriangle
+            )
+        })
+        .unwrap_or_else(|| panic!("no row labelled {name:?}"))
+}
+
+/// Where `name`'s row starts its name: a [`tree_row`] button's rect
+/// already starts right there (the fixed chevron and swatch columns are
+/// its siblings, consumed before it in the row's `horizontal`); a
+/// [`widgets::disclosure`] row's rect is the *whole* row, chevron and
+/// icon slots included, so its name starts `CHEVRON_WIDTH +
+/// SWATCH_WIDTH` past its own left edge.
+fn name_x(h: &Harness<'_, MeshFixerApp>, name: &str) -> f32 {
+    use egui::accesskit::Role;
+    let node = row_node(h, name);
+    let left = node.rect().left();
+    match node.accesskit_node().role() {
+        Role::DisclosureTriangle => {
+            left + mf_desktop::theme::ROW_CHEVRON_WIDTH + mf_desktop::theme::ROW_SWATCH_WIDTH
+        }
+        _ => left,
+    }
+}
+
+/// Fix round 2026-11-12 (owner screenshot): every Browser row is
+/// left-aligned at its tree depth — not centred, not shifted by its own
+/// hover buttons appearing — and its colour swatch sits inside the
+/// panel. This hovers every row one at a time and checks its rect (the
+/// name button's, which starts right after the fixed chevron-and-swatch
+/// columns) never moves, then checks rows at the same depth start their
+/// name at the same x regardless of how long their own name is.
+#[test]
+fn browser_rows_are_left_aligned_and_dont_shift_on_hover() {
+    require_gpu!("browser_rows_are_left_aligned_and_dont_shift_on_hover");
+    let mut h = opened_several(&["scan", "part", "probe"]);
+
+    // Group "part" and "probe" together: a group row (depth 0) with two
+    // members (depth 1), alongside "scan" (depth 0, ungrouped).
+    {
+        let app = h.state_mut();
+        let part = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "part")
+            .unwrap()
+            .id;
+        let probe = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "probe")
+            .unwrap()
+            .id;
+        app.picked = vec![part, probe];
+        app.group_selection();
+    }
+    h.run_steps(3);
+
+    // "scan" has one 1-cell hole cut into a 6x6 plate (plus its open
+    // rim): its Holes disclosure (depth 1) and the hole's own row
+    // (depth 2) are both laid out once it's active.
+    {
+        let app = h.state_mut();
+        let scan = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "scan")
+            .unwrap()
+            .id;
+        app.set_active(scan);
+    }
+    wait_until(&mut h, "scan's holes listed", |a| a.hole_view().is_some());
+    h.run_steps(3);
+
+    // The Holes disclosure's own label ("Holes (N)"), N whatever this
+    // plate's cut-and-rim combination lists: a depth-1 row, a sibling
+    // (in a different subtree) of "part" and "probe".
+    let holes_label = format!("Holes ({})", h.state().hole_view().unwrap().listed.len());
+    h.run_steps(2);
+
+    still(&mut h, "before-hover");
+
+    // Every row this test cares about, and the depth its name should
+    // line up at (0: "scan", the group it's a sibling of; 1: the
+    // group's own members "part" and "probe", and "scan"'s own "Holes
+    // (N)" category row, a defect sub-row using the same grid).
+    let rows: [(&str, u8); 5] = [
+        ("scan", 0),
+        ("Group", 0),
+        ("part", 1),
+        ("probe", 1),
+        (holes_label.as_str(), 1),
+    ];
+
+    // Snapshot every row's rect unhovered, then again with the pointer
+    // over that row (one row at a time, pointer moved away between), and
+    // check it didn't move a pixel.
+    let mut unhovered = Vec::new();
+    for &(name, _) in &rows {
+        unhovered.push(row_node(&h, name).rect());
+    }
+    for (i, &(name, _)) in rows.iter().enumerate() {
+        let rect = unhovered[i];
+        h.event(egui::Event::PointerMoved(rect.center()));
+        h.run_steps(3);
+        let hovered_rect = row_node(&h, name).rect();
+        assert_eq!(
+            hovered_rect, rect,
+            "{name} row shifted when hovered: {rect:?} -> {hovered_rect:?}",
+        );
+        h.event(egui::Event::PointerGone);
+        h.run_steps(2);
+    }
+
+    still(&mut h, "after-hover");
+
+    // The name's x depends only on depth: "scan" and the group start at
+    // the same x though their names differ in length, and
+    // "part"/"probe"/"Holes (N)" (one level deeper: two inside the
+    // group, one under "scan"'s own defects) start further right than
+    // either, by the same indent, though "Holes (N)" is a disclosure
+    // row in a different subtree, not a `tree_row` button at all.
+    let depth0_x: Vec<f32> = rows
+        .iter()
+        .filter(|&&(_, d)| d == 0)
+        .map(|&(name, _)| name_x(&h, name))
+        .collect();
+    for &x in &depth0_x {
+        assert!(
+            (x - depth0_x[0]).abs() < 0.5,
+            "depth-0 rows don't share a name x: {depth0_x:?}"
+        );
+    }
+    let depth1_x: Vec<f32> = rows
+        .iter()
+        .filter(|&&(_, d)| d == 1)
+        .map(|&(name, _)| name_x(&h, name))
+        .collect();
+    for &x in &depth1_x {
+        assert!(
+            (x - depth1_x[0]).abs() < 0.5,
+            "depth-1 rows don't share a name x: {depth1_x:?}"
+        );
+    }
+    assert!(
+        depth1_x[0] > depth0_x[0],
+        "a deeper row ({:?}) should start right of a shallower one ({:?})",
+        depth1_x[0],
+        depth0_x[0]
+    );
+
+    // Every swatch (one per object row with a colour) sits fully inside
+    // the Browser panel's own rect, not clipped at its left edge.
+    let panel = h.get_by_label("Browser").rect();
+    for name in ["scan", "part", "probe"] {
+        let row = row_node(&h, name).rect();
+        // The swatch sits in the fixed slot just left of the row's own
+        // (name) rect: chevron width then swatch width, both from
+        // `theme`.
+        let swatch_left = row.left() - mf_desktop::theme::ROW_SWATCH_WIDTH;
+        assert!(
+            swatch_left >= panel.left() - 0.5,
+            "{name}'s swatch (starting at {swatch_left}) is clipped at the panel's left edge {}",
+            panel.left()
+        );
+    }
+}
+
+/// The Browser panel's own content rect, right of the viewport (the
+/// right dock's `size_range` and `default_size` are set in `panels.rs`;
+/// nothing names the dock itself, so this derives its bound from the
+/// viewport's own rect, which fills everything the dock doesn't).
+fn browser_panel_rect(h: &Harness<'_, MeshFixerApp>) -> egui::Rect {
+    let viewport = h.state().viewport.last_rect.expect("viewport laid out");
+    let window = h.ctx.content_rect();
+    egui::Rect::from_min_max(egui::pos2(viewport.right(), window.top()), window.max)
+}
+
+/// A galley of `name` at the Browser row's own body font
+/// (`theme::TYPE_BODY`, `RichText`'s default when nothing overrides it:
+/// `object_row`'s `text` never sets a size), to measure how wide it
+/// would be unwrapped — the same text `tree_row`'s button lays out.
+fn name_natural_width(h: &Harness<'_, MeshFixerApp>, name: &str) -> f32 {
+    let galley = h.ctx.fonts_mut(|f| {
+        f.layout_no_wrap(
+            name.to_owned(),
+            egui::FontId::proportional(mf_desktop::theme::TYPE_BODY),
+            egui::Color32::WHITE,
+        )
+    });
+    galley.size().x
+}
+
+/// Fix round 2026-11-13 (owner screenshot, the same one as the Align
+/// dots): object names were ellipsised far too early ("cr…", "pr…")
+/// because the Browser's old 248pt default width, less the chevron and
+/// swatch columns and `HOVER_ACTIONS_WIDTH` (114pt reserved for the
+/// hide/lock/role/delete/move icons — always, whether or not any of
+/// them are actually showing), left the name only about 80pt: a name
+/// comfortably short enough for the panel's own width was still cut off
+/// because that fixed reservation ate more than a third of it. Rather
+/// than touch how (or how reliably) those hover icons' own click
+/// detection works — this is the one part of the Browser's row layout
+/// where "zero layout shift on hover" has to hold exactly, since a
+/// click here doubles as a hit-test boundary, not just a visual one —
+/// the fix widens the Browser's own default (`BROWSER_WIDTH`, 248 to
+/// 320) so the same, unchanged reservation leaves the name real room.
+/// This checks a name that used to be ellipsised at the old width but
+/// fits at the new one renders whole, and that hovering (which is when
+/// the icons actually paint) still doesn't move the row or change its
+/// width at all — `object_row`'s own layout never was, and still isn't,
+/// hover-dependent.
+#[test]
+fn long_object_names_use_the_full_name_column_width() {
+    require_gpu!("long_object_names_use_the_full_name_column_width");
+    let long_name = "crate_holder_part";
+    let mut h = opened_several(&[long_name, "probe"]);
+    h.run_steps(3);
+
+    let natural = name_natural_width(&h, long_name);
+    let panel = browser_panel_rect(&h);
+    // `HOVER_ACTIONS_WIDTH` (hide/lock/role/delete/move) plus the right
+    // dock's own inner margin (`theme::SPACE_S`, both sides): the
+    // constant cost every name budget below has to account for,
+    // whatever the panel's own width.
+    const FIXED_COST: f32 = 114.0 + 2.0 * 8.0;
+    let name_budget = |panel_width: f32| {
+        panel_width
+            - mf_desktop::theme::ROW_CHEVRON_WIDTH
+            - mf_desktop::theme::ROW_SWATCH_WIDTH
+            - FIXED_COST
+    };
+    let new_budget = name_budget(panel.width());
+    // Sanity: at the *old* 248pt default this name would have been too
+    // wide for its own budget (so the old code really did truncate it);
+    // at today's wider default it fits — otherwise this test wouldn't
+    // actually exercise the fix.
+    let old_name_budget = name_budget(248.0);
+    assert!(
+        natural > old_name_budget,
+        "{long_name:?} (natural width {natural}) should be too wide for the old 248pt \
+         default's own name budget ({old_name_budget}) for this test to mean anything"
+    );
+    assert!(
+        natural < new_budget,
+        "{long_name:?} (natural width {natural}) should fit today's name budget \
+         ({new_budget}, from a {0}pt-wide Browser)",
+        panel.width()
+    );
+
+    let unhovered = row_node(&h, long_name).rect();
+    assert!(
+        unhovered.width() >= natural - 1.0,
+        "{long_name:?}'s row ({}) is narrower than its own natural width ({natural}): it's \
+         being truncated though the panel has room",
+        unhovered.width()
+    );
+
+    // Hovering (when the hide/lock/role/delete/move icons actually
+    // paint, in their own always-reserved slots) must not move the row
+    // or change the name's own width at all: this layout was never
+    // hover-dependent, before or after this fix.
+    h.event(egui::Event::PointerMoved(unhovered.center()));
+    h.run_steps(3);
+    let hovered = row_node(&h, long_name).rect();
+    assert_eq!(
+        hovered, unhovered,
+        "{long_name:?} row shifted when hovered: {unhovered:?} -> {hovered:?}",
+    );
+    h.event(egui::Event::PointerGone);
+    h.run_steps(2);
+
+    // A name wider than even the full name column (chevron, swatch and
+    // the hover-icons' own always-reserved width aside) still truncates
+    // — the fix only stops truncating *early*, it doesn't turn
+    // truncation off.
+    let absurd_name = "a_name_so_long_nobody_would_ever_actually_type_it_into_a_dialog_box";
+    let mut h2 = opened_several(&[absurd_name, "probe"]);
+    h2.run_steps(3);
+    let panel2 = browser_panel_rect(&h2);
+    let natural2 = name_natural_width(&h2, absurd_name);
+    let full_name_budget = name_budget(panel2.width());
+    assert!(
+        natural2 > full_name_budget,
+        "{absurd_name:?} (natural width {natural2}) should be wider than the full name \
+         column ({full_name_budget}) for this half of the test to mean anything"
+    );
+    let row2 = row_node(&h2, absurd_name).rect();
+    assert!(
+        row2.width() <= full_name_budget + 1.0,
+        "{absurd_name:?}'s row ({}) overflows the name column ({full_name_budget}) instead \
+         of truncating",
+        row2.width()
+    );
 }

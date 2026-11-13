@@ -4,10 +4,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use mf_runtime::{Cancelled, RunContext};
 use serde::Serialize;
 
-use crate::chunked::{Bits, CHUNK, Chunked};
+use crate::chunked::{Bits, CHUNK, Chunked, STORAGE_CHUNK};
 use crate::edit::MeshEdit;
 use crate::hash::ContentHash;
 use crate::ids::{FaceId, SlotRemap, VertexId};
+use crate::materials::{Material, MaterialData, NO_MATERIAL};
 use crate::topology::Topology;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -76,6 +77,8 @@ pub(crate) struct Inner {
     pub(crate) vertex_live: Bits,
     pub(crate) face_count: usize,
     pub(crate) vertex_count: usize,
+    /// Per-face materials (MF-ISSUE-091).
+    pub(crate) materials: MaterialData,
     hash: OnceLock<ContentHash>,
     structure: OnceLock<ContentHash>,
     /// Derived, so it can be dropped and recomputed (review I5).
@@ -155,6 +158,26 @@ impl Mesh {
         face_count: usize,
         vertex_count: usize,
     ) -> Mesh {
+        Mesh::from_parts_with(
+            positions,
+            faces,
+            face_live,
+            vertex_live,
+            face_count,
+            vertex_count,
+            MaterialData::default(),
+        )
+    }
+
+    pub(crate) fn from_parts_with(
+        positions: Chunked<[f64; 3]>,
+        faces: Chunked<[u32; 3]>,
+        face_live: Bits,
+        vertex_live: Bits,
+        face_count: usize,
+        vertex_count: usize,
+        materials: MaterialData,
+    ) -> Mesh {
         Mesh {
             inner: Arc::new(Inner {
                 positions,
@@ -163,6 +186,7 @@ impl Mesh {
                 vertex_live,
                 face_count,
                 vertex_count,
+                materials,
                 hash: OnceLock::new(),
                 structure: OnceLock::new(),
                 topology: Mutex::new(None),
@@ -306,13 +330,26 @@ impl Mesh {
             ctx,
         )?;
         let (face_count, vertex_count) = (self.face_count(), self.vertex_count());
-        let mesh = Mesh::from_parts(
+        let m = &self.inner.materials;
+        let materials = MaterialData {
+            palette: m.palette.clone(),
+            default: m.default,
+            faces: match &m.faces {
+                None => None,
+                Some(f) => Some(Chunked::from_iter_with(
+                    self.faces().map(|(id, _)| f.get(id.0 as usize)),
+                    ctx,
+                )?),
+            },
+        };
+        let mesh = Mesh::from_parts_with(
             positions,
             faces,
             Bits::all_set(face_count),
             Bits::all_set(vertex_count),
             face_count,
             vertex_count,
+            materials,
         );
         let map = Compaction {
             faces: face_map,
@@ -384,6 +421,9 @@ impl Mesh {
             self.inner.vertex_live.hash_into(&mut h);
             self.inner.face_live.hash_into(&mut h);
             self.inner.faces.hash_into(&mut h);
+            // Nothing at all for a mesh without materials, so hashes from
+            // before MF-ISSUE-091 are unchanged.
+            self.inner.materials.hash_into(&mut h);
             ContentHash(*h.finalize().as_bytes())
         })
     }
@@ -477,6 +517,12 @@ impl Mesh {
             + self.inner.faces.unique_heap_bytes(seen)
             + self.inner.face_live.unique_heap_bytes(seen)
             + self.inner.vertex_live.unique_heap_bytes(seen)
+            + self
+                .inner
+                .materials
+                .faces
+                .as_ref()
+                .map_or(0, |f| f.unique_heap_bytes(seen))
     }
 
     pub fn edit(&self) -> MeshEdit {
@@ -526,13 +572,37 @@ impl Mesh {
         if self.vertex_chunk_shared(prev, j) {
             return true;
         }
-        let (now, then) = (self.inner.positions.chunk(j), prev.inner.positions.chunk(j));
-        now.len() >= then.len()
-            && !then.is_empty()
+        let (now, then) = (&self.inner.positions, &prev.inner.positions);
+        now.chunk_len(j) >= then.chunk_len(j)
+            && then.chunk_len(j) > 0
             && now
-                .iter()
-                .zip(then)
+                .chunk_iter(j)
+                .zip(then.chunk_iter(j))
                 .all(|(a, b)| a.map(f64::to_bits) == b.map(f64::to_bits))
+    }
+
+    /// The vertex slots `prev` has whose position differs here (bitwise),
+    /// ascending. Vertices appended since `prev` aren't "moved". Only
+    /// storage chunks not shared with `prev` are compared, so after a
+    /// local edit this is O(chunks + the copied chunks' vertices)
+    /// (Phase 1 Task 16b: what a dab invalidates on the GPU).
+    pub fn moved_vertices(&self, prev: &Mesh) -> Vec<u32> {
+        let (now, then) = (&self.inner.positions, &prev.inner.positions);
+        let mut out = Vec::new();
+        for k in 0..then.storage_chunk_count() {
+            if now.shares_storage_chunk(then, k) {
+                continue;
+            }
+            let (a, b) = (now.storage_chunk(k), then.storage_chunk(k));
+            for (i, q) in b.iter().enumerate() {
+                if a.get(i)
+                    .is_none_or(|p| p.map(f64::to_bits) != q.map(f64::to_bits))
+                {
+                    out.push((k * STORAGE_CHUNK + i) as u32);
+                }
+            }
+        }
+        out
     }
 
     /// Live faces in face chunk `i`, in ascending ID order.
@@ -541,12 +611,107 @@ impl Mesh {
         let base = i * CHUNK;
         self.inner
             .faces
-            .chunk(i)
-            .iter()
+            .chunk_iter(i)
             .enumerate()
             .map(move |(k, t)| (base + k, *t))
             .filter(move |(f, _)| live.get(*f))
             .map(|(f, t)| (FaceId(f as u32), t))
+    }
+
+    /// The material palette (MF-ISSUE-091); empty without materials.
+    pub fn materials(&self) -> &[Material] {
+        &self.inner.materials.palette
+    }
+
+    /// The object-wide default material, if any.
+    pub fn default_material(&self) -> Option<u32> {
+        let d = self.inner.materials.default;
+        (d != NO_MATERIAL).then_some(d)
+    }
+
+    /// True if the mesh has any material data.
+    pub fn has_materials(&self) -> bool {
+        !self.inner.materials.is_empty()
+    }
+
+    /// True if faces carry their own materials (not just a default).
+    pub fn has_face_materials(&self) -> bool {
+        self.inner.materials.faces.is_some()
+    }
+
+    /// A live face's own material ([`NO_MATERIAL`] if it has none).
+    pub fn face_material_override(&self, id: FaceId) -> u32 {
+        match &self.inner.materials.faces {
+            Some(f) if (id.0 as usize) < f.len() => f.get(id.0 as usize),
+            _ => NO_MATERIAL,
+        }
+    }
+
+    /// The material a live face prints with: its own, else the default.
+    pub fn face_material(&self, id: FaceId) -> Option<u32> {
+        let own = self.face_material_override(id);
+        let m = if own == NO_MATERIAL {
+            self.inner.materials.default
+        } else {
+            own
+        };
+        (m != NO_MATERIAL).then_some(m)
+    }
+
+    /// This mesh with `palette`, `default` and per-face materials replaced:
+    /// `faces[slot]` per face slot (`None`: no per-face materials). The
+    /// geometry is shared, not copied.
+    pub fn with_materials(
+        &self,
+        palette: Vec<Material>,
+        default: Option<u32>,
+        faces: Option<Vec<u32>>,
+    ) -> Mesh {
+        let i = &self.inner;
+        Mesh::from_parts_with(
+            i.positions.clone(),
+            i.faces.clone(),
+            i.face_live.clone(),
+            i.vertex_live.clone(),
+            i.face_count,
+            i.vertex_count,
+            MaterialData {
+                palette: Arc::new(palette),
+                default: default.unwrap_or(NO_MATERIAL),
+                faces: faces.map(Chunked::from_vec),
+            },
+        )
+    }
+
+    /// This mesh with `palette` and some faces' own materials set (others
+    /// unchanged; storage shared where untouched). The palette must extend
+    /// the current one (same entries first).
+    pub fn with_face_materials(&self, palette: Vec<Material>, set: &[(FaceId, u32)]) -> Mesh {
+        let i = &self.inner;
+        let slots = i.faces.len();
+        let mut faces = match &i.materials.faces {
+            Some(f) => f.clone(),
+            None => Chunked::from_vec(vec![NO_MATERIAL; slots]),
+        };
+        while faces.len() < slots {
+            faces.push(NO_MATERIAL);
+        }
+        for &(f, m) in set {
+            faces.set(f.0 as usize, m);
+        }
+        Mesh::from_parts_with(
+            i.positions.clone(),
+            i.faces.clone(),
+            i.face_live.clone(),
+            i.vertex_live.clone(),
+            i.face_count,
+            i.vertex_count,
+            MaterialData {
+                palette: Arc::new(palette),
+                default: i.materials.default,
+                faces: Some(faces),
+            },
+        )
     }
 
     /// True if both handles point at the same revision.

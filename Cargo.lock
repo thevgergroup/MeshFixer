@@ -741,6 +741,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "clipper2-rust"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "210e9ea90a5f6c731c23bf642383ad7c006d8b24803c5c33afd5aaeae5a33f66"
+dependencies = [
+ "num-traits",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -940,6 +949,38 @@ name = "cursor-icon"
 version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
+
+[[package]]
+name = "dashu-base"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a64b04cdfc4c8533100fe00304eb9687173bda47b1f1dac8af12ba13712ed49d"
+
+[[package]]
+name = "dashu-int"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6ee98721d5d223e5b64b642dd9588b79d9ef415554b13720308b77d628c3be6"
+dependencies = [
+ "cfg-if",
+ "dashu-base",
+ "num-modular",
+ "num-traits",
+ "rustversion",
+ "static_assertions",
+]
+
+[[package]]
+name = "dashu-ratio"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "727613e0312d442301147d9e45eb2e7c2797230fc6d223a2c51ecf0e98dfeb5e"
+dependencies = [
+ "dashu-base",
+ "dashu-int",
+ "num-traits",
+ "rustversion",
+]
 
 [[package]]
 name = "data-encoding"
@@ -2620,6 +2661,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
 
 [[package]]
+name = "manifold-rust"
+version = "0.19.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddad329fd20646de626e339ea1146de838464060824cb3edd5593d8d061a3f95"
+dependencies = [
+ "clipper2-rust",
+ "dashu-int",
+ "dashu-ratio",
+ "num-traits",
+ "rayon",
+ "rustc-hash 2.1.3",
+]
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2644,6 +2699,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "mf-boolean"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "manifold-rust",
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-manifold-sys",
+ "mf-metrics",
+ "mf-runtime",
+ "rayon",
+ "robust",
+ "serde_json",
+ "spade",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "mf-cli"
 version = "0.0.1"
 dependencies = [
@@ -2655,6 +2729,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2670,11 +2745,14 @@ name = "mf-command"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
+ "mf-boolean",
  "mf-document",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-operations",
+ "mf-parts",
  "mf-runtime",
  "mf-selection",
  "mf-spec",
@@ -2689,15 +2767,19 @@ dependencies = [
 name = "mf-desktop"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "eframe",
  "egui_kittest",
  "glam",
+ "image",
+ "mf-boolean",
  "mf-command",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-metrics",
  "mf-operations",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-selection",
@@ -2716,6 +2798,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -2723,6 +2806,7 @@ name = "mf-fixtures"
 version = "0.0.1"
 dependencies = [
  "mf-geometry",
+ "mf-runtime",
  "tempfile",
 ]
 
@@ -2731,10 +2815,14 @@ name = "mf-geometry"
 version = "0.0.1"
 dependencies = [
  "blake3",
+ "glam",
+ "mf-boolean",
  "mf-fixtures",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "rayon",
+ "robust",
  "serde",
  "serde_json",
  "thiserror 2.0.21",
@@ -2758,6 +2846,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mf-manifold-sys"
+version = "0.0.1"
+dependencies = [
+ "cc",
+ "cmake",
+]
+
+[[package]]
 name = "mf-metrics"
 version = "0.0.1"
 dependencies = [
@@ -2771,11 +2867,15 @@ name = "mf-operations"
 version = "0.0.1"
 dependencies = [
  "faer",
+ "glam",
  "jsonschema",
+ "mf-boolean",
+ "mf-document",
  "mf-fixtures",
  "mf-geometry",
  "mf-io",
  "mf-metrics",
+ "mf-parts",
  "mf-render",
  "mf-runtime",
  "mf-spec",
@@ -2783,6 +2883,27 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tempfile",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mf-parts"
+version = "0.0.1"
+dependencies = [
+ "blake3",
+ "glam",
+ "mf-boolean",
+ "mf-command",
+ "mf-fixtures",
+ "mf-geometry",
+ "mf-io",
+ "mf-runtime",
+ "mf-spec",
+ "serde",
+ "serde-saphyr",
+ "serde_json",
+ "tempfile",
  "thiserror 2.0.21",
 ]
 
@@ -2795,6 +2916,7 @@ dependencies = [
  "image",
  "mf-fixtures",
  "mf-geometry",
+ "mf-io",
  "mf-metrics",
  "mf-runtime",
  "pollster 0.4.0",
@@ -2828,6 +2950,7 @@ version = "0.0.1"
 dependencies = [
  "clap",
  "jsonschema",
+ "mf-io",
  "serde",
  "serde-saphyr",
  "serde_json",
@@ -3119,6 +3242,12 @@ dependencies = [
  "num-integer",
  "num-traits",
 ]
+
+[[package]]
+name = "num-modular"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bd8e500409e6cd603b03e477c26a6caecdc27ac58979a53e881c75eafc079f44"
 
 [[package]]
 name = "num-rational"
@@ -4186,6 +4315,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "robust"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e27ee8bb91ca0adcf0ecb116293afa12d393f9c2b9b9cd54d33e8078fe19839"
+
+[[package]]
 name = "rustc-hash"
 version = "1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4586,6 +4721,18 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "spade"
+version = "2.15.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9699399fd9349b00b184f5635b074f9ec93afffef30c853f8c875b32c0f8c7fa"
+dependencies = [
+ "hashbrown 0.16.1",
+ "num-traits",
+ "robust",
+ "smallvec",
 ]
 
 [[package]]

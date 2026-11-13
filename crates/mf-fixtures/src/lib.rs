@@ -2,6 +2,8 @@
 
 use mf_geometry::Mesh;
 
+pub mod scenario;
+
 /// Axis-aligned cube from the origin to `size`, outward CCW winding.
 pub fn cube(size: f64) -> Mesh {
     let s = size;

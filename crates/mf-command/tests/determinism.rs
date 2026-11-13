@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use mf_command::{Geometry, Invocation, Session};
-use mf_fixtures::{DamageSpec, damaged_sphere};
+use mf_fixtures::{DamageSpec, damaged_sphere, uv_sphere};
 
 fn run_all_ops(threads: usize) -> Vec<(String, String)> {
     let pool = rayon::ThreadPoolBuilder::new()
@@ -17,36 +17,173 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
         let mesh = damaged_sphere(&DamageSpec::for_triangles(80_000, 9));
         let mut out = Vec::new();
         for op in mf_operations::registry() {
+            // Operations that need another object have their own
+            // determinism through replay (tests/objects.rs).
+            let spec = mf_spec::builtin::get(op.id()).unwrap();
+            if spec.operands.iter().any(|o| o.required) {
+                continue;
+            }
+            // Operations on a selection only (split by region, delete
+            // faces) are checked with their selections in their own tests.
+            if !spec.target.whole_object {
+                continue;
+            }
+            // A split needs a closed model and a plane through it: a bias
+            // cut with a gap through a closed sphere. Combine needs a
+            // second closed solid overlapping the target to join (its
+            // own operands are optional in the spec, so a plain
+            // whole-object run validates, but it refuses to run with
+            // nothing to combine, and a boolean union needs closed
+            // inputs, so the usual holey `mesh` fixture won't do).
+            let (input, raw_params) = if op.id() == "mesh.split_plane" {
+                (
+                    uv_sphere(160, 250),
+                    BTreeMap::from([
+                        ("plane_point".to_string(), "0.01,0.02,0.1".to_string()),
+                        ("plane_normal".to_string(), "0.3,0.2,1".to_string()),
+                        ("cut_gap".to_string(), "0.05".to_string()),
+                    ]),
+                )
+            } else if op.id() == "mesh.split_box" {
+                (
+                    uv_sphere(48, 96),
+                    BTreeMap::from([
+                        ("box_min".to_string(), "-0.5137,-0.6171,-0.4373".to_string()),
+                        ("box_max".to_string(), "0.5531,0.4713,0.5231".to_string()),
+                        ("cut_gap".to_string(), "0.02".to_string()),
+                    ]),
+                )
+            } else if op.id() == "object.add_part" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
+                )
+            } else if op.id() == "object.rename" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([("name".to_string(), "renamed".to_string())]),
+                )
+            } else if op.id() == "object.add_shape" {
+                // The parametric-shapes brief's own placement op: needs at
+                // least one shape in its `shapes` JSON, or it refuses
+                // "nothing_to_add" rather than running (pre-existing gap:
+                // this op predates this test's own special cases, from
+                // before the parametric-shapes system existed).
+                let shape = mf_operations::shapes::ShapeToAdd {
+                    generator: mf_parts::GeneratorRecord {
+                        id: "shape.box".to_owned(),
+                        version: mf_parts::find_generator("shape.box")
+                            .expect("the Box shape is a built-in")
+                            .version(),
+                        params: mf_parts::find_generator("shape.box")
+                            .expect("the Box shape is a built-in")
+                            .spec()
+                            .validate(&BTreeMap::new())
+                            .expect("the Box shape's own defaults validate"),
+                        part: None,
+                    },
+                    name: "Box".to_owned(),
+                    hole: false,
+                    attach_to: None,
+                    transform: None,
+                    group: None,
+                };
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "shapes".to_string(),
+                        mf_operations::shapes::shapes_param(&[shape]),
+                    )]),
+                )
+            } else if op.id() == "object.set_shape_params" {
+                // Likewise needs one recipe per target (here, one target,
+                // the geometry fixture itself re-read as a Box so the
+                // regenerate step has a matching recipe to replay).
+                let record = mf_parts::GeneratorRecord {
+                    id: "shape.box".to_owned(),
+                    version: mf_parts::find_generator("shape.box")
+                        .expect("the Box shape is a built-in")
+                        .version(),
+                    params: mf_parts::find_generator("shape.box")
+                        .expect("the Box shape is a built-in")
+                        .spec()
+                        .validate(&BTreeMap::new())
+                        .expect("the Box shape's own defaults validate"),
+                    part: None,
+                };
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "generators".to_string(),
+                        mf_operations::shapes::generators_param(&[record]),
+                    )]),
+                )
+            } else if op.id() == "object.move_group" {
+                // One target, one transform (an identity move is enough
+                // to exercise it without needing a real linked group).
+                (
+                    mesh.clone(),
+                    BTreeMap::from([(
+                        "transforms".to_string(),
+                        mf_operations::shapes::transforms_param(&[mf_io::threemf::IDENTITY]),
+                    )]),
+                )
+            } else if op.id() == "mesh.combine" {
+                (uv_sphere(24, 48), BTreeMap::new())
+            } else if op.id() == "object.align" {
+                // `target` is `many: true` and needs at least two
+                // objects (its own refusal otherwise): a second target,
+                // offset on x, aligned to the first's min edge.
+                (
+                    mesh.clone(),
+                    BTreeMap::from([
+                        ("axis".to_string(), "x".to_string()),
+                        ("mode".to_string(), "min".to_string()),
+                    ]),
+                )
+            } else {
+                (mesh.clone(), BTreeMap::new())
+            };
             let mut s = Session::new();
-            let id = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture".into(), None);
+            let id = s.add_geometry(Geometry::Mesh(input), "fixture".into(), None);
+            let operands = if op.id() == "mesh.combine" {
+                let other =
+                    s.add_geometry(Geometry::Mesh(uv_sphere(24, 48)), "fixture 2".into(), None);
+                vec![("solids".to_string(), other, None)]
+            } else if op.id() == "object.align" {
+                let other = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture 2".into(), None);
+                vec![("target".to_string(), other, None)]
+            } else {
+                Vec::new()
+            };
             s.execute(Invocation {
+                operands,
                 selection: None,
                 op_id: op.id().into(),
                 target: id,
-                raw_params: BTreeMap::new(),
+                raw_params,
             })
             .unwrap();
-            let hash = s
-                .document()
-                .object(id)
-                .unwrap()
-                .geometry
-                .content_hash()
-                .to_hex();
+            // Objects an operation created (a split's bottom part).
+            for o in s.document().objects().iter().filter(|o| o.id != id) {
+                out.push((
+                    format!("{} created {}", op.id(), o.name),
+                    o.geometry.content_hash().to_hex(),
+                ));
+            }
+            // An object operation may move or remove the object: its
+            // placement is part of the result (and "removed" is one).
+            let Some(object) = s.document().object(id) else {
+                out.push((op.id().to_owned(), "removed".into()));
+                continue;
+            };
+            let hash = object.geometry.content_hash().to_hex();
+            let placement = format!("{:?}", object.transform.map(f64::to_bits));
             // Fresh topology per run so cached results can't mask differences.
-            let topo = format!(
-                "{:?}",
-                s.document()
-                    .object(id)
-                    .unwrap()
-                    .mesh()
-                    .unwrap()
-                    .topology()
-                    .boundary_loops
-            );
+            let topo = format!("{:?}", object.mesh().unwrap().topology().boundary_loops);
             out.push((
                 op.id().to_owned(),
-                format!("{hash}/{}", blake3::hash(topo.as_bytes())),
+                format!("{hash}/{placement}/{}", blake3::hash(topo.as_bytes())),
             ));
         }
         out

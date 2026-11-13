@@ -8,12 +8,26 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only: registers `test.unit_conversion`, matching mf-spec's
+# `test-kinds`-gated spec of the same id, so mf-command's tests can
+# exercise real unit-conversion wiring end to end. Off in every normal
+# build; only mf-command's dev-dependency enables it.
+# Also registers `test.consume_tool`, a stand-in for a boolean (removes
+# its tool operand and creates an object) for multi-object command tests.
+# And mf-parts' test-only generators.
+test-kinds = ["mf-spec/test-kinds", "mf-parts/test-kinds"]
+
 [dependencies]
 faer.workspace = true
+glam.workspace = true
 rayon.workspace = true
 mf-runtime.workspace = true
+mf-document.workspace = true
 serde.workspace = true
 mf-geometry.workspace = true
+mf-boolean.workspace = true
+mf-parts.workspace = true
 mf-spec.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -27,3 +41,4 @@ serde-saphyr.workspace = true
 jsonschema.workspace = true
 mf-fixtures.workspace = true
 rayon.workspace = true
+tempfile.workspace = true

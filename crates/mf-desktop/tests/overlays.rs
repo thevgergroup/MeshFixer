@@ -183,7 +183,10 @@ fn small_components_are_tinted_and_clickable() {
     let p = pixel(&mut h, top);
     assert!(amber(p), "the loose piece is tinted amber: {p:?}");
 
-    // Its legend entry hides the tint, and shows it again.
+    // Its entry in the Overlays popover hides the tint, and shows it
+    // again.
+    h.get_by_label("Overlays").click();
+    h.run_steps(3);
     h.get_by_label("Loose pieces").click();
     h.run_steps(3);
     let p = pixel(&mut h, top);
@@ -191,6 +194,8 @@ fn small_components_are_tinted_and_clickable() {
     h.get_by_label("Loose pieces").click();
     h.run_steps(3);
     assert!(amber(pixel(&mut h, top)));
+    h.get_by_label("Overlays").click();
+    h.run_steps(3);
 
     // Clicking it selects the piece, which then shows the selection colour.
     click_at(&mut h, top);
@@ -541,8 +546,9 @@ fn hover_returns_when_the_pointer_comes_back() {
     wait_until(&mut h, "hover again", hovered);
 }
 
-/// Fix round 1, P5: a hovered loose piece stands out: it glows near-white,
-/// clearly brighter than its amber at rest.
+/// Fix round 1, P5: a hovered loose piece stands out: lighter than its
+/// amber at rest (a light tint and a rim since the owner's §11 report,
+/// not a solid near-white fill).
 #[test]
 fn hovered_loose_piece_stands_out() {
     require_gpu!("hovered_loose_piece_stands_out");
@@ -573,8 +579,10 @@ fn hovered_loose_piece_stands_out() {
         .0;
     let p = [0, 1, 2].map(|k| i32::from(p[k]));
     let sum = |p: [i32; 3]| p.iter().sum::<i32>();
+    // UI plan §11 (owner): a light tint and a rim, not a solid near-white
+    // fill, so it stands out by being lighter while keeping its shading.
     assert!(
-        hover_white(p) && sum(p) >= sum(rest) + 120,
+        sum(p) >= sum(rest) + 30,
         "hovered {p:?} vs at rest {rest:?}"
     );
 }

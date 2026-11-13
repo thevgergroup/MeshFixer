@@ -18,9 +18,11 @@ use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
 use glam::DMat4;
+use mf_boolean::{Plane, plane_cut};
 use mf_command::{CommandError, Completed, ObjectId, Prepared};
 use mf_geometry::{Aabb, Diagnostics, Mesh};
 use mf_io::{Format, ImportedModel, IoError};
+use mf_operations::{PegShape, dowel_size, place_holes};
 use mf_render::{
     Bvh, FaceStates, GpuLines, GpuMesh, UploadStats, edge_line_vertices, loop_line_vertices,
 };
@@ -109,10 +111,13 @@ impl Gpu {
         let Primer { renderer, target } = &mut *primer;
         let camera = mf_render::OrbitCamera::fit(bounds);
         let items = [mf_render::DrawItem {
+            hole: false,
+            ghost: false,
             mesh,
             model: DMat4::IDENTITY,
             inactive: false,
             shown_states: u32::from(FaceStates::ALL),
+            object_color: None,
         }];
         target.draw(
             &self.device,
@@ -178,6 +183,28 @@ impl RenderMesh {
         }
         render
     }
+
+    /// A live revision shown mid-stroke (Task 19: a sculpt dab), on the UI
+    /// thread: `gpu_mesh` is `vertices`' GPU side already synced (only the
+    /// dab's touched chunks uploaded, MF-RENDER-003, MF-SCULPT-004).
+    /// Unlike [`RenderMesh::build`], there is no priming draw (one per dab
+    /// would cost a GPU round trip for no benefit: this revision is shown
+    /// for a frame, not cached), and no face-state request is kept (a
+    /// stroke in progress draws no overlay).
+    pub fn from_live(
+        mesh: &Mesh,
+        vertices: &mf_render::MeshVertices,
+        gpu_mesh: GpuMesh,
+    ) -> RenderMesh {
+        RenderMesh {
+            mesh: mesh.clone(),
+            bounds: vertices.bounds,
+            origin: vertices.origin,
+            gpu: gpu_mesh,
+            requested_states: Mutex::new(None),
+            written_states: Mutex::new(0),
+        }
+    }
 }
 
 impl RenderMesh {
@@ -234,7 +261,7 @@ impl RenderMesh {
 /// What the face states of the active object's revision are made from
 /// (see [`face_states`]). Small to compare, so the UI thread can tell when
 /// they change; the O(n) part is done on a worker.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct StateInputs {
     /// The selection's faces (a loop or edge selection tints no face).
     pub selected: Option<OverlayTarget>,
@@ -251,7 +278,33 @@ pub struct StateInputs {
     /// The faces around the holes (View ▸ Show hole overview), from the
     /// analysis; `None` while the overview is off.
     pub hole_ring: Option<Arc<[u32]>>,
+    /// Sculpt ▸ "Show sculpt changes": the active object's mesh as of
+    /// when the tool opened, to compare `mesh` against; `None` while the
+    /// overlay (or the tool) is off.
+    pub sculpt_baseline: Option<Mesh>,
 }
+
+impl PartialEq for StateInputs {
+    /// `Mesh` has no `PartialEq` of its own (MF-DOC-001: compare content,
+    /// not identity, and a full comparison would defeat the point of
+    /// staying cheap); `sculpt_baseline` compares by content hash
+    /// (cached, so repeating this every frame is cheap) instead.
+    fn eq(&self, other: &Self) -> bool {
+        self.selected == other.selected
+            && self.hover == other.hover
+            && self.recent == other.recent
+            && self.tangled == other.tangled
+            && self.loose_limit == other.loose_limit
+            && self.hole_ring == other.hole_ring
+            && match (&self.sculpt_baseline, &other.sculpt_baseline) {
+                (Some(a), Some(b)) => a.content_hash() == b.content_hash(),
+                (None, None) => true,
+                _ => false,
+            }
+    }
+}
+
+impl Eq for StateInputs {}
 
 /// Which pieces "Remove loose pieces" would remove: every piece but the
 /// main body up to `max_size` triangles (`None`: none of them), and the
@@ -319,6 +372,11 @@ pub fn face_states(
             }
             Some(OverlayTarget::Loops(_) | OverlayTarget::Edges(_)) | None => {}
         }
+    }
+    // `set`'s last use was just above: borrowing `flagged` directly from
+    // here on is fine.
+    if let Some(baseline) = &inputs.sculpt_baseline {
+        flagged.extend(crate::sculpt_tool::sculpt_changed_faces(baseline, mesh));
     }
     ctx.checkpoint()?;
     Ok(FaceStates::from_flagged(mesh, &mut flagged))
@@ -468,11 +526,33 @@ pub enum Message {
         ids: Vec<u32>,
         add: bool,
     },
+    /// `mesh`'s defects measured again at `transform` (its topology,
+    /// render mesh and overlays are kept: see [`remeasure`]).
+    Remeasured {
+        mesh: Mesh,
+        transform: [f64; 12],
+        defects: Arc<Defects>,
+        hole_view: Arc<HoleView>,
+    },
+    /// The lowest world z of `object`'s revision `mesh` at `transform`
+    /// (the Transform tool's plate snap; `None`: no vertices).
+    LowestPoint {
+        object: ObjectId,
+        mesh: Mesh,
+        transform: [f64; 12],
+        z: Option<f64>,
+    },
     /// The hole overview's screen markers for request `key`.
     Markers {
         key: u64,
         markers: Arc<Markers>,
     },
+    /// Every overlapping Solid/Hole pair's crossing curve, for the latest
+    /// request ([`IntersectionCurves`]).
+    IntersectionsFound(IntersectionCurves),
+    /// The Alignment panel's hole preview for the latest plane and peg
+    /// settings ([`peg_preview`]).
+    PegPreview(PegPreview),
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -1019,6 +1099,208 @@ pub struct AnalysisRequest {
     pub openings: Vec<u32>,
 }
 
+/// One analysed revision to measure again at a new transform.
+pub struct RemeasureRequest {
+    pub mesh: Mesh,
+    pub diagnostics: mf_geometry::Diagnostics,
+    /// Its defects, and the transform they were measured at.
+    pub previous: Arc<Defects>,
+    pub from: [f64; 12],
+    pub to: [f64; 12],
+    pub numbers: Arc<HoleNumbers>,
+    pub openings: Vec<u32>,
+}
+
+/// A transform-only change (a move, a turn, an undo of one): the mesh's
+/// topology, render mesh, face states and overlay lines all stay; only the
+/// measurements are made again ([`crate::defects::remeasured`]: O(defects)
+/// for a move). On a worker, like the analysis.
+pub fn remeasure(request: RemeasureRequest, ctx: &RunContext) -> Result<Message, Cancelled> {
+    ctx.checkpoint()?;
+    let defects = crate::defects::remeasured(
+        &request.previous,
+        &request.mesh,
+        &request.diagnostics,
+        &request.from,
+        &request.to,
+        fill_cap(),
+        &request.numbers,
+    );
+    ctx.checkpoint()?;
+    let hole_view = Arc::new(crate::defects::hole_view(&defects, &request.openings));
+    Ok(Message::Remeasured {
+        mesh: request.mesh,
+        transform: request.to,
+        defects: Arc::new(defects),
+        hole_view,
+    })
+}
+
+/// Split's Alignment panel: the cut plane, which peg shape and sizes, and
+/// how holes should be placed. World space (the plane; the result's
+/// placements are converted back to world so the panel can draw them
+/// without knowing the object's transform again).
+#[derive(Debug, Clone)]
+pub struct PegPreviewRequest {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub transform: [f64; 12],
+    pub plane_point: [f64; 3],
+    pub plane_normal: [f64; 3],
+    pub shape: PegShape,
+    pub diameter: f64,
+    pub depth_above: f64,
+    pub depth_below: f64,
+    pub clearance: f64,
+    pub allowance: f64,
+    pub count: u32,
+    pub min_wall: f64,
+}
+
+/// One hole's placement, in world space, for the Alignment panel's
+/// preview overlay.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PegPreviewHole {
+    pub center: [f64; 3],
+    pub axis: [f64; 3],
+    pub shape: PegShape,
+}
+
+/// What the Alignment panel shows for the current plane and peg settings:
+/// every hole [`place_holes`] would put ("Cut in two" cuts for real), the
+/// dowel's size, and a refusal in the same words the command would give.
+#[derive(Debug, Clone)]
+pub struct PegPreview {
+    pub object: ObjectId,
+    pub mesh: Mesh,
+    pub transform: [f64; 12],
+    pub holes: Vec<PegPreviewHole>,
+    pub dowel: (f64, f64),
+    pub skipped_regions: usize,
+    pub refusal: Option<String>,
+}
+
+/// Cuts `request.mesh` through its plane (same engine `mesh.split_plane`
+/// uses) and places holes on the cut's section regions: what the
+/// Alignment panel shows while the Split tool is open, before Apply runs
+/// the real command. O(n) like the cut itself, so it runs on a worker
+/// ([`crate::analysis::LatestWorker`]), debounced to only the plane and
+/// peg settings that actually changed.
+pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Message, Cancelled> {
+    let world_to_object = |p: [f64; 3]| {
+        let m = mf_render::model_matrix(&request.transform).inverse();
+        m.transform_point3(glam::DVec3::from(p)).to_array()
+    };
+    let object_to_world = |p: [f64; 3]| {
+        let m = mf_render::model_matrix(&request.transform);
+        m.transform_point3(glam::DVec3::from(p)).to_array()
+    };
+    let direction_to_world = |d: [f64; 2], frame_u: glam::DVec3, frame_v: glam::DVec3| {
+        let m = mf_render::model_matrix(&request.transform);
+        let local = frame_u * d[0] + frame_v * d[1];
+        m.transform_vector3(local).normalize_or_zero().to_array()
+    };
+    let point_obj = world_to_object(request.plane_point);
+    let normal_obj = {
+        let m = mf_render::model_matrix(&request.transform).inverse();
+        m.transform_vector3(glam::DVec3::from(request.plane_normal))
+            .normalize_or_zero()
+            .to_array()
+    };
+    let plane = Plane {
+        point: point_obj,
+        normal: normal_obj,
+    };
+    let base = || {
+        Message::PegPreview(PegPreview {
+            object: request.object,
+            mesh: request.mesh.clone(),
+            transform: request.transform,
+            holes: Vec::new(),
+            dowel: (0.0, 0.0),
+            skipped_regions: 0,
+            refusal: None,
+        })
+    };
+    ctx.checkpoint()?;
+    let cut = match plane_cut(&request.mesh, plane, ctx) {
+        Ok(cut) => cut,
+        Err(mf_boolean::CutError::Cancelled) => return Err(Cancelled),
+        Err(e) => {
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.refusal = Some(e.to_string());
+            return Ok(Message::PegPreview(preview));
+        }
+    };
+    let dowel = dowel_size(
+        request.diameter,
+        request.depth_above,
+        request.depth_below,
+        request.clearance,
+        request.allowance,
+    );
+    ctx.checkpoint()?;
+    match place_holes(
+        &cut.section_regions,
+        request.shape,
+        request.diameter,
+        request.count,
+        request.min_wall,
+    ) {
+        Ok((placements, skipped)) => {
+            let holes = placements
+                .iter()
+                .map(|h| {
+                    let region = &cut.section_regions[h.region];
+                    let center3 = [
+                        region.frame.origin[0]
+                            + h.center[0] * region.frame.u[0]
+                            + h.center[1] * region.frame.v[0],
+                        region.frame.origin[1]
+                            + h.center[0] * region.frame.u[1]
+                            + h.center[1] * region.frame.v[1],
+                        region.frame.origin[2]
+                            + h.center[0] * region.frame.u[2]
+                            + h.center[1] * region.frame.v[2],
+                    ];
+                    PegPreviewHole {
+                        center: object_to_world(center3),
+                        axis: direction_to_world(
+                            h.axis,
+                            glam::DVec3::from(region.frame.u),
+                            glam::DVec3::from(region.frame.v),
+                        ),
+                        shape: h.shape,
+                    }
+                })
+                .collect();
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.holes = holes;
+            preview.dowel = dowel;
+            preview.skipped_regions = skipped.len();
+            Ok(Message::PegPreview(preview))
+        }
+        Err(mf_operations::PegError::DoesNotFit {
+            region,
+            widest_fit_mm,
+        }) => {
+            let Message::PegPreview(mut preview) = base() else {
+                unreachable!()
+            };
+            preview.dowel = dowel;
+            preview.refusal = Some(format!(
+                "Section region {region} is too thin for a {:.2} mm hole: the widest that fits is {widest_fit_mm:.2} mm.",
+                request.diameter
+            ));
+            Ok(Message::PegPreview(preview))
+        }
+    }
+}
+
 /// The analysis a [`crate::Settings`] can swap in (tests inject failures).
 pub type AnalyzeFn = fn(AnalysisRequest, &RunContext, &Gpu) -> Result<Message, Cancelled>;
 
@@ -1314,9 +1596,13 @@ fn build_overlay(
                     .flatten()
                     .copied()
                     .collect();
-                (face_corners(&mesh, &faces).collect(), Vec::new())
+                let outline = face_set_outline(&mesh, &faces);
+                (face_corners(&mesh, &faces).collect(), outline)
             }
-            OverlayTarget::Faces(ids) => (face_corners(&mesh, ids).collect(), Vec::new()),
+            OverlayTarget::Faces(ids) => (
+                face_corners(&mesh, ids).collect(),
+                face_set_outline(&mesh, ids),
+            ),
             OverlayTarget::Object => (mesh.faces().flat_map(|(_, t)| t).collect(), Vec::new()),
             OverlayTarget::Edges(edges) => {
                 (edges.iter().flatten().copied().collect(), edges.clone())
@@ -1325,9 +1611,12 @@ fn build_overlay(
         let lines = match &target {
             OverlayTarget::Loops(ids) => loop_line_vertices(&mesh, origin, ids),
             OverlayTarget::Edges(edges) => edge_line_vertices(&mesh, origin, edges),
-            OverlayTarget::Components(_) | OverlayTarget::Faces(_) | OverlayTarget::Object => {
-                Vec::new()
+            // A face set's outline (UI plan §11: an outline and a light
+            // tint, never a solid fill).
+            OverlayTarget::Components(_) | OverlayTarget::Faces(_) => {
+                edge_line_vertices(&mesh, origin, &outline)
             }
+            OverlayTarget::Object => Vec::new(),
         };
         // Which way the target faces, for framing it (F): only a selection
         // is framed, and finding a loop's faces is O(n).
@@ -1417,6 +1706,51 @@ fn facing(mesh: &Mesh, faces: &[u32]) -> Option<glam::DVec3> {
 }
 
 /// The corner vertices of the live faces among `faces`.
+/// Above this many faces a face set gets no outline (its tint alone):
+/// finding one hashes every edge, too much for a whole 30M body.
+const OUTLINE_MAX_FACES: usize = 2_000_000;
+
+/// The outline of a face set, as vertex pairs: its open edges (used by
+/// one face of the set) and its sharp edges (two faces of the set meeting
+/// at more than 40°), so a selected block reads by its edges and a patch
+/// by its border. O(faces).
+fn face_set_outline(mesh: &Mesh, faces: &[u32]) -> Vec<[u32; 2]> {
+    if faces.len() > OUTLINE_MAX_FACES {
+        return Vec::new();
+    }
+    let normal = |t: [u32; 3]| {
+        let p = t.map(|v| glam::DVec3::from(mesh.corner_position(v)));
+        (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero()
+    };
+    let mut edges: std::collections::HashMap<(u32, u32), (u32, glam::DVec3, bool)> =
+        std::collections::HashMap::with_capacity(faces.len() * 2);
+    let cos_sharp = 40f64.to_radians().cos();
+    for &f in faces {
+        let Some(t) = mesh.face(mf_geometry::FaceId(f)) else {
+            continue;
+        };
+        let n = normal(t);
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            edges
+                .entry(key)
+                .and_modify(|e| {
+                    e.0 += 1;
+                    e.2 |= e.1.dot(n) < cos_sharp;
+                })
+                .or_insert((1, n, false));
+        }
+    }
+    let mut out: Vec<[u32; 2]> = edges
+        .into_iter()
+        .filter(|(_, (count, _, sharp))| *count == 1 || (*count == 2 && *sharp))
+        .map(|((a, b), _)| [a, b])
+        .collect();
+    out.sort_unstable();
+    out
+}
+
 fn face_corners<'a>(mesh: &'a Mesh, faces: &'a [u32]) -> impl Iterator<Item = u32> + 'a {
     faces
         .iter()
@@ -1654,6 +1988,101 @@ const MAX_EDGE_CANDIDATES: usize = 16;
 fn nearest_edge_candidates<T>(candidates: &mut Vec<T>, distance: impl Fn(&T) -> f64) {
     candidates.sort_by(|a, b| distance(a).total_cmp(&distance(b)));
     candidates.truncate(MAX_EDGE_CANDIDATES);
+}
+
+/// One Solid/Hole pair to find the exact crossing curve of
+/// (`mesh.intersections`): their current revisions, BVHs and transforms.
+/// `solid` is the frame the segments are reported in.
+pub struct IntersectionPair {
+    pub solid: ObjectId,
+    pub solid_mesh: Mesh,
+    pub solid_bvh: Arc<Bvh>,
+    pub solid_transform: [f64; 12],
+    pub hole: ObjectId,
+    pub hole_mesh: Mesh,
+    pub hole_bvh: Arc<Bvh>,
+    pub hole_transform: [f64; 12],
+}
+
+/// Every Solid/Hole pair to check this request, tagged with a number so a
+/// superseded request's result can be told apart from the latest's.
+pub struct IntersectionRequest {
+    pub key: u64,
+    pub pairs: Vec<IntersectionPair>,
+}
+
+/// One pair's crossing curve, in world space (so the view draws it with an
+/// identity model matrix, like the build plate): empty when the pair
+/// doesn't overlap at all.
+pub struct IntersectionCurve {
+    pub solid: ObjectId,
+    pub hole: ObjectId,
+    pub lines: Arc<GpuLines>,
+}
+
+/// Every pair's curve for request `key` (the latest only: see
+/// [`crate::analysis::LatestWorker`]).
+pub struct IntersectionCurves {
+    pub key: u64,
+    pub curves: Vec<IntersectionCurve>,
+}
+
+/// The exact crossing curve of every pair in `req` (MF-MODEL-002's
+/// `mesh.intersections`: ~6 ms at 30M vs 50k faces), on a worker. Each
+/// pair's segments are placed in the solid's frame by `intersections_between`,
+/// then carried into world space by the solid's transform, so the view can
+/// draw every pair's curve with one identity-model layer (like the build
+/// plate). Cancellable: a newer request (roles, transforms, or a Transform
+/// drag) supersedes this one before it finishes.
+pub fn intersections(
+    req: IntersectionRequest,
+    ctx: &RunContext,
+    gpu: &Gpu,
+) -> Result<IntersectionCurves, Cancelled> {
+    let mut curves = Vec::with_capacity(req.pairs.len());
+    for pair in &req.pairs {
+        ctx.checkpoint()?;
+        let solid_to_world = mf_render::model_matrix(&pair.solid_transform);
+        let hole_to_solid =
+            solid_to_world.inverse() * mf_render::model_matrix(&pair.hole_transform);
+        let report = mf_geometry::intersections_between(
+            &pair.solid_mesh,
+            &pair.solid_bvh,
+            &pair.hole_mesh,
+            &pair.hole_bvh,
+            &hole_to_solid,
+            ctx,
+        )?;
+        let mut vertices = Vec::new();
+        for region in &report.regions {
+            for [a, b] in &region.segments {
+                let world = |p: &[f64; 3]| {
+                    (solid_to_world * glam::DVec4::new(p[0], p[1], p[2], 1.0)).truncate()
+                };
+                vertices.push(mf_render::LineVertex {
+                    position: world(a).as_vec3().to_array(),
+                });
+                vertices.push(mf_render::LineVertex {
+                    position: world(b).as_vec3().to_array(),
+                });
+            }
+        }
+        let lines = Arc::new(GpuLines::upload_paced(
+            &gpu.device,
+            &gpu.queue,
+            &vertices,
+            UPLOAD_CHUNK_BYTES,
+        ));
+        curves.push(IntersectionCurve {
+            solid: pair.solid,
+            hole: pair.hole,
+            lines,
+        });
+    }
+    Ok(IntersectionCurves {
+        key: req.key,
+        curves,
+    })
 }
 
 /// What to export: one mesh, or a whole 3MF model.

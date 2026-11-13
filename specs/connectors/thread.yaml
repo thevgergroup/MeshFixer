@@ -1,0 +1,42 @@
+id: thread
+version: 1
+summary: "Metric coarse threaded fasteners, \"what's on the packet\" presets (M1-M12)."
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: size
+    type: choice
+    values: [M1, M1.2, M1.6, M2, M2.5, M3, M4, M5, M6, M8, M10, M12]
+    default: M3
+    description: "Metric coarse size on the packet, for example M3 (pitch comes from the standard; see Advanced for the exact value)"
+  - name: length
+    type: float
+    default: 12.0
+    min: 1.0
+    unit: mm
+    description: "Length on the packet, for example the 12 in \"M3 x 12\" (the bolt shaft's length, or the hole's depth)"
+  - name: shape
+    type: choice
+    values: [bolt_hex, bolt_socket, nut, threaded_hole, clearance_hole, nut_trap]
+    default: bolt_hex
+    description: "bolt_hex/bolt_socket: a bolt with a hex or socket head. nut: a hex nut. threaded_hole: a tap-drill hole in a part. clearance_hole: a loose hole for a bought bolt's shaft. nut_trap: a hex pocket that catches a nut, with the bolt's clearance hole through it"
+  - name: fit_clearance
+    type: float
+    default: 0.0
+    unit: mm
+    fit_role: hole
+    description: "The chosen Fit class's clearance (design intent) between the thread and its mating hole, before machine tolerance. Negative is interference (a press fit)"
+  - name: machine_tolerance
+    type: float
+    default: 0.0
+    unit: mm
+    fit_role: machine_hole_undersize
+    description: "The active Machine profile's hole-undersize compensation, added to fit_clearance to size a bore (0 on an uncalibrated machine)"
+preconditions:
+  - size is one of the metric coarse presets on the packet
+effects: [geometry_changes]
+runtime:
+  cancellable: false
+  progress: false
