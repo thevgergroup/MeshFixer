@@ -130,6 +130,17 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                 )
             } else if op.id() == "mesh.combine" {
                 (uv_sphere(24, 48), BTreeMap::new())
+            } else if op.id() == "object.align" {
+                // `target` is `many: true` and needs at least two
+                // objects (its own refusal otherwise): a second target,
+                // offset on x, aligned to the first's min edge.
+                (
+                    mesh.clone(),
+                    BTreeMap::from([
+                        ("axis".to_string(), "x".to_string()),
+                        ("mode".to_string(), "min".to_string()),
+                    ]),
+                )
             } else {
                 (mesh.clone(), BTreeMap::new())
             };
@@ -139,6 +150,9 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                 let other =
                     s.add_geometry(Geometry::Mesh(uv_sphere(24, 48)), "fixture 2".into(), None);
                 vec![("solids".to_string(), other, None)]
+            } else if op.id() == "object.align" {
+                let other = s.add_geometry(Geometry::Mesh(mesh.clone()), "fixture 2".into(), None);
+                vec![("target".to_string(), other, None)]
             } else {
                 Vec::new()
             };

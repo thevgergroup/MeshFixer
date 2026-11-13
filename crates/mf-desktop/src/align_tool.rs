@@ -142,21 +142,35 @@ fn dot_box(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
 }
 
 /// The 9 dot handles (3 axes x min/centre/max), placed on the dots' box
-/// (see [`dot_box`]), at the centre of the other two axes' extent so each
-/// sits on the middle of that box edge.
+/// (see [`dot_box`]): each axis's three dots run along their own edge of
+/// the box (a different edge per axis, offset from the box's centroid
+/// on the *other* two axes), so no two dots — in particular no two
+/// axes' centre dots — ever land on the same point.
 pub fn dots(app: &MeshFixerApp) -> Vec<Dot> {
     let Some((lo, hi)) = dot_box(app) else {
         return Vec::new();
     };
     let mid = (lo + hi) * 0.5;
+    // Each axis's three dots run along their own edge: offset, on the
+    // *other* two axes, three quarters of the way from the box's
+    // centre towards its low corner. Every axis picks a different pair
+    // of other axes to offset, so no two axes' dots — in particular no
+    // two centre dots — ever land on the same point.
+    let corners = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
+    // 3/4 of the way from the centre towards that axis's low corner.
+    let toward_low = |a: usize| mid[a] + (lo[a] - mid[a]) * 0.75;
     let mut out = Vec::with_capacity(9);
     for axis in 0..3 {
+        let (oa, ob) = corners[axis];
+        let mut base = mid;
+        base[oa] = toward_low(oa);
+        base[ob] = toward_low(ob);
         for (mode, value) in [
             (Mode::Min, lo[axis]),
             (Mode::Centre, mid[axis]),
             (Mode::Max, hi[axis]),
         ] {
-            let mut p = mid;
+            let mut p = base;
             p[axis] = value;
             out.push(Dot {
                 axis,
@@ -392,12 +406,38 @@ pub fn apply(app: &mut MeshFixerApp, axis: usize, mode: Mode) {
     if selected.len() < 2 || app.busy.is_some() {
         return;
     }
-    let (targets, leaders) = targets_with_groups(app);
+    let anchor = app.align.anchor.filter(|&a| selected.contains(&a));
+    let anchor_name = anchor
+        .and_then(|a| app.session.document().object(a))
+        .map(|o| o.name.clone());
+    // The anchor is its own operand, never one of the (`many`) targets:
+    // drop it, and its leader entry, from the target list the operation
+    // moves. Dropping an entry shifts every later index, so leader
+    // indices (which point into this same list) are remapped, not just
+    // copied across.
+    let (all_targets, all_leaders) = targets_with_groups(app);
+    let mut old_to_new: Vec<Option<usize>> = Vec::with_capacity(all_targets.len());
+    let mut targets = Vec::with_capacity(all_targets.len());
+    for &id in &all_targets {
+        if Some(id) == anchor {
+            old_to_new.push(None);
+        } else {
+            old_to_new.push(Some(targets.len()));
+            targets.push(id);
+        }
+    }
+    let leaders: Vec<Option<usize>> = all_targets
+        .iter()
+        .zip(&all_leaders)
+        .filter(|&(&id, _)| Some(id) != anchor)
+        .map(|(_, leader)| leader.and_then(|old| old_to_new[old]))
+        .collect();
+    if targets.len() < 2 {
+        return;
+    }
     let Some((&first, rest)) = targets.split_first() else {
         return;
     };
-    let anchor = app.align.anchor.filter(|&a| selected.contains(&a));
-    let anchor_name = anchor.and_then(|a| app.session.document().object(a)).map(|o| o.name.clone());
     let mut operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)> = rest
         .iter()
         .map(|&id| ("target".to_owned(), id, None))
@@ -561,7 +601,13 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 (Mode::Centre, t!("align.centre")),
                 (Mode::Max, t!("align.max")),
             ] {
-                if widgets::button(ui, Kind::Secondary, None, &label, w).clicked() {
+                let r = widgets::button(ui, Kind::Secondary, None, &label, w);
+                // Each axis's own accessible name ("Align X: Centre"):
+                // the visible text repeats per axis row, but every
+                // button still needs a name that's unique in the panel.
+                let full = format!("Align {}: {label}", axis_name(axis));
+                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &full));
+                if r.clicked() {
                     apply(app, axis, mode);
                 }
             }
@@ -576,10 +622,19 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             let can = selected.len() >= 3;
             ui.add_enabled_ui(can, |ui| {
                 let w = (ui.available_width() - 2.0 * ui.spacing().item_spacing.x) / 2.0;
-                if widgets::button(ui, Kind::Secondary, None, &t!("align.equal_gaps"), w).clicked() {
+                let gaps = widgets::button(ui, Kind::Secondary, None, &t!("align.equal_gaps"), w);
+                let gaps_name = format!("Distribute {}: {}", axis_name(axis), t!("align.equal_gaps"));
+                gaps.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, &gaps_name));
+                if gaps.clicked() {
                     apply(app, axis, Mode::DistributeGaps);
                 }
-                if widgets::button(ui, Kind::Secondary, None, &t!("align.equal_centres"), w).clicked() {
+                let centres =
+                    widgets::button(ui, Kind::Secondary, None, &t!("align.equal_centres"), w);
+                let centres_name =
+                    format!("Distribute {}: {}", axis_name(axis), t!("align.equal_centres"));
+                centres
+                    .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, can, &centres_name));
+                if centres.clicked() {
                     apply(app, axis, Mode::DistributeCentres);
                 }
             });

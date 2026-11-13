@@ -15,6 +15,7 @@
 //!
 //! Run with `scripts/core-workflows.sh` (kept under 3 minutes at `-j 4`).
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use eframe::egui;
@@ -1975,5 +1976,251 @@ fn a_named_checkpoint_can_be_checked_out() {
         h.state().session.document().object(id).unwrap().name,
         "before",
         "the document is back at the named point"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Align: min/centre/max per axis, an anchor that stays fixed,
+// distributing with equal gaps, and Undo.
+// ---------------------------------------------------------------------
+
+/// With `MF_ARTIFACTS` set, saves a frame to
+/// `<dir>/design/align-<scene>-<w>x<h>.png`.
+fn capture(h: &mut Harness<'_, MeshFixerApp>, scene: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = PathBuf::from(dir).join("design");
+    std::fs::create_dir_all(&dir).unwrap();
+    let size = h.ctx.content_rect().size();
+    let name = format!("align-{scene}-{}x{}.png", size.x as u32, size.y as u32);
+    h.render().unwrap().save(dir.join(name)).unwrap();
+}
+
+/// Opens Align (L) with `names` selected together, waiting for its 9
+/// dot handles to be drawn.
+fn open_align(h: &mut Harness<'_, MeshFixerApp>, names: &[&str]) {
+    select_together(h, names);
+    h.key_press(egui::Key::L);
+    wait_until(h, "align's dots", |a| {
+        a.active_tool == mf_desktop::align_tool::ID && !mf_desktop::align_tool::dots(a).is_empty()
+    });
+    settle(h);
+}
+
+/// `dot`'s window position, as the renderer places it (the same
+/// projection [`mf_desktop::align_tool::view_overlay`] draws with).
+fn dot_point(h: &Harness<'_, MeshFixerApp>, dot: mf_desktop::align_tool::Dot) -> egui::Pos2 {
+    let app = h.state();
+    let cam = app.camera.unwrap();
+    let rect = app.viewport.last_rect.unwrap();
+    let view = (rect.width() as f64, rect.height() as f64);
+    let (x, y) = mf_render::screen_position(&cam, cam.target, view, dot.world.to_array()).unwrap();
+    rect.left_top() + egui::vec2(x as f32, y as f32)
+}
+
+/// The dot for `axis`/`mode` among Align's current 9.
+fn find_dot(
+    h: &Harness<'_, MeshFixerApp>,
+    axis: usize,
+    mode: mf_desktop::align_tool::Mode,
+) -> mf_desktop::align_tool::Dot {
+    mf_desktop::align_tool::dots(h.state())
+        .into_iter()
+        .find(|d| d.axis == axis && d.mode == mode)
+        .unwrap_or_else(|| panic!("no dot for axis {axis} mode {mode:?}"))
+}
+
+/// Clicks the dot for `axis`/`mode` and waits for the command to commit.
+fn click_dot(h: &mut Harness<'_, MeshFixerApp>, axis: usize, mode: mf_desktop::align_tool::Mode) {
+    let history = history_len(h);
+    let p = dot_point(h, find_dot(h, axis, mode));
+    click_at(h, p);
+    wait_until(h, "the align commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() == history + 1
+    });
+    settle(h);
+}
+
+/// Three balls (10 mm diameter) placed apart on one axis.
+fn three_balls_on(axis: usize) -> Vec<(&'static str, Mesh, [f64; 12])> {
+    let p = |v: f64| {
+        let mut t = [0.0; 3];
+        t[axis] = v;
+        t
+    };
+    vec![
+        ("a", ball(5.0), at(p(0.0))),
+        ("b", ball(5.0), at(p(30.0))),
+        ("c", ball(5.0), at(p(100.0))),
+    ]
+}
+
+/// Aligning to the min, centre and max edges on each axis: every
+/// selected object's bounding box lands exactly on the overall bounds'
+/// edge or centre on that axis, and the other two axes don't move.
+#[test]
+fn align_min_centre_max_on_each_axis() {
+    use mf_desktop::align_tool::Mode;
+    require_gpu!("align_min_centre_max_on_each_axis");
+    for axis in 0..3 {
+        for (mode, scene) in [
+            (Mode::Min, "min"),
+            (Mode::Centre, "centre"),
+            (Mode::Max, "max"),
+        ] {
+            let mut h = opened(three_balls_on(axis));
+            let (ida, idb, idc) = (id_of(&h, "a"), id_of(&h, "b"), id_of(&h, "c"));
+            open_align(&mut h, &["a", "b", "c"]);
+            capture(&mut h, &format!("{scene}-axis{axis}-before"));
+
+            click_dot(&mut h, axis, mode);
+            capture(&mut h, &format!("{scene}-axis{axis}-after"));
+
+            let (ba, bb, bc) = (
+                world_bounds(&h, ida),
+                world_bounds(&h, idb),
+                world_bounds(&h, idc),
+            );
+            let value = |b: &Aabb| match mode {
+                Mode::Min => b.min[axis],
+                Mode::Max => b.max[axis],
+                _ => (b.min[axis] + b.max[axis]) / 2.0,
+            };
+            let (va, vb, vc) = (value(&ba), value(&bb), value(&bc));
+            assert!(
+                (va - vb).abs() < 1e-6 && (vb - vc).abs() < 1e-6,
+                "axis {axis} {scene}: all three should share the same {scene}: {va} {vb} {vc}"
+            );
+            // The other two axes are untouched.
+            for other in (0..3).filter(|&o| o != axis) {
+                assert_eq!(ba.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on a");
+                assert_eq!(bb.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on b");
+                assert_eq!(bc.min[other], 0.0 - 5.0, "{scene}: axis {other} untouched on c");
+            }
+        }
+    }
+}
+
+/// Clicking a selected object in the view sets it as the anchor: its
+/// own bounding box never moves, and the others align to it.
+#[test]
+fn align_anchor_stays_fixed() {
+    require_gpu!("align_anchor_stays_fixed");
+    let mut h = opened(three_balls_on(0));
+    let (ida, idb, idc) = (id_of(&h, "a"), id_of(&h, "b"), id_of(&h, "c"));
+    open_align(&mut h, &["a", "b", "c"]);
+    wait_until(&mut h, "picking is ready", |a| a.picking_ready());
+    settle(&mut h);
+
+    // Click on c's own surface (its centre, which is on its silhouette
+    // from this camera) to anchor it.
+    let p = {
+        let app = h.state();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        let world = world_bounds(&h, idc).center();
+        let (x, y) = mf_render::screen_position(&cam, cam.target, view, world).unwrap();
+        rect.left_top() + egui::vec2(x as f32, y as f32)
+    };
+    click_at(&mut h, p);
+    wait_until(&mut h, "c becomes the anchor", |a| a.align.anchor == Some(idc));
+    settle(&mut h);
+    capture(&mut h, "anchor-set");
+
+    let before_c = world_bounds(&h, idc);
+    click_dot(&mut h, 0, mf_desktop::align_tool::Mode::Centre);
+    capture(&mut h, "anchor-after");
+
+    let after_c = world_bounds(&h, idc);
+    assert_eq!(before_c, after_c, "the anchor itself never moves");
+    let (ba, bb) = (world_bounds(&h, ida), world_bounds(&h, idb));
+    let centre = |b: &Aabb| (b.min[0] + b.max[0]) / 2.0;
+    let anchor_centre = centre(&after_c);
+    assert!(
+        (centre(&ba) - anchor_centre).abs() < 1e-6,
+        "a centres on the anchor"
+    );
+    assert!(
+        (centre(&bb) - anchor_centre).abs() < 1e-6,
+        "b centres on the anchor"
+    );
+}
+
+/// Distribute, equal gaps on X: the two outermost objects (by position)
+/// stay put, and the middle one lands with equal gaps on either side.
+#[test]
+fn align_distribute_equal_gaps() {
+    require_gpu!("align_distribute_equal_gaps");
+    // a and c at the extremes; b not yet evenly spaced between them.
+    let mut h = opened(vec![
+        ("a", ball(5.0), at([0.0, 0.0, 0.0])),
+        ("b", ball(5.0), at([17.0, 0.0, 0.0])),
+        ("c", ball(5.0), at([100.0, 0.0, 0.0])),
+    ]);
+    let (ida, idb, idc) = (id_of(&h, "a"), id_of(&h, "b"), id_of(&h, "c"));
+    open_align(&mut h, &["a", "b", "c"]);
+    let (before_a, before_c) = (world_bounds(&h, ida), world_bounds(&h, idc));
+
+    let history = history_len(&h);
+    h.get_by_label("Distribute X: Equal gaps").click();
+    wait_until(&mut h, "distribute commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() == history + 1
+    });
+    settle(&mut h);
+    capture(&mut h, "distribute-gaps");
+
+    assert_eq!(world_bounds(&h, ida), before_a, "a (an extreme) doesn't move");
+    assert_eq!(world_bounds(&h, idc), before_c, "c (an extreme) doesn't move");
+    let bb = world_bounds(&h, idb);
+    // a: [-5,5], c: [95,105]; equal gaps split (95-5-10)/2 = 40 each
+    // side, so b's box should be [45, 55].
+    assert!((bb.min[0] - 45.0).abs() < 1e-6, "{bb:?}");
+    assert!((bb.max[0] - 55.0).abs() < 1e-6, "{bb:?}");
+}
+
+/// Aligning is one undo step; Undo puts every moved object back exactly.
+#[test]
+fn align_then_undo_restores_every_object() {
+    require_gpu!("align_then_undo_restores_every_object");
+    let mut h = opened(three_balls_on(0));
+    let (ida, idb, idc) = (id_of(&h, "a"), id_of(&h, "b"), id_of(&h, "c"));
+    open_align(&mut h, &["a", "b", "c"]);
+
+    let before = (
+        h.state().session.document().object(ida).unwrap().transform,
+        h.state().session.document().object(idb).unwrap().transform,
+        h.state().session.document().object(idc).unwrap().transform,
+    );
+    let revision = h.state().session.current();
+
+    click_dot(&mut h, 0, mf_desktop::align_tool::Mode::Centre);
+    assert_ne!(
+        h.state().session.document().object(idb).unwrap().transform,
+        before.1,
+        "the align actually moved something"
+    );
+    capture(&mut h, "undo-before-undo");
+
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "the undo", |a| {
+        a.busy.is_none() && a.session.current() == revision
+    });
+    settle(&mut h);
+    capture(&mut h, "undo-after-undo");
+
+    assert_eq!(
+        h.state().session.document().object(ida).unwrap().transform,
+        before.0
+    );
+    assert_eq!(
+        h.state().session.document().object(idb).unwrap().transform,
+        before.1
+    );
+    assert_eq!(
+        h.state().session.document().object(idc).unwrap().transform,
+        before.2,
+        "one undo restores every moved object exactly"
     );
 }
