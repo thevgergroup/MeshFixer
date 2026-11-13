@@ -309,7 +309,7 @@ fn wedge_spec() -> &'static mf_spec::OperationSpec {
     })
 }
 
-impl mf_parts::Shape for Wedge {
+impl mf_parts::Generator for Wedge {
     fn id(&self) -> &'static str {
         "plugin.wedge"
     }
@@ -322,17 +322,25 @@ impl mf_parts::Shape for Wedge {
     fn spec(&self) -> &'static mf_spec::OperationSpec {
         wedge_spec()
     }
+    fn is_shape(&self) -> bool {
+        true
+    }
     fn generate(
         &self,
         params: &mf_spec::Params,
-        _: &mf_runtime::RunContext,
-    ) -> Result<Mesh, mf_parts::ConnectorError> {
+        _: &mf_parts::GenContext,
+    ) -> Result<Vec<mf_parts::ShapePart>, mf_parts::ConnectorError> {
         let s = params.get_float("size").unwrap();
-        Ok(Mesh::new(
-            vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
-            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
-        )
-        .unwrap())
+        Ok(vec![mf_parts::ShapePart::new(
+            "shape",
+            mf_parts::ShapeRole::Solid,
+            mf_parts::TargetSlot::Neither,
+            Mesh::new(
+                vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
+                vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            )
+            .unwrap(),
+        )])
     }
 }
 
@@ -343,7 +351,7 @@ fn a_plugin_registered_shape_appears_in_the_library() {
     require_gpu!("a_plugin_registered_shape_appears_in_the_library");
     static WEDGE: Wedge = Wedge;
     let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
-    h.state().shell.register_shape(&WEDGE).unwrap();
+    h.state().shell.register_generator(&WEDGE).unwrap();
     h.get_by_label("Parts").click();
     settle(&mut h);
     let history = h.state().session.history_labels().len();
@@ -358,7 +366,7 @@ fn a_plugin_registered_shape_appears_in_the_library() {
         mf_parts::GeneratorRecord::from_json(&o.properties[mf_command::GENERATOR]).unwrap();
     assert_eq!(record.id, "plugin.wedge");
     assert!(
-        h.state().shell.register_shape(&WEDGE).is_err(),
+        h.state().shell.register_generator(&WEDGE).is_err(),
         "a shape id registers once"
     );
 }

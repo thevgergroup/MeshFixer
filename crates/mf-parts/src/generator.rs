@@ -218,7 +218,8 @@ pub trait Generator: Send + Sync {
     /// The param schema (only `parameters:` is used).
     fn spec(&self) -> &'static OperationSpec;
     /// The parts, from validated `params`.
-    fn generate(&self, params: &Params, ctx: &GenContext) -> Result<Vec<ShapePart>, ConnectorError>;
+    fn generate(&self, params: &Params, ctx: &GenContext)
+    -> Result<Vec<ShapePart>, ConnectorError>;
 
     /// A one-part shape's default role (for the library's icon; the
     /// person can flip it). A connector's parts carry their own.
@@ -304,7 +305,11 @@ impl Generator for ShapeAdapter {
     fn is_shape(&self) -> bool {
         true
     }
-    fn generate(&self, params: &Params, ctx: &GenContext) -> Result<Vec<ShapePart>, ConnectorError> {
+    fn generate(
+        &self,
+        params: &Params,
+        ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         Ok(vec![ShapePart::new(
             "shape",
             self.0.role(),
@@ -320,6 +325,7 @@ pub struct ConnectorAdapter {
     pub inner: &'static dyn crate::Connector,
     pub name: &'static str,
     pub hint: PlacementHint,
+    pub deprecated: bool,
 }
 
 impl Generator for ConnectorAdapter {
@@ -338,7 +344,14 @@ impl Generator for ConnectorAdapter {
     fn placement_hint(&self) -> PlacementHint {
         self.hint
     }
-    fn generate(&self, params: &Params, ctx: &GenContext) -> Result<Vec<ShapePart>, ConnectorError> {
+    fn deprecated(&self) -> bool {
+        self.deprecated
+    }
+    fn generate(
+        &self,
+        params: &Params,
+        ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         Ok(self
             .inner
             .generate(params, ctx.run)?
@@ -372,14 +385,16 @@ fn builtin() -> &'static [&'static dyn Generator] {
             .into_iter()
             .map(|s| &*Box::leak(Box::new(ShapeAdapter(s))) as &'static dyn Generator)
             .collect();
-        all.extend(
-            crate::connectors::builtin_connectors()
-                .into_iter()
-                .map(|(inner, name, hint)| {
-                    &*Box::leak(Box::new(ConnectorAdapter { inner, name, hint }))
-                        as &'static dyn Generator
-                }),
-        );
+        all.extend(crate::connectors::builtin_connectors().into_iter().map(
+            |(inner, name, hint, deprecated)| {
+                &*Box::leak(Box::new(ConnectorAdapter {
+                    inner,
+                    name,
+                    hint,
+                    deprecated,
+                })) as &'static dyn Generator
+            },
+        ));
         all
     })
 }

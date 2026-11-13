@@ -283,8 +283,9 @@ impl std::fmt::Debug for Flow {
 
 impl Flow {
     pub fn kind(&self) -> &'static str {
-        self.kind
-            .unwrap_or(mf_parts::connectors::joint::JOINT_CONNECTORS[0])
+        self.kind.unwrap_or_else(|| {
+            offered_kinds().first().copied().unwrap_or("joint.dowel") // allow-swallow: the registry always has a cut-face connector; this only names one if a build had none
+        })
     }
 
     pub fn min_wall(&self) -> f64 {
@@ -318,27 +319,25 @@ impl Flow {
     }
 }
 
-/// A connector kind's name in the panel.
+/// The connector kinds Connect offers for a new placement: every
+/// cut-face generator in the registry that isn't kept only for old saves.
+pub fn offered_kinds() -> Vec<&'static str> {
+    mf_parts::cut_generators()
+        .into_iter()
+        .filter(|g| !g.deprecated())
+        .map(|g| g.id())
+        .collect()
+}
+
+/// A connector kind's name in the panel: its generator's own name.
 pub fn kind_label(id: &str) -> String {
-    match id {
-        "joint.dowel" => t!("connect.kind.dowel"),
-        "joint.peg" => t!("connect.kind.peg"),
-        "joint.dovetail" => t!("connect.kind.dovetail"),
-        "joint.magnet" => t!("connect.kind.magnet"),
-        _ => t!("connect.kind.insert"),
-    }
+    mf_parts::find_generator(id).map_or_else(|| id.to_owned(), |g| g.name().to_owned())
 }
 
 /// A connector kind's plural noun, lower case ("dowels", "pegs"): for a
 /// history row naming how many of one kind a step added (I5).
 pub fn kind_label_plural(id: &str) -> String {
-    match id {
-        "joint.dowel" => t!("connect.kind.dowel.plural"),
-        "joint.peg" => t!("connect.kind.peg.plural"),
-        "joint.dovetail" => t!("connect.kind.dovetail.plural"),
-        "joint.magnet" => t!("connect.kind.magnet.plural"),
-        _ => t!("connect.kind.insert.plural"),
-    }
+    format!("{}s", kind_label(id).to_lowercase())
 }
 
 /// Document units per millimetre.
@@ -487,7 +486,10 @@ pub fn open_joint(app: &mut MeshFixerApp, j: usize) {
 /// Indices after removing placement `removed`: itself gone, everything
 /// after it shifted down one (so `expanded_warnings` keeps naming the
 /// same connectors once one is deleted).
-fn reindex_after_removal(indices: &std::collections::HashSet<usize>, removed: usize) -> std::collections::HashSet<usize> {
+fn reindex_after_removal(
+    indices: &std::collections::HashSet<usize>,
+    removed: usize,
+) -> std::collections::HashSet<usize> {
     indices
         .iter()
         .filter(|&&i| i != removed)
@@ -1325,7 +1327,11 @@ pub(crate) fn view(app: &MeshFixerApp) -> Option<(mf_render::OrbitCamera, (f64, 
     Some((cam, (rect.width() as f64, rect.height() as f64)))
 }
 
-pub(crate) fn screen(cam: &mf_render::OrbitCamera, size: (f64, f64), p: DVec3) -> Option<(f64, f64)> {
+pub(crate) fn screen(
+    cam: &mf_render::OrbitCamera,
+    size: (f64, f64),
+    p: DVec3,
+) -> Option<(f64, f64)> {
     mf_render::screen_position(cam, cam.target, size, p.to_array())
 }
 

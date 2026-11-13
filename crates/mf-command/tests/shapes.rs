@@ -33,7 +33,7 @@ fn session(dir: &Path) -> (Session, ObjectId) {
 }
 
 fn record(id: &str, raw: &[(&str, &str)]) -> GeneratorRecord {
-    let shape = mf_parts::find_shape(id).unwrap();
+    let shape = mf_parts::find_generator(id).unwrap();
     let raw: BTreeMap<String, String> = raw
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
@@ -224,10 +224,7 @@ fn combine_bakes_a_shape_into_a_mesh() {
 fn a_group_is_regenerated_by_one_edit() {
     let dir = tempfile::tempdir().unwrap();
     let (mut s, base) = session(dir.path());
-    let peg = mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == "joint.peg")
-        .unwrap();
+    let peg = mf_parts::find_generator("joint.peg").unwrap();
     let params = peg.spec().validate(&BTreeMap::new()).unwrap();
     let member = |part: &str, params: &mf_spec::Params| GeneratorRecord {
         id: "joint.peg".into(),
@@ -329,10 +326,7 @@ fn a_linked_pair_moves_together_and_attaches_to_its_two_pieces() {
     let mut s = Session::new();
     let (ids, _) = s.import_model(read_model(&path).unwrap());
     let (bottom, top) = (ids[0], ids[1]);
-    let peg = mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == "joint.peg")
-        .unwrap();
+    let peg = mf_parts::find_generator("joint.peg").unwrap();
     let params = peg.spec().validate(&BTreeMap::new()).unwrap();
     let member = |part: &str| GeneratorRecord {
         id: "joint.peg".into(),

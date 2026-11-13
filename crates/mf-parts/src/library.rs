@@ -73,7 +73,9 @@ impl LibraryPart {
         match &self.source {
             Source::Builtin(b) => {
                 ctx.checkpoint()?;
-                Ok(b.mesh())
+                b.mesh().ok_or_else(|| {
+                    PartError::Invalid(format!("'{}' has no mesh of its own", self.manifest.id))
+                })
             }
             Source::User { dir, .. } => {
                 let path = dir.join(&self.manifest.mesh);
@@ -93,18 +95,17 @@ impl LibraryPart {
         params: &mf_spec::Params,
         ctx: &RunContext,
     ) -> Result<Mesh, PartError> {
-        let c = crate::connectors()
-            .into_iter()
-            .find(|c| c.id() == connector)
-            .ok_or_else(|| {
-                PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
-            })?;
-        let generated = c.generate(params, ctx).map_err(|e| match e {
-            crate::ConnectorError::Failed { message, .. } => PartError::Invalid(message),
+        let c = crate::find_generator(connector).ok_or_else(|| {
+            PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
         })?;
+        let generated = c
+            .generate(params, &crate::GenContext::new(ctx))
+            .map_err(|e| match e {
+                crate::ConnectorError::Failed { message, .. } => PartError::Invalid(message),
+            })?;
         let mut positions = Vec::new();
         let mut triangles = Vec::new();
-        for part in generated.parts {
+        for part in generated {
             let base = positions.len() as u32;
             let (p, t) = part.mesh.to_arrays();
             positions.extend(p);
@@ -122,12 +123,9 @@ impl LibraryPart {
         if let crate::manifest::PartKind::Connector { connector, params } = &self.manifest.kind {
             // A connector's identity is its recipe, not a stored mesh:
             // the id and its own version, plus the recorded params.
-            let c = crate::connectors()
-                .into_iter()
-                .find(|c| c.id() == connector)
-                .ok_or_else(|| {
-                    PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
-                })?;
+            let c = crate::find_generator(connector).ok_or_else(|| {
+                PartError::Invalid(format!("'{connector}' isn't a built-in connector"))
+            })?;
             h.update(b"mf-part-connector-v1\0");
             h.update(connector.as_bytes());
             h.update(&c.version().to_le_bytes());
@@ -318,7 +316,7 @@ pub fn save_connector_as_part(manifest: &PartManifest, dir: &Path) -> Result<Pat
             "save_connector_as_part needs a PartKind::Connector manifest".into(),
         ));
     };
-    if crate::connectors().into_iter().all(|c| c.id() != connector) {
+    if crate::find_generator(connector).is_none_or(|g| g.is_shape()) {
         return Err(PartError::Invalid(format!(
             "'{connector}' isn't a built-in connector"
         )));

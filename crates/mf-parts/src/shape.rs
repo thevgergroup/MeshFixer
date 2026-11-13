@@ -15,11 +15,9 @@
 //!   role, so a connector placed as a linked group of objects (a peg on
 //!   side A, its hole on side B; a hinge's two leaves and its pin) keeps
 //!   each member parametric, all regenerated together from one edit.
-//! - **The registry** is the built-ins ([`builtin_shapes`]) followed by
-//!   whatever a plugin registered ([`register_shape`]), looked up by id
-//!   ([`find_shape`]); the desktop exposes it through its shell.
-
-use std::sync::{OnceLock, RwLock};
+//! - **The registry** is the one generator registry
+//!   ([`crate::generators`], [`crate::find_generator`]): shapes and
+//!   connectors alike, the desktop exposing it through its shell.
 
 use mf_geometry::Mesh;
 use mf_runtime::RunContext;
@@ -66,8 +64,8 @@ pub enum ShapeRole {
     Hole,
 }
 
-/// A parametric shape generator. Built-ins are registered in
-/// [`builtin_shapes`]; a plugin adds its own with [`register_shape`].
+/// A parametric shape generator (the older one-mesh trait, seen by the
+/// registry through [`crate::generator::ShapeAdapter`]).
 pub trait Shape: Send + Sync {
     /// Stable id, namespaced (`"shape.box"`).
     fn id(&self) -> &'static str;
@@ -85,85 +83,28 @@ pub trait Shape: Send + Sync {
     fn generate(&self, params: &Params, ctx: &RunContext) -> Result<Mesh, ConnectorError>;
 }
 
-/// Why a shape couldn't be registered.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ShapeRegisterError {
-    #[error("a shape with the id '{0}' is already registered")]
-    DuplicateId(String),
-}
-
-fn extra() -> &'static RwLock<Vec<&'static dyn Shape>> {
-    static EXTRA: OnceLock<RwLock<Vec<&'static dyn Shape>>> = OnceLock::new();
-    EXTRA.get_or_init(|| RwLock::new(Vec::new()))
-}
-
-/// Adds a shape to the registry (a plugin's, MF-PLUG-001): the library
-/// lists it after the built-ins and `object.set_shape_params` finds it
-/// by id. Refuses an id already taken.
-pub fn register_shape(shape: &'static dyn Shape) -> Result<(), ShapeRegisterError> {
-    if find_shape(shape.id()).is_some() {
-        return Err(ShapeRegisterError::DuplicateId(shape.id().to_owned()));
-    }
-    extra()
-        .write()
-        .unwrap_or_else(|e| e.into_inner())
-        .push(shape);
-    Ok(())
-}
-
-/// Every shape: the built-ins, then the registered ones in order.
-pub fn shapes() -> Vec<&'static dyn Shape> {
-    let mut all = builtin_shapes();
-    all.extend(
-        extra()
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .iter()
-            .copied(),
-    );
-    all
-}
-
-pub fn find_shape(id: &str) -> Option<&'static dyn Shape> {
-    shapes().into_iter().find(|s| s.id() == id)
-}
-
-/// The record a new shape gets: `shape`'s own version and its spec's
-/// defaults, overridden by `raw` (validated, so an unknown name or an
-/// out-of-range value is refused by name).
+/// The record a new shape or connector gets: `g`'s own version and its
+/// spec's defaults, overridden by `raw` (upgraded from an older schema,
+/// then validated, so an unknown name or an out-of-range value is
+/// refused by name).
 pub fn new_record(
-    shape: &dyn Shape,
+    g: &dyn crate::Generator,
     raw: &std::collections::BTreeMap<String, String>,
 ) -> Result<GeneratorRecord, ConnectorError> {
-    let params = shape
-        .spec()
-        .validate(raw)
-        .map_err(|e| ConnectorError::Failed {
-            code: "invalid_parameter",
-            message: e.to_string(),
-        })?;
+    let params = crate::generator::validate_raw(g, raw.clone())?;
     Ok(GeneratorRecord {
-        id: shape.id().to_owned(),
-        version: shape.version(),
+        id: g.id().to_owned(),
+        version: g.version(),
         params,
         part: None,
     })
 }
 
-/// The spec a record's params are checked against (a shape's, or the
-/// connector's for a group member).
+/// The spec a record's params are checked against.
 pub fn record_spec(record: &GeneratorRecord) -> Result<&'static OperationSpec, ConnectorError> {
-    if record.part.is_some() {
-        let c = crate::connectors()
-            .into_iter()
-            .find(|c| c.id() == record.id)
-            .ok_or_else(|| unknown(&record.id))?;
-        Ok(c.spec())
-    } else {
-        Ok(find_shape(&record.id)
-            .ok_or_else(|| unknown(&record.id))?
-            .spec())
-    }
+    Ok(crate::find_generator(&record.id)
+        .ok_or_else(|| unknown(&record.id))?
+        .spec())
 }
 
 fn unknown(id: &str) -> ConnectorError {
@@ -187,38 +128,36 @@ fn version_mismatch(id: &str, recorded: u32, current: u32) -> ConnectorError {
 }
 
 /// The mesh `record` describes, built fresh (deterministic: the same
-/// record always gives the same mesh, so replay is Exact).
+/// record always gives the same mesh, so replay is Exact): its named part
+/// for a group member, a shape's one part otherwise.
 pub fn regenerate(record: &GeneratorRecord, ctx: &RunContext) -> Result<Mesh, ConnectorError> {
+    let g = crate::find_generator(&record.id).ok_or_else(|| unknown(&record.id))?;
+    if g.version() != record.version {
+        return Err(version_mismatch(&record.id, record.version, g.version()));
+    }
+    let parts = g.generate(&record.params, &crate::GenContext::new(ctx))?;
     match &record.part {
+        Some(role) => parts
+            .into_iter()
+            .find(|p| p.name == role)
+            .map(|p| p.mesh)
+            .ok_or_else(|| ConnectorError::Failed {
+                code: "unknown_part",
+                message: format!("'{}' has no part named '{role}'", record.id),
+            }),
         None => {
-            let shape = find_shape(&record.id).ok_or_else(|| unknown(&record.id))?;
-            if shape.version() != record.version {
-                return Err(version_mismatch(
-                    &record.id,
-                    record.version,
-                    shape.version(),
-                ));
-            }
-            shape.generate(&record.params, ctx)
-        }
-        Some(role) => {
-            let c = crate::connectors()
-                .into_iter()
-                .find(|c| c.id() == record.id)
-                .ok_or_else(|| unknown(&record.id))?;
-            if c.version() != record.version {
-                return Err(version_mismatch(&record.id, record.version, c.version()));
-            }
-            let parts = c.generate(&record.params, ctx)?;
-            parts
-                .parts
-                .into_iter()
-                .find(|p| p.role == role)
-                .map(|p| p.mesh)
-                .ok_or_else(|| ConnectorError::Failed {
+            let n = parts.len();
+            let mut parts = parts.into_iter();
+            match (parts.next(), n) {
+                (Some(p), 1) => Ok(p.mesh),
+                _ => Err(ConnectorError::Failed {
                     code: "unknown_part",
-                    message: format!("'{}' has no part named '{role}'", record.id),
-                })
+                    message: format!(
+                        "'{}' makes {n} parts; the recipe must name which one this is",
+                        record.id
+                    ),
+                }),
+            }
         }
     }
 }
@@ -379,16 +318,15 @@ pub fn part_of(
     ctx: &RunContext,
 ) -> Option<(crate::Side, crate::JoinKind)> {
     let role = record.part.as_deref()?;
-    let c = crate::connectors()
-        .into_iter()
-        .find(|c| c.id() == record.id)?;
+    let g = crate::find_generator(&record.id)?;
     // allow-swallow: a part that no longer generates simply has no side; regenerating it reports why
-    let parts = c.generate(&record.params, ctx).ok()?;
+    let parts = g
+        .generate(&record.params, &crate::GenContext::new(ctx))
+        .ok()?;
     parts
-        .parts
         .iter()
-        .find(|p| p.role == role)
-        .map(|p| (p.side, p.join))
+        .find(|p| p.name == role)
+        .map(|p| (p.attach_to, p.join()))
 }
 
 /// True if `record`'s params carry a hole profile (`hole_profile`,

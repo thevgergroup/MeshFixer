@@ -15,10 +15,7 @@ use mf_parts::{Connector, Side};
 use mf_runtime::RunContext;
 
 fn hinge() -> &'static dyn Connector {
-    mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == "hinge.leaf")
-        .unwrap()
+    &mf_parts::connectors::leaf_hinge::LeafHinge
 }
 
 fn params(raw: &[(&str, &str)]) -> mf_spec::Params {

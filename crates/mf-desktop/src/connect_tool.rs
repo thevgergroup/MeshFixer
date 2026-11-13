@@ -405,11 +405,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     // edits and replays it unchanged — only *new* placements through
     // this picker can no longer be a dovetail).
     section(ui, &t!("connect.section.kind"));
-    let kinds: Vec<&'static str> = mf_parts::connectors::joint::JOINT_CONNECTORS
-        .iter()
-        .copied()
-        .filter(|k| *k != "joint.dovetail")
-        .collect();
+    let kinds = split_flow::offered_kinds();
     let labels: Vec<String> = kinds.iter().map(|k| split_flow::kind_label(k)).collect();
     let options: Vec<(&str, &str, bool)> = labels
         .iter()
@@ -418,7 +414,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let current = kinds
         .iter()
         .position(|k| *k == app.split_flow.kind())
-        .unwrap_or(0); // allow-swallow: kind is always one of JOINT_CONNECTORS, minus the dovetail
+        .unwrap_or(0); // allow-swallow: kind is always one of the offered kinds
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.split_flow.kind = Some(kinds[i]);
     }

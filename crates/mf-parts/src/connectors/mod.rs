@@ -1,6 +1,6 @@
 //! Built-in connectors (Phase 1 Tasks 25-28, MF-MODEL-005): generated in
 //! code like the parts library's built-ins (D16), registered in
-//! [`crate::connectors()`]. The plugin host adds to the same registry
+//! the one generator registry ([`crate::generators`]). The plugin host adds to the same registry
 //! (MF-PLUG-001).
 
 pub mod clasp;
@@ -17,42 +17,24 @@ use mf_geometry::Mesh;
 use crate::connector::Connector;
 use crate::generator::PlacementHint;
 
-/// Every built-in connector with its library name and where it's
-/// offered, in registry order (the library lists its `Surface` ones in
+/// Every built-in connector with its library name, where it's offered
+/// and whether it's deprecated (kept for old saves only), in registry order (the library lists its `Surface` ones in
 /// this order; Connect its cut-face ones).
-pub(crate) fn builtin_connectors() -> Vec<(&'static dyn Connector, &'static str, PlacementHint)> {
+pub(crate) fn builtin_connectors()
+-> Vec<(&'static dyn Connector, &'static str, PlacementHint, bool)> {
     use PlacementHint::*;
     vec![
-        (&hinge::PinHinge, "Knuckle hinge", Manual),
-        (&leaf_hinge::LeafHinge, "Pin hinge", Surface),
-        (&flap::FlapHinge, "Flap hinge", Surface),
-        (&clasp::SnapClasp, "Snap clasp", Surface),
-        (&thread::Thread, "Thread", Surface),
-        (&dovetail_slide::DovetailSlide, "Dovetail", Surface),
-        (&joint::Dowel, "Dowel", Point),
-        (&joint::Peg, "Peg", Point),
-        (&joint::Dovetail, "Dovetail", DragLine),
-        (&joint::Magnet, "Magnet", Point),
-        (&joint::Insert, "Insert", Point),
-    ]
-}
-
-/// Every built-in connector. The plugin host appends to a copy of this
-/// (or its own registry chained after it); nothing here assumes it's the
-/// only source.
-pub fn connectors() -> Vec<&'static dyn Connector> {
-    vec![
-        &hinge::PinHinge,
-        &leaf_hinge::LeafHinge,
-        &clasp::SnapClasp,
-        &flap::FlapHinge,
-        &thread::Thread,
-        &joint::Dowel,
-        &joint::Peg,
-        &joint::Dovetail,
-        &joint::Magnet,
-        &joint::Insert,
-        &dovetail_slide::DovetailSlide,
+        (&hinge::PinHinge, "Knuckle hinge", Manual, false),
+        (&leaf_hinge::LeafHinge, "Pin hinge", Surface, false),
+        (&flap::FlapHinge, "Flap hinge", Surface, false),
+        (&clasp::SnapClasp, "Snap clasp", Surface, false),
+        (&thread::Thread, "Thread", Surface, false),
+        (&dovetail_slide::DovetailSlide, "Dovetail", Surface, false),
+        (&joint::Dowel, "Dowel", Point, false),
+        (&joint::Peg, "Peg", Point, false),
+        (&joint::Dovetail, "Dovetail", DragLine, true),
+        (&joint::Magnet, "Magnet", Point, false),
+        (&joint::Insert, "Insert", Point, false),
     ]
 }
 

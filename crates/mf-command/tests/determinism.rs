@@ -67,10 +67,10 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                 let shape = mf_operations::shapes::ShapeToAdd {
                     generator: mf_parts::GeneratorRecord {
                         id: "shape.box".to_owned(),
-                        version: mf_parts::find_shape("shape.box")
+                        version: mf_parts::find_generator("shape.box")
                             .expect("the Box shape is a built-in")
                             .version(),
-                        params: mf_parts::find_shape("shape.box")
+                        params: mf_parts::find_generator("shape.box")
                             .expect("the Box shape is a built-in")
                             .spec()
                             .validate(&BTreeMap::new())
@@ -96,10 +96,10 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                 // regenerate step has a matching recipe to replay).
                 let record = mf_parts::GeneratorRecord {
                     id: "shape.box".to_owned(),
-                    version: mf_parts::find_shape("shape.box")
+                    version: mf_parts::find_generator("shape.box")
                         .expect("the Box shape is a built-in")
                         .version(),
-                    params: mf_parts::find_shape("shape.box")
+                    params: mf_parts::find_generator("shape.box")
                         .expect("the Box shape is a built-in")
                         .spec()
                         .validate(&BTreeMap::new())

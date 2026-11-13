@@ -234,9 +234,7 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
         .cloned()
         .unwrap_or_else(MachineProfile::uncalibrated);
     let gap = mf_parts::resolve(&class, &machine, Compensation::None).max(0.0);
-    let spec = mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == id)
+    let spec = mf_parts::find_generator(id)
         .map(|c| c.spec())
         .ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
     let mut raw: BTreeMap<String, String> = BTreeMap::new();
@@ -361,33 +359,30 @@ pub(crate) fn group_members(
     transform: &[f64; 12],
     attach: Option<(ObjectId, ObjectId)>,
 ) -> Result<Vec<mf_operations::shapes::ShapeToAdd>, String> {
-    let connector = mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == id)
-        .ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
+    let connector =
+        mf_parts::find_generator(id).ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
     let raw: BTreeMap<String, mf_spec::ParamValue> =
         serde_json::from_str(params_json).map_err(|e| format!("its parameters: {e}"))?;
     let params = mf_spec::Params(raw);
     let ctx = mf_runtime::RunContext::none();
     let parts = connector
-        .generate(&params, &ctx)
+        .generate(&params, &mf_parts::GenContext::new(&ctx))
         .map_err(|e| e.to_string())?;
     let rotation = crate::shape_panel::rotation(transform);
     Ok(parts
-        .parts
         .iter()
         .map(|p| {
             let record = mf_parts::GeneratorRecord {
                 id: id.to_owned(),
                 version: connector.version(),
                 params: params.clone(),
-                part: Some(p.role.to_owned()),
+                part: Some(p.name.to_owned()),
             };
             mf_operations::shapes::ShapeToAdd {
                 generator: mf_parts::shape::orient_hole(&record, rotation),
-                name: format!("{name} ({})", p.role.replace('_', " ")),
-                hole: p.join == mf_parts::JoinKind::Subtract,
-                attach_to: attach.and_then(|(a, b)| match p.side {
+                name: format!("{name} ({})", p.name.replace('_', " ")),
+                hole: p.role == mf_parts::ShapeRole::Hole,
+                attach_to: attach.and_then(|(a, b)| match p.attach_to {
                     mf_parts::Side::A => Some(a.0),
                     mf_parts::Side::B => Some(b.0),
                     mf_parts::Side::Neither => None,
@@ -630,7 +625,7 @@ enum MatingPair {
 }
 
 fn mating_pair(id: &str, params_json: &str, ctx: &mf_runtime::RunContext) -> MatingPair {
-    let Some(connector) = mf_parts::connectors().into_iter().find(|c| c.id() == id) else {
+    let Some(connector) = mf_parts::find_generator(id) else {
         return MatingPair::Failed(format!("'{id}' isn't a built-in connector"));
     };
     let raw: BTreeMap<String, mf_spec::ParamValue> = match serde_json::from_str(params_json) {
@@ -638,14 +633,14 @@ fn mating_pair(id: &str, params_json: &str, ctx: &mf_runtime::RunContext) -> Mat
         Err(e) => return MatingPair::Failed(format!("its recorded parameters: {e}")),
     };
     let params = mf_spec::Params(raw);
-    let generated = match connector.generate(&params, ctx) {
+    let generated = match connector.generate(&params, &mf_parts::GenContext::new(ctx)) {
         Ok(g) => g,
         Err(mf_parts::ConnectorError::Failed { message, .. }) => {
             return MatingPair::Failed(message);
         }
     };
-    let a = generated.parts.iter().find(|p| p.side == mf_parts::Side::A);
-    let b = generated.parts.iter().find(|p| p.side == mf_parts::Side::B);
+    let a = generated.iter().find(|p| p.attach_to == mf_parts::Side::A);
+    let b = generated.iter().find(|p| p.attach_to == mf_parts::Side::B);
     match (a, b) {
         (Some(a), Some(b)) => MatingPair::Found(a.mesh.clone(), b.mesh.clone()),
         _ => MatingPair::NotApplicable,

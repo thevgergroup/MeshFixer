@@ -8,7 +8,10 @@
 use std::collections::BTreeMap;
 
 use mf_geometry::{Bvh, FaceId, Mesh};
-use mf_parts::{GeneratorRecord, Shape, ShapeRole, find_shape, new_record, regenerate, shapes};
+use mf_parts::{
+    GenContext, Generator, GeneratorRecord, ShapePart, ShapeRole, TargetSlot, find_generator,
+    generators, new_record, regenerate,
+};
 use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 
@@ -22,7 +25,7 @@ fn assert_closed_solid(mesh: &Mesh, label: &str) {
 }
 
 fn defaults(id: &str) -> GeneratorRecord {
-    new_record(find_shape(id).unwrap(), &BTreeMap::new()).unwrap()
+    new_record(find_generator(id).unwrap(), &BTreeMap::new()).unwrap()
 }
 
 fn with(id: &str, raw: &[(&str, &str)]) -> GeneratorRecord {
@@ -30,7 +33,7 @@ fn with(id: &str, raw: &[(&str, &str)]) -> GeneratorRecord {
         .iter()
         .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
         .collect();
-    new_record(find_shape(id).unwrap(), &raw).unwrap()
+    new_record(find_generator(id).unwrap(), &raw).unwrap()
 }
 
 const LIBRARY: &[&str] = &[
@@ -73,7 +76,7 @@ fn every_library_shape_is_a_closed_solid_from_its_defaults() {
 fn solids_sit_on_the_plate_and_holes_reach_down_from_it() {
     let ctx = RunContext::none();
     for id in LIBRARY {
-        let shape = find_shape(id).unwrap();
+        let shape = find_generator(id).unwrap();
         let bb = regenerate(&defaults(id), &ctx)
             .unwrap()
             .bounding_box()
@@ -170,7 +173,7 @@ fn wedge_spec() -> &'static OperationSpec {
     })
 }
 
-impl Shape for Wedge {
+impl Generator for Wedge {
     fn id(&self) -> &'static str {
         "test.wedge"
     }
@@ -183,26 +186,41 @@ impl Shape for Wedge {
     fn spec(&self) -> &'static OperationSpec {
         wedge_spec()
     }
-    fn generate(&self, params: &Params, _: &RunContext) -> Result<Mesh, mf_parts::ConnectorError> {
+    fn is_shape(&self) -> bool {
+        true
+    }
+    fn generate(
+        &self,
+        params: &Params,
+        _: &GenContext,
+    ) -> Result<Vec<ShapePart>, mf_parts::ConnectorError> {
         let s = params.get_float("size").unwrap();
-        Ok(Mesh::new(
-            vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
-            vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
-        )
-        .unwrap())
+        Ok(vec![ShapePart::new(
+            "shape",
+            ShapeRole::Solid,
+            TargetSlot::Neither,
+            Mesh::new(
+                vec![[0.0, 0.0, 0.0], [s, 0.0, 0.0], [0.0, s, 0.0], [0.0, 0.0, s]],
+                vec![[0, 2, 1], [0, 1, 3], [0, 3, 2], [1, 2, 3]],
+            )
+            .unwrap(),
+        )])
     }
 }
 
 #[test]
 fn a_registered_shape_joins_the_registry_once() {
     static WEDGE: Wedge = Wedge;
-    mf_parts::register_shape(&WEDGE).unwrap();
-    assert!(shapes().iter().any(|s| s.id() == "test.wedge"));
+    mf_parts::register_generator(&WEDGE).unwrap();
+    assert!(generators().iter().any(|s| s.id() == "test.wedge"));
     let mesh = regenerate(&defaults("test.wedge"), &RunContext::none()).unwrap();
     assert_closed_solid(&mesh, "wedge");
-    assert!(mf_parts::register_shape(&WEDGE).is_err(), "ids are unique");
+    assert!(
+        mf_parts::register_generator(&WEDGE).is_err(),
+        "ids are unique"
+    );
     // Built-ins come first, in library order.
-    let ids: Vec<&str> = shapes().iter().map(|s| s.id()).collect();
+    let ids: Vec<&str> = generators().iter().map(|s| s.id()).collect();
     assert_eq!(&ids[..LIBRARY.len()], LIBRARY);
 }
 
@@ -261,18 +279,15 @@ fn auto_hole_profiles_follow_the_placement_and_are_recorded() {
 #[test]
 fn joint_connector_holes_take_the_hole_profile() {
     let ctx = RunContext::none();
-    let dowel = mf_parts::connectors()
-        .into_iter()
-        .find(|c| c.id() == "joint.dowel")
-        .unwrap();
+    let dowel = find_generator("joint.dowel").unwrap();
     let hole = |raw: &[(&str, &str)]| {
         let raw = raw
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
         let params = dowel.spec().validate(&raw).unwrap();
-        let parts = dowel.generate(&params, &ctx).unwrap();
-        let mesh = &parts.parts.iter().find(|p| p.role == "hole").unwrap().mesh;
+        let parts = dowel.generate(&params, &GenContext::new(&ctx)).unwrap();
+        let mesh = &parts.iter().find(|p| p.name == "hole").unwrap().mesh;
         mesh.bounding_box().unwrap()
     };
     let round = hole(&[]);

@@ -4,7 +4,6 @@
 
 use mf_geometry::Mesh;
 
-use crate::connector::Connector;
 use crate::manifest::{Attach, PartKind, PartManifest};
 
 /// Segments around every round built-in.
@@ -163,12 +162,15 @@ pub struct Builtin {
     pub manifest: PartManifest,
     /// Its generator parameters, part of its hash.
     pub params: String,
-    make: fn() -> Mesh,
+    /// `None` for a connector entry, whose parts come from its generator
+    /// (`PartKind::Connector`), never a fixed mesh.
+    make: Option<fn() -> Mesh>,
 }
 
 impl Builtin {
-    pub fn mesh(&self) -> Mesh {
-        (self.make)()
+    /// The built-in's fixed mesh (`None` for a connector entry).
+    pub fn mesh(&self) -> Option<Mesh> {
+        self.make.map(|m| m())
     }
 }
 
@@ -190,35 +192,27 @@ fn manifest(id: &str, name: &str, kind: PartKind) -> PartManifest {
     }
 }
 
-/// A connector as a library entry (Task 29, MF-MODEL-005): its
-/// `PartKind::Connector` is checked first by both
-/// [`crate::LibraryPart::mesh`] and `content_hash`, so `make` here is
-/// never called (there's no plain generator for a connector; it's
-/// regenerated from `connector::generate` with its own recorded
-/// `connector`/`params`, which is how `connector.join` tells its parts
-/// apart later). `params_text` is the spec's own defaults, as
-/// `mf_spec::Params` would serialize them, so a dragged connector's
-/// preview mesh matches what placing it will actually create.
-fn connector_builtin(c: &'static dyn Connector, name: &str) -> Builtin {
-    let params = c
+/// A connector as a library entry (Task 29, MF-MODEL-005): derived from
+/// the generator registry (every connector offered on a surface), never
+/// listed by hand. Its `PartKind::Connector` recipe is the spec's own
+/// defaults, so a dragged connector's preview matches what placing it
+/// creates; its parts are regenerated from that recipe.
+fn connector_builtin(g: &'static dyn crate::Generator) -> Builtin {
+    let params = g
         .spec()
         .validate(&std::collections::BTreeMap::new())
         .expect("a connector's own spec validates its own defaults");
     Builtin {
         manifest: manifest(
-            c.id(),
-            name,
+            g.id(),
+            g.name(),
             PartKind::Connector {
-                connector: c.id().into(),
+                connector: g.id().into(),
                 params,
             },
         ),
         params: String::new(),
-        make: || {
-            unreachable!(
-                "a connector library entry's mesh comes from PartKind::Connector, never Builtin::make"
-            )
-        },
+        make: None,
     }
 }
 
@@ -227,56 +221,62 @@ fn connector_builtin(c: &'static dyn Connector, name: &str) -> Builtin {
 /// lines up with the target surface's outward normal ([`crate::place`]).
 pub fn builtins() -> Vec<Builtin> {
     use std::f64::consts::FRAC_PI_2;
-    vec![
+    let mut all = vec![
         Builtin {
             manifest: manifest("sphere", "Sphere", PartKind::Solid),
             params: "r=5".into(),
-            make: || sphere(5.0),
+            make: Some(|| sphere(5.0)),
         },
         Builtin {
             manifest: manifest("cylinder", "Cylinder", PartKind::Solid),
             params: "r=5,h=10".into(),
-            make: || {
+            make: Some(|| {
                 revolve(
                     &[(0.0, 0.0), (5.0, 0.0), (5.0, 10.0), (0.0, 10.0)],
                     SEGMENTS,
                 )
-            },
+            }),
         },
         Builtin {
             manifest: manifest("cone", "Cone", PartKind::Solid),
             params: "r=5,h=10".into(),
-            make: || revolve(&[(0.0, 0.0), (5.0, 0.0), (0.0, 10.0)], SEGMENTS),
+            make: Some(|| revolve(&[(0.0, 0.0), (5.0, 0.0), (0.0, 10.0)], SEGMENTS)),
         },
         Builtin {
             manifest: manifest("box", "Box", PartKind::Solid),
             params: "size=10,n=4".into(),
-            make: || rounded_box([10.0; 3], 0.0, 4),
+            make: Some(|| rounded_box([10.0; 3], 0.0, 4)),
         },
         Builtin {
             manifest: manifest("rounded-box", "Rounded box", PartKind::Solid),
             params: "size=10,round=2,n=12".into(),
-            make: || rounded_box([10.0; 3], 2.0, 12),
+            make: Some(|| rounded_box([10.0; 3], 2.0, 12)),
         },
         Builtin {
             manifest: manifest("torus", "Torus", PartKind::Solid),
             params: "R=6,r=2".into(),
-            make: || torus(6.0, 2.0),
+            make: Some(|| torus(6.0, 2.0)),
         },
         Builtin {
             manifest: manifest("capsule", "Capsule", PartKind::Solid),
             params: "r=4,h=8".into(),
-            make: || capsule(4.0, 8.0),
+            make: Some(|| capsule(4.0, 8.0)),
         },
         Builtin {
             manifest: manifest("hemisphere-stamp", "Hemisphere stamp", PartKind::Open),
             params: "r=5".into(),
-            make: || revolve(&arc(5.0, 0.0, 0.0, FRAC_PI_2, 12), SEGMENTS),
+            make: Some(|| revolve(&arc(5.0, 0.0, 0.0, FRAC_PI_2, 12), SEGMENTS)),
         },
-        connector_builtin(&crate::connectors::leaf_hinge::LeafHinge, "Pin hinge"),
-        connector_builtin(&crate::connectors::flap::FlapHinge, "Flap hinge"),
-        connector_builtin(&crate::connectors::clasp::SnapClasp, "Snap clasp"),
-        connector_builtin(&crate::connectors::thread::Thread, "Thread"),
-        connector_builtin(&crate::connectors::dovetail_slide::DovetailSlide, "Dovetail"),
-    ]
+    ];
+    all.extend(
+        crate::generators()
+            .into_iter()
+            .filter(|g| {
+                !g.is_shape()
+                    && !g.deprecated()
+                    && g.placement_hint() == crate::PlacementHint::Surface
+            })
+            .map(connector_builtin),
+    );
+    all
 }

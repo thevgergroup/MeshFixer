@@ -384,13 +384,17 @@ impl Shell {
         Ok(())
     }
 
-    /// Adds a parametric shape to the library (parametric-shapes brief,
-    /// "Registry"): the Parts library lists it after the built-ins, and
-    /// `object.set_shape_params` regenerates it by id. Refuses an id
-    /// that's already a shape.
-    pub fn register_shape(&self, shape: &'static dyn mf_parts::Shape) -> Result<(), RegisterError> {
-        mf_parts::register_shape(shape).map_err(|e| match e {
-            mf_parts::ShapeRegisterError::DuplicateId(id) => RegisterError::DuplicateId(id),
+    /// Adds a generator (a shape or a connector) to the one registry
+    /// (parametric-shapes brief, "Registry"): the Parts library lists a
+    /// shape after the built-ins, Connect offers a cut-face connector,
+    /// and `object.set_shape_params` regenerates either by id. Refuses an
+    /// id that's already registered.
+    pub fn register_generator(
+        &self,
+        generator: &'static dyn mf_parts::Generator,
+    ) -> Result<(), RegisterError> {
+        mf_parts::register_generator(generator).map_err(|e| match e {
+            mf_parts::GeneratorRegisterError::DuplicateId(id) => RegisterError::DuplicateId(id),
         })
     }
 

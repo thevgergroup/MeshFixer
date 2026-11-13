@@ -211,7 +211,7 @@ const SUPERSEDED: &[&str] = &[
 /// resolved for `transform`.
 pub(crate) fn shape_record(
     app: &MeshFixerApp,
-    shape: &dyn mf_parts::Shape,
+    shape: &dyn mf_parts::Generator,
     transform: &[f64; 12],
 ) -> Result<mf_parts::GeneratorRecord, String> {
     let mut raw = BTreeMap::new();
@@ -240,7 +240,7 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
     let Some(transform) = drop_point(app, scan) else {
         return;
     };
-    let Some(shape) = mf_parts::find_shape(id) else {
+    let Some(shape) = mf_parts::find_generator(id).filter(|g| g.is_shape()) else {
         return;
     };
     let record = match shape_record(app, shape, &transform) {
@@ -305,8 +305,9 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     );
     ui.add_space(theme::SPACE_XS);
     let query = app.parts.search.to_lowercase();
-    let shapes: Vec<(&'static str, &'static str, bool)> = mf_parts::shapes()
+    let shapes: Vec<(&'static str, &'static str, bool)> = mf_parts::generators()
         .into_iter()
+        .filter(|g| g.is_shape())
         .filter(|s| query.is_empty() || s.name().to_lowercase().contains(&query))
         .map(|s| (s.id(), s.name(), s.role() == mf_parts::ShapeRole::Hole))
         .collect();

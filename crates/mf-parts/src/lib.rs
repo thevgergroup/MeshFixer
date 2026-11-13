@@ -25,17 +25,16 @@ pub use builtin::builtins;
 pub use connector::{
     Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, RoleFaceRange, Side,
 };
-pub use connectors::connectors;
 pub use fit::{
     BUILTIN_NAME, Compensation, FIT_PROFILES_FILE, FitClass, FitClasses, FitError, FitProfile,
     FitProfiles, fill_fit_role_params, resolve,
 };
 pub use fit_check::{FitCheck, FitExpectation, MatingSurfaces, check_fit};
 pub use frame::{SurfaceFrame, place};
+pub use generator::RegisterError as GeneratorRegisterError;
 pub use generator::{
     Anchor, FitProbe, Fix, GenCheck, GenContext, Generator, Handles, ParamPatch, PlacementHint,
-    ShapePart, TargetSlot, Targets, cut_generators, find_generator, generators,
-    register_generator,
+    ShapePart, TargetSlot, Targets, cut_generators, find_generator, generators, register_generator,
 };
 pub use library::{
     Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_connector_as_part,
@@ -47,6 +46,5 @@ pub use machine::{
 };
 pub use manifest::{Attach, PartKind, PartManifest};
 pub use shape::{
-    GeneratorRecord, Shape, ShapeRegisterError, ShapeRole, builtin_shapes, find_shape, new_record,
-    record_spec, regenerate, register_shape, shapes,
+    GeneratorRecord, Shape, ShapeRole, builtin_shapes, new_record, record_spec, regenerate,
 };

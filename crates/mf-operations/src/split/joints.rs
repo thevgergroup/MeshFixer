@@ -34,8 +34,8 @@ use std::collections::{BTreeMap, HashMap};
 use glam::{DMat3, DMat4, DVec3};
 use mf_geometry::{Bvh, FaceId, Mesh, Provenance, Sources};
 use mf_parts::{
-    Compensation, ConnectorPart, FitClass, FitExpectation, JoinKind, MachineProfile,
-    MatingSurfaces, Side, check_fit,
+    Compensation, FitClass, FitExpectation, Generator, JoinKind, MachineProfile, MatingSurfaces,
+    ShapePart, Side, check_fit,
 };
 use mf_spec::Params;
 use serde::{Deserialize, Serialize};
@@ -164,8 +164,8 @@ impl Placement {
     }
 }
 
-fn find_connector(id: &str) -> Option<&'static dyn mf_parts::Connector> {
-    mf_parts::connectors().into_iter().find(|c| c.id() == id)
+fn find_connector(id: &str) -> Option<&'static dyn Generator> {
+    mf_parts::find_generator(id)
 }
 
 /// The hole profile choices, by the code a [`Placement`] records them as
@@ -176,7 +176,7 @@ pub const HOLE_PROFILES: [&str; 4] = ["auto", "round", "teardrop", "flat_top"];
 /// defaults for anything not set), with the joint's gap (`gap_mm`).
 pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
     let connector = find_connector(&p.connector)
-        .filter(|_| mf_parts::connectors::joint::JOINT_CONNECTORS.contains(&p.connector.as_str()))
+        .filter(|g| g.placement_hint().on_cut())
         .ok_or_else(|| {
             failed(
                 "unknown_connector",
@@ -685,7 +685,7 @@ pub fn footprint_2d(p: &Placement, params: &Params, mm: f64) -> Result<Vec<[f64;
         .collect())
 }
 
-fn generated(p: &Placement, params: &Params) -> Result<Vec<ConnectorPart>, OpError> {
+fn generated(p: &Placement, params: &Params) -> Result<Vec<ShapePart>, OpError> {
     let connector = find_connector(&p.connector).ok_or_else(|| {
         failed(
             "unknown_connector",
@@ -693,8 +693,7 @@ fn generated(p: &Placement, params: &Params) -> Result<Vec<ConnectorPart>, OpErr
         )
     })?;
     connector
-        .generate(params, &RunContext::none())
-        .map(|g| g.parts)
+        .generate(params, &mf_parts::GenContext::new(&RunContext::none()))
         .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))
 }
 
@@ -722,9 +721,9 @@ pub fn placed_parts(
     Ok(generated(p, &params)?
         .into_iter()
         .map(|part| PlacedPart {
-            role: part.role,
-            side: part_side(p, part.side),
-            join: part.join,
+            role: part.name,
+            side: part_side(p, part.attach_to),
+            join: part.join(),
             world: transformed(&part.mesh, &to_world),
             local: part.mesh,
         })

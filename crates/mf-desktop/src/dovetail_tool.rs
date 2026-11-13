@@ -109,7 +109,11 @@ fn dovetail_tail(
 /// groove's, the same `length`) new recipe.
 pub fn reextend(app: &MeshFixerApp, id: ObjectId) -> Option<(ObjectId, GeneratorRecord)> {
     let (tail_id, record, target) = dovetail_tail(app, id)?;
-    if !record.params.get_bool("extend_through_edge").unwrap_or(true) {
+    if !record
+        .params
+        .get_bool("extend_through_edge")
+        .unwrap_or(true)
+    {
         return None;
     }
     let (lo, hi) = target_span_local(app, tail_id, target)?;
@@ -146,12 +150,7 @@ pub fn warning_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: ObjectId) 
     if ends_inside(app, id) != Some(true) {
         return;
     }
-    widgets::chip(
-        ui,
-        icons::WARNING,
-        theme::HOLE,
-        &t!("dovetail.ends_inside"),
-    );
+    widgets::chip(ui, icons::WARNING, theme::HOLE, &t!("dovetail.ends_inside"));
     if ui
         .add_enabled_ui(app.busy.is_none(), |ui| {
             widgets::wide_button(ui, Kind::Secondary, None, &t!("dovetail.ends_inside.fix"))
@@ -159,11 +158,7 @@ pub fn warning_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: ObjectId) 
         .inner
         .clicked()
     {
-        crate::shape_panel::set_param(
-            app,
-            "extend_through_edge",
-            mf_spec::ParamValue::Bool(true),
-        );
+        crate::shape_panel::set_param(app, "extend_through_edge", mf_spec::ParamValue::Bool(true));
     }
 }
 
@@ -195,7 +190,7 @@ pub fn place_dovetail(
         Ok(f) => f,
         Err(e) => return refuse(app, "fit_settings_unreadable", e),
     };
-    let Some(connector) = mf_parts::connectors().into_iter().find(|c| c.id() == DOVETAIL) else {
+    let Some(connector) = mf_parts::find_generator(DOVETAIL) else {
         return;
     };
     let raw = BTreeMap::from([

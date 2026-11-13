@@ -35,15 +35,6 @@ use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts,
 /// alignment dovetail's, D12).
 pub const DOVETAIL_ANGLE_DEGREES: f64 = 15.0;
 
-/// Every joint connector's id, in the order the Split panel offers them.
-pub const JOINT_CONNECTORS: &[&str] = &[
-    "joint.dowel",
-    "joint.peg",
-    "joint.dovetail",
-    "joint.magnet",
-    "joint.insert",
-];
-
 fn refuse(code: &'static str, message: impl Into<String>) -> ConnectorError {
     ConnectorError::Failed {
         code,

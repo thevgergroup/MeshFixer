@@ -175,7 +175,7 @@ pub fn place_hinge(app: &mut MeshFixerApp, a: ObjectId, b: ObjectId, edge: &Hing
             return refuse(app, "fit_settings_unreadable", e);
         }
     };
-    let Some(connector) = mf_parts::connectors().into_iter().find(|c| c.id() == HINGE) else {
+    let Some(connector) = mf_parts::find_generator(HINGE) else {
         return;
     };
     let length = (edge.length * 0.8).clamp(4.0, 30.0);

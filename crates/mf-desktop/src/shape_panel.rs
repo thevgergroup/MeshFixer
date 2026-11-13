@@ -125,17 +125,7 @@ pub fn attach_sides(app: &MeshFixerApp, id: ObjectId) -> Option<(String, ObjectI
 /// The display name of a recipe's generator: the shape's own, or the
 /// connector's library name for a group member.
 pub fn generator_name(record: &GeneratorRecord) -> String {
-    if record.id.starts_with("joint.") {
-        return crate::split_flow::kind_label(&record.id);
-    }
-    if record.part.is_some() {
-        let lib = mf_parts::Library::load(None, &mf_runtime::RunContext::none()).0;
-        return lib
-            .get(&record.id)
-            .map(|p| p.manifest.name.clone())
-            .unwrap_or_else(|| record.id.clone());
-    }
-    mf_parts::find_shape(&record.id).map_or_else(|| record.id.clone(), |s| s.name().to_owned())
+    mf_parts::find_generator(&record.id).map_or_else(|| record.id.clone(), |g| g.name().to_owned())
 }
 
 /// "corner_radius" as "Corner radius".
@@ -399,7 +389,9 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
                     continue;
                 }
                 let mut params = record.params.clone();
-                params.0.insert("length".into(), mf_spec::ParamValue::Float(length));
+                params
+                    .0
+                    .insert("length".into(), mf_spec::ParamValue::Float(length));
                 stale.push((member, GeneratorRecord { params, ..record }));
             }
         }

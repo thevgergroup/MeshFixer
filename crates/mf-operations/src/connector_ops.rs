@@ -21,7 +21,7 @@
 use glam::DMat4;
 use mf_boolean::{BoolOp, BooleanError, operand_in_frame};
 use mf_geometry::{Bvh, Mesh, Provenance, Sources};
-use mf_parts::{Connector, ConnectorPart, JoinKind, Side};
+use mf_parts::{Generator, JoinKind, Side};
 use mf_spec::Params;
 
 use crate::{
@@ -41,8 +41,8 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
 /// The built-in connector named `id` (the plugin host will chain its own
 /// registry after this, MF-PLUG-001; `connector.join` only needs the
 /// built-ins for now).
-fn find_connector(id: &str) -> Option<&'static dyn Connector> {
-    mf_parts::connectors().into_iter().find(|c| c.id() == id)
+fn find_connector(id: &str) -> Option<&'static dyn Generator> {
+    mf_parts::find_generator(id).filter(|g| !g.is_shape())
 }
 
 /// `mesh op tool`, `tool` already in `mesh`'s frame.
@@ -121,7 +121,7 @@ impl Operation for ConnectorJoin {
         let gap = params.get_float("gap")?;
 
         let generated = connector
-            .generate(&connector_params, ctx)
+            .generate(&connector_params, &mf_parts::GenContext::new(ctx))
             .map_err(|e| match e {
                 mf_parts::ConnectorError::Failed { code, message } => failed(code, message),
             })?;
@@ -132,14 +132,10 @@ impl Operation for ConnectorJoin {
         let mut prov_b = Provenance::default();
         let mut created = Vec::new();
 
-        for ConnectorPart {
-            role,
-            mesh,
-            side,
-            join,
-        } in generated.parts
-        {
+        for part in generated {
             ctx.checkpoint()?;
+            let (role, side, join) = (part.name, part.attach_to, part.join());
+            let mesh = part.mesh;
             match join {
                 JoinKind::Separate => {
                     let in_target = operand_in_frame(&mesh, &target.transform, &target.transform)

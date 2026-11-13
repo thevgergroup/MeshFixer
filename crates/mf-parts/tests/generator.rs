@@ -1,6 +1,5 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-
 //! The one generator registry (parts-architecture-review.md): every
 //! built-in shape and connector is a `Generator`, with a unique id, and
 //! builds its parts from its own schema's defaults.
@@ -34,7 +33,13 @@ fn every_generator_has_a_unique_id_and_builds_from_its_defaults() {
 
 #[test]
 fn shapes_and_connectors_are_found_by_id_in_one_registry() {
-    for id in ["shape.box", "joint.dowel", "hinge.leaf", "thread", "dovetail.slide"] {
+    for id in [
+        "shape.box",
+        "joint.dowel",
+        "hinge.leaf",
+        "thread",
+        "dovetail.slide",
+    ] {
         assert_eq!(find_generator(id).map(|g| g.id()), Some(id));
     }
     assert!(find_generator("nope").is_none());

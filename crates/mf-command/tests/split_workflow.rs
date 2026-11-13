@@ -750,7 +750,8 @@ fn a_counterpart_mirrors_its_connector() {
         0.4,
     )
     .unwrap();
-    for kind in mf_parts::connectors::joint::JOINT_CONNECTORS {
+    for g in mf_parts::cut_generators() {
+        let kind = &g.id();
         for on in [JointSide::A, JointSide::B] {
             let p = Placement {
                 connector: (*kind).to_owned(),
@@ -907,7 +908,10 @@ fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
         .iter()
         .find(|c| c.kind == CheckKind::DovetailStopped(false))
         .unwrap_or_else(|| panic!("no stopped-end warning: {checks:?}"));
-    assert_eq!(warning.message, "Can't slide together: extend it to the edge");
+    assert_eq!(
+        warning.message,
+        "Can't slide together: extend it to the edge"
+    );
     // The -x end (open_a = 1, through) never warns even though its own
     // recorded reach (15 mm) is also short of the edge: "through" means
     // the recorded number already accounts for reaching well past it,
@@ -928,11 +932,7 @@ fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
     )
     .unwrap()
     .unwrap_or_else(|| panic!("no fix"));
-    assert!(
-        fixed.params["groove_b"] > 20.0 - 1e-6,
-        "{:?}",
-        fixed.params
-    );
+    assert!(fixed.params["groove_b"] > 20.0 - 1e-6, "{:?}", fixed.params);
     let checks = check_placement(&frame, [&pa, &pb], &fixed, &settings, &ctx).unwrap();
     assert!(
         !checks
