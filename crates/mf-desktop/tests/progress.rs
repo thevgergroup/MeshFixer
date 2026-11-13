@@ -477,6 +477,40 @@ fn report(what: &str, frames: &[GatedFrame], app: &MeshFixerApp) {
     eprintln!("GPU (3D view): {}", gpu_summary(app));
 }
 
+/// The surface bytes of `next`'s face chunks that a fill from `prev`
+/// must rebuild: each chunk whose faces changed, and each holding a face
+/// with a corner of a changed face (its smooth normal may differ).
+fn touched_chunk_bytes(prev: &Mesh, next: &Mesh) -> u64 {
+    use mf_geometry::{CHUNK, FaceId};
+    assert!(next.moved_vertices(prev).is_empty(), "a fill moves no vertex");
+    let chunks = next.face_chunk_count();
+    let slots = next.face_slots().max(prev.face_slots()) as usize;
+    let mut corners = std::collections::HashSet::new();
+    let mut changed = vec![false; chunks.max(prev.face_chunk_count())];
+    for (i, c) in changed.iter_mut().enumerate() {
+        if next.face_chunk_shared(prev, i) {
+            continue;
+        }
+        *c = true;
+        for f in i * CHUNK..((i + 1) * CHUNK).min(slots) {
+            let (a, b) = (prev.face(FaceId(f as u32)), next.face(FaceId(f as u32)));
+            if a != b {
+                corners.extend(a.into_iter().chain(b).flatten());
+            }
+        }
+    }
+    let vertex = std::mem::size_of::<mf_render::SurfaceVertex>() as u64;
+    (0..chunks)
+        .filter(|&i| {
+            changed[i]
+                || next
+                    .faces_in_chunk(i)
+                    .any(|(_, t)| t.iter().any(|v| corners.contains(v)))
+        })
+        .map(|i| next.faces_in_chunk(i).count() as u64 * 3 * vertex)
+        .sum()
+}
+
 /// MF-RT-001's acceptance test. A frame here is the whole frame: the app's
 /// update (with the 3D view's encode and submit), egui's paint, and waiting
 /// for the GPU to finish it all (see [`Painter`]). The camera orbits every
@@ -508,6 +542,7 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
         );
         let labels = harness.state().session.history_labels().len();
         let rendered = harness.state().viewport.frames_rendered;
+        let before = harness.state().active_mesh().unwrap().clone();
 
         // Repair holds the whole-object repairs (ui-plan.md §7).
         harness.get_by_label("Repair").click();
@@ -558,9 +593,17 @@ fn ui_frames_stay_under_50ms_while_fill_holes_runs_on_5m() {
             "filled revision uploaded {} of {surface} surface bytes, {} line bytes",
             upload.surface_bytes, upload.line_bytes
         );
+        // The chunks the fill appended to, and (smooth shading, UI plan
+        // step 3) the chunks holding a face with a corner on a changed
+        // face (the filled holes' rims), whose normals now average in the
+        // patches': exactly those, nothing else.
+        let filled = app.active_mesh().unwrap();
+        let expected = touched_chunk_bytes(&before, filled);
+        eprintln!("expected re-upload (appended + rim chunks): {expected} bytes");
         assert!(
-            upload.surface_bytes < surface / 10,
-            "a fill re-uploads only the chunks it appended to: {upload:?}"
+            upload.surface_bytes == expected && expected < surface,
+            "a fill re-uploads only the chunks it appended to and the rims' chunks \
+             ({expected} of {surface} bytes): {upload:?}"
         );
         assert!(
             committed_at >= 10,
