@@ -448,13 +448,14 @@ mod tests {
         // Same hue family: at least two of the three channels keep their
         // relative order (a tinted/shaded version of the same base,
         // rather than an unrelated hue).
-        let base_index = OBJECT_PALETTE
-            .iter()
-            .position(|&c| {
-                let variants: Vec<Color32> = (0..5).map(|v| object_shade_for_test(c, v)).collect();
-                variants.contains(&a) && variants.contains(&b)
-            });
-        assert!(base_index.is_some(), "both siblings should come from the same base shade family");
+        let base_index = OBJECT_PALETTE.iter().position(|&c| {
+            let variants: Vec<Color32> = (0..5).map(|v| object_shade_for_test(c, v)).collect();
+            variants.contains(&a) && variants.contains(&b)
+        });
+        assert!(
+            base_index.is_some(),
+            "both siblings should come from the same base shade family"
+        );
     }
 
     /// A different group gets a different (stable) base hue.
@@ -464,11 +465,17 @@ mod tests {
             .iter()
             .map(|g| object_color(0, Some(g)))
             .collect();
-        assert!(hues.len() > 1, "distinct group names should not all collide on one hue");
+        assert!(
+            hues.len() > 1,
+            "distinct group names should not all collide on one hue"
+        );
     }
 
     fn object_shade_for_test(base: Color32, variant: u32) -> Color32 {
-        let index = OBJECT_PALETTE.iter().position(|&c| c == base).expect("test base is in the palette");
+        let index = OBJECT_PALETTE
+            .iter()
+            .position(|&c| c == base)
+            .expect("test base is in the palette");
         object_shade(index, variant)
     }
 

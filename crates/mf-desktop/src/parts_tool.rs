@@ -19,8 +19,14 @@
 //!   (`mesh.combine`: a solid part unioned into it, a hole part cut from
 //!   it, the part's own object removed — one object left, one undo step)
 //!   or Blend (`mesh.boolean`'s union with a blend width).
-//! - **Save as part** on any object writes it to the user library
-//!   (`mf_parts::save_object_as_part`).
+//! - **The grid.** Every part is a thumbnail (`crate::part_thumbs`: an
+//!   offscreen 128 px Clay render, cached by its content hash) with its
+//!   name; hovering one shows it larger with its category and
+//!   description. The user's own parts are filed under their categories.
+//! - **Save as part…** on any object opens a dialog for its name,
+//!   category and description, then writes it to the user library
+//!   (`mf_parts::save_object_as_part`). A user part can be renamed (the
+//!   same dialog) or deleted; a built-in can't.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +55,11 @@ pub enum JoinMode {
 #[derive(Debug, Clone)]
 pub struct PartsState {
     pub search: String,
+    /// The save / edit dialog, while open.
+    pub dialog: Option<PartDialog>,
+    /// A user part waiting for its delete to be confirmed.
+    pub confirm_delete: Option<String>,
+    pub thumbs: crate::part_thumbs::Thumbs,
     /// The part most recently placed (so its Join-to-scan section can
     /// offer to act between it and the object it landed on).
     pub placed: Option<PlacedPart>,
@@ -60,11 +71,32 @@ impl Default for PartsState {
     fn default() -> PartsState {
         PartsState {
             search: String::new(),
+            dialog: None,
+            confirm_delete: None,
+            thumbs: Default::default(),
             placed: None,
             join: JoinMode::KeepSeparate,
             blend_width: 2.0,
         }
     }
+}
+
+/// The save-part dialog (saving an object) or the edit dialog (renaming
+/// a user part): the fields as typed.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PartDialog {
+    pub target: DialogTarget,
+    pub name: String,
+    pub category: String,
+    pub description: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum DialogTarget {
+    /// Save this object as a new user part.
+    Save(ObjectId),
+    /// Rename the user part with this id.
+    Edit(String),
 }
 
 /// A part just placed: its own object and the object it was placed on
@@ -296,11 +328,209 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
     }
 }
 
+/// One cell of the library grid.
+struct Cell {
+    /// The library id (a part) or generator id (a shape).
+    id: String,
+    name: String,
+    hole: bool,
+    shape: bool,
+    /// A user part (renamed and deleted from here; built-ins can't be).
+    user: bool,
+    category: String,
+    description: String,
+    /// The thumbnail's cache key (from the content hash).
+    key: String,
+}
+
+/// The library as grid cells: the shapes, then the built-in parts the
+/// shapes don't supersede, then the user's parts by category; filtered
+/// by `query`.
+fn cells(app: &MeshFixerApp, query: &str) -> (Vec<Cell>, Vec<Cell>) {
+    let shown = |name: &str| query.is_empty() || name.to_lowercase().contains(query);
+    let mut builtin: Vec<Cell> = mf_parts::generators()
+        .into_iter()
+        .filter(|g| g.is_shape() && shown(g.name()))
+        .map(|g| {
+            let defaults = g.spec().validate(&BTreeMap::new()).unwrap_or_default(); // allow-swallow: a spec always validates its own defaults
+            let recipe = serde_json::to_string(&defaults).unwrap_or_default(); // allow-swallow: Params is plain data; serializing it can't fail
+            Cell {
+                id: g.id().to_owned(),
+                name: g.name().to_owned(),
+                hole: g.role() == mf_parts::ShapeRole::Hole,
+                shape: true,
+                user: false,
+                category: String::new(),
+                description: g.spec().summary.clone(),
+                key: crate::part_thumbs::key(&format!("shape {} {} {recipe}", g.id(), g.version())),
+            }
+        })
+        .collect();
+    let lib = library(app);
+    let mut user = Vec::new();
+    for p in &lib.parts {
+        if matches!(p.manifest.kind, PartKind::Connector { .. })
+            || (p.is_builtin() && SUPERSEDED.contains(&p.manifest.id.as_str()))
+            || !(shown(&p.manifest.name) || shown(&p.manifest.category))
+        {
+            continue;
+        }
+        let cell = Cell {
+            id: p.manifest.id.clone(),
+            name: p.manifest.name.clone(),
+            hole: false,
+            shape: false,
+            user: !p.is_builtin(),
+            category: p.manifest.category.clone(),
+            description: p.manifest.description.clone(),
+            key: crate::part_thumbs::key(
+                &p.content_hash().unwrap_or_else(|_| p.manifest.id.clone()),
+            ), // allow-swallow: an unreadable part's picture is keyed by its id; placing it reports why
+        };
+        if cell.user {
+            user.push(cell);
+        } else {
+            builtin.push(cell);
+        }
+    }
+    user.sort_by(|a, b| (&a.category, &a.name).cmp(&(&b.category, &b.name)));
+    (builtin, user)
+}
+
+/// A cell's mesh, for its thumbnail.
+fn cell_mesh(app: &MeshFixerApp, cell: &Cell) -> Option<mf_geometry::Mesh> {
+    let ctx = mf_runtime::RunContext::none();
+    if cell.shape {
+        let g = mf_parts::find_generator(&cell.id)?;
+        let record = mf_parts::new_record(g, &BTreeMap::new()).ok()?; // allow-swallow: a shape with no default recipe has no picture; its name still shows
+        mf_parts::regenerate(&record, &ctx).ok() // allow-swallow: as above
+    } else {
+        library(app).get(&cell.id)?.mesh(&ctx).ok() // allow-swallow: a part that can't be read has no picture; placing it says why
+    }
+}
+
+/// Grid cells' size, in points.
+const CELL: f32 = 84.0;
+const THUMB: f32 = 64.0;
+
+/// One grid cell: its picture (once rendered) and name; a click places
+/// it; hovering shows it larger with its description. A user part gets
+/// rename and delete buttons below.
+fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
+    let dir = app.settings_dir().map(|d| d.join("thumbnails"));
+    let thumb = {
+        let ctx = ui.ctx().clone();
+        let mut thumbs = std::mem::take(&mut app.parts.thumbs);
+        let t = thumbs.get(&ctx, dir.as_deref(), &cell.key, || cell_mesh(app, cell));
+        app.parts.thumbs = thumbs;
+        t
+    };
+    let idle = app.busy.is_none();
+    ui.vertical(|ui| {
+        ui.set_width(CELL);
+        let button = match &thumb {
+            Some(t) => egui::Button::image_and_text(
+                egui::Image::new((t.id(), egui::vec2(THUMB, THUMB))),
+                &cell.name,
+            ),
+            None => egui::Button::new(&cell.name),
+        };
+        let r = ui
+            .add_enabled_ui(idle, |ui| {
+                ui.add_sized(
+                    [CELL, if thumb.is_some() { THUMB + 22.0 } else { 28.0 }],
+                    button,
+                )
+            })
+            .inner
+            .on_hover_ui(|ui| {
+                if let Some(t) = &thumb {
+                    let side = crate::part_thumbs::SIZE as f32;
+                    ui.image((t.id(), egui::vec2(side, side)));
+                }
+                ui.label(egui::RichText::new(&cell.name).color(theme::TEXT_STRONG));
+                if !cell.category.is_empty() {
+                    widgets::caption(ui, &cell.category);
+                }
+                if !cell.description.is_empty() {
+                    widgets::caption(ui, &cell.description);
+                }
+                if cell.shape {
+                    widgets::caption(ui, t!("parts.shape_tip"));
+                }
+                if cell.hole {
+                    widgets::caption(ui, t!("parts.hole_tip"));
+                }
+            });
+        if r.clicked() {
+            if cell.shape {
+                place_shape(app, &cell.id);
+            } else {
+                place_part(app, &cell.id);
+            }
+        }
+        if cell.user {
+            ui.horizontal(|ui| {
+                if widgets::icon_button(
+                    ui,
+                    icons::EDIT,
+                    &t!("parts.rename_named", name = cell.name.clone()),
+                    None,
+                    theme::ICON_SIZE + theme::SPACE_M,
+                )
+                .clicked()
+                {
+                    app.parts.dialog = Some(PartDialog {
+                        target: DialogTarget::Edit(cell.id.clone()),
+                        name: cell.name.clone(),
+                        category: cell.category.clone(),
+                        description: cell.description.clone(),
+                    });
+                }
+                if widgets::icon_button(
+                    ui,
+                    icons::TRASH,
+                    &t!("parts.delete_named", name = cell.name.clone()),
+                    None,
+                    theme::ICON_SIZE + theme::SPACE_M,
+                )
+                .clicked()
+                {
+                    app.parts.confirm_delete = Some(cell.id.clone());
+                }
+            });
+        }
+    });
+}
+
+/// `cells` as a grid, as many columns as fit.
+fn grid(app: &mut MeshFixerApp, ui: &mut egui::Ui, salt: &str, cells: &[Cell]) {
+    let columns = ((ui.available_width() / (CELL + theme::SPACE_S)).floor() as usize).max(1);
+    egui::Grid::new(("parts grid", salt))
+        .spacing([theme::SPACE_S, theme::SPACE_S])
+        .show(ui, |ui| {
+            for (i, cell) in cells.iter().enumerate() {
+                cell_ui(app, ui, cell);
+                if (i + 1) % columns == 0 {
+                    ui.end_row();
+                }
+            }
+        });
+}
+
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "object.add_part");
     crate::shape_tools::refusal_card_for(app, ui, "object.add_shape");
     crate::shape_tools::refusal_card_for(app, ui, "mesh.boolean");
     crate::shape_tools::refusal_card_for(app, ui, "mesh.combine");
+    // The part just placed comes first: joining it is the next step.
+    if let Some(placed) = app.parts.placed
+        && app.session.document().object(placed.part).is_some()
+        && app.session.document().object(placed.scan).is_some()
+    {
+        join_section(app, ui, placed);
+    }
+
     widgets::section(ui, &t!("parts.section.library"));
     ui.add(
         egui::TextEdit::singleline(&mut app.parts.search)
@@ -309,67 +539,31 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     );
     ui.add_space(theme::SPACE_XS);
     let query = app.parts.search.to_lowercase();
-    let shapes: Vec<(&'static str, &'static str, bool)> = mf_parts::generators()
-        .into_iter()
-        .filter(|g| g.is_shape())
-        .filter(|s| query.is_empty() || s.name().to_lowercase().contains(&query))
-        .map(|s| (s.id(), s.name(), s.role() == mf_parts::ShapeRole::Hole))
-        .collect();
-    for (id, name, hole) in &shapes {
-        let icon = if *hole {
-            icons::HOLE_ROLE
-        } else {
-            icons::OBJECT
-        };
-        if ui
-            .add_enabled_ui(app.busy.is_none(), |ui| {
-                widgets::wide_button(ui, Kind::Secondary, Some(icon), name)
-            })
-            .inner
-            .on_hover_text(t!("parts.shape_tip"))
-            .clicked()
-        {
-            place_shape(app, id);
-        }
-    }
-    let lib = library(app);
-    let mut parts: Vec<(String, String, bool)> = lib
-        .parts
-        .iter()
-        .filter(|p| query.is_empty() || p.manifest.name.to_lowercase().contains(&query))
-        .filter(|p| !(p.is_builtin() && SUPERSEDED.contains(&p.manifest.id.as_str())))
-        .map(|p| {
-            (
-                p.manifest.id.clone(),
-                p.manifest.name.clone(),
-                matches!(p.manifest.kind, PartKind::Connector { .. }),
-            )
-        })
-        .filter(|(_, _, is_connector)| !is_connector)
-        .collect();
-    parts.sort_by(|a, b| a.1.cmp(&b.1));
-    if parts.is_empty() && shapes.is_empty() {
+    let (builtin, user) = cells(app, &query);
+    if builtin.is_empty() && user.is_empty() {
         widgets::caption(ui, t!("parts.none_found"));
     }
-    for (id, name, _) in &parts {
-        if ui
-            .add_enabled_ui(app.busy.is_none(), |ui| {
-                widgets::wide_button(ui, Kind::Secondary, Some(icons::PARTS), name)
-            })
-            .inner
-            .clicked()
-        {
-            place_part(app, id);
-        }
+    grid(app, ui, "built-in", &builtin);
+    let mut start = 0;
+    while start < user.len() {
+        let category = user[start].category.clone();
+        let end = user[start..]
+            .iter()
+            .position(|c| c.category != category)
+            .map_or(user.len(), |n| start + n);
+        widgets::section(
+            ui,
+            &if category.is_empty() {
+                t!("parts.section.yours")
+            } else {
+                category.clone()
+            },
+        );
+        grid(app, ui, &format!("user {category}"), &user[start..end]);
+        start = end;
     }
+    delete_confirmation(app, ui);
     widgets::caption(ui, t!("parts.click_help"));
-
-    if let Some(placed) = app.parts.placed
-        && app.session.document().object(placed.part).is_some()
-        && app.session.document().object(placed.scan).is_some()
-    {
-        join_section(app, ui, placed);
-    }
 
     ui.add_space(theme::SPACE_L);
     widgets::section(ui, &t!("parts.section.save"));
@@ -381,8 +575,144 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .inner
         .clicked()
+        && let Some(id) = app.active
     {
-        save_active_as_part(app);
+        open_save_dialog(app, id);
+    }
+    dialog(app, ui.ctx());
+}
+
+/// Opens the save-part dialog for object `id`, its name filled in.
+pub fn open_save_dialog(app: &mut MeshFixerApp, id: ObjectId) {
+    let Some(o) = app.session.document().object(id) else {
+        return;
+    };
+    app.parts.dialog = Some(PartDialog {
+        target: DialogTarget::Save(id),
+        name: o.name.clone(),
+        category: String::new(),
+        description: String::new(),
+    });
+}
+
+/// "Delete <name>?" with Delete and Cancel, for the user part waiting on it.
+fn delete_confirmation(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(id) = app.parts.confirm_delete.clone() else {
+        return;
+    };
+    let name = library(app)
+        .get(&id)
+        .map_or_else(|| id.clone(), |p| p.manifest.name.clone());
+    let mut close = false;
+    widgets::card(ui, |ui| {
+        widgets::body(ui, t!("parts.delete_confirm", name = name.clone()));
+        ui.horizontal(|ui| {
+            if widgets::button(
+                ui,
+                Kind::Primary,
+                Some(icons::TRASH),
+                &t!("parts.delete"),
+                0.0,
+            )
+            .clicked()
+            {
+                delete_part(app, &id);
+                close = true;
+            }
+            if widgets::button(ui, Kind::Secondary, None, &t!("parts.cancel"), 0.0).clicked() {
+                close = true;
+            }
+        });
+    });
+    if close {
+        app.parts.confirm_delete = None;
+    }
+}
+
+/// Deletes user part `id` (never a built-in: the library refuses).
+pub fn delete_part(app: &mut MeshFixerApp, id: &str) {
+    let Some(dir) = app.settings_dir().map(|d| d.join("parts")) else {
+        app.status = Some(t!("parts.save_no_settings_dir"));
+        return;
+    };
+    let name = library(app)
+        .get(id)
+        .map_or_else(|| id.to_owned(), |p| p.manifest.name.clone());
+    app.status = Some(match mf_parts::delete_user_part(&dir, id) {
+        Ok(()) => t!("parts.deleted", name = name),
+        Err(e) => e.to_string(),
+    });
+}
+
+/// The save / edit dialog, while open: name, category and description.
+fn dialog(app: &mut MeshFixerApp, ctx: &egui::Context) {
+    let Some(mut d) = app.parts.dialog.clone() else {
+        return;
+    };
+    let title = match d.target {
+        DialogTarget::Save(_) => t!("parts.dialog.save_title"),
+        DialogTarget::Edit(_) => t!("parts.dialog.edit_title"),
+    };
+    let (mut done, mut cancel) = (false, false);
+    // Modal, like the app's other dialogs: nothing behind it answers
+    // until it's saved or cancelled.
+    egui::Modal::new(egui::Id::unique("part dialog")).show(ctx, |ui| {
+        ui.heading(title);
+        for (label, value, multiline) in [
+            (t!("parts.dialog.name"), &mut d.name, false),
+            (t!("parts.dialog.category"), &mut d.category, false),
+            (t!("parts.dialog.description"), &mut d.description, true),
+        ] {
+            let l = ui.label(label);
+            let edit = if multiline {
+                egui::TextEdit::multiline(value).desired_rows(3)
+            } else {
+                egui::TextEdit::singleline(value)
+            };
+            ui.add(edit.desired_width(280.0)).labelled_by(l.id);
+        }
+        ui.add_space(theme::SPACE_S);
+        ui.horizontal(|ui| {
+            let ok = !d.name.trim().is_empty();
+            let label = match d.target {
+                DialogTarget::Save(_) => t!("parts.dialog.save"),
+                DialogTarget::Edit(_) => t!("parts.dialog.apply"),
+            };
+            done = ui
+                .add_enabled_ui(ok, |ui| {
+                    widgets::button(ui, Kind::Primary, None, &label, 0.0)
+                })
+                .inner
+                .clicked();
+            cancel = widgets::button(ui, Kind::Secondary, None, &t!("parts.cancel"), 0.0)
+                .on_hover_text("Esc")
+                .clicked();
+        });
+    });
+    cancel |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
+    if cancel {
+        app.parts.dialog = None;
+        return;
+    }
+    if !done {
+        app.parts.dialog = Some(d);
+        return;
+    }
+    app.parts.dialog = None;
+    match &d.target {
+        DialogTarget::Save(id) => save_as_part(app, *id, &d.name, &d.category, &d.description),
+        DialogTarget::Edit(id) => {
+            let Some(dir) = app.settings_dir().map(|p| p.join("parts")) else {
+                app.status = Some(t!("parts.save_no_settings_dir"));
+                return;
+            };
+            app.status = Some(
+                match mf_parts::update_user_part(&dir, id, &d.name, &d.category, &d.description) {
+                    Ok(m) => t!("parts.renamed", name = m.name),
+                    Err(e) => e.to_string(),
+                },
+            );
+        }
     }
 }
 
@@ -495,23 +825,47 @@ pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, lab
     app.parts.placed = None;
 }
 
-fn save_active_as_part(app: &mut MeshFixerApp) {
-    let Some(id) = app.active else { return };
+/// Saves object `id` as a user part named `name`, filed under
+/// `category`, with `description` (`mf_parts::save_object_as_part`): its
+/// id is the name as a slug, numbered if that's taken.
+pub fn save_as_part(
+    app: &mut MeshFixerApp,
+    id: ObjectId,
+    name: &str,
+    category: &str,
+    description: &str,
+) {
     let Some(o) = app.session.document().object(id) else {
         return;
     };
     let Some(mesh) = o.mesh().cloned() else {
         return;
     };
-    let name = o.name.clone();
+    let name = name.trim().to_owned();
     let open = !mesh.topology().boundary_loops.is_empty();
     let slug: String = name
         .to_lowercase()
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
+    let Some(dir) = app.settings_dir().map(|d| d.join("parts")) else {
+        app.status = Some(t!("parts.save_no_settings_dir"));
+        return;
+    };
+    let lib = library(app);
+    let base = format!("user-{slug}");
+    let part_id = (1..)
+        .map(|n| {
+            if n == 1 {
+                base.clone()
+            } else {
+                format!("{base}-{n}")
+            }
+        })
+        .find(|c| lib.get(c).is_none() && !dir.join(c).exists())
+        .unwrap_or(base); // allow-swallow: the range is endless; `find` always returns
     let manifest = mf_parts::PartManifest {
-        id: format!("user-{slug}-{}", id.0),
+        id: part_id,
         name,
         version: 1,
         licence: "".into(),
@@ -528,12 +882,8 @@ fn save_active_as_part(app: &mut MeshFixerApp) {
         },
         default_scale: 1.0,
         mesh: String::new(),
-        category: String::new(),
-        description: String::new(),
-    };
-    let Some(dir) = app.settings_dir().map(|d| d.join("parts")) else {
-        app.status = Some(t!("parts.save_no_settings_dir"));
-        return;
+        category: category.trim().to_owned(),
+        description: description.trim().to_owned(),
     };
     match mf_parts::save_object_as_part(&mesh, &manifest, &dir) {
         Ok(_) => app.status = Some(t!("parts.saved", name = manifest.name.clone())),

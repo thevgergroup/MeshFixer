@@ -22,7 +22,16 @@ pub const MSAA_SAMPLES: u32 = 4;
 /// face-state generation (a selection change redraws), the states shown,
 /// whether it's dimmed, its Hole/ghost roles, and its palette colour
 /// (bits; View ▸ Colour objects toggling redraws).
-type ObjectKey = (ObjectId, usize, u64, u32, bool, bool, bool, Option<[u32; 4]>);
+type ObjectKey = (
+    ObjectId,
+    usize,
+    u64,
+    u32,
+    bool,
+    bool,
+    bool,
+    Option<[u32; 4]>,
+);
 
 #[derive(Clone, PartialEq)]
 struct FrameKey {

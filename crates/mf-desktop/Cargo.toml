@@ -33,6 +33,8 @@ eframe.workspace = true
 wgpu.workspace = true
 rfd.workspace = true
 serde_json.workspace = true
+image.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 # The test-only generators, so the desktop suites can drive one through
@@ -47,3 +49,4 @@ tempfile.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
 sysinfo.workspace = true
+image.workspace = true

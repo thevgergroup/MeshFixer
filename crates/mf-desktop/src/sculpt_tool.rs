@@ -781,8 +781,11 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.sculpt.falloff = FALLOFFS[i];
     }
-    ui.checkbox(&mut app.sculpt.stay_on_surface, t!("sculpt.stay_on_surface"))
-        .on_hover_text(t!("sculpt.stay_on_surface.tip"));
+    ui.checkbox(
+        &mut app.sculpt.stay_on_surface,
+        t!("sculpt.stay_on_surface"),
+    )
+    .on_hover_text(t!("sculpt.stay_on_surface.tip"));
 
     section(ui, &t!("sculpt.section.symmetry"));
     ui.horizontal(|ui| {
@@ -854,7 +857,10 @@ pub fn sculpt_changed_faces(baseline: &Mesh, current: &Mesh) -> Vec<(u32, u8)> {
         };
         match baseline.position(mf_geometry::VertexId(v)) {
             Some(before) => {
-                let d = (0..3).map(|k| (now[k] - before[k]).powi(2)).sum::<f64>().sqrt();
+                let d = (0..3)
+                    .map(|k| (now[k] - before[k]).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
                 sculpt_change_tier(d, scale)
             }
             // A vertex the baseline doesn't have: created after the tool
@@ -918,7 +924,10 @@ mod tests {
         let mut seen = HashSet::new();
         for b in BRUSHES {
             let key = brush_shortcut(b).expect("every brush has a shortcut");
-            assert!(seen.insert(key), "{b:?}'s shortcut collides with another brush's");
+            assert!(
+                seen.insert(key),
+                "{b:?}'s shortcut collides with another brush's"
+            );
             assert!(!brush_shortcut_label(b).is_empty());
         }
     }
@@ -934,7 +943,11 @@ mod tests {
                 .iter()
                 .find(|(_, k)| *k == crate::tools::ToolKey::Brush(b))
                 .map(|(k, _)| *k);
-            assert_eq!(found, Some(want), "{b:?}'s wired key must match its tooltip shortcut");
+            assert_eq!(
+                found,
+                Some(want),
+                "{b:?}'s wired key must match its tooltip shortcut"
+            );
         }
     }
 
@@ -965,7 +978,7 @@ mod tests {
         };
         use mf_render::FaceStates;
         for (frac, want) in [
-            (0.001, 0u8),                        // under the low threshold: unchanged
+            (0.001, 0u8), // under the low threshold: unchanged
             (0.005, FaceStates::SCULPT_CHANGED_LOW),
             (0.02, FaceStates::SCULPT_CHANGED_MED),
             (0.05, FaceStates::SCULPT_CHANGED_HIGH),
@@ -973,7 +986,10 @@ mod tests {
             let after = moved(frac);
             let changed = sculpt_changed_faces(&mesh, &after);
             if want == 0 {
-                assert!(changed.is_empty(), "{frac}: expected no change, got {changed:?}");
+                assert!(
+                    changed.is_empty(),
+                    "{frac}: expected no change, got {changed:?}"
+                );
             } else {
                 assert!(!changed.is_empty(), "{frac}: expected some tier, got none");
                 assert!(
@@ -1003,7 +1019,10 @@ mod tests {
         // but not `before`.
         let mut edit = before.edit();
         let (_, t) = before.faces().next().unwrap();
-        let corners: Vec<[f64; 3]> = t.iter().map(|&v| before.position(mf_geometry::VertexId(v)).unwrap()).collect();
+        let corners: Vec<[f64; 3]> = t
+            .iter()
+            .map(|&v| before.position(mf_geometry::VertexId(v)).unwrap())
+            .collect();
         let centroid = std::array::from_fn(|k| corners.iter().map(|c| c[k]).sum::<f64>() / 3.0);
         let new_v = edit.add_vertex(centroid);
         edit.remove_face(mf_geometry::FaceId(0)).unwrap();

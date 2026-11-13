@@ -15,6 +15,7 @@ pub mod icons;
 pub mod import_dialog;
 pub mod metrics;
 mod panels;
+pub mod part_thumbs;
 pub mod parts_tool;
 pub mod sculpt_tool;
 pub mod shape_panel;

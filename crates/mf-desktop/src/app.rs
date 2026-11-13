@@ -6167,7 +6167,10 @@ mod tests {
             "Combine added 42 triangles"
         );
         let deleted = serde_json::json!({"removed_faces": 1, "removed_vertices": 3});
-        assert_eq!(plain_report("mesh.delete_faces", &deleted), "Deleted 1 triangle");
+        assert_eq!(
+            plain_report("mesh.delete_faces", &deleted),
+            "Deleted 1 triangle"
+        );
         let part = serde_json::json!({"part": "bolt-m4", "part_hash": "abc", "faces": 128});
         assert_eq!(
             plain_report("object.add_part", &part),

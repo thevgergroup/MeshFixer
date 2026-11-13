@@ -231,10 +231,12 @@ fn with_no_model_open_parts_is_unavailable() {
     ));
 }
 
-/// Save as part writes the active object to the user library and says
-/// so by name: `Settings::config_dir` points it at a temp directory
+/// Save as part opens a dialog for the part's name, category and
+/// description, then writes the active object to the user library and
+/// says so by name: `Settings::config_dir` points it at a temp directory
 /// (never the real user's settings folder), and the save shows up as a
-/// file on disk.
+/// file on disk. The saved part can then be renamed and deleted from the
+/// library grid; a built-in has neither button.
 #[test]
 fn save_as_part_names_what_was_saved() {
     require_gpu!("save_as_part_names_what_was_saved");
@@ -250,6 +252,19 @@ fn save_as_part_names_what_was_saved() {
     settle(&mut h);
     h.get_by_label("Save as part…").click();
     settle(&mut h);
+    // The dialog: the name filled in from the object, a category and a
+    // description typed.
+    assert_eq!(
+        h.state().parts.dialog.as_ref().map(|d| d.name.as_str()),
+        Some("widget")
+    );
+    h.get_by_label("Category").click();
+    h.get_by_label("Category").type_text("Gadgets");
+    h.get_by_label("Description").click();
+    h.get_by_label("Description").type_text("A round widget");
+    settle(&mut h);
+    h.get_by_label("Save").click();
+    settle(&mut h);
     let status = h.state().status.clone().unwrap_or_default();
     assert!(status.contains("widget"), "{status:?}");
     assert!(
@@ -261,7 +276,38 @@ fn save_as_part_names_what_was_saved() {
             .is_some(),
         "the part was written under the temp settings dir"
     );
+    let ctx = mf_runtime::RunContext::none();
+    let (lib, _) = mf_parts::Library::load(Some(&dir.path().join("parts")), &ctx);
+    let saved = lib.parts.iter().find(|p| !p.is_builtin()).unwrap();
+    assert_eq!(saved.manifest.category, "Gadgets");
+    assert_eq!(saved.manifest.description, "A round widget");
+    let id = saved.manifest.id.clone();
     still(&mut h, "saved");
+
+    // Filed under its category, with rename and delete; built-ins have
+    // neither.
+    settle(&mut h);
+    h.get_by_label("GADGETS");
+    assert!(h.query_by_label("Rename Sphere").is_none());
+    assert!(h.query_by_label("Delete Sphere").is_none());
+    h.get_by_label("Rename widget").click_accesskit();
+    settle(&mut h);
+    h.get_by_label("Name").click();
+    h.key_press(egui::Key::End);
+    h.get_by_label("Name").type_text(" mk2");
+    settle(&mut h);
+    h.get_by_label("Save changes").click();
+    settle(&mut h);
+    let (lib, _) = mf_parts::Library::load(Some(&dir.path().join("parts")), &ctx);
+    assert_eq!(lib.get(&id).unwrap().manifest.name, "widget mk2");
+
+    h.get_by_label("Delete widget mk2").click_accesskit();
+    settle(&mut h);
+    h.get_by_label("Delete").click_accesskit();
+    settle(&mut h);
+    let (lib, _) = mf_parts::Library::load(Some(&dir.path().join("parts")), &ctx);
+    assert!(lib.get(&id).is_none(), "deleted");
+    assert!(!dir.path().join("parts").join(&id).exists());
 }
 
 /// Clicking a library shape places an editable shape: it keeps its
@@ -277,7 +323,7 @@ fn clicking_a_shape_places_an_editable_shape() {
         let history = h.state().session.history_labels().len();
         h.get_by_label("Parts").click();
         settle(&mut h);
-        h.get_by_label(label).click();
+        h.get_by_label(label).click_accesskit();
         wait_until(&mut h, "the shape placed", |a| {
             a.busy.is_none() && a.session.history_labels().len() > history
         });
@@ -369,4 +415,55 @@ fn a_plugin_registered_shape_appears_in_the_library() {
         h.state().shell.register_generator(&WEDGE).is_err(),
         "a shape id registers once"
     );
+}
+
+/// The library is a grid of thumbnails: each part rendered offscreen in
+/// Clay at 128 px, cached on disk by its content hash (so a second
+/// session shows them without rendering again), and hovering one shows
+/// it larger with what it is.
+#[test]
+fn the_library_is_a_thumbnail_grid_cached_by_content_hash() {
+    require_gpu!("the_library_is_a_thumbnail_grid_cached_by_content_hash");
+    let dir = tempfile::tempdir().unwrap();
+    let settings = || Settings {
+        config_dir: Some(dir.path().to_owned()),
+        ..Settings::default()
+    };
+    let mut h = opened_with(vec![("scan", ball(), at([0.0, 0.0, 10.0]))], settings());
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    wait_until(&mut h, "the thumbnails", |a| {
+        h_ready(a) > 10 && !a.parts.thumbs.busy()
+    });
+    let cached: Vec<_> = dir
+        .path()
+        .join("thumbnails")
+        .read_dir()
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().is_some_and(|x| x == "png"))
+        .collect();
+    assert!(cached.len() > 10, "{} pictures cached", cached.len());
+    let png = image::open(cached[0].path()).unwrap();
+    assert_eq!((png.width(), png.height()), (128, 128));
+    // Hovering a part shows it larger, with what it is.
+    h.get_by_label("Box").hover();
+    for _ in 0..120 {
+        h.step();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(h.query_by_label_contains("rounded corners").is_some());
+    drop(h);
+
+    // A second session: every picture comes from the disk cache, so none
+    // is queued for rendering.
+    let mut h = opened_with(vec![("scan", ball(), at([0.0, 0.0, 10.0]))], settings());
+    h.get_by_label("Parts").click();
+    h.run_steps(3);
+    assert!(!h.state().parts.thumbs.busy(), "nothing rendered again");
+    assert!(h.state().parts.thumbs.ready() > 10);
+}
+
+fn h_ready(a: &MeshFixerApp) -> usize {
+    a.parts.thumbs.ready()
 }
