@@ -999,3 +999,132 @@ fn a_single_round_dowel_warns_about_rotation_and_both_fixes_clear_it() {
     assert!(fix_joint(std::slice::from_ref(&round_dowel), 0.0, &acap, "nope").is_none());
     assert!(fix_joint(&doubled, 0.0, &acap, ANCHOR).is_none());
 }
+
+/// Acceptance (parts-architecture-review.md): `test.key`, a connector that
+/// is only its own generator file, spec and one registry entry, is
+/// offered on a cut face, placed and applied by `split.place_connectors`
+/// (the one apply path), replays Exact, and gets both the generic checks
+/// and its own, whose fix is a param patch.
+#[test]
+fn a_registry_only_connector_places_applies_and_checks() {
+    assert!(
+        mf_parts::cut_generators()
+            .iter()
+            .any(|g| g.id() == "test.key"),
+        "offered on a cut face"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, bottom, top, joint) = split_horizontally(dir.path());
+    let faces_before: Vec<usize> = [bottom, top]
+        .iter()
+        .map(|&id| {
+            s.document()
+                .object(id)
+                .unwrap()
+                .mesh()
+                .unwrap()
+                .face_count()
+        })
+        .collect();
+    let connectors = serde_json::json!([
+        { "connector": "test.key", "on": "a", "at": [5.0, 0.0], "params": {} }
+    ]);
+    let mut place = inv(
+        "split.place_connectors",
+        bottom,
+        &[
+            ("plane_point", "0,0,31.3"),
+            ("plane_normal", "0,0,1"),
+            ("plane_u", "1,0,0"),
+            ("gap", &joint["gap"].to_string()),
+            ("connectors", &connectors.to_string()),
+        ],
+    );
+    place.operands = vec![("side_b".into(), top, None)];
+    let report = report_of(s.execute(place).unwrap());
+    assert_eq!(report["connectors"], 1, "{report}");
+    for (k, id) in [bottom, top].into_iter().enumerate() {
+        let m = s.document().object(id).unwrap().mesh().unwrap().clone();
+        assert!(
+            m.face_count() > faces_before[k],
+            "piece {k} got the key or its socket"
+        );
+        assert_eq!(m.topology().boundary_edges, 0, "piece {k} is still closed");
+    }
+    let after = state(&s);
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let replayed = replay(&log).unwrap();
+    assert!(
+        replayed.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        replayed.results
+    );
+    assert_eq!(state(&replayed.session), after);
+
+    // Its own check, from the generator, and its fix (a param patch).
+    let (s, bottom, top, joint) = split_horizontally(dir.path());
+    let frame = JointFrame::new(
+        DVec3::new(0.0, 0.0, 31.3),
+        DVec3::Z,
+        DVec3::X,
+        joint["gap"].as_f64().unwrap(),
+    )
+    .unwrap();
+    let ctx = RunContext::none();
+    let doc = s.document();
+    let (a, b) = (doc.object(bottom).unwrap(), doc.object(top).unwrap());
+    let (am, bm) = (a.mesh().unwrap(), b.mesh().unwrap());
+    let abvh = mf_geometry::Bvh::build(am, &ctx).unwrap();
+    let bbvh = mf_geometry::Bvh::build(bm, &ctx).unwrap();
+    let acap = cap_region(am, Some(&abvh), &a.transform, &frame, JointSide::A, &ctx).unwrap();
+    let bcap = cap_region(bm, Some(&bbvh), &b.transform, &frame, JointSide::B, &ctx).unwrap();
+    let (pa, pb) = (
+        Piece {
+            name: "bottom",
+            mesh: am,
+            transform: a.transform,
+            bvh: &abvh,
+            cap: &acap,
+        },
+        Piece {
+            name: "top",
+            mesh: bm,
+            transform: b.transform,
+            bvh: &bbvh,
+            cap: &bcap,
+        },
+    );
+    let settings = CheckSettings {
+        min_wall: 1.5,
+        fit_class: mf_parts::FitClass::builtins()[2].clone(),
+        machine: mf_parts::MachineProfile::uncalibrated(),
+        mm: 1.0,
+    };
+    let thin = Placement {
+        connector: "test.key".into(),
+        on: JointSide::A,
+        at: [5.0, 0.0],
+        angle: 0.0,
+        params: BTreeMap::from([("width".to_owned(), 1.5)]),
+    };
+    let checks = check_placement(&frame, [&pa, &pb], &thin, &settings, &ctx).unwrap();
+    let own = checks
+        .iter()
+        .find(|c| c.id == "key_too_thin")
+        .unwrap_or_else(|| panic!("{checks:?}"));
+    assert_eq!(own.fix_label.as_deref(), Some("Widen the key"));
+    let fixed = mf_operations::fix(&frame, [&pa, &pb], &thin, "key_too_thin", &settings, &ctx)
+        .unwrap()
+        .unwrap();
+    assert_eq!(fixed.params["width"], 2.0);
+    let checks = check_placement(&frame, [&pa, &pb], &fixed, &settings, &ctx).unwrap();
+    assert!(!checks.iter().any(|c| c.id == "key_too_thin"), "{checks:?}");
+    // Its footprint is its own key's section on the cap: (width -
+    // clearance) wide, from its generated parts alone.
+    let params = mf_operations::placement_params(&fixed, frame.gap).unwrap();
+    let outline = mf_operations::footprint_2d(&fixed, &params, 1.0).unwrap();
+    let span = outline.iter().map(|p| p[0]).fold(f64::MIN, f64::max)
+        - outline.iter().map(|p| p[0]).fold(f64::MAX, f64::min);
+    assert!((span - (2.0 - 0.2)).abs() < 1e-6, "{outline:?}");
+}

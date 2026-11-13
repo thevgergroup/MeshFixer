@@ -1051,3 +1051,62 @@ fn connect_creates_a_linked_pair_that_edits_and_attaches_together() {
     assert!(doc.object(a_id).is_some() && doc.object(b_id).is_some());
     still(&mut h, "pair-attached");
 }
+
+/// Acceptance (parts-architecture-review.md): the test-only `test.key`
+/// connector — its own generator file, spec and one registry entry, no
+/// UI code of its own — is offered in Connect's kind picker, placed with
+/// a click, shows its schema's fields, gets its own check with a
+/// one-click fix, and applies.
+#[test]
+fn a_registry_only_connector_appears_places_checks_and_applies() {
+    require_gpu!("a_registry_only_connector_appears_places_checks_and_applies");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    h.get_by_label("Test key").click();
+    settle(&mut h);
+    let p = cap_point(&h, [-8.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    assert_eq!(placements(&h)[0].connector, "test.key");
+    // Its fields, from its own schema.
+    h.get_by_label("Width");
+    h.get_by_label("Depth on");
+    // Too thin: its own check, and its fix.
+    {
+        let a = h.state_mut();
+        let j = a.split_flow.joint.unwrap();
+        a.split_flow.joints[j].placements[0]
+            .params
+            .insert("width".into(), 1.5);
+    }
+    settle(&mut h);
+    assert!(
+        h.state().split_flow.checks().unwrap()[0]
+            .iter()
+            .any(|c| c.id == "key_too_thin"),
+        "its own check is live"
+    );
+    scroll_and_click(&mut h, "Widen the key");
+    settle(&mut h);
+    assert_eq!(placements(&h)[0].params["width"], 2.0);
+    assert!(
+        !h.state().split_flow.checks().unwrap()[0]
+            .iter()
+            .any(|c| c.id == "key_too_thin"),
+        "the fix cleared it"
+    );
+    // Apply: one command, through the one apply path.
+    let history = h.state().session.history_labels().len();
+    scroll_and_click(&mut h, "Add connectors");
+    wait_until(&mut h, "the connectors", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(h.state().session.history_labels().len(), history + 1);
+}
