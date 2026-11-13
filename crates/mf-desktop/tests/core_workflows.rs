@@ -1207,3 +1207,219 @@ fn parametric_shape_edit_param_then_undo() {
         "undo restored the original width"
     );
 }
+
+// ---------------------------------------------------------------------
+// Project organisation: rename, groups, history labels, checkpoints.
+// ---------------------------------------------------------------------
+
+/// Renaming an object, then splitting it, derives both pieces' names
+/// from the *new* name: "scan" renamed to "widget" and split gives
+/// "widget (top)" / "widget (bottom)", not "scan (top)" / "scan
+/// (bottom)" (Task "Project organisation" step 1 and its test list).
+#[test]
+fn rename_then_split_gives_derived_names() {
+    require_gpu!("rename_then_split_gives_derived_names");
+    let mut h = opened(vec![("scan", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let id = id_of(&h, "scan");
+    let history = history_len(&h);
+    h.state_mut().rename_object(id, "widget".into());
+    wait_until(&mut h, "the rename", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert_eq!(objects(&h), ["widget"], "{:?}", objects(&h));
+
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(
+        names,
+        ["widget (top)", "widget (bottom)"],
+        "derived from the renamed object: {names:?}"
+    );
+}
+
+/// Grouping two objects (Cmd+G), then hiding and locking the group:
+/// every member's hidden/locked flag follows, it's undoable, and a
+/// locked object refuses to rename (Task "Project organisation" step 2
+/// and its test list).
+#[test]
+fn group_hide_and_lock() {
+    require_gpu!("group_hide_and_lock");
+    let mut h = opened(vec![
+        ("block", mf_fixtures::cube(20.0), at([0.0; 3])),
+        ("post", mf_fixtures::cube(8.0), at([40.0, 0.0, 0.0])),
+    ]);
+    let (block, post) = (id_of(&h, "block"), id_of(&h, "post"));
+    select_together(&mut h, &["block", "post"]);
+    assert_eq!(
+        h.state().picked.len(),
+        2,
+        "both selected together: {:?}",
+        h.state().picked
+    );
+
+    h.state_mut().group_selection();
+    settle(&mut h);
+    let org = h.state().session.document().organisation().clone();
+    assert_eq!(org.root_order().len(), 1, "one group at the root");
+    let mf_command::Entry::Group(gid) = org.root_order()[0] else {
+        panic!("expected a group at the root: {:?}", org.root_order())
+    };
+    let mut members = org.members(gid);
+    members.sort_by_key(|id| id.0);
+    let mut expected = [block, post];
+    expected.sort_by_key(|id| id.0);
+    assert_eq!(members, expected, "the group holds both objects");
+
+    // Hiding the group hides every member (document state, undoable).
+    assert!(!h.state().is_hidden(block) && !h.state().is_hidden(post));
+    let history = history_len(&h);
+    h.state_mut().set_hidden(&[block, post], true);
+    settle(&mut h);
+    assert!(h.state().is_hidden(block) && h.state().is_hidden(post));
+    assert_eq!(history_len(&h), history + 1, "hide is one undo step");
+    assert!(
+        !h.state().object_views().iter().any(|v| v.id == block || v.id == post),
+        "hidden objects don't render"
+    );
+    h.state_mut().undo();
+    settle(&mut h);
+    assert!(
+        !h.state().is_hidden(block) && !h.state().is_hidden(post),
+        "undo restores visibility"
+    );
+
+    // Locking blocks rename and delete.
+    h.state_mut().set_locked(&[block], true);
+    settle(&mut h);
+    assert!(h.state().is_locked(block));
+    let before_name = h.state().session.document().object(block).unwrap().name.clone();
+    h.state_mut().rename_object(block, "renamed".into());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().object(block).unwrap().name,
+        before_name,
+        "a locked object refuses to rename"
+    );
+    let objects_before = h.state().session.document().objects().len();
+    h.state_mut().delete_object(block);
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().objects().len(),
+        objects_before,
+        "a locked object refuses to delete"
+    );
+}
+
+/// Every History row's plain-language label names the object, never a
+/// raw matrix, op id or parameter list: audited across split, combine,
+/// transform and rename (Task "Project organisation" step 3's test
+/// list; `history_labels.rs` covers make_solid and place_connectors
+/// too).
+#[test]
+fn history_labels_contain_no_raw_parameters() {
+    require_gpu!("history_labels_contain_no_raw_parameters");
+    let mut h = opened(vec![("scan", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let id = id_of(&h, "scan");
+
+    h.state_mut().rename_object(id, "widget".into());
+    wait_until(&mut h, "the rename", |a| a.busy.is_none());
+    settle(&mut h);
+
+    h.state_mut().commit_transform(id, at([12.0, 0.0, 30.0]), "moved".into());
+    wait_until(&mut h, "the move", |a| a.busy.is_none());
+    settle(&mut h);
+
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    cut_with_keep(&mut h, "Both");
+
+    let never_raw = |label: &str| {
+        assert!(!label.contains("object.rename"), "{label:?}");
+        assert!(!label.contains("object.set_transform"), "{label:?}");
+        assert!(!label.contains("mesh.split_plane"), "{label:?}");
+        assert!(!label.contains("transform:"), "{label:?}");
+        assert!(!label.contains('['), "a raw matrix would show as [...]: {label:?}");
+        // A raw f64 array prints with a decimal point; "12 mm" and
+        // "2 pieces" are fine, but "1.0, 0.0, 0.0, 0.0, 1.0" (the
+        // identity transform's own text) must never appear.
+        assert!(
+            !label.contains("1, 0, 0, 0, 1, 0, 0, 0, 1"),
+            "a raw transform's numbers leaked into the label: {label:?}"
+        );
+    };
+    let labels: Vec<String> = h
+        .state()
+        .breadcrumb()
+        .into_iter()
+        .map(|(_, label, _, _)| label)
+        .collect();
+    assert!(
+        labels.iter().any(|l| l.starts_with("Renamed scan to widget")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("Moved widget by")),
+        "{labels:?}"
+    );
+    assert!(
+        labels.iter().any(|l| l.starts_with("Split widget into 2 piece")),
+        "{labels:?}"
+    );
+    for label in &labels {
+        never_raw(label);
+    }
+}
+
+/// A named checkpoint shows as "[name]" in the History panel and
+/// clicking it checks out that revision, same as any other row (Task
+/// "Project organisation" step 3's test list).
+#[test]
+fn a_named_checkpoint_can_be_checked_out() {
+    require_gpu!("a_named_checkpoint_can_be_checked_out");
+    let mut h = opened(vec![("scan", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let id = id_of(&h, "scan");
+
+    h.state_mut().rename_object(id, "before".into());
+    wait_until(&mut h, "the first rename", |a| a.busy.is_none());
+    settle(&mut h);
+    let checkpoint = h.state().session.current();
+
+    h.state_mut().rename_object(id, "after".into());
+    wait_until(&mut h, "the second rename", |a| a.busy.is_none());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().object(id).unwrap().name,
+        "after"
+    );
+
+    h.state_mut().name_checkpoint(checkpoint, "Before the second rename".into());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.checkpoint_name(checkpoint),
+        Some("Before the second rename")
+    );
+
+    // A single clean object leaves the right dock closed by default:
+    // open it, then switch to the History tab.
+    if h.query_by_label("Show Browser").is_some() {
+        h.get_by_label("Show Browser").click();
+        settle(&mut h);
+    }
+    h.state_mut().right_tab = "history";
+    settle(&mut h);
+    let row = h.get_by_label("[Before the second rename]");
+    row.click();
+    settle(&mut h);
+    assert_eq!(h.state().session.current(), checkpoint, "checked out");
+    assert_eq!(
+        h.state().session.document().object(id).unwrap().name,
+        "before",
+        "the document is back at the named point"
+    );
+}
