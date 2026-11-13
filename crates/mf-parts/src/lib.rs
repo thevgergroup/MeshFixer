@@ -35,8 +35,8 @@ pub use generator::{
     ShapePart, TargetSlot, Targets, cut_generators, find_generator, generators, register_generator,
 };
 pub use library::{
-    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, save_connector_as_part,
-    save_object_as_part, user_parts_dir,
+    Library, LibraryPart, LibraryWarning, MANIFEST_FILE, PartError, delete_user_part,
+    save_connector_as_part, save_object_as_part, update_user_part, user_parts_dir,
 };
 pub use machine::{
     MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, PRINT_VOLUME_PRESETS,

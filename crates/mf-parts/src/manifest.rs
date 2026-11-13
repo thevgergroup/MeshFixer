@@ -44,6 +44,12 @@ pub struct PartManifest {
     /// The mesh file next to `part.yaml` (user parts; empty for built-ins).
     #[serde(default)]
     pub mesh: String,
+    /// Where it's filed in the library ("Brackets"); empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub category: String,
+    /// What it is, in the person's own words; empty for none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
 }
 
 impl PartManifest {

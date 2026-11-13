@@ -83,6 +83,8 @@ fn manifest(id: &str) -> PartManifest {
         },
         default_scale: 1.0,
         mesh: String::new(),
+        category: String::new(),
+        description: String::new(),
     }
 }
 
@@ -263,4 +265,59 @@ fn add_part_replays_exact_and_verifies_part_hash() {
     .unwrap();
     let verified = replay(&log).map(|r| r.all_verified()).unwrap_or(false);
     assert!(!verified, "a changed part hash must not replay as verified");
+}
+
+/// A user part keeps a category and description, can be renamed (its id,
+/// folder and mesh unchanged) and deleted; a built-in can be neither.
+#[test]
+fn user_parts_are_renamed_and_deleted_but_builtins_never() {
+    let dir = tempfile::tempdir().unwrap();
+    let cube = mf_fixtures::cube(4.0);
+    let mut m = manifest("little-cube");
+    m.category = "Blocks".into();
+    m.description = "A small cube".into();
+    save_object_as_part(&cube, &m, dir.path()).unwrap();
+    let (lib, warnings) = Library::load(Some(dir.path()), &ctx());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let part = lib.get("little-cube").unwrap();
+    assert_eq!(part.manifest.category, "Blocks");
+    assert_eq!(part.manifest.description, "A small cube");
+    let hash = part.content_hash().unwrap();
+
+    let renamed =
+        mf_parts::update_user_part(dir.path(), "little-cube", "Tiny cube", "Cubes", "Smaller")
+            .unwrap();
+    assert_eq!(renamed.name, "Tiny cube");
+    let (lib, _) = Library::load(Some(dir.path()), &ctx());
+    let part = lib.get("little-cube").unwrap();
+    assert_eq!(
+        (part.manifest.name.as_str(), part.manifest.category.as_str()),
+        ("Tiny cube", "Cubes")
+    );
+    assert_ne!(
+        part.content_hash().unwrap(),
+        hash,
+        "the manifest is part of the hash"
+    );
+    assert!(
+        mf_parts::update_user_part(dir.path(), "little-cube", "  ", "", "").is_err(),
+        "a part needs a name"
+    );
+
+    // Built-ins can't be renamed or deleted, and nothing outside the
+    // folder is ever reached.
+    for id in ["sphere", "box", "..", "../x", ""] {
+        assert!(
+            mf_parts::update_user_part(dir.path(), id, "X", "", "").is_err(),
+            "{id}"
+        );
+        assert!(mf_parts::delete_user_part(dir.path(), id).is_err(), "{id}");
+    }
+
+    mf_parts::delete_user_part(dir.path(), "little-cube").unwrap();
+    assert!(!dir.path().join("little-cube").exists());
+    let (lib, warnings) = Library::load(Some(dir.path()), &ctx());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert!(lib.get("little-cube").is_none());
+    assert!(mf_parts::delete_user_part(dir.path(), "little-cube").is_err());
 }

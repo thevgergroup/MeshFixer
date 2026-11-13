@@ -334,6 +334,83 @@ pub fn save_connector_as_part(manifest: &PartManifest, dir: &Path) -> Result<Pat
     Ok(folder)
 }
 
+/// A user part's folder in `dir`, checked: `id` names a folder there
+/// (letters, digits, '-', '_', '.' only, so it can't reach outside
+/// `dir`) whose `part.yaml` is that part's. A built-in isn't in `dir`
+/// and so is refused as not found: built-ins can't be renamed or deleted.
+fn user_part_folder(dir: &Path, id: &str) -> Result<(PathBuf, PartManifest), PartError> {
+    let safe = !id.is_empty()
+        && id != "."
+        && id != ".."
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    if !safe || crate::builtins().iter().any(|b| b.manifest.id == id) {
+        return Err(PartError::NotFound(id.to_owned()));
+    }
+    let folder = dir.join(id);
+    let part = load_user(&folder).map_err(|reason| {
+        if folder.join(MANIFEST_FILE).is_file() {
+            PartError::Unreadable {
+                id: id.to_owned(),
+                reason,
+            }
+        } else {
+            PartError::NotFound(id.to_owned())
+        }
+    })?;
+    if part.manifest.id != id {
+        return Err(PartError::Invalid(format!(
+            "the folder '{id}' holds the part '{}'",
+            part.manifest.id
+        )));
+    }
+    Ok((folder, part.manifest))
+}
+
+/// Renames a user part, and sets its category and description (its id,
+/// folder and mesh stay as they are, so anything placed from it keeps
+/// its recorded hash meaning). Refuses a built-in.
+pub fn update_user_part(
+    dir: &Path,
+    id: &str,
+    name: &str,
+    category: &str,
+    description: &str,
+) -> Result<PartManifest, PartError> {
+    let (folder, mut manifest) = user_part_folder(dir, id)?;
+    manifest.name = name.trim().to_owned();
+    manifest.category = category.trim().to_owned();
+    manifest.description = description.trim().to_owned();
+    manifest.check().map_err(PartError::Invalid)?;
+    let text =
+        serde_saphyr::to_string(&manifest).map_err(|e| PartError::Unwritable(e.to_string()))?;
+    std::fs::write(folder.join(MANIFEST_FILE), text)
+        .map_err(|e| PartError::Unwritable(e.to_string()))?;
+    Ok(manifest)
+}
+
+/// Deletes a user part: its `part.yaml` and mesh file, then its folder
+/// (only if nothing else is left in it, so nothing the library didn't
+/// write is ever removed). Refuses a built-in.
+pub fn delete_user_part(dir: &Path, id: &str) -> Result<(), PartError> {
+    let (folder, manifest) = user_part_folder(dir, id)?;
+    let unwritable = |e: std::io::Error| PartError::Unwritable(e.to_string());
+    if !manifest.mesh.is_empty() && !manifest.mesh.contains(['/', '\\']) {
+        let mesh = folder.join(&manifest.mesh);
+        if mesh.is_file() {
+            std::fs::remove_file(mesh).map_err(unwritable)?;
+        }
+    }
+    std::fs::remove_file(folder.join(MANIFEST_FILE)).map_err(unwritable)?;
+    std::fs::remove_dir(&folder).map_err(|e| {
+        PartError::Unwritable(format!(
+            "the part is gone, but its folder {} still holds other files: {e}",
+            folder.display()
+        ))
+    })
+}
+
 /// The user's parts folder: `<config dir>/meshfixer/parts`.
 pub fn user_parts_dir() -> Result<PathBuf, crate::dirs::DirsError> {
     Ok(crate::dirs::meshfixer_dir()?.join("parts"))

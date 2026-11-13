@@ -189,6 +189,8 @@ fn manifest(id: &str, name: &str, kind: PartKind) -> PartManifest {
         },
         default_scale: 1.0,
         mesh: String::new(),
+        category: String::new(),
+        description: String::new(),
     }
 }
 

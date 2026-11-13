@@ -528,6 +528,8 @@ fn save_active_as_part(app: &mut MeshFixerApp) {
         },
         default_scale: 1.0,
         mesh: String::new(),
+        category: String::new(),
+        description: String::new(),
     };
     let Some(dir) = app.settings_dir().map(|d| d.join("parts")) else {
         app.status = Some(t!("parts.save_no_settings_dir"));

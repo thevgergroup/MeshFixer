@@ -249,6 +249,8 @@ fn saved_connector_regenerates_identically() {
         },
         default_scale: 1.0,
         mesh: String::new(),
+        category: String::new(),
+        description: String::new(),
     };
     mf_parts::save_connector_as_part(&manifest, dir.path()).unwrap();
 
