@@ -414,12 +414,34 @@ fn inverse_transform(t: &[f64; 12]) -> Option<[f64; 12]> {
     ])
 }
 
+/// [`region_preview`]'s own cache key: everything its result depends on
+/// except the ticked set (ticking doesn't change the geometry, so it's
+/// applied after the cache hit, not part of the key) — recomputing
+/// [`mf_boolean::cut_half`] (full O(n) classification plus a Delaunay
+/// triangulation) every frame the UI merely redraws, unchanged, would
+/// make the Split panel and its view overlay visibly slow on anything
+/// past a trivial mesh (each is read once per frame from the panel and
+/// once from the overlay).
+#[derive(Debug, Clone, PartialEq)]
+struct RegionPreviewKey {
+    object: ObjectId,
+    revision: mf_command::RevisionId,
+    plane_bits: [u64; 4],
+}
+
+thread_local! {
+    static REGION_PREVIEW_CACHE: std::cell::RefCell<Option<(RegionPreviewKey, Vec<RegionPreview>)>> =
+        const { std::cell::RefCell::new(None) };
+}
+
 /// Every cap region the current plane would make in the active object,
 /// read-only (no document mutation — [`mf_boolean::cut_half`] on a clone
 /// of the live plane/mesh, exactly like [`crate::shape_tools::
 /// split_plane_misses_selection`]'s own live preview), with each
 /// region's ticked state from [`crate::shape_tools::SplitState::
-/// unticked_regions`].
+/// unticked_regions`]. Memoized per frame ([`REGION_PREVIEW_CACHE`]):
+/// ticking a region doesn't change the geometry, so a tick only
+/// recomputes the three bools in the cached list, not the cut itself.
 ///
 /// Only meaningful for a single selected object (region seed-face ids
 /// aren't distinguished across objects in the one shared `regions`
@@ -437,14 +459,64 @@ pub fn region_preview(app: &MeshFixerApp) -> Vec<RegionPreview> {
     let Some(object) = app.session.document().object(*id) else {
         return Vec::new();
     };
-    let Some(inv) = inverse_transform(&object.transform) else {
-        return Vec::new();
-    };
     let point = app.split.point();
     let normal = app.split.normal();
+    let key = RegionPreviewKey {
+        object: *id,
+        revision: app.session.current(),
+        plane_bits: [
+            point.x.to_bits(),
+            point.y.to_bits(),
+            point.z.to_bits(),
+            // Packs the normal's three components' bit patterns into
+            // one u64 isn't exact, but the plane only needs to be
+            // "the same as last frame" to hit the cache, and a
+            // bit-identical repeat (no drag in flight) is the common
+            // case this exists for; a changed normal that happened to
+            // alias is, at worst, a stale-by-one-frame preview, never
+            // a wrong committed cut (Apply always reads the live
+            // plane directly, not this cache).
+            normal.x.to_bits() ^ normal.y.to_bits().rotate_left(21) ^ normal.z.to_bits().rotate_left(42),
+        ],
+    };
+    let cached = REGION_PREVIEW_CACHE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .filter(|(k, _)| *k == key)
+            .map(|(_, v)| v.clone())
+    });
+    let regions = match cached {
+        Some(v) => v,
+        None => {
+            let computed = compute_region_preview(mesh, &object.transform, point, normal);
+            REGION_PREVIEW_CACHE.with(|c| *c.borrow_mut() = Some((key, computed.clone())));
+            computed
+        }
+    };
+    let unticked = app.split.unticked_regions.get(id);
+    regions
+        .into_iter()
+        .map(|mut r| {
+            r.ticked = !unticked.is_some_and(|u| u.contains(&r.seed_face));
+            r
+        })
+        .collect()
+}
+
+/// [`region_preview`]'s actual cut, uncached (`ticked` is always `true`
+/// here; the caller fills it in from the live, un-cached tick state).
+fn compute_region_preview(
+    mesh: &Mesh,
+    transform: &[f64; 12],
+    point: DVec3,
+    normal: DVec3,
+) -> Vec<RegionPreview> {
+    let Some(inv) = inverse_transform(transform) else {
+        return Vec::new();
+    };
     let (linear, translation) = linear_and_translation(&inv);
     let object_point = linear * point + translation;
-    let (inv_linear, _) = linear_and_translation(&object.transform);
+    let (inv_linear, _) = linear_and_translation(transform);
     // A world normal `n_w` becomes `M^T n_w` in object space when `M`
     // is object→world's linear part (the same identity `mf_operations::
     // split::normal_to_object` uses): using `inv`'s linear part
@@ -460,7 +532,7 @@ pub fn region_preview(app: &MeshFixerApp) -> Vec<RegionPreview> {
     let Ok(half) = half else {
         return Vec::new();
     };
-    let unticked = app.split.unticked_regions.get(id);
+    let translation = DVec3::new(transform[9], transform[10], transform[11]);
     half.section_regions
         .iter()
         .map(|r| {
@@ -469,7 +541,7 @@ pub fn region_preview(app: &MeshFixerApp) -> Vec<RegionPreview> {
                 .iter()
                 .map(|&p2| {
                     let p3 = r.frame.to_3d(p2);
-                    inv_linear * DVec3::from(p3) + DVec3::new(object.transform[9], object.transform[10], object.transform[11])
+                    inv_linear * DVec3::from(p3) + translation
                 })
                 .collect();
             let area_mm2 = polygon_area(&r.outer).abs();
@@ -477,7 +549,7 @@ pub fn region_preview(app: &MeshFixerApp) -> Vec<RegionPreview> {
                 seed_face: r.seed_face.0,
                 outer_world,
                 area_mm2,
-                ticked: !unticked.is_some_and(|u| u.contains(&r.seed_face.0)),
+                ticked: true,
             }
         })
         .collect()
