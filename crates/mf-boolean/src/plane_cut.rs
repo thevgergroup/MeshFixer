@@ -23,17 +23,35 @@
 //!   [`CutError::MissesObject`] (its `grazed` flag says which case it
 //!   was, for a caller like `mesh.split_plane` that only cares that
 //!   *something* was kept).
-//! - **Each crossing edge is split once**, from its lower vertex id to its
-//!   higher, so both faces using the edge share the cut point. For an
-//!   axis-aligned normal the cut point's axis coordinate is set to the
-//!   plane's exactly, so horizontal and vertical caps are exactly flat.
+//! - **Each crossing edge is split once**, keyed by its vertex ids, so
+//!   both faces using the edge share the cut point; it is interpolated
+//!   from the end nearer the plane (exact distances for an axis-aligned
+//!   plane, `orient3d` otherwise), so a crossing an ulp from a vertex
+//!   rounds onto that vertex. For an axis-aligned normal the cut point's
+//!   axis coordinate is set to the plane's exactly, so horizontal and
+//!   vertical caps are exactly flat.
+//! - **Rounding never refuses a cut** (owner 2026-11-13: a whole ring of
+//!   vertices an ulp above the plane). Where rounded cut points would
+//!   make the section or the side pieces fold — two section points at one
+//!   place, a piece with collinear corners, a spike or Z-kink in the
+//!   section, two pieces back to back, a cap triangle along a side edge —
+//!   the points at fault are merged where they truly are (round one input
+//!   vertex, within rounding), each case decided by exact predicates
+//!   only: no tolerance, and the plane is never moved.
 //! - **Caps** close the boundary loops left on the plane by genuinely
 //!   crossing faces. They are triangulated by a constrained Delaunay
-//!   triangulation (`spade`, D3) with nesting by orientation (a winding
-//!   number per triangle), so a hollow model's section is an annulus. A
-//!   section whose loops cross, touch or pinch — a real topological fault,
-//!   not a coplanar face resolved by [`SOS_SIDE`] — is refused as
-//!   [`CutError::SectionSelfIntersects`]: "move the plane slightly".
+//!   triangulation (`spade`, D3) in the plane's exact projection, with
+//!   nesting by orientation (a winding number per triangle), so a hollow
+//!   model's section is an annulus. Loops that touch at a point (two
+//!   shells meeting there, or one loop pinched) are split there, by exact
+//!   angular order, and capped each on its own. A section whose loops
+//!   genuinely cross — the input faces the plane passes through intersect
+//!   one another — is refused as [`CutError::SectionSelfIntersects`] (Make
+//!   solid fixes the model). What's left, a plane lying along a mesh edge
+//!   or face closer than its coordinates can separate where no merge
+//!   closes the section cleanly, is refused as
+//!   [`CutError::SectionDegenerate`] rather than written as a part that
+//!   isn't closed and manifold.
 //!
 //! Faces away from the plane keep their ids, indices and positions, bit for
 //! bit, in both parts: each part is a [`MeshEdit`] of the input (MF-OP-003).
@@ -152,8 +170,20 @@ pub enum CutError {
     /// still refuses, by name.
     #[error("the plane doesn't cut the object: all of it is on one side")]
     MissesObject { grazed: bool },
-    #[error("the section crosses or touches itself near {at:?}")]
+    /// The section's loops genuinely cross near `at`: the input faces the
+    /// plane crosses there intersect one another (the model's surface
+    /// crosses itself, which Make solid fixes).
+    #[error("the section crosses itself near {at:?}: the model's surface crosses itself there")]
     SectionSelfIntersects { at: [f64; 3] },
+    /// The section couldn't be closed near `at` though the model's surface
+    /// doesn't cross itself there: the plane lies along the surface
+    /// (through a mesh edge or face) closer than the coordinates' own
+    /// rounding can separate. Refused by name rather than leaving a part
+    /// that isn't closed and manifold.
+    #[error(
+        "the cut lies along the model's surface near {at:?}, closer than its coordinates can separate"
+    )]
+    SectionDegenerate { at: [f64; 3] },
     /// Phase 1b, the bounded cut plane: a section region's outer loop
     /// straddles the bound's edge (some of it inside, some outside) —
     /// ambiguous which way it should go, so the cut refuses by name
@@ -408,9 +438,7 @@ impl Bound {
     fn strictly_inside(&self, p: [f64; 2]) -> bool {
         match *self {
             Bound::Disc { radius } => p[0] * p[0] + p[1] * p[1] < radius * radius,
-            Bound::Rect { width, height } => {
-                p[0].abs() < width / 2.0 && p[1].abs() < height / 2.0
-            }
+            Bound::Rect { width, height } => p[0].abs() < width / 2.0 && p[1].abs() < height / 2.0,
         }
     }
 
@@ -423,9 +451,7 @@ impl Bound {
     fn strictly_outside(&self, p: [f64; 2]) -> bool {
         match *self {
             Bound::Disc { radius } => p[0] * p[0] + p[1] * p[1] > radius * radius,
-            Bound::Rect { width, height } => {
-                p[0].abs() > width / 2.0 || p[1].abs() > height / 2.0
-            }
+            Bound::Rect { width, height } => p[0].abs() > width / 2.0 || p[1].abs() > height / 2.0,
         }
     }
 }
@@ -495,7 +521,11 @@ pub fn cut_half_with_regions(
     // membership.
     let learn = cut_half_impl(mesh, plane, keep, true, None, ctx)?;
     let mut excluded: HashSet<FaceId> = HashSet::new();
-    for (region, crossing_faces) in learn.section_regions.iter().zip(&learn.region_crossing_faces) {
+    for (region, crossing_faces) in learn
+        .section_regions
+        .iter()
+        .zip(&learn.region_crossing_faces)
+    {
         let bound_check = bound.map(|b| classify_region(region, b));
         if let Some(BoundCheck::Crosses) = bound_check {
             return Err(CutError::RegionCrossesBound {
@@ -516,6 +546,80 @@ pub fn cut_half_with_regions(
 }
 
 fn cut_half_impl(
+    mesh: &Mesh,
+    plane: &Plane,
+    keep: Side,
+    cap: bool,
+    exclude: Option<&HashSet<FaceId>>,
+    ctx: &RunContext,
+) -> Result<HalfCut, CutError> {
+    match cut_half_core(mesh, plane, keep, cap, exclude, ctx) {
+        Err(CutError::SectionSelfIntersects { at }) => {
+            Err(if crossing_faces_intersect(mesh, plane, ctx)? {
+                CutError::SectionSelfIntersects { at }
+            } else {
+                CutError::SectionDegenerate { at }
+            })
+        }
+        other => other,
+    }
+}
+
+/// Whether the input faces the plane passes through (a corner on each
+/// side, or on it) intersect one another, by the exact test
+/// [`crate::validate_solid`] uses: what tells a section that genuinely
+/// crosses itself (the model's surface crosses itself there; Make solid
+/// fixes it) from one that only rounding couldn't close. Only run once a
+/// section has failed.
+fn crossing_faces_intersect(
+    mesh: &Mesh,
+    plane: &Plane,
+    ctx: &RunContext,
+) -> Result<bool, CutError> {
+    let [a, b, c] = exact_points(plane).map(c3);
+    let side = |v: u32| {
+        let o = orient3d(a, b, c, c3(mesh.corner_position(v)));
+        if o < 0.0 {
+            1
+        } else if o > 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    let faces: Vec<[u32; 3]> = (0..mesh.face_chunk_count())
+        .into_par_iter()
+        .flat_map_iter(|k| {
+            mesh.faces_in_chunk(k)
+                .filter(|&(_, t)| {
+                    let s = t.map(side);
+                    s.contains(&0) || (s.contains(&1) && s.contains(&-1))
+                })
+                .map(|(_, t)| t)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let mut index: HashMap<u32, u32> = HashMap::new();
+    let mut positions: Vec<[f64; 3]> = Vec::new();
+    let triangles: Vec<[u32; 3]> = faces
+        .iter()
+        .map(|t| {
+            t.map(|v| {
+                *index.entry(v).or_insert_with(|| {
+                    positions.push(mesh.corner_position(v));
+                    positions.len() as u32 - 1
+                })
+            })
+        })
+        .collect();
+    match crate::validate::self_intersecting_faces(&positions, &triangles, ctx) {
+        Ok(flags) => Ok(flags.into_iter().any(|f| f)),
+        Err(crate::SolidError::Cancelled) => Err(CutError::Cancelled),
+        Err(_) => Ok(false),
+    }
+}
+
+fn cut_half_core(
     mesh: &Mesh,
     plane: &Plane,
     keep: Side,
@@ -730,15 +834,32 @@ fn cut_half_impl(
     // appends vertices after the input's slots, in order).
     let mut cut_points: HashMap<(u32, u32), u32> = HashMap::new();
     let mut new_positions: Vec<[f64; 3]> = Vec::new();
+    // Each cut point's anchor (by `id - slots`): the edge end nearer the
+    // plane, which it was interpolated from, and the fraction of the
+    // edge it lies from it.
+    let mut anchors: Vec<(u32, f64)> = Vec::new();
+    // Each vertex's distance from the plane, up to one positive scale
+    // shared by every vertex: exactly `p[axis] - plane` for an
+    // axis-aligned plane (rounded once at most), otherwise the adaptive-
+    // exact `orient3d` determinant itself, whose sign is the vertex's
+    // exact side and whose magnitude is accurate even for a vertex an
+    // ulp from the plane (where a dot product's own rounding swamps the
+    // true distance).
+    let distance = |p: [f64; 3]| -> f64 {
+        match axis {
+            Some(i) => (p[i] - frame.origin[i]).abs(),
+            None => orient3d(a, b, c, c3(p)).abs(),
+        }
+    };
     let mut cut = |edit: &mut mf_geometry::MeshEdit, p: u32, q: u32| -> u32 {
         let (lo, hi) = (p.min(q), p.max(q));
         *cut_points.entry((lo, hi)).or_insert_with(|| {
-            let point = edge_cut_point(
-                &frame,
-                axis,
-                mesh.corner_position(lo),
-                mesh.corner_position(hi),
-            );
+            let (x, y) = (mesh.corner_position(lo), mesh.corner_position(hi));
+            let (dx, dy) = (distance(x), distance(y));
+            let point = edge_cut_point(&frame, axis, x, y, dx, dy);
+            // The end it was interpolated from, and how far along.
+            let (near, dn, df) = if dx <= dy { (lo, dx, dy) } else { (hi, dy, dx) };
+            anchors.push((near, if dn + df > 0.0 { dn / (dn + df) } else { 0.5 }));
             new_positions.push(point);
             let id = edit.add_vertex(point).0;
             debug_assert_eq!(id as usize, slots + new_positions.len() - 1);
@@ -747,6 +868,10 @@ fn cut_half_impl(
     };
     let mut pieces: Vec<[u32; 3]> = Vec::new();
     let mut piece_faces: Vec<FaceId> = Vec::new();
+    // A crossing face whose lone corner is discarded keeps a quad, `[x1,
+    // m1, m2, x2]` round the face; which diagonal splits it is chosen
+    // once its cut points are final (below).
+    let mut quads: Vec<([u32; 4], [u32; 3], FaceId)> = Vec::new();
     for scan in &scans {
         for &(f, tri) in &scan.crossing {
             tick.tick()?;
@@ -776,8 +901,7 @@ fn cut_half_impl(
                     pieces.push([l, x1, x2]);
                     plane_edges.push((x1, x2, f));
                 } else {
-                    pieces.push([x1, m1, m2]);
-                    pieces.push([x1, m2, x2]);
+                    quads.push(([x1, m1, m2, x2], tri, f));
                     plane_edges.push((x2, x1, f));
                 }
             }
@@ -802,73 +926,356 @@ fn cut_half_impl(
             new_positions[v as usize - slots]
         }
     };
-    // Canonicalise cut points: two different crossing edges of one
-    // near-plane vertex (every vertex of a ring that's a whole `ulp` off
-    // true zero, such as a UV sphere's equator, carries the *same* tiny
-    // nonzero signed distance, so `orient3d` gives it one real, exactly
-    // consistent side — a genuine crossing, not [`SOS_SIDE`]'s on-plane
-    // case) can land their cut points at the exact same position: the
-    // crossing is essentially right at that vertex. `cut` already shares
-    // one point per *edge*; this shares one point per *position* across
-    // every edge, so the boundary traced below sees the ring as what it
-    // geometrically is — one loop point there, not two that happen to
-    // sit on top of each other. Exact (bit-for-bit) equality only, same
-    // as every other test here: no epsilon.
-    // Visited lowest id first (`cut_points.values()`' own order is a
-    // `HashMap`'s, not reproducible run to run), so the canonical id for
-    // a shared position is always the lowest one that reached it: the
-    // result doesn't depend on hash iteration order (D23's determinism).
+    // Merge loop points that the section would otherwise see as two
+    // different points at one place (owner 2026-11-13: the demo scan's
+    // equator ring sits 1.2e-15 above the plane, so each ring vertex
+    // has two crossing edges whose cut points round to within an ulp of
+    // it — sometimes to the same point, sometimes not). The section is
+    // triangulated in the plane's exact projection ([`Projection`]), so
+    // "at one place" means exactly that: the same projected coordinates,
+    // bit for bit. Two such points are merged only when they are
+    // *related* — cut points of edges sharing an input vertex, or a cut
+    // point and that vertex itself — so the merge is local to one
+    // vertex's fan, where the true section really does pass within
+    // rounding of that vertex. Unrelated points at one place (separate
+    // shells touching there) stay distinct vertices: the section touches
+    // itself there, which the cap's triangulation handles as a touch
+    // ([`crate::section::triangulate_section_touching`]), not a fault.
+    // A cut point whose computed position *is* a kept endpoint's, bit for
+    // bit, is that endpoint. Canonical id: the lowest in each merged set
+    // (an input vertex wherever one is involved), independent of hash
+    // order (D23's determinism). No tolerance anywhere: exact equality.
+    let proj = Projection::new(frame.normal);
+    let mut ends: HashMap<u32, (u32, u32)> = HashMap::with_capacity(cut_points.len());
+    for (&(lo, hi), &id) in &cut_points {
+        ends.insert(id, (lo, hi));
+    }
     let mut ids: Vec<u32> = cut_points.values().copied().collect();
+    ids.extend(used_on_plane.iter().copied());
     ids.sort_unstable();
-    let mut canon: HashMap<[u64; 3], u32> = HashMap::new();
-    let key = |p: [f64; 3]| -> [u64; 3] { p.map(f64::to_bits) };
-    let mut remap: HashMap<u32, u32> = HashMap::new();
-    for id in ids {
-        let k = key(pos(id));
-        match canon.entry(k) {
-            std::collections::hash_map::Entry::Occupied(e) => {
-                remap.insert(id, *e.get());
+    let mut parent: HashMap<u32, u32> = HashMap::new();
+    fn find(parent: &mut HashMap<u32, u32>, v: u32) -> u32 {
+        let mut r = v;
+        while let Some(&p) = parent.get(&r) {
+            if p == r {
+                break;
             }
-            std::collections::hash_map::Entry::Vacant(e) => {
-                e.insert(id);
+            r = p;
+        }
+        parent.insert(v, r);
+        r
+    }
+    // Never joins two input vertices (each set's root is its lowest id,
+    // so an input vertex wherever one is in it): only cut points are
+    // ever merged away. Returns whether it merged.
+    let input = slots as u32;
+    let union = |parent: &mut HashMap<u32, u32>, a: u32, b: u32| -> bool {
+        let (ra, rb) = (find(parent, a), find(parent, b));
+        if ra == rb || (ra < input && rb < input) {
+            return false;
+        }
+        parent.insert(ra.max(rb), ra.min(rb));
+        true
+    };
+    let input_ends = |v: u32| -> [u32; 2] { ends.get(&v).map_or([v, v], |&(lo, hi)| [lo, hi]) };
+    for &id in &ids {
+        if let Some(&(lo, hi)) = ends.get(&id) {
+            for e in [lo, hi] {
+                if side[e as usize] == keep_sign
+                    && pos(e).map(f64::to_bits) == pos(id).map(f64::to_bits)
+                {
+                    union(&mut parent, id, e);
+                }
             }
         }
     }
-    let canon = |v: u32| -> u32 { remap.get(&v).copied().unwrap_or(v) };
-    for tri in &mut pieces {
-        *tri = tri.map(canon);
+    let mut by_place: HashMap<[u64; 2], Vec<u32>> = HashMap::new();
+    for &id in &ids {
+        by_place.entry(proj.key(pos(id))).or_default().push(id);
     }
-    for edge in &mut plane_edges {
-        edge.0 = canon(edge.0);
-        edge.1 = canon(edge.1);
+    let mut places: Vec<&Vec<u32>> = by_place.values().filter(|g| g.len() > 1).collect();
+    places.sort_unstable();
+    for group in places {
+        for (i, &a) in group.iter().enumerate() {
+            let ea = input_ends(a);
+            for &b in &group[i + 1..] {
+                let eb = input_ends(b);
+                if ea.iter().any(|v| eb.contains(v)) {
+                    union(&mut parent, a, b);
+                }
+            }
+        }
     }
-    // A merged-away cut point is now unused (every reference to it was
-    // remapped to its canonical twin): remove it so it isn't left as a
-    // dangling, never-referenced vertex in the output.
-    let merged_away: HashSet<u32> = remap.keys().copied().collect();
-    for &v in &merged_away {
-        edit.remove_vertex(VertexId(v))?;
+    // The kept pieces under the merges so far; then, while any is
+    // exactly degenerate (collinear corners, `degenerate`), merge the cut
+    // point that makes it so into its anchor, and rebuild. A cut point
+    // lies on its own edge, so it can only be collinear with a kept edge
+    // of its face where it has rounded onto that edge's end — its anchor,
+    // the end nearer the plane (owner 2026-11-13: an edge parallel to a
+    // tilted plane an ulp from it, whose cut point rounded exactly onto
+    // the line through the kept edge, 1 ulp from its end). Merging it
+    // there is the crossing at that vertex, which is where it is to
+    // within rounding. Of a degenerate piece's cut points anchored at one
+    // of its own kept corners, the one nearest its anchor goes first;
+    // repeated until no piece is degenerate. Exact predicates only.
+    let anchor =
+        |v: u32| -> Option<(u32, f64)> { (v >= input).then(|| anchors[(v - input) as usize]) };
+    // Cut points by the kept end of their edge, for the closure below.
+    let mut by_kept_end: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (&(lo, hi), &x) in &cut_points {
+        let end = if side[lo as usize] == keep_sign {
+            lo
+        } else {
+            hi
+        };
+        by_kept_end.entry(end).or_default().push(x);
     }
-    for (tri, f) in pieces.iter().zip(&piece_faces) {
-        tick.tick()?;
+    for cuts in by_kept_end.values_mut() {
+        cuts.sort_unstable();
+    }
+    let (remap, pieces, piece_faces) = loop {
+        // Closure round a kept vertex: each of its crossing edges gives
+        // a piece with a side edge from it to that edge's cut point, two
+        // faces either side. Once one of those cut points is merged into
+        // it, or two of them into each other, those side edges coincide
+        // (the vertex and a cut point beside it both on the section, or
+        // one edge from it now bordered by four pieces): so every cut
+        // point on its edges merges into it — it is where they all
+        // cross, to within rounding, as the merge that started this
+        // says.
+        let mut merged = false;
+        let mut ends: Vec<u32> = by_kept_end.keys().copied().collect();
+        ends.sort_unstable();
+        for v in ends {
+            let cuts = &by_kept_end[&v];
+            let roots: Vec<u32> = cuts.iter().map(|&x| find(&mut parent, x)).collect();
+            let mut distinct = roots.clone();
+            distinct.sort_unstable();
+            distinct.dedup();
+            if roots.contains(&v) || distinct.len() < roots.len() {
+                for &x in cuts {
+                    merged |= union(&mut parent, x, v);
+                }
+            }
+        }
+        if merged {
+            continue;
+        }
+        let mut remap: HashMap<u32, u32> = HashMap::new();
+        for &id in &ids {
+            let r = find(&mut parent, id);
+            if r != id {
+                remap.insert(id, r);
+            }
+        }
+        let canon = |v: u32| -> u32 { remap.get(&v).copied().unwrap_or(v) };
+        let mut kept: Vec<[u32; 3]> = pieces.iter().map(|t| t.map(canon)).collect();
+        let mut kept_faces = piece_faces.clone();
+        // Each kept quad, split by the diagonal that keeps both triangles
+        // facing the way the input face did (exact `orient2d` in the
+        // face's own dominant projection). Rounding can put a cut point
+        // exactly in line with — or just past — its neighbour (owner
+        // 2026-11-13: on the demo's combined scan, a cut point an ulp
+        // from the equator vertex it lies under made the quad reflex
+        // there, and the fixed diagonal folded one triangle over the
+        // other): only one diagonal is valid then, and it is the one
+        // used. Merged corners leave a triangle.
+        for &(quad, tri, f) in &quads {
+            let quad = quad.map(canon);
+            let mut ring: Vec<u32> = Vec::with_capacity(4);
+            for v in quad {
+                if ring.last() != Some(&v) && ring.first() != Some(&v) {
+                    ring.push(v);
+                }
+            }
+            match ring.len() {
+                4 => {
+                    let [x1, m1, m2, x2] = [ring[0], ring[1], ring[2], ring[3]];
+                    let facing = face_facing(tri.map(&pos));
+                    let a = [[x1, m1, m2], [x1, m2, x2]];
+                    let b = [[x1, m1, x2], [m1, m2, x2]];
+                    let ok = |pair: &[[u32; 3]; 2]| pair.iter().all(|t| facing(t.map(&pos)) > 0);
+                    let pair = if !ok(&a) && ok(&b) { b } else { a };
+                    kept.extend(pair);
+                    kept_faces.extend([f, f]);
+                }
+                3 => {
+                    kept.push([ring[0], ring[1], ring[2]]);
+                    kept_faces.push(f);
+                }
+                _ => {}
+            }
+        }
         // A piece with two corners merged onto one (the crossing landed
         // essentially at a vertex it already touched) has no area:
         // dropped, not an error — the face's other piece(s), and its
         // neighbours across the now-shared point, still exactly cover
         // the kept side.
-        if tri[0] == tri[1] || tri[1] == tri[2] || tri[2] == tri[0] {
+        let mut keep_piece: Vec<bool> = kept
+            .iter()
+            .map(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0])
+            .collect();
+        // Two pieces on the same three points, wound opposite ways (two
+        // faces' slivers round one near-plane vertex, merged onto the
+        // same cut points): a closed pillow with no inside, whose faces
+        // cancel exactly — as do the section edges they each left.
+        // Dropped in pairs, they leave every edge with the two faces it
+        // had besides them.
+        let mut by_points: HashMap<[u32; 3], Vec<(usize, bool)>> = HashMap::new();
+        for (k, t) in kept.iter().enumerate() {
+            if keep_piece[k] {
+                let r = (0..3).min_by_key(|&i| t[i]).unwrap_or(0);
+                let (a, b, c) = (t[r], t[(r + 1) % 3], t[(r + 2) % 3]);
+                by_points
+                    .entry([a, b.min(c), b.max(c)])
+                    .or_default()
+                    .push((k, b < c));
+            }
+        }
+        for group in by_points.values() {
+            let fwd = group.iter().filter(|g| g.1);
+            let back = group.iter().filter(|g| !g.1);
+            for (f, b) in fwd.zip(back) {
+                keep_piece[f.0] = false;
+                keep_piece[b.0] = false;
+            }
+        }
+        // A section point the section folds back at — `a → b → c`
+        // exactly collinear in the plane's exact projection, reversing at
+        // `b` — is a spike rounding made: consecutive section points come
+        // from one face, so they lie round one input vertex, and their
+        // true order along the section was lost where coordinates rounded
+        // together (owner 2026-11-13: three cut points with one x after
+        // rounding but distinct y near zero, where ulps are tiny). `b`
+        // merges into whichever neighbour lies between it and the other.
+        // On the section's own edges: netted against their reverses, as
+        // `boundary_loops` traces them.
+        let mut net: HashMap<(u32, u32), i64> = HashMap::new();
+        for &(u, w, _) in &plane_edges {
+            let (u, w) = (canon(u), canon(w));
+            if u != w {
+                *net.entry((u, w)).or_insert(0) += 1;
+                *net.entry((w, u)).or_insert(0) -= 1;
+            }
+        }
+        let mut next: HashMap<u32, (u32, i64)> = HashMap::new();
+        let mut prev: HashMap<u32, (u32, i64)> = HashMap::new();
+        for (&(u, w), &n) in &net {
+            if n > 0 {
+                next.entry(u).or_insert((w, 0)).1 += n;
+                prev.entry(w).or_insert((u, 0)).1 += n;
+            }
+        }
+        let mut tips: Vec<u32> = next.keys().copied().collect();
+        tips.sort_unstable();
+        for b in tips {
+            let (Some(&(c, 1)), Some(&(a, 1))) = (next.get(&b), prev.get(&b)) else {
+                continue;
+            };
+            let (pa, pb, pc) = (proj.p2(pos(a)), proj.p2(pos(b)), proj.p2(pos(c)));
+            let q = |p: [f64; 2]| Coord { x: p[0], y: p[1] };
+            if a == c || orient2d(q(pa), q(pb), q(pc)) != 0.0 {
+                continue;
+            }
+            let i = if pa[0] != pb[0] { 0 } else { 1 };
+            let j = if pc[0] != pb[0] { 0 } else { 1 };
+            if pa[i] == pb[i] || pc[j] == pb[j] {
+                continue;
+            }
+            // Collinear: compare along one axis the line isn't flat in.
+            let k = if pa[0] != pb[0] && pc[0] != pb[0] {
+                0
+            } else {
+                1
+            };
+            let (up_a, up_c) = (pa[k] > pb[k], pc[k] > pb[k]);
+            if up_a != up_c {
+                continue;
+            }
+            // Reversing at `b`: the neighbour nearer it is between.
+            let to = if (pc[k] <= pa[k]) == up_a { c } else { a };
+            merged |= union(&mut parent, b, to);
+        }
+        if merged {
             continue;
         }
-        if degenerate(tri.map(pos)) {
-            return Err(CutError::SectionSelfIntersects { at: pos(tri[0]) });
+        // The same fault, not quite collinear: a section edge `a → b` and
+        // the one after next, `c → d`, meet — the short edge `b → c`
+        // between them (two cut points round one vertex) came out
+        // pointing back the way the section came, a Z-kink rounding made
+        // (owner 2026-11-13: two cut points an ulp apart, the second on
+        // the wrong side of the edge before them). `b` and `c` merge.
+        let mut starts: Vec<u32> = next.keys().copied().collect();
+        starts.sort_unstable();
+        for a in starts {
+            let Some(&(b, 1)) = next.get(&a) else {
+                continue;
+            };
+            let Some(&(c, 1)) = next.get(&b) else {
+                continue;
+            };
+            let Some(&(d, 1)) = next.get(&c) else {
+                continue;
+            };
+            if a == c || a == d || b == d {
+                continue;
+            }
+            let p = |v: u32| proj.p2(pos(v));
+            if segments_meet(p(a), p(b), p(c), p(d)) {
+                merged |= union(&mut parent, b, c);
+            }
         }
-        edit.add_face(
-            *tri,
-            Sources {
-                faces: vec![*f],
-                ..Sources::default()
-            },
-        )?;
+        if merged {
+            continue;
+        }
+        let mut stuck = None;
+        for (k, t) in kept.iter().enumerate() {
+            if !keep_piece[k] || !degenerate(t.map(&pos)) {
+                continue;
+            }
+            let pick = t
+                .iter()
+                .filter_map(|&v| anchor(v).map(|(near, s)| (s, v, near)))
+                .filter(|&(_, _, near)| side[near as usize] == keep_sign && t.contains(&near))
+                .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+            match pick {
+                Some((_, v, near)) if union(&mut parent, v, near) => merged = true,
+                _ => stuck = Some(t[0]),
+            }
+            keep_piece[k] = false;
+        }
+        if !merged {
+            if let Some(v) = stuck {
+                return Err(CutError::SectionSelfIntersects { at: pos(v) });
+            }
+            let mut pieces = Vec::with_capacity(kept.len());
+            let mut faces = Vec::with_capacity(kept.len());
+            for ((t, f), keep) in kept.into_iter().zip(kept_faces).zip(keep_piece) {
+                if keep {
+                    pieces.push(t);
+                    faces.push(f);
+                }
+            }
+            break (remap, pieces, faces);
+        }
+    };
+    let canon = |v: u32| -> u32 { remap.get(&v).copied().unwrap_or(v) };
+    for edge in &mut plane_edges {
+        edge.0 = canon(edge.0);
+        edge.1 = canon(edge.1);
+    }
+    // A merged pair that was one loop edge leaves a zero-length edge:
+    // nothing to trace or cap there.
+    plane_edges.retain(|e| e.0 != e.1);
+    // A merged-away cut point is now unused (every reference to it was
+    // remapped to its canonical twin): remove it so it isn't left as a
+    // dangling, never-referenced vertex in the output. Only cut points
+    // are ever merged away: an input vertex is always its set's lowest.
+    let mut merged_away: Vec<u32> = remap.keys().copied().collect();
+    merged_away.sort_unstable();
+    debug_assert!(merged_away.iter().all(|&v| v as usize >= slots));
+    for &v in &merged_away {
+        edit.remove_vertex(VertexId(v))?;
     }
     ctx.checkpoint()?;
 
@@ -878,11 +1285,11 @@ fn cut_half_impl(
     // well-defined loop per opening, just left uncapped, not however
     // the ambiguous section `SectionSelfIntersects` refuses.
     let span = ctx.span(CAPPING, 0.0, 1.0, 1);
-    let loops = boundary_loops(&plane_edges, &pos)?;
-    let mut cap_faces = Vec::new();
-    let mut section_regions = Vec::new();
-    let mut region_crossing_faces: Vec<HashSet<FaceId>> = Vec::new();
-    if cap && !loops.is_empty() {
+    let capped = 'capped: {
+        let loops = boundary_loops(&plane_edges, &pos, proj, keep == Side::Above)?;
+        if !cap || loops.is_empty() {
+            break 'capped None;
+        }
         // Counter-clockwise outer loops seen from above: the part below's
         // boundary runs the other way round its cap.
         let oriented: Vec<Vec<(u32, FaceId)>> = loops
@@ -897,22 +1304,161 @@ fn cut_half_impl(
             })
             .collect();
         let flat: Vec<(u32, FaceId)> = oriented.iter().flatten().copied().collect();
+        // Triangulated in the plane's exact projection, not the frame's
+        // coordinates: `to_2d` subtracts the plane's point and rotates,
+        // which rounds, and can land two distinct cut points on one 2D
+        // point (owner 2026-11-13: at the default plane point x = 2.5, two
+        // cut points an ulp apart at x = -7.045 both became -9.545).
+        // Dropping a coordinate is exact, so the triangulation sees
+        // exactly the points the mesh has.
+        let exact: Vec<Vec<[f64; 2]>> = oriented
+            .iter()
+            .map(|l| l.iter().map(|&(v, _)| proj.p2(pos(v))).collect())
+            .collect();
+        ctx.checkpoint()?;
+        let tris = cap_triangles(&exact)
+            .map_err(|k| CutError::SectionSelfIntersects { at: pos(flat[k].0) })?;
+        Some((oriented, flat, tris))
+    };
+    for (tri, f) in pieces.iter().zip(&piece_faces) {
+        tick.tick()?;
+        edit.add_face(
+            *tri,
+            Sources {
+                faces: vec![*f],
+                ..Sources::default()
+            },
+        )?;
+    }
+    let mut cap_faces = Vec::new();
+    let mut section_regions = Vec::new();
+    let mut region_crossing_faces: Vec<HashSet<FaceId>> = Vec::new();
+    if let Some((oriented, flat, tris)) = capped {
         let loops2d: Vec<Vec<[f64; 2]>> = oriented
             .iter()
             .map(|l| l.iter().map(|&(v, _)| frame.to_2d(pos(v))).collect())
             .collect();
         ctx.checkpoint()?;
-        let tris = cap_triangles(&loops2d)
-            .map_err(|k| CutError::SectionSelfIntersects { at: pos(flat[k].0) })?;
-        ctx.checkpoint()?;
-        for t in tris {
-            let mut tri = t.map(|k| flat[k].0);
-            if keep == Side::Above {
-                tri.swap(1, 2);
+        let mut cap: Vec<([u32; 3], Vec<FaceId>)> = tris
+            .into_iter()
+            .map(|t| {
+                let mut tri = t.map(|k| flat[k].0);
+                if keep == Side::Above {
+                    tri.swap(1, 2);
+                }
+                let mut sources: Vec<FaceId> = t.iter().map(|&k| flat[k].1).collect();
+                sources.sort_unstable();
+                sources.dedup();
+                (tri, sources)
+            })
+            .collect();
+        // The side edges joining two section points other than along the
+        // section itself: a cap triangle along one of these would give
+        // that edge four faces. They exist only where an input vertex is
+        // on the section (on the plane, or merged as a crossing above):
+        // pieces' edges, and kept whole faces with two such corners —
+        // where the kept side lies along the plane within rounding, an
+        // ε-thin slab whose two faces the cap's triangulation would
+        // otherwise naturally retrace (owner 2026-11-13: a box face
+        // horizontal in world space but ulp-noisy in a tilted object's
+        // own frame, cut along it).
+        let on_section: HashSet<u32> = flat.iter().map(|&(v, _)| v).collect();
+        let originals: HashSet<u32> = on_section.iter().copied().filter(|&v| v < input).collect();
+        let mut side_edges: HashSet<(u32, u32)> = HashSet::new();
+        let whole: Vec<[u32; 3]> = if originals.len() >= 2 {
+            (0..mesh.face_chunk_count())
+                .into_par_iter()
+                .flat_map_iter(|k| {
+                    mesh.faces_in_chunk(k)
+                        .filter(|&(f, t)| {
+                            t.iter().filter(|v| originals.contains(v)).count() >= 2
+                                && edit.is_face_live(f)
+                        })
+                        .map(|(_, t)| t)
+                        .collect::<Vec<_>>()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut note = |t: [u32; 3]| {
+            for i in 0..3 {
+                let (u, w) = (t[i], t[(i + 1) % 3]);
+                if on_section.contains(&u) && on_section.contains(&w) {
+                    side_edges.insert((u.min(w), u.max(w)));
+                }
             }
-            let mut sources: Vec<FaceId> = t.iter().map(|&k| flat[k].1).collect();
-            sources.sort_unstable();
-            sources.dedup();
+        };
+        for &t in &pieces {
+            note(t);
+        }
+        for &t in &whole {
+            note(t);
+        }
+        // What no flip clears (both of a cap quad's diagonals are side
+        // edges: the ε-thin slab folded) is split at its midpoint, in the
+        // cap: the four new edges all meet a new vertex, so none can be a
+        // side edge.
+        for (u, w) in flip_off_side_edges(&mut cap, &side_edges) {
+            let ts: Vec<usize> = (0..cap.len())
+                .filter(|&k| cap[k].0.contains(&u) && cap[k].0.contains(&w))
+                .collect();
+            let [t1, t2] = ts[..] else {
+                return Err(CutError::SectionSelfIntersects { at: pos(u) });
+            };
+            let (pu, pw) = (pos(u), pos(w));
+            let m = edit
+                .add_vertex(std::array::from_fn(|i| pu[i] + (pw[i] - pu[i]) * 0.5))
+                .0;
+            let mut more = Vec::with_capacity(2);
+            for k in [t1, t2] {
+                let (t, sources) = cap[k].clone();
+                let i = (0..3)
+                    .find(|&i| {
+                        let (p, q) = (t[i], t[(i + 1) % 3]);
+                        (p == u && q == w) || (p == w && q == u)
+                    })
+                    .ok_or(CutError::SectionSelfIntersects { at: pu })?;
+                let (p, q, r) = (t[i], t[(i + 1) % 3], t[(i + 2) % 3]);
+                cap[k] = ([p, m, r], sources.clone());
+                more.push(([m, q, r], sources));
+            }
+            cap.extend(more);
+        }
+        // Every edge the cut made (one end a new vertex) or that joins two
+        // section points must have exactly two faces, wound opposite
+        // ways: checked here, on the pieces, the cap and the whole faces
+        // between section points, so a section that rounding left
+        // impossible to close is refused by name, never written as a part
+        // that isn't closed and manifold.
+        let mut edges: HashMap<(u32, u32), (i32, i32)> = HashMap::new();
+        let made = |a: u32, b: u32| {
+            a >= input || b >= input || (on_section.contains(&a) && on_section.contains(&b))
+        };
+        for t in pieces
+            .iter()
+            .chain(cap.iter().map(|(t, _)| t))
+            .chain(&whole)
+        {
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                if made(a, b) {
+                    let e = edges.entry((a.min(b), a.max(b))).or_insert((0, 0));
+                    e.0 += 1;
+                    e.1 += if a < b { 1 } else { -1 };
+                }
+            }
+        }
+        let mut bad: Vec<u32> = edges
+            .iter()
+            .filter(|&(_, &(n, net))| n != 2 || net != 0)
+            .map(|(&(a, _), _)| a)
+            .collect();
+        bad.sort_unstable();
+        if let Some(&v) = bad.first() {
+            return Err(CutError::SectionDegenerate { at: pos(v) });
+        }
+        for (tri, sources) in cap {
             cap_faces.push(edit.add_face(
                 tri,
                 Sources {
@@ -945,23 +1491,189 @@ fn cut_half_impl(
     })
 }
 
+/// Flips cap triangles' shared edges off `side_edges` (undirected,
+/// `(low, high)`): an edge both a cap's interior edge and a side edge
+/// would have four faces. Each such edge, shared by cap triangles `[u,
+/// w, a]` and `[w, u, b]`, is replaced by `a–b` (the quad's other
+/// diagonal), when that is neither a side edge nor already in the cap.
+/// Purely combinatorial: orientation is kept, the cap's boundary is
+/// untouched. Deterministic (lowest edge first). Returns the conflicts
+/// no flip could clear, lowest first.
+fn flip_off_side_edges(
+    cap: &mut [([u32; 3], Vec<FaceId>)],
+    side_edges: &HashSet<(u32, u32)>,
+) -> Vec<(u32, u32)> {
+    let key = |u: u32, w: u32| (u.min(w), u.max(w));
+    let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
+    for (k, (t, _)) in cap.iter().enumerate() {
+        for i in 0..3 {
+            by_edge
+                .entry(key(t[i], t[(i + 1) % 3]))
+                .or_default()
+                .push(k);
+        }
+    }
+    let mut conflicts: Vec<(u32, u32)> = by_edge
+        .iter()
+        .filter(|(e, ts)| ts.len() == 2 && side_edges.contains(e))
+        .map(|(&e, _)| e)
+        .collect();
+    if conflicts.is_empty() {
+        return Vec::new();
+    }
+    conflicts.sort_unstable();
+    conflicts.reverse();
+    let mut budget = 4 * cap.len() + 16;
+    let mut stuck: Vec<(u32, u32)> = Vec::new();
+    while let Some(e) = conflicts.pop() {
+        if budget == 0 {
+            stuck.push(e);
+            stuck.append(&mut conflicts);
+            break;
+        }
+        budget -= 1;
+        let Some(ts) = by_edge.get(&e).filter(|ts| ts.len() == 2).cloned() else {
+            continue;
+        };
+        // `t1` runs u → w, `t2` w → u.
+        let directed =
+            |t: [u32; 3], from: u32, to: u32| (0..3).any(|i| t[i] == from && t[(i + 1) % 3] == to);
+        let (mut t1, mut t2) = (ts[0], ts[1]);
+        let (u, w) = if directed(cap[t1].0, e.0, e.1) {
+            (e.0, e.1)
+        } else {
+            (e.1, e.0)
+        };
+        if !directed(cap[t1].0, u, w) {
+            std::mem::swap(&mut t1, &mut t2);
+        }
+        let third = |t: [u32; 3]| t.into_iter().find(|&v| v != u && v != w);
+        let (Some(a), Some(b)) = (third(cap[t1].0), third(cap[t2].0)) else {
+            stuck.push(e);
+            continue;
+        };
+        let ab = key(a, b);
+        if a == b || side_edges.contains(&ab) || by_edge.contains_key(&ab) {
+            stuck.push(e);
+            continue;
+        }
+        let mut sources: Vec<FaceId> = cap[t1].1.iter().chain(&cap[t2].1).copied().collect();
+        sources.sort_unstable();
+        sources.dedup();
+        cap[t1] = ([u, b, a], sources.clone());
+        cap[t2] = ([b, w, a], sources);
+        by_edge.remove(&e);
+        by_edge.insert(ab, vec![t1, t2]);
+        for (edge, from, to) in [(key(u, b), t2, t1), (key(w, a), t1, t2)] {
+            if let Some(ts) = by_edge.get_mut(&edge) {
+                for t in ts.iter_mut() {
+                    if *t == from {
+                        *t = to;
+                    }
+                }
+            }
+        }
+        // A flip can unblock one that was stuck.
+        conflicts.append(&mut stuck);
+    }
+    // Still conflicts: a flip since may have cleared some.
+    stuck.retain(|e| by_edge.get(e).is_some_and(|ts| ts.len() == 2));
+    stuck.sort_unstable();
+    stuck.dedup();
+    stuck
+}
+
 /// Where the plane crosses the edge `lo`→`hi` (vertex ids ascending, so
-/// both faces on the edge get the same point). On an axis-aligned plane
-/// the axis coordinate is the plane's, exactly.
-fn edge_cut_point(frame: &PlaneFrame, axis: Option<usize>, x: [f64; 3], y: [f64; 3]) -> [f64; 3] {
-    let dx = dot(sub(x, frame.origin), frame.normal);
-    let dy = dot(sub(y, frame.origin), frame.normal);
-    let denom = dx - dy;
-    let t = if denom != 0.0 {
-        (dx / denom).clamp(0.0, 1.0)
+/// both faces on the edge get the same point), given each end's
+/// distance from the plane (`dx`, `dy`, same scale, both nonzero: the
+/// ends are on opposite sides). Interpolated from the end **nearer the
+/// plane**, by `s = d_near / (d_near + d_far) <= 1/2` (no cancellation:
+/// a sum of magnitudes): a crossing an ulp from a vertex is that vertex
+/// plus an offset smaller than an ulp, which rounds onto the vertex
+/// itself, consistently for every edge round it (owner 2026-11-13: the
+/// cut points of one near-plane vertex's edges, interpolated from
+/// whichever end had the lower id with distances from rounded dot
+/// products, came out in the wrong order along the section, a spike
+/// doubling back on itself). On an axis-aligned plane the axis
+/// coordinate is the plane's, exactly.
+fn edge_cut_point(
+    frame: &PlaneFrame,
+    axis: Option<usize>,
+    x: [f64; 3],
+    y: [f64; 3],
+    dx: f64,
+    dy: f64,
+) -> [f64; 3] {
+    let (near, far, dn, df) = if dx <= dy {
+        (x, y, dx, dy)
     } else {
-        0.5
+        (y, x, dy, dx)
     };
-    let mut point: [f64; 3] = std::array::from_fn(|i| x[i] + t * (y[i] - x[i]));
+    let s = if dn + df > 0.0 { dn / (dn + df) } else { 0.5 };
+    let mut point: [f64; 3] = std::array::from_fn(|i| near[i] + s * (far[i] - near[i]));
     if let Some(i) = axis {
         point[i] = frame.origin[i];
     }
     point
+}
+
+/// Whether segments `a–b` and `c–d` share any point (crossing, touching
+/// or overlapping), by exact `orient2d` and exact coordinate comparisons.
+fn segments_meet(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+    let q = |p: [f64; 2]| Coord { x: p[0], y: p[1] };
+    let o = |p: [f64; 2], r: [f64; 2], s: [f64; 2]| {
+        let v = orient2d(q(p), q(r), q(s));
+        if v > 0.0 {
+            1
+        } else if v < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    // `p` on segment `r–s`, given the three collinear.
+    let within = |p: [f64; 2], r: [f64; 2], s: [f64; 2]| {
+        (0..2).all(|i| p[i] >= r[i].min(s[i]) && p[i] <= r[i].max(s[i]))
+    };
+    let (o1, o2, o3, o4) = (o(a, b, c), o(a, b, d), o(c, d, a), o(c, d, b));
+    if o1 * o2 < 0 && o3 * o4 < 0 {
+        return true;
+    }
+    (o1 == 0 && within(c, a, b))
+        || (o2 == 0 && within(d, a, b))
+        || (o3 == 0 && within(a, c, d))
+        || (o4 == 0 && within(b, c, d))
+}
+
+/// How a triangle faces relative to `reference` (an input face's
+/// corners): +1 the same way, -1 flipped, 0 collinear, by exact
+/// `orient2d` in the projection that drops the reference's dominant
+/// normal axis.
+fn face_facing(reference: [[f64; 3]; 3]) -> impl Fn([[f64; 3]; 3]) -> i8 {
+    let [a, b, c] = reference;
+    let n = cross(sub(b, a), sub(c, a));
+    let mut k = 0;
+    for i in 1..3 {
+        if n[i].abs() > n[k].abs() {
+            k = i;
+        }
+    }
+    let (i, j) = ((k + 1) % 3, (k + 2) % 3);
+    let orient = move |t: [[f64; 3]; 3]| -> f64 {
+        let q = t.map(|p| Coord { x: p[i], y: p[j] });
+        orient2d(q[0], q[1], q[2])
+    };
+    let sign = orient(reference).signum();
+    move |t| {
+        let o = orient(t) * sign;
+        if o > 0.0 {
+            1
+        } else if o < 0.0 {
+            -1
+        } else {
+            0
+        }
+    }
 }
 
 /// True if a triangle has no area: its corners are collinear (exactly:
@@ -986,10 +1698,6 @@ fn degenerate(p: [[f64; 3]; 3]) -> bool {
     proj(0, 1) && proj(1, 2) && proj(2, 0)
 }
 
-/// The directed plane edges that don't cancel against a reverse edge,
-/// traced into loops of `(vertex, source face)`. A doubled edge, a vertex
-/// with two ways out (two loops pinched together) or a dead end makes the
-/// section ambiguous.
 /// Every face reachable from `seeds` by a shared vertex (Phase 1b: an
 /// excluded region's whole connected island — not just its crossing
 /// faces — so the region's entire appendage, both the part above the
@@ -1021,60 +1729,170 @@ fn expand_island(mesh: &Mesh, seeds: &HashSet<FaceId>) -> HashSet<FaceId> {
     island
 }
 
+/// The directed plane edges that don't cancel against a reverse edge,
+/// traced into loops of `(vertex, source face)`. A point the section
+/// passes through more than once (loops touching, or one pinched) is
+/// split there: each way in is paired with a way out by exact angular
+/// order (`region_left`: the region the loops bound is on their left).
+/// Only a dead end — no way out of a point, which a closed input can't
+/// give — is refused.
 fn boundary_loops(
     edges: &[(u32, u32, FaceId)],
     pos: &dyn Fn(u32) -> [f64; 3],
+    proj: Projection,
+    region_left: bool,
 ) -> Result<Vec<Vec<(u32, FaceId)>>, CutError> {
     let bad = |v: u32| CutError::SectionSelfIntersects { at: pos(v) };
-    let mut count: HashMap<(u32, u32), (u32, FaceId)> = HashMap::with_capacity(edges.len());
+    // Each directed edge, netted against its reverse (an on-plane edge
+    // between two kept faces, or a kept face and an in-plane face,
+    // appears once each way and isn't boundary).
+    let mut count: HashMap<(u32, u32), Vec<FaceId>> = HashMap::with_capacity(edges.len());
     for &(u, v, f) in edges {
-        let e = count.entry((u, v)).or_insert((0, f));
-        e.0 += 1;
-        if e.0 > 1 {
-            return Err(bad(u));
-        }
+        count.entry((u, v)).or_default().push(f);
     }
-    let mut boundary: Vec<(u32, u32, FaceId)> = count
-        .iter()
-        .filter(|((u, v), _)| !count.contains_key(&(*v, *u)))
-        .map(|(&(u, v), &(_, f))| (u, v, f))
-        .collect();
-    boundary.sort_unstable_by_key(|&(u, v, _)| (u, v));
-    let mut next: HashMap<u32, (u32, FaceId)> = HashMap::with_capacity(boundary.len());
-    for &(u, v, f) in &boundary {
-        if next.insert(u, (v, f)).is_some() {
-            return Err(bad(u));
-        }
+    let mut boundary: Vec<(u32, u32, FaceId)> = Vec::with_capacity(count.len());
+    for (&(u, v), faces) in &count {
+        let back = count.get(&(v, u)).map_or(0, Vec::len);
+        let mut faces = faces.clone();
+        faces.sort_unstable();
+        boundary.extend(faces.into_iter().skip(back).map(|f| (u, v, f)));
     }
-    let mut seen: HashSet<u32> = HashSet::with_capacity(boundary.len());
+    boundary.sort_unstable_by_key(|&(u, v, f)| (u, v, f));
+    let mut out: HashMap<u32, Vec<usize>> = HashMap::with_capacity(boundary.len());
+    for (k, &(u, _, _)) in boundary.iter().enumerate() {
+        out.entry(u).or_default().push(k);
+    }
+    // Where a loop passes through one point twice (it touches itself
+    // there, or two loops meet there), each way in is paired with the
+    // way out that keeps the region on the same side without crossing:
+    // seen round the point, the first one turning from the way in
+    // towards the region's side (clockwise from the reversed incoming
+    // edge when the region is on the left). Exact `orient2d` on the
+    // exact projection, ties broken by vertex and face id (a fixed
+    // symbolic perturbation): the loops come out split at the touch,
+    // never refused.
+    let p2 = |v: u32| {
+        let q = proj.p2(pos(v));
+        Coord { x: q[0], y: q[1] }
+    };
+    let turn = |a: u32, b: u32, c: u32| -> i8 {
+        let o = orient2d(p2(a), p2(b), p2(c));
+        let o = if region_left { o } else { -o };
+        if o > 0.0 {
+            1
+        } else if o < 0.0 {
+            -1
+        } else {
+            0
+        }
+    };
+    // Same direction from `v`, given `a`, `b`, `v` collinear (and
+    // neither at `v`): exact coordinate comparisons.
+    let same_way = |v: u32, a: u32, b: u32| -> bool {
+        let (pv, pa, pb) = (proj.p2(pos(v)), proj.p2(pos(a)), proj.p2(pos(b)));
+        let i = if pa[0] != pv[0] { 0 } else { 1 };
+        (pa[i] > pv[i]) == (pb[i] > pv[i])
+    };
+    // Where `w` comes, turning from `v → u` towards the region: 0 strictly
+    // turning that way, 1 straight back along `v → u`'s opposite, 2 the
+    // far side, 3 straight back towards `u`.
+    let class = |u: u32, v: u32, w: u32| -> u8 {
+        match turn(v, u, w) {
+            -1 => 0,
+            1 => 2,
+            _ if same_way(v, u, w) => 3,
+            _ => 1,
+        }
+    };
+    let pick = |u: u32, v: u32, ks: &[usize]| -> usize {
+        let mut best = ks[0];
+        for &k in &ks[1..] {
+            let (w, b) = (boundary[k].1, boundary[best].1);
+            let (cw, cb) = (class(u, v, w), class(u, v, b));
+            let better = if cw != cb {
+                cw < cb
+            } else {
+                match if cw == 0 || cw == 2 { turn(v, b, w) } else { 0 } {
+                    // `w` comes before `b` turning towards the region.
+                    1 => true,
+                    -1 => false,
+                    _ => (w, boundary[k].2) < (b, boundary[best].2),
+                }
+            };
+            if better {
+                best = k;
+            }
+        }
+        best
+    };
+    let mut used = vec![false; boundary.len()];
     let mut loops = Vec::new();
-    for &(start, _, _) in &boundary {
-        if seen.contains(&start) {
+    for first in 0..boundary.len() {
+        if used[first] {
             continue;
         }
         let mut l = Vec::new();
-        let mut at = start;
+        let mut k = first;
         loop {
-            if !seen.insert(at) {
-                return Err(bad(at));
+            if used[k] {
+                return Err(bad(boundary[k].0));
             }
-            let &(to, f) = next.get(&at).ok_or_else(|| bad(at))?;
-            l.push((at, f));
-            at = to;
-            if at == start {
+            used[k] = true;
+            let (u, v, f) = boundary[k];
+            l.push((u, f));
+            let ks = out.get(&v).ok_or_else(|| bad(v))?;
+            let next = if ks.len() == 1 { ks[0] } else { pick(u, v, ks) };
+            if next == first {
                 break;
             }
+            k = next;
         }
         loops.push(l);
     }
     Ok(loops)
 }
 
+/// The plane's exact 2D projection: drop the normal's dominant
+/// coordinate (lowest axis on a tie), keeping the other two in the order
+/// that makes counter-clockwise seen from the normal's side
+/// counter-clockwise here too. Exact (no arithmetic at all), so distinct
+/// points stay distinct and every `orient2d` on them is the true one.
+#[derive(Debug, Clone, Copy)]
+struct Projection {
+    i: usize,
+    j: usize,
+}
+
+impl Projection {
+    fn new(normal: [f64; 3]) -> Projection {
+        let mut k = 0;
+        for a in 1..3 {
+            if normal[a].abs() > normal[k].abs() {
+                k = a;
+            }
+        }
+        let (i, j) = ((k + 1) % 3, (k + 2) % 3);
+        if normal[k] < 0.0 {
+            Projection { i: j, j: i }
+        } else {
+            Projection { i, j }
+        }
+    }
+
+    fn p2(&self, p: [f64; 3]) -> [f64; 2] {
+        [p[self.i], p[self.j]]
+    }
+
+    fn key(&self, p: [f64; 3]) -> [u64; 2] {
+        self.p2(p).map(f64::to_bits)
+    }
+}
+
 /// The cap's triangles (D3), from the one section triangulation shared
 /// with the boolean window ([`crate::triangulate_section`]), or the index
 /// of a point near the fault.
 fn cap_triangles(loops: &[Vec<[f64; 2]>]) -> Result<Vec<[usize; 3]>, usize> {
-    crate::section::triangulate_section_at(loops)
+    crate::section::triangulate_section_touching(loops)
         .map(|t| t.into_iter().map(|t| t.map(|i| i as usize)).collect())
         .map_err(|(_, k)| k)
 }

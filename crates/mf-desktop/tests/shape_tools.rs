@@ -145,8 +145,9 @@ fn split_cuts_a_closed_object_in_two_and_refuses_an_open_one() {
     settle(&mut h);
     let n = h.state().split.normal();
     assert!((n.x - 1.0).abs() < 1e-9, "{n:?}");
-    // Off the ball's seam of vertices (a plane through a ring of them
-    // grazes the surface: refused, "move the plane slightly").
+    // Off the ball's seam of vertices (kept there so this test's
+    // screenshots stay as they were; a plane through a ring of them
+    // cuts too — core_workflows' owner tests).
     h.state_mut().split.plane[9] += 1.3;
     settle(&mut h);
     still(&mut h, "split-preview");

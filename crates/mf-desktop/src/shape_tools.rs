@@ -562,9 +562,10 @@ fn next_action(code: &str) -> Option<Next> {
         | "tool_not_closed"
         | "opening_not_covered"
         | "opening_too_large_for_join" => Some(Next::Repair),
-        "operand_overlaps_itself" | "section_self_intersects" | "result_self_intersects" => {
-            Some(Next::MakeSolid)
-        }
+        "operand_overlaps_itself"
+        | "section_self_intersects"
+        | "split_section_self_intersects"
+        | "result_self_intersects" => Some(Next::MakeSolid),
         _ => None,
     }
 }
@@ -1026,8 +1027,10 @@ fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &
         .on_hover_text(t!("split.bound_help"));
     if app.split.bound {
         let shapes = [t!("split.bound.disc"), t!("split.bound.rect")];
-        let options: Vec<(&str, &str, bool)> =
-            shapes.iter().map(|l| (l.as_str(), l.as_str(), true)).collect();
+        let options: Vec<(&str, &str, bool)> = shapes
+            .iter()
+            .map(|l| (l.as_str(), l.as_str(), true))
+            .collect();
         let current = usize::from(app.split.bound_shape == "rect");
         if let (Some(i), _) = widgets::segmented(ui, &options, current) {
             app.split.bound_shape = if i == 0 { "disc" } else { "rect" }.into();
@@ -1396,7 +1399,11 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
                         .collect()
                 }
             };
-            let expected = if app.split.bound_shape == "rect" { 4 } else { 48 };
+            let expected = if app.split.bound_shape == "rect" {
+                4
+            } else {
+                48
+            };
             if pts.len() == expected {
                 painter.add(egui::Shape::convex_polygon(
                     pts.clone(),

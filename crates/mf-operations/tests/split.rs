@@ -416,20 +416,25 @@ fn refusals_are_named() {
         )),
         "section_too_thin"
     );
-    // Two cubes touching along an edge, cut through that edge: the two
-    // section squares touch at a point, which is refused, not guessed.
-    // Its own code, not `mesh.boolean`'s "section_self_intersects": the
-    // model here isn't self-overlapping, only this plane's section is
-    // ambiguous (Make solid wouldn't help, so it isn't offered).
+}
+
+/// Two cubes touching along an edge, cut through that edge (owner
+/// 2026-11-13): the two section squares touch at a point. Loops that
+/// only touch are split apart at the touch, never refused — each square
+/// capped on its own — and both parts are closed solids.
+#[test]
+fn sections_that_touch_at_a_point_are_cut_not_refused() {
     let touching = merge(&[cube(1.0), translated(&cube(1.0), [1.0, 1.0, 0.0])]);
-    assert_eq!(
-        code(split_with(
-            &touching,
-            IDENTITY,
-            &[("plane_point", "0,0,0.5")]
-        )),
-        "split_section_self_intersects"
-    );
+    let out = split_with(&touching, IDENTITY, &[("plane_point", "0,0,0.5")]).unwrap();
+    let (top, created) = parts(&out);
+    let bottom = created.unwrap().1;
+    for (mesh, what) in [(&top, "top"), (&bottom, "bottom")] {
+        let topo = mesh.topology_with(&RunContext::none()).unwrap();
+        assert_eq!(topo.boundary_edges, 0, "{what}: closed");
+        assert!(topo.non_manifold_edges.is_empty(), "{what}: manifold");
+        assert_eq!(topo.inconsistent_edges, 0, "{what}: oriented");
+        assert!(close(volume(mesh), 1.0, 1e-12), "{what}: {}", volume(mesh));
+    }
 }
 
 /// Owner 2026-11-12: a plane lying exactly on a box's top face must
@@ -708,8 +713,8 @@ fn seed_faces(mesh: &Mesh, plane_point: [f64; 3]) -> Vec<FaceId> {
         point: plane_point,
         normal: [0.0, 0.0, 1.0],
     };
-    let half = mf_boolean::cut_half(mesh, &plane, mf_boolean::Side::Above, &RunContext::none())
-        .unwrap();
+    let half =
+        mf_boolean::cut_half(mesh, &plane, mf_boolean::Side::Above, &RunContext::none()).unwrap();
     half.section_regions.iter().map(|r| r.seed_face).collect()
 }
 
@@ -729,22 +734,46 @@ fn version_3_log_upgrades_to_todays_defaults() {
     assert_eq!(op.version(), 4);
     let mut old = mf_spec::Params(
         [
-            ("plane_point".to_owned(), mf_spec::ParamValue::Vec3([0.0, 0.0, 0.7])),
-            ("plane_normal".to_owned(), mf_spec::ParamValue::Vec3([0.0, 0.0, 1.0])),
+            (
+                "plane_point".to_owned(),
+                mf_spec::ParamValue::Vec3([0.0, 0.0, 0.7]),
+            ),
+            (
+                "plane_normal".to_owned(),
+                mf_spec::ParamValue::Vec3([0.0, 0.0, 1.0]),
+            ),
             ("keep".to_owned(), mf_spec::ParamValue::Text("both".into())),
             ("cut_gap".to_owned(), mf_spec::ParamValue::Float(0.0)),
             ("cap".to_owned(), mf_spec::ParamValue::Bool(true)),
             ("pegs".to_owned(), mf_spec::ParamValue::Text("none".into())),
-            ("peg_shape".to_owned(), mf_spec::ParamValue::Text("round".into())),
-            ("hole_profile".to_owned(), mf_spec::ParamValue::Text("auto".into())),
+            (
+                "peg_shape".to_owned(),
+                mf_spec::ParamValue::Text("round".into()),
+            ),
+            (
+                "hole_profile".to_owned(),
+                mf_spec::ParamValue::Text("auto".into()),
+            ),
             ("hole_diameter".to_owned(), mf_spec::ParamValue::Float(5.0)),
-            ("hole_depth_above".to_owned(), mf_spec::ParamValue::Float(6.0)),
-            ("hole_depth_below".to_owned(), mf_spec::ParamValue::Float(6.0)),
+            (
+                "hole_depth_above".to_owned(),
+                mf_spec::ParamValue::Float(6.0),
+            ),
+            (
+                "hole_depth_below".to_owned(),
+                mf_spec::ParamValue::Float(6.0),
+            ),
             ("peg_count".to_owned(), mf_spec::ParamValue::Int(0)),
             ("peg_clearance".to_owned(), mf_spec::ParamValue::Float(0.2)),
-            ("length_allowance".to_owned(), mf_spec::ParamValue::Float(0.4)),
+            (
+                "length_allowance".to_owned(),
+                mf_spec::ParamValue::Float(0.4),
+            ),
             ("fit_clearance".to_owned(), mf_spec::ParamValue::Float(0.2)),
-            ("machine_tolerance".to_owned(), mf_spec::ParamValue::Float(0.0)),
+            (
+                "machine_tolerance".to_owned(),
+                mf_spec::ParamValue::Float(0.0),
+            ),
             ("min_wall".to_owned(), mf_spec::ParamValue::Float(1.5)),
             ("plate_width".to_owned(), mf_spec::ParamValue::Float(256.0)),
             ("plate_depth".to_owned(), mf_spec::ParamValue::Float(256.0)),

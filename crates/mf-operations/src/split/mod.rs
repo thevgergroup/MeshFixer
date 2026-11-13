@@ -178,17 +178,34 @@ fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
             let at = apply(transform, at);
             failed(
                 // A cut's own code, not `mesh.boolean`'s
-                // "section_self_intersects" (ADR owner 2026-11-12): the
-                // *model* isn't self-overlapping here — coplanar faces
-                // resolve cleanly by `mf_boolean::plane_cut`'s own
-                // simulation of simplicity — only the section this
-                // particular plane makes genuinely crosses or touches
-                // itself. Make solid fixes a self-overlapping model; it
-                // wouldn't fix this, so it isn't offered for it.
+                // "section_self_intersects". Owner 2026-11-13: a cut through
+                // valid closed manifold geometry is never refused, wherever
+                // its vertices sit relative to the plane — on it, an ulp off
+                // it, whole rings of them — and loops that only touch are
+                // split apart, not refused (`mf_boolean::plane_cut`). What's
+                // left is a section whose loops genuinely cross, which only
+                // a model whose surface crosses itself makes: Make solid is
+                // the fix, and the next action offered.
                 "split_section_self_intersects",
                 format!(
-                    "The cut grazes the surface here (near {:.3}, {:.3}, {:.3}); move the plane \
-                     slightly.",
+                    "The model's surface crosses itself where the cut passes (near {:.3}, {:.3}, \
+                     {:.3}). Run Make solid on it first.",
+                    at[0], at[1], at[2]
+                ),
+            )
+        }
+        // The plane lies along the surface (through a mesh edge or face)
+        // closer than the coordinates can separate, and rounding left the
+        // section impossible to close as a clean solid: refused by name,
+        // never written as a part that isn't closed and manifold. The
+        // model itself is fine, so Make solid isn't offered.
+        CutError::SectionDegenerate { at } => {
+            let at = apply(transform, at);
+            failed(
+                "split_section_degenerate",
+                format!(
+                    "The cut runs exactly along the model's surface here (near {:.3}, {:.3}, \
+                     {:.3}), closer than its coordinates can separate; move the plane slightly.",
                     at[0], at[1], at[2]
                 ),
             )
@@ -273,10 +290,9 @@ impl Operation for SplitPlane {
                 params
                     .0
                     .insert("bound_width".to_owned(), mf_spec::ParamValue::Float(100.0));
-                params.0.insert(
-                    "bound_height".to_owned(),
-                    mf_spec::ParamValue::Float(100.0),
-                );
+                params
+                    .0
+                    .insert("bound_height".to_owned(), mf_spec::ParamValue::Float(100.0));
                 true
             }
             v => v == self.version(),
@@ -462,7 +478,9 @@ fn split_one(
         let height = params.get_float("bound_height").unwrap_or(100.0) / scale;
         match params.get_choice("bound_shape").unwrap_or("disc") {
             "rect" => mf_boolean::Bound::Rect { width, height },
-            _ => mf_boolean::Bound::Disc { radius: width / 2.0 },
+            _ => mf_boolean::Bound::Disc {
+                radius: width / 2.0,
+            },
         }
     });
     let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
