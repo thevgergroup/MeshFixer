@@ -144,26 +144,10 @@ fn double_click(h: &mut Harness<'_, MeshFixerApp>, rec: &mut Recorder, label: &s
     record_camera_move(h, rec);
 }
 
-/// Selects and frames an object's row: a click, then focusing it (as Tab
-/// would) and Enter, which `tree_row` treats as a click too and always
-/// frames (M4 Task 8a). An object row's own double-click now renames it
-/// in place instead ("Project organisation" step 1, 2026-11-12), so Enter
-/// is this row kind's way to do what double-click still does for every
-/// other row kind (a hole, a loose piece); see the same helper in
-/// `tests/find.rs`.
+/// Selects and frames an object's row with a double-click, like any other
+/// row (M4 Task 8a); see the same helper in `tests/find.rs`.
 fn frame_object_row(h: &mut Harness<'_, MeshFixerApp>, rec: &mut Recorder, label: &str) {
-    let pos = row_pos(h, label);
-    h.event(egui::Event::PointerMoved(pos));
-    h.step();
-    h.run_steps(20);
-    assert_eq!(row_pos(h, label), pos, "the row stays put");
-    rec.shot(h, 0.8);
-    press(h, pos, true);
-    press(h, pos, false);
-    h.get_all_by_label(label).next().unwrap().focus();
-    h.run_steps(2);
-    key(h, egui::Key::Enter);
-    record_camera_move(h, rec);
+    double_click(h, rec, label);
 }
 
 /// Steps through a camera move (and the pulse after it) started by a
@@ -400,9 +384,7 @@ fn checkpoint_b_followup_real_scan() {
     h.run_steps(3);
     rec.still(&mut h, "03-far-side-hole-framed");
 
-    // 3. The object's row: the whole scan, framed. Double-click on an
-    //    object row now renames it in place instead of framing (see
-    //    `frame_object_row`), so Enter is used here.
+    // 3. The object's row: the whole scan, framed.
     let name = h.state().session.document().objects()[0].name.clone();
     scroll_to(&mut h, &name);
     frame_object_row(&mut h, &mut rec, &name);

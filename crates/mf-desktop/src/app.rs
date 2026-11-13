@@ -612,9 +612,10 @@ pub struct MeshFixerApp {
     /// The latest curves found (request number, one entry per overlapping
     /// pair: a pair that doesn't cross has none).
     intersections: Option<(u64, Vec<worker::IntersectionCurve>)>,
-    /// A name edit in progress (the selection panel's name field, or a
-    /// Browser row's F2/double-click): which object, and the text so far.
-    /// Committed on Enter or losing focus; Esc cancels it.
+    /// A name edit in progress (the selection panel's name field, F2 on
+    /// the active object, or the Browser row's "Rename…" context menu
+    /// item): which object, and the text so far. Committed on Enter or
+    /// losing focus; Esc cancels it.
     pub renaming: Option<(ObjectId, String)>,
     /// The Browser's search field (project organisation brief, step 2):
     /// filters rows by name; empty shows everything.
@@ -5772,7 +5773,8 @@ impl MeshFixerApp {
             self.toggle_role(&ids);
         }
         // F2: rename the active object in the Browser (Task "Project
-        // organisation" step 1), same as double-clicking its row.
+        // organisation" step 1), same as the Browser row's "Rename…"
+        // context menu item or the selection panel's name field.
         let f2 = !typing
             && !ctx.egui_wants_keyboard_input()
             && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2));

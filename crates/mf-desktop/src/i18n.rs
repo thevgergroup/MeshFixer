@@ -387,6 +387,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("ctx.frame", "Frame {name}"),
     ("ctx.mark", "Mark {name} as intentional"),
     ("ctx.remove", "Remove {name}"),
+    ("ctx.rename", "Rename…"),
     ("ctx.select_faces", "Select the faces at {name}"),
     ("ctx.unmark", "Unmark {name}"),
     (

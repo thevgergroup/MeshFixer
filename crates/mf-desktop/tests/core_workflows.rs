@@ -1777,6 +1777,76 @@ fn rename_then_split_gives_derived_names() {
     );
 }
 
+/// Double-clicking an object's Browser row frames it (M4 Task 8a), and
+/// F2 renames the active object in place (Task "Project organisation"
+/// step 1): a regression test for commit 14dc859, which briefly made an
+/// object row's double-click rename it instead of framing it.
+#[test]
+fn double_click_frames_an_object_row_and_f2_renames_it() {
+    require_gpu!("double_click_frames_an_object_row_and_f2_renames_it");
+    let mut h = opened(vec![("scan", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let id = id_of(&h, "scan");
+    let before = h.state().camera.unwrap();
+
+    // A single clean object leaves the right dock (the Browser) closed
+    // by default.
+    if h.query_by_label("Show Browser").is_some() {
+        h.get_by_label("Show Browser").click();
+        settle(&mut h);
+    }
+
+    let pos = row(&h, "scan").rect().center();
+    click_at(&mut h, pos);
+    click_at(&mut h, pos);
+    let waiting = Instant::now();
+    while h.state().framing_pending() {
+        assert!(waiting.elapsed() < Duration::from_secs(30), "timed out");
+        h.step();
+    }
+    let mut steps = 0;
+    while h.state().camera_animating() {
+        steps += 1;
+        assert!(steps < 600, "the camera move never ended");
+        h.step();
+    }
+    settle(&mut h);
+    assert_ne!(
+        h.state().camera.unwrap(),
+        before,
+        "double-click frames the object, it doesn't rename it"
+    );
+    assert!(h.state().renaming.is_none(), "no rename started");
+    assert_eq!(
+        h.state().session.document().object(id).unwrap().name,
+        "scan",
+        "unchanged by the double-click"
+    );
+
+    h.state_mut().active = Some(id);
+    // Hide the Browser so only the selection panel's name field watches
+    // `app.renaming` for this object (both would otherwise fight for
+    // keyboard focus on the same text, as they did before this test
+    // closed the Browser).
+    if h.query_by_label("Hide Browser").is_some() {
+        h.get_by_label("Hide Browser").click();
+        settle(&mut h);
+    }
+    let history = history_len(&h);
+    h.key_press(egui::Key::F2);
+    settle(&mut h);
+    assert_eq!(
+        h.state().renaming,
+        Some((id, "scan".to_owned())),
+        "F2 starts an inline rename of the active object"
+    );
+    h.state_mut().rename_object(id, "widget".into());
+    wait_until(&mut h, "the rename", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert_eq!(objects(&h), ["widget"], "F2's rename committed");
+}
+
 /// Grouping two objects (Cmd+G), then hiding and locking the group:
 /// every member's hidden/locked flag follows, it's undoable, and a
 /// locked object refuses to rename (Task "Project organisation" step 2

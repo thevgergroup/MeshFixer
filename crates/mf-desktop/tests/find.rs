@@ -133,33 +133,10 @@ fn double_click_row(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
     double_click_at(h, pos);
 }
 
-/// Selects and frames an object's row: a click, then focusing it (as Tab
-/// would) and Enter, which `tree_row` treats as a click too and always
-/// frames (M4 Task 8a). An object row's own double-click now renames it
-/// in place instead (Task "Project organisation" step 1), so Enter is
-/// this row kind's way to do what double-click still does for every
-/// other row (Model, a defect).
+/// Selects and frames an object's row with a double-click, like any other
+/// row (M4 Task 8a).
 fn frame_object_row(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
-    let pos = row_pos(h, label);
-    click_at(h, pos);
-    h.run_steps(2);
-    h.get_all_by_label(label).next().unwrap().focus();
-    h.run_steps(2);
-    h.event(egui::Event::Key {
-        key: egui::Key::Enter,
-        physical_key: None,
-        pressed: true,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.event(egui::Event::Key {
-        key: egui::Key::Enter,
-        physical_key: None,
-        pressed: false,
-        repeat: false,
-        modifiers: egui::Modifiers::NONE,
-    });
-    h.step();
+    double_click_row(h, label);
 }
 
 /// The input time of the frame just run (seconds).

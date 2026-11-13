@@ -252,6 +252,21 @@ fn context_actions() -> Vec<ContextAction> {
                 app.toggle_role(&ids);
             },
         },
+        // Rename (also F2, or double-clicking the selection panel's name
+        // field): starts the same inline edit as F2
+        // (`MeshFixerApp::rename_object` commits it).
+        ContextAction {
+            id: "object.rename_menu",
+            applies_to: |_, item| matches!(item, TreeItem::Object(_)),
+            title: |_, _| t!("ctx.rename"),
+            run: |app, item| {
+                if let TreeItem::Object(id) = *item
+                    && let Some(name) = app.session.document().object(id).map(|o| o.name.clone())
+                {
+                    app.renaming = Some((id, name));
+                }
+            },
+        },
         ContextAction {
             id: "defect.fill",
             applies_to: |app, item| {

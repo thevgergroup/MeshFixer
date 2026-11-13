@@ -1662,8 +1662,8 @@ fn object_entry(
         RichText::new(&name).color(theme::TEXT_MUTED)
     };
     let tip = format!(
-        "{}{} · Shift-click to select it too · double-click to frame it · right-click for \
-         more; the reorder menu moves it",
+        "{}{} · Shift-click to select it too · double-click to frame it · F2 to rename · \
+         right-click for more; the reorder menu moves it",
         count(tris, "triangle"),
         if active {
             ""
@@ -1837,9 +1837,9 @@ const HOVER_ACTIONS_WIDTH: f32 = HIDE_TOGGLE_WIDTH
     + DELETE_BUTTON_WIDTH
     + MOVE_MENU_WIDTH;
 
-/// `id`'s row while it is being renamed (double-click, F2, or Cmd+G's
-/// opposite number): a text field at the row's height, pre-filled with
-/// its current name, committing on Enter or losing focus
+/// `id`'s row while it is being renamed (F2, or the "Rename…" context
+/// menu item): a text field at the row's height, pre-filled with its
+/// current name, committing on Enter or losing focus
 /// (`MeshFixerApp::rename_object`) and cancelling on Esc.
 fn rename_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::ObjectId) {
     let mut text = app
@@ -2135,14 +2135,7 @@ fn tree_row(
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(last_click, response.id));
     }
-    // Double-click an object row renames it in place (Task "Project
-    // organisation" step 1); every other row kind still frames (M4 Task
-    // 8a). Enter still frames any row (it has no text to edit).
-    if twice && let TreeItem::Object(id) = *item {
-        if let Some(doc_name) = app.session.document().object(id).map(|o| o.name.clone()) {
-            app.renaming = Some((id, doc_name));
-        }
-    } else if twice || (response.clicked() && enter) {
+    if twice || (response.clicked() && enter) {
         app.tree_find(item);
     } else if response.clicked() && ui.input(|i| i.modifiers.shift) {
         app.tree_select_add(item);
