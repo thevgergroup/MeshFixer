@@ -1124,7 +1124,13 @@ fn cut_half_core(
         let mut by_points: HashMap<[u32; 3], Vec<(usize, bool)>> = HashMap::new();
         for (k, t) in kept.iter().enumerate() {
             if keep_piece[k] {
-                let r = (0..3).min_by_key(|&i| t[i]).unwrap_or(0);
+                let r = if t[0] <= t[1] && t[0] <= t[2] {
+                    0
+                } else if t[1] <= t[2] {
+                    1
+                } else {
+                    2
+                };
                 let (a, b, c) = (t[r], t[(r + 1) % 3], t[(r + 2) % 3]);
                 by_points
                     .entry([a, b.min(c), b.max(c)])

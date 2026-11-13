@@ -1499,7 +1499,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                             .collect::<Vec<_>>()
                             .join(",")
                     })
-                    .unwrap_or_default()
+                    .unwrap_or_default() // allow-swallow: no unticked regions means "cut every region", which the op reads from an empty list
             } else {
                 String::new()
             };
