@@ -15,8 +15,10 @@
 //!   (world +Z): `object.add_part`, one undo step. The new part becomes
 //!   the active object so Transform (T) is one key away.
 //! - **Join to scan**, on a placed part: Keep separate (the default,
-//!   nothing further to do), Merge (`mesh.boolean` union into the object
-//!   it was placed on) or Blend (the same union with a blend width).
+//!   nothing further to do), Combine with <the object it was placed on>
+//!   (`mesh.combine`: a solid part unioned into it, a hole part cut from
+//!   it, the part's own object removed — one object left, one undo step)
+//!   or Blend (`mesh.boolean`'s union with a blend width).
 //! - **Save as part** on any object writes it to the user library
 //!   (`mf_parts::save_object_as_part`).
 
@@ -37,7 +39,8 @@ pub const PARTS: &str = "parts";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JoinMode {
     KeepSeparate,
-    Merge,
+    /// `mesh.combine` into the object it was placed on.
+    Combine,
     Blend,
 }
 
@@ -297,6 +300,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "object.add_part");
     crate::shape_tools::refusal_card_for(app, ui, "object.add_shape");
     crate::shape_tools::refusal_card_for(app, ui, "mesh.boolean");
+    crate::shape_tools::refusal_card_for(app, ui, "mesh.combine");
     widgets::section(ui, &t!("parts.section.library"));
     ui.add(
         egui::TextEdit::singleline(&mut app.parts.search)
@@ -395,9 +399,16 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
     if open_stamp {
         widgets::caption(ui, t!("parts.open_stamp"));
     }
+    let target = app
+        .session
+        .document()
+        .object(placed.scan)
+        .map(|o| o.name.clone())
+        .unwrap_or_default(); // allow-swallow: the caller checked the scan still exists
+    let combine_label = t!("parts.join.combine", target = target.clone());
     let modes = [
         (JoinMode::KeepSeparate, t!("parts.join.keep_separate")),
-        (JoinMode::Merge, t!("parts.join.merge")),
+        (JoinMode::Combine, combine_label.clone()),
         (JoinMode::Blend, t!("parts.join.blend")),
     ];
     let options: Vec<(&str, &str, bool)> = modes
@@ -422,37 +433,66 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
     }
     ui.add_space(theme::SPACE_S);
     let can = app.busy.is_none() && app.parts.join != JoinMode::KeepSeparate;
+    let label = match app.parts.join {
+        JoinMode::Blend => t!("parts.join.blend_into", target = target),
+        _ => combine_label,
+    };
     if ui
         .add_enabled_ui(can, |ui| {
             widgets::wide_button(
                 ui,
                 Kind::Primary,
                 Some(icons::COMBINE),
-                &t!("parts.apply_join"),
+                &t!("parts.join.apply"),
             )
         })
         .inner
+        .on_hover_text(&label)
         .clicked()
     {
-        let blend_width = if app.parts.join == JoinMode::Blend {
-            app.parts.blend_width
-        } else {
-            0.0
-        };
-        let params = BTreeMap::from([
-            ("operation".to_owned(), "union".to_owned()),
-            ("blend_width".to_owned(), blend_width.to_string()),
-        ]);
-        run_on(
-            app,
-            placed.scan,
-            "mesh.boolean",
-            t!("parts.apply_join"),
-            params,
-            vec![("tool".to_owned(), placed.part, None)],
-        );
-        app.parts.placed = None;
+        join_part(app, placed, app.parts.join, label);
     }
+}
+
+/// Joins a placed part into the object it was placed on, as one undo
+/// step: Combine is `mesh.combine` (the part unioned in as a solid, or
+/// cut as a hole by its role; the part's own object removed, so one
+/// object is left); Blend is `mesh.boolean`'s union with the blend width.
+pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, label: String) {
+    match mode {
+        JoinMode::KeepSeparate => return,
+        JoinMode::Combine => {
+            let hole = app
+                .session
+                .document()
+                .object(placed.part)
+                .is_some_and(|o| o.is_hole());
+            let slot = if hole { "holes" } else { "solids" };
+            run_on(
+                app,
+                placed.scan,
+                "mesh.combine",
+                label,
+                BTreeMap::from([("keep_holes".to_owned(), "false".to_owned())]),
+                vec![(slot.to_owned(), placed.part, None)],
+            );
+        }
+        JoinMode::Blend => {
+            let params = BTreeMap::from([
+                ("operation".to_owned(), "union".to_owned()),
+                ("blend_width".to_owned(), app.parts.blend_width.to_string()),
+            ]);
+            run_on(
+                app,
+                placed.scan,
+                "mesh.boolean",
+                label,
+                params,
+                vec![("tool".to_owned(), placed.part, None)],
+            );
+        }
+    }
+    app.parts.placed = None;
 }
 
 fn save_active_as_part(app: &mut MeshFixerApp) {

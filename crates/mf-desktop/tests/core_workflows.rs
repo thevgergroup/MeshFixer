@@ -10,7 +10,8 @@
 //! Connect (two dowels, Apply, holes and dowel objects); one Sculpt
 //! inflate stroke with "stay on surface" leaving a split's cap
 //! untouched; a Transform move and its Undo; and a parametric shape
-//! param edit and its Undo.
+//! param edit and its Undo; and Parts' "Combine with <target>" union
+//! and its Undo.
 //!
 //! Run with `scripts/core-workflows.sh` (kept under 3 minutes at `-j 4`).
 
@@ -470,10 +471,16 @@ fn cap_on_by_default_closes_the_parts_and_records_a_joint() {
     );
     for name in ["ball (top)", "ball (bottom)"] {
         let id = id_of(&h, name);
-        let mesh = h.state().session.document().object(id).unwrap().mesh().unwrap().clone();
-        let topo = mesh
-            .topology_with(&mf_runtime::RunContext::none())
-            .unwrap();
+        let mesh = h
+            .state()
+            .session
+            .document()
+            .object(id)
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .clone();
+        let topo = mesh.topology_with(&mf_runtime::RunContext::none()).unwrap();
         assert_eq!(topo.boundary_edges, 0, "{name}: closed, with a cap");
     }
 }
@@ -500,10 +507,16 @@ fn cap_off_leaves_the_parts_open_with_no_joint() {
     );
     for name in ["ball (top)", "ball (bottom)"] {
         let id = id_of(&h, name);
-        let mesh = h.state().session.document().object(id).unwrap().mesh().unwrap().clone();
-        let topo = mesh
-            .topology_with(&mf_runtime::RunContext::none())
-            .unwrap();
+        let mesh = h
+            .state()
+            .session
+            .document()
+            .object(id)
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .clone();
+        let topo = mesh.topology_with(&mf_runtime::RunContext::none()).unwrap();
         assert!(topo.boundary_edges > 0, "{name}: left open at the cut");
     }
 }
@@ -1370,7 +1383,13 @@ fn dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove() {
     settle(&mut h);
     let history = history_len(&h);
     let before_tail = h.state().session.document().object(tail).unwrap().transform;
-    let before_groove = h.state().session.document().object(groove).unwrap().transform;
+    let before_groove = h
+        .state()
+        .session
+        .document()
+        .object(groove)
+        .unwrap()
+        .transform;
     let turned = rotated_90_z(&before_tail);
     h.state_mut()
         .commit_transform(tail, turned, "test rotate".into());
@@ -1383,7 +1402,13 @@ fn dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove() {
         history_len(&h)
     );
     let after_tail = h.state().session.document().object(tail).unwrap().transform;
-    let after_groove = h.state().session.document().object(groove).unwrap().transform;
+    let after_groove = h
+        .state()
+        .session
+        .document()
+        .object(groove)
+        .unwrap()
+        .transform;
     assert_ne!(after_tail, before_tail, "the tail turned");
     assert_ne!(
         after_groove, before_groove,
@@ -1408,8 +1433,8 @@ fn dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove() {
     // flank's own width-change with depth.
     let gap = world_min_distance(&h, tail, groove);
     let record = mf_desktop::shape_panel::recipe(h.state(), tail).unwrap();
-    let clearance =
-        record.params.get_float("fit_clearance").unwrap() + record.params.get_float("machine_tolerance").unwrap();
+    let clearance = record.params.get_float("fit_clearance").unwrap()
+        + record.params.get_float("machine_tolerance").unwrap();
     assert!(
         gap >= 0.0 && gap <= clearance.max(0.0) + 0.5,
         "gap {gap} should be within the clearance {clearance}"
@@ -1443,4 +1468,84 @@ fn dovetail_placed_rotated_and_applied_exits_the_piece_and_fits_the_groove() {
     );
     let names = objects(&h);
     assert_eq!(names.len(), 2, "{names:?}");
+}
+
+/// Parts' "Combine with <target>" (owner 2026-11-12, replacing Merge):
+/// a placed Box sunk into the ball it was dropped on is really unioned
+/// into it — one object left, whose bounds take in the box, with more
+/// faces than the ball alone — as one undo step; Undo restores both.
+#[test]
+fn parts_combine_with_target_unions_the_shapes_then_undo() {
+    require_gpu!("parts_combine_with_target_unions_the_shapes_then_undo");
+    let mut h = opened(vec![("scan", ball(10.0), at([0.0, 0.0, 10.0]))]);
+    let scan = id_of(&h, "scan");
+    let ball_faces = h
+        .state()
+        .session
+        .document()
+        .object(scan)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .face_count();
+    let part = place_box(&mut h);
+    // Sink it a few mm into the ball, as a person would in Transform, so
+    // the union has a real overlap.
+    let placed = history_len(&h);
+    let mut t = h.state().session.document().object(part).unwrap().transform;
+    t[11] -= 4.0;
+    h.state_mut().commit_transform(part, t, "sink".into());
+    wait_until(&mut h, "the sink-in", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > placed
+    });
+    settle(&mut h);
+    let box_bounds = world_bounds(&h, part);
+    let ball_bounds = world_bounds(&h, scan);
+    assert!(
+        box_bounds.max[2] > ball_bounds.max[2] + 1.0,
+        "the box sticks out"
+    );
+    let before = objects(&h);
+    assert_eq!(before.len(), 2, "{before:?}");
+
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    scroll_and_click(&mut h, "Combine with scan");
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Join");
+    wait_until(&mut h, "the combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    assert_eq!(
+        objects(&h),
+        vec!["scan".to_owned()],
+        "the box is combined away"
+    );
+    let combined = world_bounds(&h, scan);
+    assert!(
+        (combined.max[2] - box_bounds.max[2]).abs() < 1e-6,
+        "the union takes in the box: {combined:?} vs {box_bounds:?}"
+    );
+    let o = h.state().session.document().object(scan).unwrap();
+    let mesh = o.mesh().unwrap().clone();
+    let shift = DVec3::new(o.transform[9], o.transform[10], o.transform[11]);
+    // The box's own top corner is now a corner of the one mesh: its
+    // faces really joined, not just its bounds.
+    let corner = DVec3::from(box_bounds.max);
+    assert!(
+        mesh.vertices()
+            .any(|(_, p)| (DVec3::from(p) + shift - corner).length() < 1e-6),
+        "the box's corner is part of the union"
+    );
+    assert_ne!(mesh.face_count(), ball_faces, "the ball's surface changed");
+    assert_eq!(mesh.topology().boundary_edges, 0, "still closed");
+
+    h.state_mut().undo();
+    settle(&mut h);
+    assert_eq!(objects(&h), before, "Undo brings the box back");
+    assert!((world_bounds(&h, scan).max[2] - ball_bounds.max[2]).abs() < 1e-9);
 }

@@ -194,9 +194,9 @@ fn merge_joins_the_part_into_the_scan_as_a_second_command() {
     // tool switch.
     h.get_by_label("Parts").click();
     settle(&mut h);
-    h.get_by_label("Merge").click();
+    h.get_by_label("Combine with scan").click();
     settle(&mut h);
-    h.get_by_label("Join to scan").click();
+    h.get_by_label("Join").click();
     wait_until(&mut h, "the merge", |a| {
         a.busy.is_none() && a.session.history_labels().len() > after_sink
     });
