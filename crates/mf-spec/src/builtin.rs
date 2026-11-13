@@ -50,6 +50,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/mesh.make_solid.yaml"),
     ),
     (
+        "mesh.hollow.yaml",
+        include_str!("../../../specs/operations/mesh.hollow.yaml"),
+    ),
+    (
         "object.arrange_on_plate.yaml",
         include_str!("../../../specs/operations/object.arrange_on_plate.yaml"),
     ),

@@ -29,6 +29,7 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 /// holes are triangulated in parallel only while their summed O(n²)
 /// tables fit (one hole bigger than this runs alone).
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
+pub mod hollow;
 mod inspect;
 mod intersections;
 mod make_solid;
@@ -340,6 +341,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &inspect::Inspect,
     &intersections::Intersections,
     &make_solid::MakeSolid,
+    &hollow::Hollow,
     &remove_small::RemoveSmallComponents,
     &transform::SetTransform,
     &transform::DropToPlate,
