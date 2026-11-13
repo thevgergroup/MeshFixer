@@ -822,6 +822,91 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     );
 }
 
+/// Highlighting the picked surface (owner 2026-11-13): clicking a split
+/// cap's flat face while Hollow is open selects the whole cap, up to
+/// its own boundary (a box's cut face is exactly flat — every face
+/// there is coplanar, and the sides it's capped onto meet it at a
+/// sharp, real crease, so the crease-limited region grows all the way
+/// to the rim and no further); the selection tint lights up every one
+/// of those faces and no other; the panel names it by the object and
+/// the side Split's own naming gives that cut.
+#[test]
+fn hollow_clicking_the_cap_highlights_the_whole_region_and_names_it() {
+    require_gpu!("hollow_clicking_the_cap_highlights_the_whole_region_and_names_it");
+    let mut h = opened(vec![(
+        "block",
+        mf_fixtures::cube(40.0),
+        at([0.0, 0.0, 0.0]),
+    )]);
+    let id = id_of(&h, "block");
+
+    // Cut the block in half (world z = 20, its own local z too): Keep
+    // Bottom leaves a 40x40x20 box whose new top face (the cap, local
+    // z = 20) is flat, bounded by the box's own four flat sides, and
+    // faces up (visible from the default camera).
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 20.0;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert_eq!(names, ["block (bottom)"], "{names:?}");
+    let kept = mesh_of(&h, "block (bottom)");
+
+    // The cap's own faces: every face every one of whose corners sits
+    // on the cut plane (local z = 20, the box's own new top).
+    let cap_faces: Vec<u32> = kept
+        .faces()
+        .filter(|(_, t)| {
+            t.iter()
+                .all(|&v| (kept.corner_position(v)[2] - 20.0).abs() < 1e-6)
+        })
+        .map(|(f, _)| f.0)
+        .collect();
+    assert!(!cap_faces.is_empty());
+
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    wait_until(&mut h, "the box's preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    // The new top face (world z = 20, the cut plane), from above.
+    let p = facing_point(&h, [20.0, 20.0, 20.0], 1.0);
+    click_at(&mut h, p);
+    settle(&mut h);
+
+    // The whole cap is selected, nothing else.
+    let region = h.state().hollow.picked_region.clone().unwrap();
+    let mut picked: Vec<u32> = region.faces.iter().map(|f| f.0).collect();
+    picked.sort_unstable();
+    let mut expected = cap_faces.clone();
+    expected.sort_unstable();
+    assert_eq!(picked, expected, "the whole cap, up to its own boundary");
+
+    // The selection tint and outline (the same mechanism and meaning as
+    // any other face selection here): `app.selection` names the same
+    // faces, on the box's own revision.
+    let sel = h.state().selection.clone().unwrap();
+    assert_eq!(sel.kind, mf_selection::SelectionKind::Faces);
+    assert_eq!(sel.object, id);
+    let mut sel_ids = sel.ids.clone();
+    sel_ids.sort_unstable();
+    assert_eq!(sel_ids, expected);
+    wait_until(&mut h, "the cap's selection tint", |a| {
+        cap_faces
+            .iter()
+            .all(|&f| a.read_face_state(f).unwrap().unwrap() & mf_render::FaceStates::SELECTED != 0)
+    });
+
+    // Named by the object and the side it faces (Split's own naming).
+    h.get_by_label(&format!("Opens through: {}", region.name));
+    assert!(
+        region.name.starts_with("Cut face of block (bottom) ("),
+        "{}",
+        region.name
+    );
+}
+
 /// Owner 2026-11-12: with only "ball" selected (a plain Browser click,
 /// not Shift), Split must cut only "ball", even though the plane also
 /// crosses "cube", which was never selected. The panel says so by name

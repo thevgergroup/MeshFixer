@@ -213,6 +213,13 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_close: |app, _| {
             app.hollow.preview = None;
             app.hollow.asked = None;
+            if let Some(r) = &app.hollow.picked_region
+                && app.active_mesh().is_some_and(|m| Mesh::ptr_eq(m, &r.mesh))
+            {
+                app.selection = None;
+            }
+            app.hollow.picked_region = None;
+            app.hollow.open_through = false;
         },
         ..T::new(
             HOLLOW,
@@ -466,10 +473,21 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
         return Input::Consumed;
     }
     let region = grow_region(&mesh, face);
+    let ids: Vec<u32> = region.iter().map(|f| f.0).collect();
     app.hollow.picked_region = Some(PickedRegion {
         faces: region,
         name: region_name(app, id, &mesh, face),
         mesh,
+    });
+    // The selection tint and outline (the generic mechanism every other
+    // face-region highlight here uses): a plain click elsewhere in the
+    // view never reaches this (Hollow's own `claims` keeps it), so this
+    // never fights the row/click selection while the tool is open.
+    app.selection = Some(mf_selection::Selection {
+        object: id,
+        revision: app.session.current(),
+        kind: mf_selection::SelectionKind::Faces,
+        ids,
     });
     Input::Consumed
 }
@@ -625,6 +643,7 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
     app.hollow.points.clear();
     app.hollow.picked_region = None;
     app.hollow.open_through = false;
+    app.selection = None;
     app.hollow.last_result = Some(match report["thin"]["below"].as_f64() {
         // allow-swallow: a report without a thin-face count has none to report
         Some(below) if report["thin"]["faces"].as_u64().unwrap_or(0) > 0 => t!(
@@ -658,6 +677,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     {
         app.hollow.picked_region = None;
         app.hollow.open_through = false;
+        app.selection = None;
     }
     let Some((lo, hi)) = crate::shape_tools::world_bounds(app, id) else {
         widgets::caption(ui, t!("hollow.measuring"));
@@ -935,5 +955,41 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             },
             t!("hollow.apply"),
         );
+    }
+}
+
+#[cfg(test)]
+mod grow_region_tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
+    use super::*;
+
+    /// Clicking a cube's flat top grows exactly its two triangles, never
+    /// crossing the sharp (90 degree) crease to a side face: a flat
+    /// region's own boundary is a real crease, not a naive per-edge-hop
+    /// count that a smoothly curved surface could ever add up past 60
+    /// degrees (unlike a curved surface's many small hops, which never
+    /// trips a single-hop threshold — see
+    /// `growing_across_a_smooth_surface_never_stops_on_curvature_alone`
+    /// below for why a curved cap needs its own real crease to stop at,
+    /// not just "far enough").
+    #[test]
+    fn growing_from_a_flat_top_stops_at_its_own_sharp_edge() {
+        let cube = mf_fixtures::cube(10.0);
+        // Faces 0, 1 are the top (+z): see `mf_fixtures::cube`.
+        let region = grow_region(&cube, FaceId(0));
+        let mut ids: Vec<u32> = region.iter().map(|f| f.0).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, [0, 1], "the whole top, and no side face");
+    }
+
+    /// A UV sphere has no sharp crease anywhere: growing from any face
+    /// reaches every face of it (the whole closed surface), which is
+    /// the documented, accepted limit of a per-edge dihedral check on a
+    /// smoothly curved surface with no real crease to stop at.
+    #[test]
+    fn growing_across_a_smooth_surface_never_stops_on_curvature_alone() {
+        let sphere = mf_fixtures::uv_sphere(16, 24);
+        let region = grow_region(&sphere, FaceId(0));
+        assert_eq!(region.len(), sphere.face_count(), "the whole sphere");
     }
 }
