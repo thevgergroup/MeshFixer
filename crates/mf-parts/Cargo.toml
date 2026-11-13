@@ -8,6 +8,12 @@ repository.workspace = true
 [lints]
 workspace = true
 
+[features]
+# Test-only generators (the acceptance connector that proves a new one
+# needs only its generator file, its spec and one registry line). Off in
+# every normal build; only tests' dev-dependencies enable it.
+test-kinds = []
+
 [dependencies]
 mf-spec.workspace = true
 mf-geometry.workspace = true

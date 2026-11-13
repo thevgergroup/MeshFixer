@@ -15,7 +15,8 @@ workspace = true
 # build; only mf-command's dev-dependency enables it.
 # Also registers `test.consume_tool`, a stand-in for a boolean (removes
 # its tool operand and creates an object) for multi-object command tests.
-test-kinds = ["mf-spec/test-kinds"]
+# And mf-parts' test-only generators.
+test-kinds = ["mf-spec/test-kinds", "mf-parts/test-kinds"]
 
 [dependencies]
 faer.workspace = true

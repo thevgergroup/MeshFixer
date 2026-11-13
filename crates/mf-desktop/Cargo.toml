@@ -35,6 +35,9 @@ rfd.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+# The test-only generators, so the desktop suites can drive one through
+# the UI (never in a normal build: dev-dependencies only).
+mf-parts = { workspace = true, features = ["test-kinds"] }
 mf-selection.workspace = true
 mf-spec.workspace = true
 egui_kittest = { version = "0.37", features = ["eframe", "wgpu", "snapshot"] }

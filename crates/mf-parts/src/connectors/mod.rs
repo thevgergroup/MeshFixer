@@ -16,8 +16,12 @@ use mf_geometry::Mesh;
 
 /// Every built-in connector, in registry order (the library lists the
 /// ones offered on a surface in this order; Connect its cut-face ones).
+/// Adding one is one entry here, next to its own generator file and spec.
+/// A test-only one (the `test-kinds` feature) is registered with its
+/// module inline, `#[path]` naming its file, so it too is one entry.
 pub(crate) fn builtin_generators() -> Vec<&'static dyn crate::Generator> {
-    vec![
+    #[allow(unused_mut, clippy::let_and_return)] // only the test-kinds entries push
+    let mut all: Vec<&'static dyn crate::Generator> = vec![
         &hinge::PinHinge,
         &leaf_hinge::LeafHinge,
         &flap::FlapHinge,
@@ -29,7 +33,8 @@ pub(crate) fn builtin_generators() -> Vec<&'static dyn crate::Generator> {
         &joint::Dovetail,
         &joint::Magnet,
         &joint::Insert,
-    ]
+    ];
+    all
 }
 
 /// A closed surface of revolution around the x axis: `profile` is
