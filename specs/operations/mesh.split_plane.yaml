@@ -1,7 +1,9 @@
 id: mesh.split_plane
 # Version 2 adds hole_profile (version 1 records replay round); version 3
-# adds cap (version 2 and older records replay capped, as they ran).
-version: 3
+# adds cap (version 2 and older records replay capped, as they ran);
+# version 4 adds regions and the bound (version 3 and older records
+# replay with every region cut and no bound, as they ran).
+version: 4
 summary: Cut a closed object in two along a plane and close each part with a flat cap.
 geometry_kinds: [mesh]
 # Every selected object (many): each one the plane crosses becomes its
@@ -37,6 +39,44 @@ parameters:
     type: bool
     default: true
     description: "Close each kept part with a flat cap where it was cut (on by default). Off leaves it open at the cut, with no cap faces and no joint recorded — for a vase or bowl. Version 2 always capped"
+  # Cross-section picking (Phase 1b): each separate cap loop or loop
+  # nest the plane makes is a region, named by a stable seed face (the
+  # lowest input face id on its outer loop). Empty (the default) cuts
+  # every region, today's behaviour; naming some leaves the rest of the
+  # object whole across the plane there — an ear can be cut off without
+  # slicing the head behind it. Version 3 and older always cut every
+  # region.
+  - name: regions
+    type: faces
+    default: []
+    description: "Seed faces (mesh.split_plane's own report lists each region's) of the cross-section regions to cut; empty cuts every region"
+  # Bounded cut plane (Phase 1b): "Limit to area" turns the infinite
+  # plane into a disc or rectangle centred on plane_point, in the
+  # plane's own frame. Only a region whose section lies entirely inside
+  # the bound is cut; one entirely outside is left whole; one crossing
+  # the bound's edge refuses the cut by name. Version 3 and older had
+  # no bound (the plane was always infinite).
+  - name: bound
+    type: bool
+    default: false
+    description: "Limit the cut plane to a disc or rectangle (off: the plane is infinite, today's behaviour)"
+  - name: bound_shape
+    type: choice
+    default: disc
+    values: [disc, rect]
+    description: "The bound's shape when bound is on: a disc (bound_width is its diameter) or a rectangle (bound_width by bound_height)"
+  - name: bound_width
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "The bound's diameter (disc) or width (rect), centred on plane_point"
+  - name: bound_height
+    type: float
+    default: 100.0
+    min: 0.0
+    unit: mm
+    description: "The bound's height (rect only; unused for a disc)"
   # Alignment holes and dowels (Task 13, D12); dovetail (Task 14): a
   # groove of hole_diameter at the cut, hole_depth_below deep, flanks at
   # 15 degrees, through the bottom part, and a matching tail on the top.
@@ -140,6 +180,8 @@ postconditions:
   - with pegs dowels, both cut faces get the same holes, and each dowel (diameter = hole - peg_clearance, length = hole_depth_above + hole_depth_below - length_allowance) is a new object standing upright on the plate (world min z 0), laid out clear of the split object; dowels that don't fit are placed beside the plate and reported
   - with pegs dovetail, one dovetail per section along its principal axis; the tail is peg_clearance narrower than the groove across its flanks and length_allowance short of its floor, so the parts slide together
   - with pegs attached, pegs of the dowel's diameter and hole_depth_below - length_allowance long stick out of the top part, and the bottom part has the holes
+  - with regions set, only the named regions are cut; every other region's object stays whole and unseamed across the plane there
+  - with bound on, only a region whose section lies entirely inside the bound is cut; a region crossing the bound's edge refuses the cut (split_region_crosses_bound), with the next action "Make the cut area larger or move it"
 effects: [geometry_changes, topology_changes, creates_objects]
 runtime:
   cancellable: true

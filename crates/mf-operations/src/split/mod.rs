@@ -197,6 +197,12 @@ fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
             "invalid_plane",
             "The cut plane's direction is zero; give it a direction.",
         ),
+        // Phase 1b, the bounded cut plane: a region's section straddles
+        // the bound's edge, ambiguous which way it should go.
+        CutError::RegionCrossesBound { .. } => failed(
+            "split_region_crosses_bound",
+            "A cut region crosses the cut area's edge. Make the cut area larger or move it.",
+        ),
         CutError::Geometry(e) => failed("invalid_mesh", e.to_string()),
     }
 }
@@ -230,7 +236,7 @@ impl Operation for SplitPlane {
     }
 
     fn version(&self) -> u32 {
-        3
+        4
     }
 
     fn upgrade_params(&self, recorded: u32, params: &mut Params) -> bool {
@@ -248,6 +254,29 @@ impl Operation for SplitPlane {
                 params
                     .0
                     .insert("cap".to_owned(), mf_spec::ParamValue::Bool(true));
+                self.upgrade_params(3, params)
+            }
+            // Version 3 (and older, falling through) always cut every
+            // region, with no bound (Phase 1b: regions, bound).
+            3 => {
+                params.0.insert(
+                    "regions".to_owned(),
+                    mf_spec::ParamValue::Faces(mf_spec::FaceList::default()),
+                );
+                params
+                    .0
+                    .insert("bound".to_owned(), mf_spec::ParamValue::Bool(false));
+                params.0.insert(
+                    "bound_shape".to_owned(),
+                    mf_spec::ParamValue::Text("disc".into()),
+                );
+                params
+                    .0
+                    .insert("bound_width".to_owned(), mf_spec::ParamValue::Float(100.0));
+                params.0.insert(
+                    "bound_height".to_owned(),
+                    mf_spec::ParamValue::Float(100.0),
+                );
                 true
             }
             v => v == self.version(),
@@ -409,6 +438,33 @@ fn split_one(
     let gap = params.get_float("cut_gap")?;
     let pegs = params.get_choice("pegs")?;
     let cap = params.get_bool("cap")?;
+    // Cross-section picking (Phase 1b): an empty list cuts every region
+    // (today's behaviour); `mf_boolean::cut_half_with_regions` takes the
+    // same "empty/absent means all" convention.
+    let region_faces: Vec<mf_geometry::FaceId> = params
+        .get_faces("regions")?
+        .into_iter()
+        .map(mf_geometry::FaceId)
+        .collect();
+    let regions_filter = (!region_faces.is_empty()).then_some(region_faces);
+    // The bounded cut plane (Phase 1b): width/height are world mm; the
+    // bound itself lives in the plane's own object-space frame, so they
+    // need the same object-units conversion `alignment` uses for hole
+    // sizes.
+    let scale = crate::affine::determinant(&target.transform).abs().cbrt();
+    let scale = if scale > 0.0 && scale.is_finite() {
+        scale
+    } else {
+        1.0
+    };
+    let bound = params.get_bool("bound")?.then(|| {
+        let width = params.get_float("bound_width").unwrap_or(100.0) / scale;
+        let height = params.get_float("bound_height").unwrap_or(100.0) / scale;
+        match params.get_choice("bound_shape").unwrap_or("disc") {
+            "rect" => mf_boolean::Bound::Rect { width, height },
+            _ => mf_boolean::Bound::Disc { radius: width / 2.0 },
+        }
+    });
     let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
     if len == 0.0 || !len.is_finite() {
         return Err(refusal(&target.transform, CutError::InvalidPlane));
@@ -451,7 +507,17 @@ fn split_one(
     // so is asking for just one side and missing it entirely.
     let side_or_none = |keep_this: bool, plane: &Plane, side: Side| {
         keep_this
-            .then(|| mf_boolean::cut_half_with(target.mesh, plane, side, cap, ctx))
+            .then(|| {
+                mf_boolean::cut_half_with_regions(
+                    target.mesh,
+                    plane,
+                    side,
+                    cap,
+                    regions_filter.as_deref(),
+                    bound.as_ref(),
+                    ctx,
+                )
+            })
             .transpose()
     };
     let above = match side_or_none(keep != "below", &plane_above, Side::Above) {
