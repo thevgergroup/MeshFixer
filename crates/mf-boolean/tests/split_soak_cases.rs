@@ -40,6 +40,22 @@ const CASES: &[(&str, [f64; 3], [f64; 3])] = &[
         [5.995190528383289, 9.0, 3.750000000000001],
         [1.0, 2.0, 3.0],
     ),
+    // Found by the soak after the section was rebuilt on topology
+    // (split-harden): the first fan pairing and cap repair refused these.
+    (
+        "1926ead54f47f5bd",
+        [3.0, 3.1038298234083785, 0.5],
+        [1.0, 0.0, 0.0],
+    ),
+    (
+        "bc83aa83d226ff05",
+        [-2.962523224388176, 2.216919686113031, 7.629165124598852],
+        [
+            0.0000000000000002498001805406602,
+            0.03518281605681696,
+            0.07468182241865415,
+        ],
+    ),
 ];
 
 /// `mf-operations`' `affine::inverse`, verbatim: the plane must be
@@ -85,8 +101,9 @@ pub fn case(seed: &str, point: [f64; 3], normal: [f64; 3]) -> (Mesh, Plane) {
     let local: [f64; 3] = std::array::from_fn(|c| {
         inv[c] * point[0] + inv[3 + c] * point[1] + inv[6 + c] * point[2] + inv[9 + c]
     });
-    let n: [f64; 3] =
-        std::array::from_fn(|r| t[3 * r] * normal[0] + t[3 * r + 1] * normal[1] + t[3 * r + 2] * normal[2]);
+    let n: [f64; 3] = std::array::from_fn(|r| {
+        t[3 * r] * normal[0] + t[3 * r + 1] * normal[1] + t[3 * r + 2] * normal[2]
+    });
     (
         o.mesh.clone(),
         Plane {

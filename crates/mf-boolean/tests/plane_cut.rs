@@ -199,3 +199,141 @@ fn bound_crossing_a_region_is_refused_by_name() {
         other => panic!("expected RegionCrossesBound, got {other:?}"),
     }
 }
+
+fn closed_manifold(mesh: &Mesh, what: &str) {
+    let topo = mesh.topology_with(&RunContext::none()).unwrap();
+    assert_eq!(topo.boundary_edges, 0, "{what}: open edges");
+    assert!(topo.non_manifold_edges.is_empty(), "{what}: non-manifold");
+    assert_eq!(topo.inconsistent_edges, 0, "{what}: misoriented");
+}
+
+/// An unticked region is left whole as the input had it: the other lobe
+/// comes back bit for bit, ids and corners, in exactly one part; both
+/// parts closed and manifold. Through a vertex ring on the plane to
+/// within rounding (z = 0: `uv_sphere(12, 16)`'s equator is at
+/// cos(π/2) = 6e-17) and off it. Each side ticks its own left lobe.
+#[test]
+fn an_unticked_region_comes_back_exactly_as_the_input_had_it() {
+    let mesh = two_lobes();
+    let ctx = RunContext::none();
+    let per_lobe = uv_sphere(12, 16).face_count() as u32;
+    for z in [0.0, 0.13] {
+        let plane = Plane {
+            point: [0.0, 0.0, z],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let part = |side: Side| {
+            let all = cut_half(&mesh, &plane, side, &ctx).unwrap();
+            assert_eq!(all.section_regions.len(), 2, "z = {z}");
+            // A +z normal's frame is (u, v) = (y, -x): v > 0 is the lobe
+            // at x = -3, the same lobe on either side.
+            let left = all
+                .section_regions
+                .iter()
+                .find(|r| r.outer.iter().all(|p| p[1] > 0.0))
+                .unwrap()
+                .seed_face;
+            let half = cut_half_with_regions(&mesh, &plane, side, true, Some(&[left]), None, &ctx)
+                .unwrap();
+            assert_eq!(half.section_regions.len(), 1, "z = {z}");
+            assert_eq!(half.section_regions[0].seed_face, left);
+            closed_manifold(&half.mesh, &format!("z = {z} {side:?}"));
+            half.mesh
+        };
+        let (above, below) = (part(Side::Above), part(Side::Below));
+        let whole_in = |part: &Mesh, lobe: u32| {
+            (lobe * per_lobe..(lobe + 1) * per_lobe)
+                .all(|f| part.face(mf_geometry::FaceId(f)) == mesh.face(mf_geometry::FaceId(f)))
+        };
+        let found: Vec<(u32, bool)> = (0..2)
+            .flat_map(|lobe| {
+                [
+                    (lobe, whole_in(&above, lobe)),
+                    (lobe, whole_in(&below, lobe)),
+                ]
+            })
+            .filter(|&(_, w)| w)
+            .collect();
+        assert_eq!(found.len(), 1, "z = {z}: {found:?}");
+    }
+}
+
+/// Cap-off (owner 2026-11-12, "Cap the cut" off): each part is exactly
+/// the capped part without its cap faces — the same triangles, bit for
+/// bit — and its open boundary is exactly the cap's boundary. Through a
+/// vertex ring on the plane, off it, tilted, and through two lobes.
+#[test]
+fn cap_off_removes_exactly_the_cap() {
+    use mf_boolean::cut_half_with;
+    use std::collections::BTreeMap;
+    let ctx = RunContext::none();
+    let sphere = mf_fixtures::scaled(&uv_sphere(12, 16), 3.0);
+    let cases: Vec<(Mesh, Plane)> = vec![
+        (sphere.clone(), plane()),
+        (
+            sphere.clone(),
+            Plane {
+                point: [0.1, 0.0, 0.37],
+                normal: [0.3, 0.1, 1.0],
+            },
+        ),
+        (two_lobes(), plane()),
+    ];
+    type Tri = [[u64; 3]; 3];
+    let tri = |m: &Mesh, t: [u32; 3]| -> Tri { t.map(|v| m.corner_position(v).map(f64::to_bits)) };
+    // Triangles as a multiset, each rotated to start at its least corner.
+    let multiset = |m: &Mesh, skip: &[mf_geometry::FaceId]| {
+        let mut out: BTreeMap<Tri, usize> = BTreeMap::new();
+        for (f, t) in m.faces() {
+            if skip.contains(&f) {
+                continue;
+            }
+            let p = tri(m, t);
+            let r = (0..3).min_by_key(|&i| p[i]).unwrap();
+            *out.entry([p[r], p[(r + 1) % 3], p[(r + 2) % 3]])
+                .or_default() += 1;
+        }
+        out
+    };
+    // Undirected edges with one face, by position.
+    let open = |m: &Mesh, faces: &dyn Fn(mf_geometry::FaceId) -> bool| {
+        let mut count: BTreeMap<[[u64; 3]; 2], i32> = BTreeMap::new();
+        for (f, t) in m.faces() {
+            if !faces(f) {
+                continue;
+            }
+            for i in 0..3 {
+                let (a, b) = (
+                    m.corner_position(t[i]).map(f64::to_bits),
+                    m.corner_position(t[(i + 1) % 3]).map(f64::to_bits),
+                );
+                *count.entry([a.min(b), a.max(b)]).or_default() += 1;
+            }
+        }
+        count
+            .into_iter()
+            .filter(|&(_, n)| n == 1)
+            .map(|(e, _)| e)
+            .collect::<Vec<_>>()
+    };
+    for (mesh, p) in cases {
+        for side in [Side::Above, Side::Below] {
+            let c = cut_half_with(&mesh, &p, side, true, &ctx).unwrap();
+            let u = cut_half_with(&mesh, &p, side, false, &ctx).unwrap();
+            closed_manifold(&c.mesh, "capped");
+            assert!(!c.cap_faces.is_empty());
+            assert!(u.cap_faces.is_empty() && u.section_regions.is_empty());
+            assert_eq!(
+                multiset(&u.mesh, &[]),
+                multiset(&c.mesh, &c.cap_faces),
+                "the uncapped part is the capped one without its cap"
+            );
+            let cap_boundary = open(&c.mesh, &|f| c.cap_faces.contains(&f));
+            assert!(!cap_boundary.is_empty());
+            assert_eq!(open(&u.mesh, &|_| true), cap_boundary);
+            let topo = u.mesh.topology_with(&ctx).unwrap();
+            assert!(topo.non_manifold_edges.is_empty());
+            assert_eq!(topo.inconsistent_edges, 0);
+        }
+    }
+}

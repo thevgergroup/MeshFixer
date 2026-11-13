@@ -81,14 +81,18 @@ pub(crate) fn winding_faces(
     points: &[[f64; 2]],
     edges: &[(usize, usize)],
 ) -> Result<Vec<([usize; 3], i32)>, Fault> {
-    winding_faces_impl(points, edges, false)
+    winding_faces_impl(points, edges, None)
 }
 
 /// [`triangulate_section_at`] for loops that may legitimately **touch**
-/// (the plane cut, owner 2026-11-13): two loop points at exactly the
-/// same place — the same mesh vertex where a pinched loop was split in
-/// two, or two distinct vertices of separate shells that meet there —
-/// are one triangulation vertex, not a fault. Each output triangle's
+/// (the plane cut, owner 2026-11-13): loop points that are the same mesh
+/// vertex (`ids`, one per point in the loops' concatenated order: an
+/// on-plane vertex the section passes more than once) are one
+/// triangulation vertex, not a fault. Two *different* vertices at one
+/// place are a fault (`SelfIntersects` at the second): the section's
+/// own topology never puts two of its points at one place, so it is
+/// rounding folding the section there (split-harden, 2026-11-13: a cut
+/// point an ulp off, then the next one back exactly on the first). Each output triangle's
 /// corner there is resolved to the loop point whose own wedge (between
 /// its incoming and outgoing loop edges) the triangle lies in, found by
 /// walking clockwise round the shared vertex to the first loop edge
@@ -101,6 +105,7 @@ pub(crate) fn winding_faces(
 /// point exactly on another loop's edge) are still refused.
 pub(crate) fn triangulate_section_touching(
     loops: &[Vec<[f64; 2]>],
+    ids: &[u32],
 ) -> Result<Vec<[u32; 3]>, Fault> {
     let mut points = Vec::new();
     let mut edges = Vec::new();
@@ -115,7 +120,7 @@ pub(crate) fn triangulate_section_touching(
         }
     }
     let mut out = Vec::new();
-    for (t, w) in winding_faces_impl(&points, &edges, true)? {
+    for (t, w) in winding_faces_impl(&points, &edges, Some(ids))? {
         match w {
             0 => {}
             1 => out.push(t.map(|i| i as u32)),
@@ -131,8 +136,9 @@ pub(crate) fn triangulate_section_touching(
 fn winding_faces_impl(
     points: &[[f64; 2]],
     edges: &[(usize, usize)],
-    allow_touch: bool,
+    touch_ids: Option<&[u32]>,
 ) -> Result<Vec<([usize; 3], i32)>, Fault> {
+    let allow_touch = touch_ids.is_some();
     let mut cdt = ConstrainedDelaunayTriangulation::<Point2<f64>>::new();
     let mut handles: Vec<FixedVertexHandle> = Vec::with_capacity(points.len());
     let mut owner: HashMap<usize, usize> = HashMap::with_capacity(points.len());
@@ -143,7 +149,7 @@ fn winding_faces_impl(
             .insert(Point2::new(p[0], p[1]))
             .map_err(|_| (SectionError::Degenerate, i))?;
         if let Some(&first) = owner.get(&h.index()) {
-            if !allow_touch {
+            if touch_ids.is_none_or(|ids| ids[first] != ids[i]) {
                 // Two points at one place.
                 return Err((SectionError::SelfIntersects, i));
             }
