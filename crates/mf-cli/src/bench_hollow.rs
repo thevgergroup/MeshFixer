@@ -148,21 +148,6 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     let op = mf_operations::find("mesh.hollow")
         .ok_or_else(|| Failure::Runtime("mesh.hollow isn't registered".into()))?;
 
-    // Each stage's start, from the progress reports.
-    let (_sink, reader) = ctx.progress.channel();
-    let stages = std::thread::spawn(move || {
-        let t0 = Instant::now();
-        let mut seen: Vec<(&'static str, f64)> = Vec::new();
-        while let Some((stage, _)) = reader.recv() {
-            if stage == "done" {
-                break;
-            }
-            if seen.last().is_none_or(|(s, _)| *s != stage) {
-                seen.push((stage, t0.elapsed().as_secs_f64()));
-            }
-        }
-        seen
-    });
     let before = footprint()?;
     let stop = Arc::new(AtomicBool::new(false));
     let samples = sampler(Arc::clone(&stop));
@@ -182,26 +167,6 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
     );
     let hollow_s = start.elapsed().as_secs_f64();
     let cpu_s = cpu()? - cpu0;
-    ctx.progress.report("done", 1.0);
-    let seen = stages
-        .join()
-        .map_err(|_| Failure::Runtime("the progress thread panicked".into()))?;
-    // (stage, seconds), in order; a stage met again (a boolean's own
-    // stages inside the drain holes) is added to its first entry.
-    let mut stage_s: Vec<(&'static str, f64)> = Vec::new();
-    for (i, (stage, t)) in seen.iter().enumerate() {
-        let end = seen.get(i + 1).map_or(hollow_s, |(_, n)| *n);
-        match stage_s.iter_mut().find(|(s, _)| s == stage) {
-            Some((_, d)) => *d += end - t,
-            None => stage_s.push((stage, end - t)),
-        }
-    }
-    let first = seen.first().map_or(0.0, |(_, t)| *t);
-    stage_s.insert(0, ("(before the first report)", first));
-    let stage_s: Vec<serde_json::Value> = stage_s
-        .into_iter()
-        .map(|(s, d)| serde_json::json!([s, (d * 1000.0).round() / 1000.0]))
-        .collect();
     stop.store(true, Ordering::Relaxed);
     let samples = samples
         .join()
@@ -239,7 +204,6 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
         "band_points": report["band_points"],
         "inner_faces": report["inner_faces"],
         "holes": report["holes"].as_array().map_or(0, Vec::len),
-        "stages_s": stage_s,
     });
     if m.get_flag("json") {
         println!(
@@ -262,7 +226,6 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             report["band_points"],
             report["inner_faces"],
         );
-        println!("  stages: {}", serde_json::Value::Array(stage_s));
     }
     if out.is_err() {
         return Err(Failure::Runtime(outcome));
