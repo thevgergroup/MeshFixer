@@ -49,6 +49,7 @@ fn one_colour(mesh: &Mesh, m: Material) -> Mesh {
 fn session_with(dir: &Path, objects: Vec<(&str, Mesh)>) -> (Session, Vec<ObjectId>) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: objects
             .into_iter()

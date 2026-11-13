@@ -74,6 +74,11 @@ pub const MESHFIXER_NS: &str = "https://thevgergroup.com/meshfixer/3mf/2026";
 pub struct Model {
     pub unit: Unit,
     pub objects: Vec<ModelObject>,
+    /// The model's own `<metadata>` (outside any `<object>`): name to
+    /// value. MeshFixer's own entries are named `meshfixer:<key>` (see
+    /// [`MESHFIXER_NS`]), such as `meshfixer:browser` = the Browser's
+    /// groups, order, hidden and locked state as JSON.
+    pub metadata: BTreeMap<String, String>,
 }
 
 const CORE_NS: &str = "http://schemas.microsoft.com/3dmanufacturing/core/2015/02";
@@ -326,6 +331,10 @@ pub fn read_with_limits(
     }
     // The object metadata entry being read: its name and text so far.
     let mut open_metadata: Option<(String, String)> = None;
+    // The model-level metadata entry being read (a `<metadata>` directly
+    // under `<model>`, outside any `<object>`): its name and text so far.
+    let mut open_model_metadata: Option<(String, String)> = None;
+    let mut model_metadata: BTreeMap<String, String> = BTreeMap::new();
     let mut unit = Unit::Millimeter;
     let mut objects: Vec<Obj> = Vec::new();
     let mut current: Option<Obj> = None;
@@ -387,16 +396,22 @@ pub fn read_with_limits(
             Event::Text(t) => {
                 if let Some((_, value)) = open_metadata.as_mut() {
                     value.push_str(&t.xml10_content());
+                } else if let Some((_, value)) = open_model_metadata.as_mut() {
+                    value.push_str(&t.xml10_content());
                 }
                 (None, false)
             }
             Event::GeneralRef(r) => {
-                if let Some((_, value)) = open_metadata.as_mut() {
+                if open_metadata.is_some() || open_model_metadata.is_some() {
                     let name = r.xml10_content();
                     let raw = format!("&{name};");
                     let text = quick_xml::escape::unescape(&raw)
                         .map_err(|e| parse_err(format!("<metadata> text: {e}")))?;
-                    value.push_str(&text);
+                    if let Some((_, value)) = open_metadata.as_mut() {
+                        value.push_str(&text);
+                    } else if let Some((_, value)) = open_model_metadata.as_mut() {
+                        value.push_str(&text);
+                    }
                 }
                 (None, false)
             }
@@ -404,11 +419,14 @@ pub fn read_with_limits(
                 if matches!(end.local_name().as_ref(), "basematerials" | "colorgroup") {
                     open_group = None;
                 }
-                if end.local_name().as_ref() == "metadata"
-                    && let Some((name, value)) = open_metadata.take()
-                    && let Some(o) = current.as_mut()
-                {
-                    o.metadata.insert(name, value);
+                if end.local_name().as_ref() == "metadata" {
+                    if let Some((name, value)) = open_metadata.take() {
+                        if let Some(o) = current.as_mut() {
+                            o.metadata.insert(name, value);
+                        }
+                    } else if let Some((name, value)) = open_model_metadata.take() {
+                        model_metadata.insert(name, value);
+                    }
                 }
                 if end.local_name().as_ref() == "object"
                     && let Some(o) = current.take()
@@ -583,6 +601,18 @@ pub fn read_with_limits(
                         open_metadata = Some((name, String::new()));
                     }
                 }
+                // A `<metadata>` outside any `<object>` is the model's own
+                // (MeshFixer's Browser organisation: `meshfixer:browser`).
+                "metadata" => {
+                    let name = attr(&e, "name")
+                        .map_err(parse_err)?
+                        .ok_or_else(|| parse_err("<metadata> is missing name".into()))?;
+                    if is_empty {
+                        model_metadata.insert(name, String::new());
+                    } else {
+                        open_model_metadata = Some((name, String::new()));
+                    }
+                }
                 "components" => {
                     if let Some(o) = current.as_mut() {
                         o.has_components = true;
@@ -750,7 +780,15 @@ pub fn read_with_limits(
         ));
     }
     ctx.progress.report(READING, 1.0);
-    Ok((Model { unit, objects: out }, digits, warnings))
+    Ok((
+        Model {
+            unit,
+            objects: out,
+            metadata: model_metadata,
+        },
+        digits,
+        warnings,
+    ))
 }
 
 pub fn read(bytes: &[u8]) -> Result<(Model, Vec<String>), IoError> {
@@ -800,12 +838,23 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
     if kept
         .iter()
         .any(|o| o.metadata.keys().any(|k| k.starts_with("meshfixer:")))
+        || model.metadata.keys().any(|k| k.starts_with("meshfixer:"))
     {
         // allow-swallow: writing to a String can't fail
         let _ = write!(xml, " xmlns:meshfixer=\"{MESHFIXER_NS}\"");
     }
     // allow-swallow: writing to a String can't fail
-    let _ = write!(xml, " unit=\"{}\">\n <resources>\n", model.unit.as_attr());
+    let _ = writeln!(xml, " unit=\"{}\">", model.unit.as_attr());
+    for (name, value) in &model.metadata {
+        // allow-swallow: writing to a String can't fail
+        let _ = writeln!(
+            xml,
+            " <metadata name=\"{}\">{}</metadata>",
+            escape(name),
+            escape(value)
+        );
+    }
+    xml.push_str(" <resources>\n");
     for (k, o) in kept.iter().enumerate() {
         // allow-swallow: writing to a String can't fail
         // Materials (MF-ISSUE-091): the object's palette as one

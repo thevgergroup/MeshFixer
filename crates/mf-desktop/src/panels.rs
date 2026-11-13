@@ -1060,8 +1060,11 @@ fn browser(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 /// History: every step of the current path (click one to go back to it;
-/// the current one is highlighted, steps Redo would take are greyed), and
-/// any other branches.
+/// the current one is highlighted, steps Redo would take are greyed),
+/// any other branches, and named checkpoints as labelled markers
+/// (right-click a row, "Name this point…"; clicking the marker checks
+/// out that revision, same as clicking the row itself — Task "Project
+/// organisation" step 3).
 fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let idle = app.busy.is_none();
     let mut clicked = None;
@@ -1071,32 +1074,33 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             let current = app.session.current();
-            let crumbs = app.breadcrumb();
-            if crumbs.is_empty() {
+            let rows = app.grouped_breadcrumb();
+            if rows.is_empty() {
                 widgets::caption(ui, t!("history.empty"));
             }
-            for (id, label, details, reached) in crumbs {
-                let text = if reached {
-                    RichText::new(&label)
-                } else {
-                    RichText::new(&label).color(theme::TEXT_MUTED).italics()
-                };
-                let w = ui.available_width();
-                let tip = if details.is_empty() {
-                    t!("history.tip")
-                } else {
-                    format!("{}\n\n{details}", t!("history.tip"))
-                };
-                if ui
-                    .add_enabled(
-                        idle,
-                        egui::Button::selectable(id == current, text)
-                            .min_size(egui::vec2(w, theme::ROW_HEIGHT)),
-                    )
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    clicked = Some(id);
+            for row in rows {
+                match row {
+                    crate::app::BreadcrumbRow::Run { ids, label, reached } => {
+                        history_run_row(app, ui, &ids, &label, reached, &mut clicked);
+                    }
+                    crate::app::BreadcrumbRow::Single {
+                        id,
+                        label,
+                        details,
+                        reached,
+                    } => {
+                        history_step_row(
+                            app, ui, idle, current, id, label, details, reached, &mut clicked,
+                        );
+                    }
+                    crate::app::BreadcrumbRow::CollapseControl { .. } => {
+                        if widgets::icon_button(ui, icons::CARET_DOWN, "Collapse this run", None, theme::ROW_HEIGHT)
+                            .on_hover_text("Collapse back into one row")
+                            .clicked()
+                        {
+                            app.expand_run(None);
+                        }
+                    }
                 }
             }
             if has_branches(app) {
@@ -1110,6 +1114,154 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         });
     if let Some(id) = clicked {
         app.checkout(id);
+    }
+}
+
+/// One plain step of the History panel (not part of a collapsed run):
+/// its label (a named checkpoint shows as "[name]" instead), a
+/// right-click menu to name or rename its checkpoint, and a click
+/// that checks it out.
+#[allow(clippy::too_many_arguments)]
+fn history_step_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    idle: bool,
+    current: mf_command::RevisionId,
+    id: mf_command::RevisionId,
+    label: String,
+    details: String,
+    reached: bool,
+    clicked: &mut Option<mf_command::RevisionId>,
+) {
+    if app
+        .checkpoint_naming
+        .as_ref()
+        .is_some_and(|(r, _)| *r == id)
+    {
+        checkpoint_name_row(app, ui, id);
+        return;
+    }
+    let checkpoint = app.session.checkpoint_name(id).map(str::to_owned);
+    let shown = match &checkpoint {
+        Some(name) => format!("[{name}]"),
+        None => label,
+    };
+    let text = if reached {
+        RichText::new(&shown)
+    } else {
+        RichText::new(&shown).color(theme::TEXT_MUTED).italics()
+    };
+    let w = ui.available_width();
+    let tip = match (checkpoint.is_some(), details.is_empty()) {
+        (true, true) => format!("Named checkpoint · {}", t!("history.tip")),
+        (true, false) => format!("Named checkpoint\n\n{details}"),
+        (false, true) => t!("history.tip"),
+        (false, false) => format!("{}\n\n{details}", t!("history.tip")),
+    };
+    let response = ui.add_enabled(
+        idle,
+        egui::Button::selectable(id == current, text).min_size(egui::vec2(w, theme::ROW_HEIGHT)),
+    );
+    response.context_menu(|ui| {
+        let title = if checkpoint.is_some() {
+            "Rename this point…"
+        } else {
+            "Name this point…"
+        };
+        if ui.button(title).clicked() {
+            app.checkpoint_naming = Some((id, checkpoint.clone().unwrap_or_default()));
+            ui.close();
+        }
+        if checkpoint.is_some() && ui.button("Remove checkpoint name").clicked() {
+            app.name_checkpoint(id, String::new());
+            ui.close();
+        }
+    });
+    if response.on_hover_text(tip).clicked() {
+        *clicked = Some(id);
+    }
+}
+
+/// A collapsed run of consecutive small steps on the same object
+/// ("Sculpted head (24 strokes)", Task "Project organisation" step 3):
+/// clicking it checks out its last revision, same as an uncollapsed
+/// run's last row would; its own caret expands it into its individual
+/// rows.
+fn history_run_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    ids: &[mf_command::RevisionId],
+    label: &str,
+    reached: bool,
+    clicked: &mut Option<mf_command::RevisionId>,
+) {
+    let idle = app.busy.is_none();
+    let current = app.session.current();
+    let last = *ids.last().expect("a run is never empty");
+    let w = ui.available_width();
+    let text = if reached {
+        RichText::new(label)
+    } else {
+        RichText::new(label).color(theme::TEXT_MUTED).italics()
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.scope(|ui| {
+            ui.set_width(18.0);
+            ui.set_height(theme::ROW_HEIGHT);
+            if widgets::icon_button(ui, icons::CARET_RIGHT, "Expand this run", None, 18.0)
+                .on_hover_text("Show each step")
+                .clicked()
+            {
+                app.expand_run(Some(ids[0]));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(w - 18.0);
+            let response = ui.add_enabled(
+                idle,
+                egui::Button::selectable(ids.contains(&current), text)
+                    .min_size(egui::vec2(w - 18.0, theme::ROW_HEIGHT)),
+            );
+            if response
+                .on_hover_text(format!("{} · click to go to the last of them", t!("history.tip")))
+                .clicked()
+            {
+                *clicked = Some(last);
+            }
+        });
+    });
+}
+
+/// A history row while its checkpoint name is being edited: a text field
+/// pre-filled with its current name (empty for a new one), committing
+/// on Enter or losing focus and cancelling on Esc.
+fn checkpoint_name_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::RevisionId) {
+    let mut text = app
+        .checkpoint_naming
+        .as_ref()
+        .filter(|(r, _)| *r == id)
+        .map_or_else(String::new, |(_, t)| t.clone());
+    let text_id = egui::Id::unique(("checkpoint name field", id));
+    let r = ui.add_sized(
+        egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+        egui::TextEdit::singleline(&mut text)
+            .id(text_id)
+            .hint_text("Checkpoint name"),
+    );
+    if r.changed() {
+        app.checkpoint_naming = Some((id, text.clone()));
+    }
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let committed = r.lost_focus() && !escaped;
+    if !r.has_focus() && !committed {
+        ui.memory_mut(|m| m.request_focus(text_id));
+    }
+    if committed {
+        app.checkpoint_naming = None;
+        app.name_checkpoint(id, text);
+    } else if escaped {
+        app.checkpoint_naming = None;
     }
 }
 
@@ -1252,52 +1404,320 @@ pub fn settings_window(app: &mut MeshFixerApp, ctx: &egui::Context) {
     app.show_settings = open;
 }
 
-fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let objects: Vec<_> = app
-        .session
-        .document()
-        .objects()
-        .iter()
-        .map(|o| {
-            (
-                o.id,
-                o.name.clone(),
-                o.mesh().map_or(0, |m| m.triangle_count()),
-            )
-        })
-        .collect();
-    if objects.is_empty() {
-        ui.add_space(theme::SPACE_S);
-        widgets::caption(ui, t!("browser.empty"));
-    }
-    for (id, name, tris) in objects {
-        let active = app.active == Some(id);
-        let hole = app.is_hole(id);
-        // The accessible label says the role too ("peg (hole)").
-        let label = if hole {
-            t!("role.row_hole", name = name)
-        } else {
-            name.clone()
-        };
-        let text = if active {
-            RichText::new(&name).color(theme::TEXT_STRONG)
-        } else {
-            RichText::new(&name).color(theme::TEXT_MUTED)
-        };
-        let tip = format!(
-            "{}{} · Shift-click to select it too · double-click to frame it · right-click for more",
-            count(tris, "triangle"),
-            if active {
-                ""
-            } else {
-                " · click to work on it"
-            }
+/// Search/filter field at the top of the Browser (project organisation
+/// brief, step 2): filters rows by name, case-insensitively. A group
+/// that doesn't match by its own name still shows if any descendant does
+/// (so filtering never hides a match inside a closed-looking folder).
+fn browser_search(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = theme::SPACE_XS;
+        ui.label(RichText::new(icons::INSPECT).font(icons::font(theme::ICON_SIZE - 4.0)));
+        ui.add_sized(
+            egui::vec2(ui.available_width(), 22.0),
+            egui::TextEdit::singleline(&mut app.browser_search)
+                .hint_text("Search")
+                .desired_width(f32::INFINITY),
         );
-        object_row(app, ui, id, &name, text, &label, &tip);
-        if app.tree_expanded() == Some(id) {
-            ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
+    });
+    ui.add_space(theme::SPACE_XS);
+}
+
+/// `name` matches the Browser's search field (always true when it's
+/// empty).
+fn matches_search(app: &MeshFixerApp, name: &str) -> bool {
+    app.browser_search.is_empty()
+        || name
+            .to_lowercase()
+            .contains(&app.browser_search.to_lowercase())
+}
+
+/// True if `entry` (or, for a group, any of its descendants) matches the
+/// search field.
+fn entry_matches_search(app: &MeshFixerApp, entry: mf_command::Entry) -> bool {
+    match entry {
+        mf_command::Entry::Object(id) => app
+            .session
+            .document()
+            .object(id)
+            .is_some_and(|o| matches_search(app, &o.name)),
+        mf_command::Entry::Group(g) => {
+            let org = app.session.document().organisation();
+            let Some(group) = org.group(g) else {
+                return false;
+            };
+            matches_search(app, &group.name)
+                || group
+                    .order
+                    .iter()
+                    .any(|&e| entry_matches_search(app, e))
         }
     }
+}
+
+fn tree(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    browser_search(app, ui);
+    let empty = app.session.document().objects().is_empty();
+    if empty {
+        ui.add_space(theme::SPACE_S);
+        widgets::caption(ui, t!("browser.empty"));
+        return;
+    }
+    let root = app.session.document().organisation().root_order().to_vec();
+    entries_tree(app, ui, &root, None);
+}
+
+/// One level of the Browser tree: every entry of `entries` (the root's,
+/// or one group's `order`). `into` is the group these entries belong to
+/// (`None`: the root), for each row's Move up/down and Move into/out of
+/// group context actions (project organisation brief, step 2: reordering
+/// and moving between groups).
+fn entries_tree(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    entries: &[mf_command::Entry],
+    into: Option<mf_command::GroupId>,
+) {
+    let shown: Vec<mf_command::Entry> = entries
+        .iter()
+        .copied()
+        .filter(|&e| entry_matches_search(app, e))
+        .collect();
+    let n = shown.len();
+    for (shown_index, &entry) in shown.iter().enumerate() {
+        // The real index in `entries` (not `shown`), so Move up/down
+        // target the unfiltered order the document actually keeps.
+        let index = entries.iter().position(|&e| e == entry).unwrap_or(0);
+        let reorder = Reorder {
+            into,
+            index,
+            at_start: shown_index == 0,
+            at_end: shown_index + 1 == n,
+        };
+        match entry {
+            mf_command::Entry::Object(id) => object_entry(app, ui, id, reorder),
+            mf_command::Entry::Group(g) => group_entry(app, ui, g, reorder),
+        }
+    }
+}
+
+/// Where a row sits among its siblings, for its Move up/down actions:
+/// the group it's in (`None`: the root), its index there, and whether
+/// it's first or last among the rows currently shown (so the actions
+/// that would do nothing are left off the menu).
+#[derive(Debug, Clone, Copy)]
+struct Reorder {
+    into: Option<mf_command::GroupId>,
+    index: usize,
+    at_start: bool,
+    at_end: bool,
+}
+
+/// "Move up" / "Move down" (reorder within the same group or the root)
+/// and, inside a group, "Move out of group" (to just after the group, at
+/// the root): the Browser row's right-click menu (project organisation
+/// brief, step 2). Plain, explicit actions rather than a pointer drag,
+/// so reordering is as reliable and accessible as every other action
+/// here.
+fn reorder_actions(app: &mut MeshFixerApp, ui: &mut egui::Ui, entry: mf_command::Entry, r: Reorder) {
+    if !r.at_start
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move up"))
+            .clicked()
+    {
+        app.move_entry(entry, r.into, r.index.saturating_sub(1));
+        ui.close();
+    }
+    if !r.at_end
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move down"))
+            .clicked()
+    {
+        app.move_entry(entry, r.into, r.index + 2);
+        ui.close();
+    }
+    if let Some(g) = r.into
+        && ui
+            .add_enabled(app.busy.is_none(), egui::Button::new("Move out of group"))
+            .clicked()
+    {
+        let outer = app
+            .session
+            .document()
+            .organisation()
+            .parent_of(mf_command::Entry::Group(g));
+        let end = match outer {
+            Some(o) => app
+                .session
+                .document()
+                .organisation()
+                .group(o)
+                .map_or(0, |p| p.order.len()),
+            None => app.session.document().organisation().root_order().len(),
+        };
+        app.move_entry(entry, outer, end);
+        ui.close();
+    }
+}
+
+fn object_entry(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    id: mf_command::ObjectId,
+    reorder: Reorder,
+) {
+    let active = app.active == Some(id);
+    let hole = app.is_hole(id);
+    let Some(name) = app.session.document().object(id).map(|o| o.name.clone()) else {
+        return;
+    };
+    let tris = app
+        .session
+        .document()
+        .object(id)
+        .and_then(|o| o.mesh())
+        .map_or(0, |m| m.triangle_count());
+    // The accessible label says the role too ("peg (hole)").
+    let label = if hole {
+        t!("role.row_hole", name = name)
+    } else {
+        name.clone()
+    };
+    let text = if active {
+        RichText::new(&name).color(theme::TEXT_STRONG)
+    } else {
+        RichText::new(&name).color(theme::TEXT_MUTED)
+    };
+    let tip = format!(
+        "{}{} · Shift-click to select it too · double-click to frame it · right-click for \
+         more; the reorder menu moves it",
+        count(tris, "triangle"),
+        if active { "" } else { " · click to work on it" }
+    );
+    object_row(app, ui, id, &name, text, &label, &tip, reorder);
+    if app.tree_expanded() == Some(id) {
+        ui.indent(("defects", id.0), |ui| defects_tree(app, ui, id));
+    }
+}
+
+/// A group (folder) row: its own icon and name, a swatch-free hide/lock
+/// pair acting on every member, and its own members indented underneath
+/// (always expanded; collapsing is left for later). Clicking the row
+/// selects every member (project organisation brief, step 2).
+fn group_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, g: mf_command::GroupId, reorder: Reorder) {
+    let Some(group) = app.session.document().organisation().group(g).cloned() else {
+        return;
+    };
+    let members = app.session.document().organisation().members(g);
+    let any_hidden = members.iter().any(|&id| app.is_hidden(id));
+    let any_locked = members.iter().any(|&id| app.is_locked(id));
+    let full_width = ui.available_width();
+    let row_rect =
+        egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
+    let row_hovered = ui.rect_contains_pointer(row_rect);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.scope(|ui| {
+            ui.set_width(SWATCH_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+        });
+        ui.scope(|ui| {
+            ui.set_width(
+                full_width
+                    - SWATCH_WIDTH
+                    - HIDE_TOGGLE_WIDTH
+                    - LOCK_TOGGLE_WIDTH
+                    - ROLE_TOGGLE_WIDTH
+                    - DELETE_BUTTON_WIDTH
+                    - MOVE_MENU_WIDTH,
+            );
+            let selected = app.tree_selected(&TreeItem::Group(g));
+            tree_row(
+                app,
+                ui,
+                &TreeItem::Group(g),
+                Row {
+                    icon: Some((icons::GROUP, theme::TEXT_MUTED)),
+                    text: if selected {
+                        RichText::new(&group.name).color(theme::TEXT_STRONG)
+                    } else {
+                        RichText::new(&group.name).color(theme::TEXT_MUTED)
+                    },
+                    size: None,
+                    label: &group.name,
+                },
+                |ui| {
+                    ui.label(format!(
+                        "{} · click to select every member",
+                        count(members.len(), "object")
+                    ));
+                },
+            );
+        });
+        let hide_label = format!("{} group {}", if any_hidden { "Show" } else { "Hide" }, group.name);
+        ui.scope(|ui| {
+            ui.set_width(HIDE_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || any_hidden {
+                if widgets::icon_button(
+                    ui,
+                    if any_hidden { icons::HIDDEN } else { icons::SHOWN },
+                    &hide_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if any_hidden { "Show" } else { "Hide" })
+                .clicked()
+                {
+                    app.set_hidden(&members, !any_hidden);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        let lock_label = format!("{} group {}", if any_locked { "Unlock" } else { "Lock" }, group.name);
+        ui.scope(|ui| {
+            ui.set_width(LOCK_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || any_locked {
+                if widgets::icon_button(
+                    ui,
+                    if any_locked { icons::LOCKED } else { icons::UNLOCKED },
+                    &lock_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if any_locked { "Unlock" } else { "Lock" })
+                .clicked()
+                {
+                    app.set_locked(&members, !any_locked);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(ROLE_TOGGLE_WIDTH + DELETE_BUTTON_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+        });
+        let group_name = group.name.clone();
+        ui.scope(|ui| {
+            ui.set_width(MOVE_MENU_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                ui.menu_button(
+                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
+                    |ui| reorder_actions(app, ui, mf_command::Entry::Group(g), reorder),
+                )
+                .response
+                .on_hover_text(format!("Reorder group {group_name}"));
+            } else {
+                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
+            }
+        });
+    });
+    ui.indent(("group", g.0), |ui| {
+        entries_tree(app, ui, &group.order, Some(g));
+    });
 }
 
 /// The width `object_row` reserves for its Solid/Hole toggle.
@@ -1306,12 +1726,57 @@ const ROLE_TOGGLE_WIDTH: f32 = 26.0;
 /// role toggle (owner 2026-11-12: "Delete a split part... using both
 /// the Backspace key and the trash button").
 const DELETE_BUTTON_WIDTH: f32 = 26.0;
+/// The width it reserves for its colour swatch (project organisation
+/// brief, step 2): always shown, so the viewport's per-object colour has
+/// a legend right on the row.
+const SWATCH_WIDTH: f32 = 18.0;
+/// The width it reserves for its show/hide toggle, left of the lock
+/// toggle: both hover-only, like the role and delete buttons.
+const HIDE_TOGGLE_WIDTH: f32 = 22.0;
+/// The width it reserves for its lock toggle.
+const LOCK_TOGGLE_WIDTH: f32 = 22.0;
+/// The width it reserves for its reorder menu (Move up/down/out of
+/// group: project organisation brief, step 2).
+const MOVE_MENU_WIDTH: f32 = 18.0;
+
+/// `id`'s row while it is being renamed (double-click, F2, or Cmd+G's
+/// opposite number): a text field at the row's height, pre-filled with
+/// its current name, committing on Enter or losing focus
+/// (`MeshFixerApp::rename_object`) and cancelling on Esc.
+fn rename_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::ObjectId) {
+    let mut text = app
+        .renaming
+        .as_ref()
+        .filter(|(o, _)| *o == id)
+        .map_or_else(String::new, |(_, t)| t.clone());
+    let text_id = egui::Id::unique(("browser rename field", id));
+    ui.set_height(theme::ROW_HEIGHT);
+    let r = ui.add_sized(
+        egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+        egui::TextEdit::singleline(&mut text).id(text_id),
+    );
+    if r.changed() {
+        app.renaming = Some((id, text.clone()));
+    }
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let committed = r.lost_focus() && !escaped;
+    if !r.has_focus() && !committed {
+        ui.memory_mut(|m| m.request_focus(text_id));
+    }
+    if committed {
+        app.renaming = None;
+        app.rename_object(id, text);
+    } else if escaped {
+        app.renaming = None;
+    }
+}
 
 /// An object row (the tree row plus, at its right end, a Solid/Hole
 /// toggle): the toggle only shows while the row (or the toggle itself) is
 /// hovered, so rows stay clean otherwise. One click is one undo step
 /// ([`MeshFixerApp::toggle_role`]), the same change H and the Browser's
 /// menu make.
+#[allow(clippy::too_many_arguments)]
 fn object_row(
     app: &mut MeshFixerApp,
     ui: &mut egui::Ui,
@@ -1320,35 +1785,105 @@ fn object_row(
     text: RichText,
     label: &str,
     tip: &str,
+    reorder: Reorder,
 ) {
     let hole = app.is_hole(id);
     let full_width = ui.available_width();
     let row_rect =
         egui::Rect::from_min_size(ui.cursor().min, egui::vec2(full_width, theme::ROW_HEIGHT));
     let row_hovered = ui.rect_contains_pointer(row_rect);
+    let renaming = app.renaming.as_ref().is_some_and(|(o, _)| *o == id);
+    let hidden = app.is_hidden(id);
+    let locked = app.is_locked(id);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
         ui.scope(|ui| {
-            ui.set_width(full_width - ROLE_TOGGLE_WIDTH - DELETE_BUTTON_WIDTH);
-            tree_row(
-                app,
-                ui,
-                &TreeItem::Object(id),
-                Row {
-                    // A Hole's row says so with its own icon.
-                    icon: Some(if hole {
-                        (icons::HOLE_ROLE, theme::TEXT_MUTED)
-                    } else {
-                        (icons::OBJECT, theme::TEXT_MUTED)
-                    }),
-                    text,
-                    size: None,
-                    label,
-                },
-                |ui| {
-                    ui.label(tip);
-                },
+            ui.set_width(SWATCH_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            ui.centered_and_justified(|ui| match app.object_swatch(id) {
+                Some(c) => swatch(ui, c),
+                None => {
+                    ui.allocate_space(egui::vec2(10.0, 10.0));
+                }
+            });
+        });
+        ui.scope(|ui| {
+            ui.set_width(
+                full_width
+                    - SWATCH_WIDTH
+                    - HIDE_TOGGLE_WIDTH
+                    - LOCK_TOGGLE_WIDTH
+                    - ROLE_TOGGLE_WIDTH
+                    - DELETE_BUTTON_WIDTH
+                    - MOVE_MENU_WIDTH,
             );
+            if renaming {
+                rename_row(app, ui, id);
+            } else {
+                tree_row(
+                    app,
+                    ui,
+                    &TreeItem::Object(id),
+                    Row {
+                        // A Hole's row says so with its own icon.
+                        icon: Some(if hole {
+                            (icons::HOLE_ROLE, theme::TEXT_MUTED)
+                        } else {
+                            (icons::OBJECT, theme::TEXT_MUTED)
+                        }),
+                        text,
+                        size: None,
+                        label,
+                    },
+                    |ui| {
+                        ui.label(tip);
+                    },
+                );
+            }
+        });
+        let hide_label = format!("{} {name}", if hidden { "Show" } else { "Hide" });
+        ui.scope(|ui| {
+            ui.set_width(HIDE_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            // Hidden stays visible even when the row isn't hovered, so a
+            // hidden object's row still says so at a glance.
+            if row_hovered || hidden {
+                if widgets::icon_button(
+                    ui,
+                    if hidden { icons::HIDDEN } else { icons::SHOWN },
+                    &hide_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if hidden { "Show" } else { "Hide" })
+                .clicked()
+                {
+                    app.set_hidden(&[id], !hidden);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
+        });
+        let lock_label = format!("{} {name}", if locked { "Unlock" } else { "Lock" });
+        ui.scope(|ui| {
+            ui.set_width(LOCK_TOGGLE_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered || locked {
+                if widgets::icon_button(
+                    ui,
+                    if locked { icons::LOCKED } else { icons::UNLOCKED },
+                    &lock_label,
+                    None,
+                    20.0,
+                )
+                .on_hover_text(if locked { "Unlock" } else { "Lock" })
+                .clicked()
+                {
+                    app.set_locked(&[id], !locked);
+                }
+            } else {
+                ui.allocate_space(egui::vec2(20.0, 20.0));
+            }
         });
         let action = if hole {
             t!("role.make_solid")
@@ -1395,6 +1930,20 @@ fn object_row(
                 }
             } else {
                 ui.allocate_space(egui::vec2(22.0, 22.0));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(MOVE_MENU_WIDTH);
+            ui.set_height(theme::ROW_HEIGHT);
+            if row_hovered {
+                ui.menu_button(
+                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
+                    |ui| reorder_actions(app, ui, mf_command::Entry::Object(id), reorder),
+                )
+                .response
+                .on_hover_text(format!("Reorder {name}"));
+            } else {
+                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
             }
         });
     });
@@ -1499,7 +2048,14 @@ fn tree_row(
     if response.clicked() {
         ui.data_mut(|d| d.insert_temp(last_click, response.id));
     }
-    if twice || (response.clicked() && enter) {
+    // Double-click an object row renames it in place (Task "Project
+    // organisation" step 1); every other row kind still frames (M4 Task
+    // 8a). Enter still frames any row (it has no text to edit).
+    if twice && let TreeItem::Object(id) = *item {
+        if let Some(doc_name) = app.session.document().object(id).map(|o| o.name.clone()) {
+            app.renaming = Some((id, doc_name));
+        }
+    } else if twice || (response.clicked() && enter) {
         app.tree_find(item);
     } else if response.clicked() && ui.input(|i| i.modifiers.shift) {
         app.tree_select_add(item);
@@ -1573,6 +2129,7 @@ fn item_key(item: &TreeItem) -> (u8, u64, [u32; 2]) {
             Defect::LoosePiece { component, .. } => (4, id.0, [*component, 0]),
             Defect::Tangled { edge, .. } => (5, id.0, *edge),
         },
+        TreeItem::Group(g) => (6, g.0, [0; 2]),
     }
 }
 

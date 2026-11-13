@@ -38,6 +38,7 @@ fn two_translated_cubes(dir: &std::path::Path) -> std::path::PathBuf {
         t
     };
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
@@ -177,6 +178,7 @@ fn two_objects_both_visible_and_clicking_one_activates_it() {
 fn cube_and_tetrahedron(dir: &std::path::Path) -> std::path::PathBuf {
     let path = dir.join("cube_and_tetrahedron.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             ModelObject {
@@ -281,6 +283,7 @@ fn single_translated_cube(dir: &std::path::Path, name: &str, d: [f64; 3]) -> std
     t[10] = d[1];
     t[11] = d[2];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),

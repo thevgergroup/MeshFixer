@@ -15,8 +15,8 @@ mod session;
 pub use log::{LOG_FORMAT, LogError, READABLE_LOG_FORMATS};
 pub use mf_document::RevisionId;
 pub use mf_document::{
-    Document, GENERATOR, GROUP, Geometry, GeometryKind, HOLE, Object, ObjectId, PARAMETRIC_KEYS,
-    ROLE,
+    Document, Entry, GENERATOR, GROUP, Geometry, GeometryKind, Group, GroupId, HOLE, Object,
+    ObjectId, Organisation, OrganisationError, PARAMETRIC_KEYS, ROLE,
 };
 pub use record::{
     AffectedSummary, CommandId, CommandRecord, CommandStatus, GeometrySummary, ImportRecord,

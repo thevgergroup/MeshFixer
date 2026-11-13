@@ -257,6 +257,60 @@ impl Operation for DropToPlate {
     }
 }
 
+/// `object.rename`: gives the target a new name (MF-OBJ-001). Geometry and
+/// transform are unchanged and stay shared; replay matches Exact because
+/// the object's content hash never depends on its name.
+pub struct Rename;
+
+impl Operation for Rename {
+    fn id(&self) -> &'static str {
+        "object.rename"
+    }
+
+    fn version(&self) -> u32 {
+        1
+    }
+
+    fn execute(
+        &self,
+        _: &Mesh,
+        _: &Target,
+        _: &Params,
+        _: &RunContext,
+    ) -> Result<OpOutput, OpError> {
+        Err(needs_document(self.id()))
+    }
+
+    fn execute_doc(
+        &self,
+        inputs: &[OperandInput],
+        params: &Params,
+        ctx: &RunContext,
+    ) -> Result<DocOutput, OpError> {
+        let target = whole_object(self.id(), inputs)?;
+        let name = params.get_text("name")?;
+        ctx.checkpoint()?;
+        if name.is_empty() {
+            return Err(OpError::Failed {
+                code: "empty_name",
+                message: "an object's name can't be empty".into(),
+            });
+        }
+        let changes = if name == target.name {
+            Vec::new()
+        } else {
+            vec![ObjectChange::Rename {
+                operand: 0,
+                name: name.to_owned(),
+            }]
+        };
+        Ok(DocOutput {
+            changes,
+            report: serde_json::json!({ "name": name }),
+        })
+    }
+}
+
 pub struct Delete;
 
 impl Operation for Delete {

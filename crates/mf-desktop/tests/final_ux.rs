@@ -85,6 +85,7 @@ fn still(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
 
 fn model(name: &str, mesh: Mesh, warnings: Vec<String>) -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![ModelObject {
             metadata: Default::default(),
             name: name.into(),

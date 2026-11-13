@@ -30,6 +30,7 @@ fn split_spec() -> &'static mf_spec::OperationSpec {
 fn session_with(dir: &Path) -> (Session, ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),

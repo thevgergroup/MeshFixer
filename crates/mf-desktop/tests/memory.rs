@@ -28,6 +28,7 @@ const BIG: usize = 5_000_000;
 
 fn big_model() -> ImportedModel {
     ImportedModel {
+        metadata: Default::default(),
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),
             name: "big".into(),

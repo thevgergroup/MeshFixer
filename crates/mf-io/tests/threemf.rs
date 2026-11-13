@@ -2,6 +2,8 @@
 
 //! 3MF core: objects, build-item transforms, units (MF-IO-001, MF-DOC-004).
 
+use std::collections::BTreeMap;
+
 use mf_fixtures::{cube, tetrahedron, uv_sphere};
 use mf_geometry::FaceId;
 use mf_io::threemf::{self, Model, ModelObject, Unit};
@@ -22,6 +24,7 @@ fn obj(name: &str, mesh: mf_geometry::Mesh, transform: [f64; 12]) -> ModelObject
 fn threemf_roundtrip_three_objects() {
     let shifted = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 10.0, -2.5, 3.0];
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Inch,
         objects: vec![
             obj("box", cube(1.0), IDENTITY),
@@ -170,14 +173,17 @@ fn export_verification_compares_triangle_indices_and_object_names() {
     // whose indices (or name) changed between what was asked for and what
     // comes back.
     let asked = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("part", cube(1.0), IDENTITY)],
     };
     let got_indices = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("part", rewound, IDENTITY)],
     };
     let got_name = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("other", cube(1.0), IDENTITY)],
     };
@@ -192,6 +198,7 @@ fn export_verification_compares_triangle_indices_and_object_names() {
     assert!(mf_io::models_match_for_verification(
         &asked,
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![obj("part", cube(1.0), IDENTITY)],
         }
@@ -226,6 +233,7 @@ fn threemf_read_is_linear_in_file_size() {
     // Locating each XML event by counting newlines from the start of the
     // file made reading quadratic: minutes for a 200k-triangle export.
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("sphere", uv_sphere(150, 300), threemf::IDENTITY)],
     };
@@ -340,6 +348,7 @@ fn threemf_materials_and_colours_round_trip() {
     }
     // A colour-free model still writes no properties at all.
     let plain = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("plain", cube(1.0), IDENTITY)],
     };
@@ -364,6 +373,7 @@ fn empty_objects_are_left_out_of_the_export_with_a_warning_naming_them() {
     let dir = tempfile::tempdir().unwrap();
     let p = dir.path().join("out.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![
             obj("solid", cube(1.0), IDENTITY),
@@ -435,6 +445,7 @@ fn object_metadata_round_trips() {
     hole.metadata
         .insert("meshfixer:note".into(), "a < b & \"c\"".into());
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![obj("solid", tetrahedron(), IDENTITY), hole],
     };
@@ -443,4 +454,24 @@ fn object_metadata_round_trips() {
     assert!(warnings.is_empty(), "{warnings:?}");
     assert!(back.objects[0].metadata.is_empty());
     assert_eq!(back.objects[1].metadata, model.objects[1].metadata);
+}
+
+/// The model's own `<metadata>` (outside any `<object>`, such as the
+/// Browser's groups/order/hidden/locked state) round-trips too, separately
+/// from any object's.
+#[test]
+fn model_metadata_round_trips() {
+    let model = Model {
+        metadata: BTreeMap::from([(
+            "meshfixer:browser".into(),
+            "{\"groups\":[],\"note\":\"a < b & \\\"c\\\"\"}".into(),
+        )]),
+        unit: Unit::Millimeter,
+        objects: vec![obj("solid", tetrahedron(), IDENTITY)],
+    };
+    let bytes = threemf::write(&model).unwrap();
+    let (back, warnings) = threemf::read(&bytes).unwrap();
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(back.metadata, model.metadata);
+    assert!(back.objects[0].metadata.is_empty());
 }

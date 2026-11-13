@@ -618,6 +618,11 @@ pub struct Session {
     cursor: RevisionId,
     next_object: u64,
     next_command: u64,
+    /// Named checkpoints (History "Name this point…"): a revision's own
+    /// label, shown as a marker in the history list, clicked to check
+    /// out that revision. Session-only (not document state: naming a
+    /// point doesn't change the model), so it isn't itself an undo step.
+    checkpoints: BTreeMap<RevisionId, String>,
 }
 
 impl Default for Session {
@@ -644,11 +649,40 @@ impl Session {
             cursor: RevisionId(0),
             next_object: 1,
             next_command: 1,
+            checkpoints: BTreeMap::new(),
         }
     }
 
     pub fn node(&self, id: RevisionId) -> Option<&RevisionNode> {
         self.nodes.get(id.0 as usize)
+    }
+
+    /// `id`'s checkpoint name, if it was given one ("Name this
+    /// point…").
+    pub fn checkpoint_name(&self, id: RevisionId) -> Option<&str> {
+        self.checkpoints.get(&id).map(String::as_str)
+    }
+
+    /// Every named checkpoint, in revision order.
+    pub fn checkpoints(&self) -> impl Iterator<Item = (RevisionId, &str)> {
+        self.checkpoints.iter().map(|(&id, name)| (id, name.as_str()))
+    }
+
+    /// Names `id` as a checkpoint ("Name this point…"), replacing its
+    /// name if it already had one; a blank name removes it. Does
+    /// nothing (returns false) if `id` isn't a real revision. Not an
+    /// undo step: naming a point doesn't change the document.
+    pub fn name_checkpoint(&mut self, id: RevisionId, name: String) -> bool {
+        if self.node(id).is_none() {
+            return false;
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            self.checkpoints.remove(&id);
+        } else {
+            self.checkpoints.insert(id, trimmed.to_owned());
+        }
+        true
     }
 
     pub fn revisions(&self) -> &[RevisionNode] {
@@ -665,6 +699,18 @@ impl Session {
 
     pub fn document(&self) -> &Document {
         &self.current_node().document
+    }
+
+    /// Replaces the *current* revision's organisation in place (no new
+    /// revision): used right after `import_model` restores the Browser's
+    /// groups/order/hidden/locked from the file's `meshfixer:browser`
+    /// metadata, folded into the last object's import revision exactly
+    /// as its unit is (`add_object_as`'s `with_units`), so importing one
+    /// file is still one step to undo, not many.
+    fn set_organisation_in_place(&mut self, organisation: mf_document::Organisation) {
+        let cursor = self.cursor;
+        let node = &mut self.nodes[cursor.0 as usize];
+        node.document = node.document.with_organisation(organisation);
     }
 
     /// Unique ID of the current state, as a number (for stale checks).
@@ -729,7 +775,16 @@ impl Session {
                 self.document().units()
             ));
         }
-        let ids = model
+        // Only a 3MF this document started from carries the Browser's own
+        // groups/order/hidden/locked (`meshfixer:browser`); merging a
+        // file into an existing document leaves the current organisation
+        // alone (its new objects just join the root, as `with_object`
+        // already does).
+        let organisation = first_import
+            .then(|| model.metadata.get("meshfixer:browser"))
+            .flatten()
+            .and_then(|s| mf_document::Organisation::from_json(s));
+        let ids: Vec<ObjectId> = model
             .objects
             .into_iter()
             .enumerate()
@@ -746,6 +801,11 @@ impl Session {
                 )
             })
             .collect();
+        if let Some(organisation) = organisation
+            && !ids.is_empty()
+        {
+            self.set_organisation_in_place(organisation);
+        }
         (ids, warnings)
     }
 
@@ -1599,6 +1659,35 @@ impl Session {
             provenance: BTreeMap::new(),
             openings: None,
             properties: applied,
+        });
+        true
+    }
+
+    /// Replaces the Browser's organisation (groups, order, hidden,
+    /// locked: project organisation brief, step 2) as ONE document step
+    /// that changes no geometry, undone like any other. `label` names
+    /// the history step. False (and no step) if `organisation` is
+    /// exactly what's already there.
+    pub fn set_organisation(
+        &mut self,
+        organisation: mf_document::Organisation,
+        label: String,
+    ) -> bool {
+        if *self.document().organisation() == organisation {
+            return false;
+        }
+        let document = self.document().with_organisation(organisation);
+        self.push(RevisionNode {
+            id: RevisionId(0),
+            parent: None,
+            children: Vec::new(),
+            label,
+            record: None,
+            import: None,
+            document,
+            provenance: BTreeMap::new(),
+            openings: None,
+            properties: Vec::new(),
         });
         true
     }

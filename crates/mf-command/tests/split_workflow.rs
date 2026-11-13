@@ -25,6 +25,7 @@ use mf_runtime::RunContext;
 fn session_with(dir: &Path, name: &str, mesh: Mesh, transform: [f64; 12]) -> (Session, ObjectId) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),

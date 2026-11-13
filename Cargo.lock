@@ -2798,6 +2798,7 @@ dependencies = [
  "mf-geometry",
  "mf-io",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

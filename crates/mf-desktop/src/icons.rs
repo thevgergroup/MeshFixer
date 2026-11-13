@@ -81,6 +81,16 @@ pub const OPENING: &str = "\u{E18A}"; // circle
 pub const CARET_RIGHT: &str = "\u{E13A}";
 pub const CARET_DOWN: &str = "\u{E136}";
 pub const CARET_LEFT: &str = "\u{E138}";
+/// A Browser group (folder).
+pub const GROUP: &str = "\u{E256}"; // folder-open
+/// Shown (the Browser's show/hide toggle).
+pub const SHOWN: &str = "\u{E62E}"; // eye
+/// Hidden (the Browser's show/hide toggle).
+pub const HIDDEN: &str = "\u{E632}"; // eye-slash
+/// Unlocked (the Browser's lock toggle).
+pub const UNLOCKED: &str = "\u{E5EA}"; // lock-simple-open
+/// Locked (the Browser's lock toggle).
+pub const LOCKED: &str = "\u{E5E8}"; // lock-simple
 
 // Actions.
 pub const UNDO: &str = "\u{E08A}"; // arrow-u-up-left

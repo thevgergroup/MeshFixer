@@ -62,6 +62,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/object.delete.yaml"),
     ),
     (
+        "object.rename.yaml",
+        include_str!("../../../specs/operations/object.rename.yaml"),
+    ),
+    (
         "mesh.sculpt_stroke.yaml",
         include_str!("../../../specs/operations/mesh.sculpt_stroke.yaml"),
     ),

@@ -40,6 +40,7 @@ fn split_body(dir: &Path) -> PathBuf {
     let in_path = dir.join("octopus.3mf");
     write_model_path(
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![ModelObject {
                 metadata: Default::default(),
@@ -93,6 +94,7 @@ fn split_plane_and_blended_union_run_through_the_cli() {
     let combined_path = dir.path().join("combined.3mf");
     write_model_path(
         &Model {
+            metadata: Default::default(),
             unit: Unit::Millimeter,
             objects: vec![
                 ModelObject {

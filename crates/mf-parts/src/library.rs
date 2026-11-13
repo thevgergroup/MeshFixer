@@ -286,6 +286,7 @@ pub fn save_object_as_part(
     let mut m = manifest.clone();
     m.mesh = "part.3mf".into();
     let model = mf_io::threemf::Model {
+        metadata: Default::default(),
         unit: mf_io::threemf::Unit::Millimeter,
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),

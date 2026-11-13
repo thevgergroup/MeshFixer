@@ -58,6 +58,11 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                     mesh.clone(),
                     BTreeMap::from([("part_id".to_string(), "torus".to_string())]),
                 )
+            } else if op.id() == "object.rename" {
+                (
+                    mesh.clone(),
+                    BTreeMap::from([("name".to_string(), "renamed".to_string())]),
+                )
             } else if op.id() == "object.add_shape" {
                 // The parametric-shapes brief's own placement op: needs at
                 // least one shape in its `shapes` JSON, or it refuses

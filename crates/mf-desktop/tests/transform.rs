@@ -63,6 +63,7 @@ fn model_file(
 ) -> std::path::PathBuf {
     let path = dir.join(format!("{name}.3mf"));
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),
@@ -816,6 +817,7 @@ const FRAME_BUDGET: Duration = Duration::from_millis(50);
 fn big_model(transform: [f64; 12]) -> mf_io::ImportedModel {
     let mesh = mf_fixtures::damaged_sphere(&mf_fixtures::DamageSpec::for_triangles(BIG, 3));
     mf_io::ImportedModel {
+        metadata: Default::default(),
         objects: vec![ModelObject {
             metadata: Default::default(),
             name: "big".into(),

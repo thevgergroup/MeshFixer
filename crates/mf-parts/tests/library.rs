@@ -207,6 +207,7 @@ fn add_part_replays_exact_and_verifies_part_hash() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![ModelObject {
             metadata: Default::default(),

@@ -25,6 +25,7 @@ fn session(dir: &Path, hole_in_file: bool) -> (Session, Vec<ObjectId>) {
         transform: IDENTITY,
     };
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: vec![object("a", false), object("b", hole_in_file)],
     };

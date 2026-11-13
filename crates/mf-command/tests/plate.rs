@@ -22,6 +22,7 @@ fn at(x: f64, y: f64, z: f64) -> [f64; 12] {
 fn session(dir: &Path, objects: Vec<(&str, Mesh, [f64; 12])>) -> (Session, Vec<ObjectId>) {
     let path = dir.join("doc.3mf");
     let model = Model {
+        metadata: Default::default(),
         unit: Unit::Millimeter,
         objects: objects
             .into_iter()

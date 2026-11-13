@@ -154,6 +154,36 @@ pub enum TreeItem {
     Model(ObjectId),
     /// A defect of the active object.
     Defect(ObjectId, Defect),
+    /// A Browser group (folder): selecting it selects every member
+    /// (project organisation brief, step 2), so Move, Hide, Export and
+    /// Delete act on the whole group.
+    Group(mf_command::GroupId),
+}
+
+/// One row of the History panel's grouped view
+/// ([`MeshFixerApp::grouped_breadcrumb`]): a plain step, or a run of
+/// consecutive small steps on the same object collapsed into one
+/// expandable row ("Sculpted head (24 strokes)", Task "Project
+/// organisation" step 3).
+#[derive(Debug, Clone)]
+pub enum BreadcrumbRow {
+    Single {
+        id: RevisionId,
+        label: String,
+        details: String,
+        reached: bool,
+    },
+    Run {
+        /// Every revision the run collapses, in order; clicking the row
+        /// checks out the last one (same as the un-collapsed rows would).
+        ids: Vec<RevisionId>,
+        label: String,
+        reached: bool,
+    },
+    /// The first row of a run the caller expanded ([`MeshFixerApp::expand_run`]):
+    /// a "Collapse" control, shown just before that run's individual
+    /// [`Self::Single`] rows.
+    CollapseControl { run_id: RevisionId },
 }
 
 /// A row double-clicked: frame its item once what that needs is ready (its
@@ -580,6 +610,22 @@ pub struct MeshFixerApp {
     /// The latest curves found (request number, one entry per overlapping
     /// pair: a pair that doesn't cross has none).
     intersections: Option<(u64, Vec<worker::IntersectionCurve>)>,
+    /// A name edit in progress (the selection panel's name field, or a
+    /// Browser row's F2/double-click): which object, and the text so far.
+    /// Committed on Enter or losing focus; Esc cancels it.
+    pub renaming: Option<(ObjectId, String)>,
+    /// The Browser's search field (project organisation brief, step 2):
+    /// filters rows by name; empty shows everything.
+    pub browser_search: String,
+    /// A checkpoint name edit in progress (History row's right-click
+    /// "Name this point…"): which revision, and the text so far.
+    /// Committed on Enter or losing focus; Esc cancels it (Task
+    /// "Project organisation" step 3).
+    pub checkpoint_naming: Option<(RevisionId, String)>,
+    /// The collapsed run whose individual steps are shown expanded
+    /// (`grouped_breadcrumb`'s row, keyed on its first revision): `None`
+    /// keeps every eligible run collapsed.
+    pub expanded_run: Option<RevisionId>,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -887,6 +933,10 @@ impl MeshFixerApp {
             intersection_worker,
             intersection_query: None,
             intersections: None,
+            renaming: None,
+            browser_search: String::new(),
+            checkpoint_naming: None,
+            expanded_run: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -1192,7 +1242,15 @@ impl MeshFixerApp {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
+        // Only written when there's something to say (a group, a hidden
+        // or locked object): a plain document with everything at the
+        // root exports with no Browser metadata at all.
+        let mut metadata = BTreeMap::new();
+        if doc.organisation() != &mf_command::Organisation::default() {
+            metadata.insert("meshfixer:browser".to_owned(), doc.organisation().to_json());
+        }
         Ok(mf_io::threemf::Model {
+            metadata,
             unit: doc.units(),
             objects,
         })
@@ -1450,6 +1508,113 @@ impl MeshFixerApp {
             .collect()
     }
 
+    /// Consecutive breadcrumb rows of the same small, repeatable
+    /// operation on the same object (sculpt strokes, transform nudges)
+    /// collapse into one: "Sculpted head (24 strokes)" (Task "Project
+    /// organisation" step 3). A lone step, or a run the caller has
+    /// expanded (`expanded_run`), is left as its own rows.
+    pub fn grouped_breadcrumb(&self) -> Vec<BreadcrumbRow> {
+        let flat = self.breadcrumb();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < flat.len() {
+            let run_len = self.run_length(&flat, i);
+            if run_len > 1 && self.expanded_run != Some(flat[i].0) {
+                let ids: Vec<RevisionId> = flat[i..i + run_len].iter().map(|r| r.0).collect();
+                let reached = flat[i + run_len - 1].3;
+                let noun = self.run_noun(flat[i].0);
+                let name = self.run_object_name(flat[i].0);
+                out.push(BreadcrumbRow::Run {
+                    ids,
+                    label: format!("{noun} {name} ({run_len} {})", self.run_unit(flat[i].0, run_len)),
+                    reached,
+                });
+                i += run_len;
+            } else if run_len > 1 {
+                // Expanded: a "Collapse" control, then its own rows.
+                out.push(BreadcrumbRow::CollapseControl { run_id: flat[i].0 });
+                for (id, label, details, reached) in &flat[i..i + run_len] {
+                    out.push(BreadcrumbRow::Single {
+                        id: *id,
+                        label: label.clone(),
+                        details: details.clone(),
+                        reached: *reached,
+                    });
+                }
+                i += run_len;
+            } else {
+                let (id, label, details, reached) = flat[i].clone();
+                out.push(BreadcrumbRow::Single {
+                    id,
+                    label,
+                    details,
+                    reached,
+                });
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// How many consecutive rows from `start` share a collapsible
+    /// operation and target (a run `grouped_breadcrumb` folds into one).
+    fn run_length(&self, flat: &[(RevisionId, String, String, bool)], start: usize) -> usize {
+        let Some(key) = self.run_key(flat[start].0) else {
+            return 1;
+        };
+        let mut n = 1;
+        while start + n < flat.len() && self.run_key(flat[start + n].0) == Some(key) {
+            n += 1;
+        }
+        n
+    }
+
+    /// `(op_id, target)` if revision `id`'s command is one
+    /// `grouped_breadcrumb` ever collapses with its neighbours
+    /// (currently: sculpt strokes and a plain `object.set_transform`
+    /// with no other document change).
+    fn run_key(&self, id: RevisionId) -> Option<(&'static str, ObjectId)> {
+        let rec = self.session.node(id)?.record.as_ref()?;
+        match rec.op_id.as_str() {
+            "mesh.sculpt_stroke" => Some(("mesh.sculpt_stroke", rec.target)),
+            "object.set_transform" => Some(("object.set_transform", rec.target)),
+            _ => None,
+        }
+    }
+
+    fn run_noun(&self, id: RevisionId) -> &'static str {
+        match self.run_key(id) {
+            Some(("mesh.sculpt_stroke", _)) => "Sculpted",
+            Some(("object.set_transform", _)) => "Nudged",
+            _ => "Changed",
+        }
+    }
+
+    fn run_unit(&self, id: RevisionId, n: usize) -> String {
+        let word = match self.run_key(id) {
+            Some(("mesh.sculpt_stroke", _)) => "stroke",
+            _ => "move",
+        };
+        format!("{word}{}", plural_s(n))
+    }
+
+    fn run_object_name(&self, id: RevisionId) -> String {
+        let Some((_, target)) = self.run_key(id) else {
+            return "the object".into();
+        };
+        self.session
+            .node(id)
+            .and_then(|n| n.document.object(target))
+            .map_or_else(|| "the object".into(), |o| o.name.clone())
+    }
+
+    /// Expands one collapsed run (clicking it in the History panel), so
+    /// its individual steps show as their own rows again; `None` keeps
+    /// every eligible run collapsed.
+    pub fn expand_run(&mut self, id: Option<RevisionId>) {
+        self.expanded_run = id;
+    }
+
     /// Undo (mid-drag, it cancels the drag instead, as Esc does).
     pub fn undo(&mut self) {
         if self.cancel_tool_drag() {
@@ -1541,10 +1706,14 @@ impl MeshFixerApp {
     /// active object once analysed, its defects. O(objects).
     fn pick_targets(&self) -> Vec<PickTarget> {
         let analysis = self.current_analysis();
+        let org = self.session.document().organisation();
         self.session
             .document()
             .objects()
             .iter()
+            // Hidden objects don't render or pick; locked ones can't be
+            // selected in the view (Task "Project organisation" step 2).
+            .filter(|o| !org.is_hidden(o.id) && !org.is_locked(o.id))
             .filter_map(|o| {
                 let mesh = o.mesh()?;
                 let active = Some(o.id) == self.active;
@@ -2271,11 +2440,26 @@ impl MeshFixerApp {
             .is_some_and(|o| o.is_hole())
     }
 
+    /// `id`'s colour swatch for the Browser row (the same colour its
+    /// viewport draw uses, [`object_color_for`]): `None` for a Hole (its
+    /// row shows the neutral Hole icon instead of a colour) or if the
+    /// Colour objects view is off.
+    pub fn object_swatch(&self, id: ObjectId) -> Option<egui::Color32> {
+        let doc = self.session.document();
+        let o = doc.object(id)?;
+        let mesh = o.mesh()?;
+        if !self.object_colors || o.is_hole() || mesh.has_materials() {
+            return None;
+        }
+        let group = o.properties.get(mf_command::GROUP).map(String::as_str);
+        Some(theme::object_color(o.id.0, group))
+    }
+
     /// Toggle the Solid/Hole role of `ids` (H, or the Browser's menu) as
     /// one undoable step: all become solids if every one is a hole,
     /// otherwise all become holes.
     pub fn toggle_role(&mut self, ids: &[ObjectId]) {
-        if self.busy.is_some() || ids.is_empty() {
+        if self.busy.is_some() || ids.is_empty() || ids.iter().any(|&id| self.is_locked(id)) {
             return;
         }
         let to_hole = !ids.iter().all(|&id| self.is_hole(id));
@@ -2296,6 +2480,105 @@ impl MeshFixerApp {
         if self.session.set_properties(changes, label.clone()) {
             self.after_history_move();
             self.status = Some(label);
+        }
+    }
+
+    /// Every object a Browser row's item stands for: a group selects all
+    /// its members (recursively), an object just itself.
+    pub fn entry_objects(&self, entry: mf_command::Entry) -> Vec<ObjectId> {
+        match entry {
+            mf_command::Entry::Object(id) => vec![id],
+            mf_command::Entry::Group(g) => self.session.document().organisation().members(g),
+        }
+    }
+
+    /// True if `id` is hidden (doesn't render or pick): the Browser's
+    /// show/hide toggle, document state.
+    pub fn is_hidden(&self, id: ObjectId) -> bool {
+        self.session.document().organisation().is_hidden(id)
+    }
+
+    /// True if `id` is locked (can't be selected in the view or edited):
+    /// the Browser's lock toggle, document state.
+    pub fn is_locked(&self, id: ObjectId) -> bool {
+        self.session.document().organisation().is_locked(id)
+    }
+
+    /// Sets `ids`' hidden flag as one undo step (the Browser's eye icon,
+    /// or a group's, which hides every member). All become hidden if any
+    /// isn't yet, otherwise all become shown (matching `toggle_role`'s
+    /// own all-or-nothing rule).
+    pub fn set_hidden(&mut self, ids: &[ObjectId], hidden: bool) {
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let mut org = self.session.document().organisation().clone();
+        for &id in ids {
+            org = org.with_hidden(id, hidden);
+        }
+        let label = if hidden { "Hide" } else { "Show" }.to_owned();
+        if self.session.set_organisation(org, label.clone()) {
+            self.after_history_move();
+            self.status = Some(label);
+        }
+    }
+
+    /// Sets `ids`' locked flag as one undo step (the Browser's padlock).
+    pub fn set_locked(&mut self, ids: &[ObjectId], locked: bool) {
+        if self.busy.is_some() || ids.is_empty() {
+            return;
+        }
+        let mut org = self.session.document().organisation().clone();
+        for &id in ids {
+            org = org.with_locked(id, locked);
+        }
+        let label = if locked { "Lock" } else { "Unlock" }.to_owned();
+        if self.session.set_organisation(org, label.clone()) {
+            self.after_history_move();
+            self.status = Some(label);
+        }
+    }
+
+    /// Groups the selected objects (Cmd+G): a new folder holding them, in
+    /// the selection's own order, one undo step. Does nothing with fewer
+    /// than one object selected.
+    pub fn group_selection(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        let ids = self.selected_objects();
+        if ids.is_empty() {
+            return;
+        }
+        let org = self.session.document().organisation().clone();
+        let entries: Vec<mf_command::Entry> =
+            ids.iter().map(|&id| mf_command::Entry::Object(id)).collect();
+        let (org, _group) = org.with_new_group("Group".to_owned(), &entries);
+        if self.session.set_organisation(org, "Group".to_owned()) {
+            self.after_history_move();
+            self.status = Some("Group".to_owned());
+        }
+    }
+
+    /// Moves `entry` to sit at `index` of `into`'s order (`None`: the
+    /// root): the Browser row's Move up/down/out-of-group menu, one undo
+    /// step. Does nothing if the move is refused (a cycle, or an unknown
+    /// group).
+    pub fn move_entry(
+        &mut self,
+        entry: mf_command::Entry,
+        into: Option<mf_command::GroupId>,
+        index: usize,
+    ) {
+        if self.busy.is_some() {
+            return;
+        }
+        let org = self.session.document().organisation().clone();
+        let Ok(org) = org.with_moved(entry, into, index) else {
+            return;
+        };
+        if self.session.set_organisation(org, "Reorder".to_owned()) {
+            self.after_history_move();
         }
     }
 
@@ -2363,7 +2646,7 @@ impl MeshFixerApp {
     /// button, which acts on the row it's on regardless of which object
     /// is active): the same `object.delete` command, undoable.
     pub fn delete_object(&mut self, id: ObjectId) {
-        if self.busy.is_some() {
+        if self.busy.is_some() || self.is_locked(id) {
             return;
         }
         self.run_invocation(
@@ -2376,6 +2659,42 @@ impl MeshFixerApp {
             },
             "Delete object".into(),
         );
+    }
+
+    /// Rename `id` to `name` (the Browser row's F2/double-click, or the
+    /// selection panel's name field): the `object.rename` command, one
+    /// undo step. Blank or unchanged names are left alone (no revision).
+    pub fn rename_object(&mut self, id: ObjectId, name: String) {
+        let trimmed = name.trim();
+        if trimmed.is_empty() || self.busy.is_some() || self.is_locked(id) {
+            return;
+        }
+        if self
+            .session
+            .document()
+            .object(id)
+            .is_some_and(|o| o.name == trimmed)
+        {
+            return;
+        }
+        self.run_invocation(
+            Invocation {
+                op_id: "object.rename".into(),
+                target: id,
+                selection: None,
+                operands: Vec::new(),
+                raw_params: BTreeMap::from([("name".to_owned(), trimmed.to_owned())]),
+            },
+            "Rename object".into(),
+        );
+    }
+
+    /// Names (or renames) revision `id` as a History checkpoint ("Name
+    /// this point…", Task "Project organisation" step 3): not an undo
+    /// step (naming a point doesn't change the document). A blank name
+    /// removes it.
+    pub fn name_checkpoint(&mut self, id: RevisionId, name: String) {
+        self.session.name_checkpoint(id, name);
     }
 
     /// Keep `active` pointing at an object that exists in the current document.
@@ -3058,8 +3377,12 @@ impl MeshFixerApp {
     /// object whose render mesh is ready (MF-ISSUE-042).
     pub fn object_views(&self) -> Vec<ObjectView> {
         let doc = self.session.document();
+        let org = doc.organisation();
         doc.objects()
             .iter()
+            // Hidden objects don't render (Task "Project organisation"
+            // step 2).
+            .filter(|o| !org.is_hidden(o.id))
             .filter_map(|o| {
                 let active = Some(o.id) == self.active;
                 let render = if active
@@ -3301,6 +3624,16 @@ impl MeshFixerApp {
                 self.set_active(*id);
                 self.select_defect(d);
             }
+            TreeItem::Group(g) => {
+                // Selecting a group selects every member (Move, Hide,
+                // Export and Delete then act on the whole group).
+                let members = self.session.document().organisation().members(*g);
+                self.picked = members;
+                if let Some(&last) = self.picked.last() {
+                    self.set_active(last);
+                }
+                self.clear_selection();
+            }
         }
     }
 
@@ -3310,6 +3643,11 @@ impl MeshFixerApp {
     /// ([`PULSE_SECONDS`]) so the eye finds it.
     pub fn tree_find(&mut self, item: &TreeItem) {
         self.tree_select(item);
+        // A group has no single place to frame the camera on (its
+        // members can sit anywhere); double-clicking it only selects.
+        if matches!(item, TreeItem::Group(_)) {
+            return;
+        }
         let mesh = match item {
             TreeItem::Defect(..) => self.active_mesh().cloned(),
             _ => None,
@@ -3327,10 +3665,12 @@ impl MeshFixerApp {
     /// The pointer is over a row of the tree this frame: highlight its
     /// item in the view (its outline or glow; the camera stays).
     pub fn tree_hover(&mut self, item: &TreeItem) {
-        self.hover = Some(match item {
-            TreeItem::Object(id) | TreeItem::Model(id) => (*id, OverlayTarget::Object),
-            TreeItem::Defect(id, d) => (*id, defect_target(d)),
-        });
+        self.hover = match item {
+            TreeItem::Object(id) | TreeItem::Model(id) => Some((*id, OverlayTarget::Object)),
+            TreeItem::Defect(id, d) => Some((*id, defect_target(d))),
+            // A group has no single object to outline in the view.
+            TreeItem::Group(_) => None,
+        };
     }
 
     /// The object whose defects the tree lists under its row: the active
@@ -3366,6 +3706,12 @@ impl MeshFixerApp {
                 (None, _) => self.current_inspected().is_some_and(|i| i.defect == *d),
                 _ => false,
             },
+            // A group shows selected once every member is among the
+            // objects picked together (and there's at least one).
+            TreeItem::Group(g) => {
+                let members = self.session.document().organisation().members(*g);
+                !members.is_empty() && members.iter().all(|m| self.picked.contains(m))
+            }
         }
     }
 
@@ -3451,6 +3797,11 @@ impl MeshFixerApp {
                     return;
                 }
                 crate::framing::defect_view(&cam, &place, &scene, |o, d| self.ray_hit(o, d))
+            }
+            // `tree_find` never starts a `Find` for a group.
+            TreeItem::Group(_) => {
+                self.find = None;
+                return;
             }
         };
         self.find = None;
@@ -4926,7 +5277,7 @@ impl MeshFixerApp {
     /// `object.set_transform` (one undo step), run like any command. The
     /// object is drawn there meanwhile; `status` says what changed.
     pub fn commit_transform(&mut self, object: ObjectId, transform: [f64; 12], status: String) {
-        if self.busy.is_some() || self.active != Some(object) {
+        if self.busy.is_some() || self.active != Some(object) || self.is_locked(object) {
             return;
         }
         if self.move_group(object, transform, &status) {
@@ -5399,6 +5750,25 @@ impl MeshFixerApp {
         if role {
             let ids = self.selected_objects();
             self.toggle_role(&ids);
+        }
+        // F2: rename the active object in the Browser (Task "Project
+        // organisation" step 1), same as double-clicking its row.
+        let f2 = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::F2));
+        if f2
+            && let Some(id) = self.active
+            && let Some(name) = self.session.document().object(id).map(|o| o.name.clone())
+        {
+            self.renaming = Some((id, name));
+        }
+        // Cmd/Ctrl+G: group the selected objects (Task "Project
+        // organisation" step 2).
+        let group = !typing
+            && !ctx.egui_wants_keyboard_input()
+            && ctx.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::G));
+        if group {
+            self.group_selection();
         }
         if !typing && !ctx.egui_wants_keyboard_input() {
             self.tool_keys(&ctx);
@@ -5958,6 +6328,12 @@ fn history_label(
     rec: &mf_command::CommandRecord,
 ) -> Option<String> {
     match rec.op_id.as_str() {
+        "object.rename" => {
+            let id = rec.target;
+            let before = before_name(session, rec, id);
+            let after = result_name(node, id);
+            Some(format!("Renamed {before} to {after}"))
+        }
         "mesh.split_plane" | "mesh.split_box" => {
             let name = before_name(session, rec, rec.target);
             let pieces = rec.outputs.iter().filter(|o| o.created).count() + 1;
@@ -6066,6 +6442,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
         ],
         "object.set_transform" => &["transform"],
         "split.place_connectors" => &["connectors"],
+        "object.rename" => &["name"],
         _ => &[],
     };
     let mut lines: Vec<String> = spec
