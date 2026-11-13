@@ -913,6 +913,115 @@ fn hollow_clicking_the_cap_highlights_the_whole_region_and_names_it() {
     );
 }
 
+/// The owner's case (2026-11-13 follow-up): a sphere cut near its
+/// pole, Keep Both (so the cut records a joint — its own plane and
+/// which piece is which side). Picking the large piece's cap must
+/// match the joint's own recorded cap exactly, not a crease-grown
+/// region (near the pole the surrounding surface curves at well under
+/// 60 degrees from the cap, which crease growth alone would wrongly
+/// cross); Hollow with "Open through this surface" on must then
+/// succeed on it.
+#[test]
+fn hollow_open_through_the_cap_of_a_near_pole_split_uses_the_recorded_cap_exactly() {
+    require_gpu!("hollow_open_through_the_cap_of_a_near_pole_split_uses_the_recorded_cap_exactly");
+    let mut h = opened(vec![("ball", ball(20.0), at([0.0, 0.0, 20.0]))]);
+
+    // Cut near the pole (world z = 38, local z = 18, 2 mm short of the
+    // top): Keep Both records a joint between the two pieces.
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 38.0;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["ball (top)", "ball (bottom)"], "{names:?}");
+    assert_eq!(h.state().split_flow.joints.len(), 1, "a joint was recorded");
+
+    // The large piece is "ball (bottom)" (below the cut, most of the
+    // sphere); its own cap is the joint's side B (the cut's own report
+    // pairs the created "(top)" piece as operand a, the target "(bottom)"
+    // as b — checked, not assumed, below).
+    let big_id = id_of(&h, "ball (bottom)");
+    let joint = h.state().split_flow.joints[0].clone();
+    let big_side = if joint.a == big_id {
+        mf_operations::JointSide::A
+    } else if joint.b == big_id {
+        mf_operations::JointSide::B
+    } else {
+        panic!("the joint should name ball (bottom) as one of its pieces: {joint:?}");
+    };
+    let big_mesh = mesh_of(&h, "ball (bottom)");
+    let big_transform = h
+        .state()
+        .session
+        .document()
+        .object(big_id)
+        .unwrap()
+        .transform;
+    let bvh = mf_geometry::Bvh::build(&big_mesh, &mf_runtime::RunContext::none()).unwrap();
+    let recorded: Vec<u32> = mf_operations::cap_faces(
+        &big_mesh,
+        Some(&bvh),
+        &big_transform,
+        &joint.frame,
+        big_side,
+        &mf_runtime::RunContext::none(),
+    )
+    .unwrap()
+    .into_iter()
+    .map(|(f, _)| f.0)
+    .collect();
+    assert!(!recorded.is_empty());
+
+    // Pick the cap in the view: it must match the joint's own recorded
+    // cap exactly.
+    row(&h, "ball (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    wait_until(&mut h, "the big piece's preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, big_id).is_some()
+    });
+    settle(&mut h);
+    let p = facing_point(&h, [0.0, 0.0, 38.0], 1.0);
+    click_at(&mut h, p);
+    settle(&mut h);
+    let region = h.state().hollow.picked_region.clone().unwrap();
+    let mut picked: Vec<u32> = region.faces.iter().map(|f| f.0).collect();
+    picked.sort_unstable();
+    let mut expected = recorded.clone();
+    expected.sort_unstable();
+    assert_eq!(
+        picked, expected,
+        "the pick must be exactly the recorded cap, not crease growth"
+    );
+
+    h.get_by_label("Open through this surface").click();
+    settle(&mut h);
+    assert!(h.state().hollow.open_through);
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let shell = mesh_of(&h, "ball (bottom)");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed, with a rim, not an opening");
+    assert!(
+        topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0,
+        "{topo:?}"
+    );
+    assert_eq!(
+        topo.components.len(),
+        1,
+        "the rim joins the outer and inner walls into one surface"
+    );
+}
+
 /// Owner 2026-11-12: with only "ball" selected (a plain Browser click,
 /// not Shift), Split must cut only "ball", even though the plane also
 /// crosses "cube", which was never selected. The panel says so by name

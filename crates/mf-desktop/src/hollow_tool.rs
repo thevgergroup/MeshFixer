@@ -472,11 +472,18 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
         changed(app);
         return Input::Consumed;
     }
-    let region = grow_region(&mesh, face);
+    // A recorded split cap, picked exactly as the cut itself defines it
+    // (its own plane and side), never grown from the seed by a
+    // geometric heuristic: crease growth is the fallback only for a
+    // surface that isn't one (owner 2026-11-13 follow-up).
+    let (region, name) = match recorded_cap_region(app, id, &mesh, &bvh, &transform, face) {
+        Some((faces, name)) => (faces, name),
+        None => (grow_region(&mesh, face), region_name(app, id, &mesh, face)),
+    };
     let ids: Vec<u32> = region.iter().map(|f| f.0).collect();
     app.hollow.picked_region = Some(PickedRegion {
         faces: region,
-        name: region_name(app, id, &mesh, face),
+        name,
         mesh,
     });
     // The selection tint and outline (the generic mechanism every other
@@ -490,6 +497,64 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
         ids,
     });
     Input::Consumed
+}
+
+/// `face` as a recorded split cap, if it is one: a cut (`split_flow`'s
+/// own joints) remembers its plane and which piece is which side of
+/// it, so that piece's cap is found exactly — `mf_operations::cap_faces`
+/// against the joint's own recorded frame, never grown from a seed —
+/// whenever `id` is one of the joint's two pieces and `face` is on
+/// that side's cap. `None` for a surface that isn't a recorded cap (or
+/// no longer matches one, the cut having been undone or redone past);
+/// the caller falls back to crease growth.
+fn recorded_cap_region(
+    app: &MeshFixerApp,
+    id: ObjectId,
+    mesh: &Mesh,
+    bvh: &mf_geometry::Bvh,
+    transform: &[f64; 12],
+    face: FaceId,
+) -> Option<(Vec<FaceId>, String)> {
+    for joint in &app.split_flow.joints {
+        let side = if joint.a == id {
+            mf_operations::JointSide::A
+        } else if joint.b == id {
+            mf_operations::JointSide::B
+        } else {
+            continue;
+        };
+        let Ok(faces) = mf_operations::cap_faces(
+            mesh,
+            Some(bvh),
+            transform,
+            &joint.frame,
+            side,
+            &RunContext::none(),
+        ) else {
+            continue;
+        };
+        if !faces.iter().any(|&(f, _)| f == face) {
+            continue;
+        }
+        let ids: Vec<FaceId> = faces.iter().map(|&(f, _)| f).collect();
+        let base = app
+            .session
+            .document()
+            .object(id)
+            .map(|o| o.name.clone())
+            // allow-swallow: id is the active object, checked live by the caller; a vanished one reads as an empty name for this frame.
+            .unwrap_or_default();
+        let (side_a, side_b) = mf_operations::split_names(
+            &format!("Cut face of {base}"),
+            joint.frame.normal.to_array(),
+        );
+        let name = match side {
+            mf_operations::JointSide::A => side_a,
+            mf_operations::JointSide::B => side_b,
+        };
+        return Some((ids, name));
+    }
+    None
 }
 
 /// A name for the picked region, for the panel ("Cut face of scan

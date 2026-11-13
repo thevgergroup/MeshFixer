@@ -430,18 +430,22 @@ fn cap_tolerance(frame: &JointFrame, t: &DMat4) -> f64 {
     1e-6 * (1.0 + far)
 }
 
-/// `side`'s cut face on `mesh` (placed by `transform`): every face on its
-/// cap plane, facing out of the piece, in the joint's 2D frame. With
-/// `bvh` (of `mesh`), an axis-aligned cap only visits the faces near its
-/// plane.
-pub fn cap_region(
+/// `side`'s cut face on `mesh` (placed by `transform`): every live face
+/// on its cap plane, facing out of the piece, as the mesh's own face
+/// ids — exactly, not grown from a seed by any geometric heuristic,
+/// since the cut recorded exactly this plane and side. With `bvh` (of
+/// `mesh`), an axis-aligned cap only visits the faces near its plane.
+/// Picking a surface that's a recorded cap (Hollow's `open_through`,
+/// owner 2026-11-13 follow-up) uses this, not crease growth, whenever
+/// the clicked face is one of these.
+pub fn cap_faces(
     mesh: &Mesh,
     bvh: Option<&Bvh>,
     transform: &[f64; 12],
     frame: &JointFrame,
     side: JointSide,
     ctx: &RunContext,
-) -> Result<CapRegion, Cancelled> {
+) -> Result<Vec<(FaceId, [u32; 3])>, Cancelled> {
     let t = mat(transform);
     let tol = cap_tolerance(frame, &t);
     let world = |c: u32| t.transform_point3(DVec3::from(mesh.corner_position(c)));
@@ -477,6 +481,25 @@ pub fn cap_region(
         }
     }
     faces.sort_by_key(|(f, _)| *f);
+    Ok(faces)
+}
+
+/// `side`'s cut face on `mesh` (placed by `transform`): [`cap_faces`],
+/// projected into the joint's 2D frame for the live checks (breakout,
+/// edge distance). With `bvh` (of `mesh`), an axis-aligned cap only
+/// visits the faces near its plane.
+pub fn cap_region(
+    mesh: &Mesh,
+    bvh: Option<&Bvh>,
+    transform: &[f64; 12],
+    frame: &JointFrame,
+    side: JointSide,
+    ctx: &RunContext,
+) -> Result<CapRegion, Cancelled> {
+    let t = mat(transform);
+    let tol = cap_tolerance(frame, &t);
+    let world = |c: u32| t.transform_point3(DVec3::from(mesh.corner_position(c)));
+    let faces = cap_faces(mesh, bvh, transform, frame, side, ctx)?;
     let mut edges: HashMap<(u32, u32), u32> = HashMap::new();
     let mut region = CapRegion {
         tol,

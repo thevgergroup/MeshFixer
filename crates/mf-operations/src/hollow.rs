@@ -1267,13 +1267,71 @@ fn through_plug(
     let (u, v) = orthonormal_basis(normal);
     let span = margin + depth;
     for loop_ in &topo.boundary_loops {
-        let outer: Vec<[f64; 3]> = loop_
+        // Consecutive boundary vertices this close together are merged
+        // into one: a plane cut's own near-plane vertex, now snapped
+        // exactly onto its plane, and a freshly cut point an edge away
+        // from it can end up a single ulp apart (never farther) rather
+        // than exactly coincident — close enough to make this loop's own
+        // side wall and ear-clipped cap degenerate without ever being a
+        // real second point the picked region's own outline needs
+        // (owner 2026-11-13 follow-up). Every dropped vertex is remapped
+        // to the one it merged into — including in the top cap's own
+        // triangles, which may still reference it — so the wall joins
+        // the whole boundary with no gap. The loop stays closed (every
+        // kept vertex still cycles to the next kept one); fewer than 3
+        // left means the loop was only ever these near-duplicates.
+        let scale = loop_
             .vertices
+            .iter()
+            .map(|&vid| norm(out_positions[vid as usize]))
+            .fold(1.0_f64, f64::max);
+        let merge_tol = scale * 1e-9;
+        let mut kept: Vec<u32> = Vec::with_capacity(loop_.vertices.len());
+        let mut remap: HashMap<u32, u32> = HashMap::new();
+        for &vid in &loop_.vertices {
+            let p = out_positions[vid as usize];
+            let last = kept.last().copied();
+            let dup =
+                last.is_some_and(|last| norm(sub(p, out_positions[last as usize])) <= merge_tol);
+            match last {
+                Some(last) if dup => {
+                    remap.insert(vid, last);
+                }
+                _ => kept.push(vid),
+            }
+        }
+        if let (Some(&first), Some(&last)) = (kept.first(), kept.last())
+            && kept.len() > 1
+            && norm(sub(
+                out_positions[first as usize],
+                out_positions[last as usize],
+            )) <= merge_tol
+        {
+            remap.insert(last, first);
+            kept.pop();
+        }
+        if !remap.is_empty() {
+            for t in &mut out_triangles {
+                for v in t.iter_mut() {
+                    if let Some(&r) = remap.get(v) {
+                        *v = r;
+                    }
+                }
+            }
+            // A top-cap triangle degenerate after the remap (two of its
+            // corners merged into the same vertex) contributes no area
+            // and would make the plug non-manifold at that corner;
+            // dropped, same as any other degenerate triangle.
+            out_triangles.retain(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0]);
+        }
+        if kept.len() < 3 {
+            continue;
+        }
+        let outer: Vec<[f64; 3]> = kept
             .iter()
             .map(|&vid| out_positions[vid as usize])
             .collect();
-        let inner: Vec<[f64; 3]> = loop_
-            .vertices
+        let inner: Vec<[f64; 3]> = kept
             .iter()
             .map(|&vid| {
                 let n = vertex_normal(vid as usize);
@@ -1284,7 +1342,7 @@ fn through_plug(
         let base = out_positions.len() as u32;
         out_positions.extend(inner.iter().copied());
         let m = outer.len() as u32;
-        let outer_ids: Vec<u32> = loop_.vertices.clone();
+        let outer_ids: Vec<u32> = kept.clone();
         let inner_ids: Vec<u32> = (0..m).map(|i| base + i).collect();
         // The side wall: a ruled strip between the loop and its inward
         // copy. The loop's own direction runs opposite to how it
@@ -1318,9 +1376,8 @@ fn through_plug(
             out_triangles.push([inner_ids[a], inner_ids[c], inner_ids[b]]);
         }
     }
-    Ok(Some(
-        Mesh::new(out_positions, out_triangles).map_err(geometry)?,
-    ))
+    let plug = Mesh::new(out_positions, out_triangles).map_err(geometry)?;
+    Ok(Some(plug))
 }
 
 /// Any unit `x`, `y` with `x`, `y`, `normal` an orthonormal basis.
@@ -2158,6 +2215,35 @@ mod through_plug_tests {
             }
         }
         assert_eq!(moved, 0, "no face outside the picked region should move");
+    }
+
+    /// A flat disk whose boundary has a deliberate near-duplicate pair
+    /// (two consecutive loop vertices a single ulp apart, never farther
+    /// — the shape a plane cut's own near-plane vertex and a freshly
+    /// cut point next to it can leave after the vertex is snapped onto
+    /// the cut plane exactly, owner 2026-11-13 follow-up): the plug is
+    /// still a valid, watertight solid (the near-duplicate is merged,
+    /// and the top cap's own triangles that referenced it are
+    /// remapped, not left dangling).
+    #[test]
+    fn a_boundary_with_a_near_duplicate_vertex_still_gives_a_watertight_plug() {
+        let (mut disk, faces) = flat_cap(17.3, 96);
+        // Nudge one boundary vertex's neighbour a single ulp away from
+        // it (never farther), as if it were two independently computed
+        // near-coincident cut points.
+        let mut edit = disk.edit();
+        let p = disk.position(mf_geometry::VertexId(1)).unwrap();
+        let nudged = p.map(|c| c + f64::EPSILON.max(c.abs() * f64::EPSILON));
+        edit.move_vertex(mf_geometry::VertexId(1), nudged).unwrap();
+        disk = edit.finish().unwrap().0;
+        let plug = through_plug(&disk, &faces, 1.0, 4.0).unwrap().unwrap();
+        let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
+        let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
+        mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
+            .unwrap()
+            .unwrap_or_else(|e| panic!("not a valid solid: {e}"));
+        let topo = plug.topology();
+        assert_eq!(topo.boundary_edges, 0, "the plug must be watertight");
     }
 
     /// A real split-sphere cap (`mesh.split_plane`, `keep: above`),
