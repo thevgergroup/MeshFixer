@@ -577,7 +577,10 @@ pub(crate) fn refresh_geometry(app: &mut MeshFixerApp) {
         // its result: it fails by name instead of reading forever.
         GeomSlot::Pending(k, slot) => match slot.lock() {
             Ok(mut s) => s.take().map(|r| (k.clone(), r)),
-            Err(_) => Some((k.clone(), Err("the joint reader stopped unexpectedly".to_owned()))),
+            Err(_) => Some((
+                k.clone(),
+                Err("the joint reader stopped unexpectedly".to_owned()),
+            )),
         },
         _ => None,
     };

@@ -14,9 +14,7 @@ use crate::ObjectId;
 /// A group's id. Stable for the session, never reused, like
 /// [`ObjectId`] (its own counter, so a group and an object are never
 /// confused even though both are small integers).
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct GroupId(pub u64);
 
 /// One entry of a group's (or the root's) order: an object or a nested
@@ -266,12 +264,45 @@ impl Organisation {
         serde_json::to_string(self).unwrap_or_default()
     }
 
-    /// Reads [`Self::to_json`] back; `None` for malformed or absent text
-    /// (a 3MF with no Browser metadata, or from before this existed),
-    /// which the caller treats as the default (everything at the root,
-    /// nothing hidden or locked).
-    pub fn from_json(s: &str) -> Option<Organisation> {
-        serde_json::from_str(s).ok()
+    /// Reads [`Self::to_json`] back. Malformed text is an error the
+    /// caller reports by name (final review I1): never silently the
+    /// default, which would drop the user's groups, hidden and locked.
+    pub fn from_json(s: &str) -> Result<Organisation, String> {
+        serde_json::from_str(s).map_err(|e| e.to_string())
+    }
+
+    /// The same organisation with every object id replaced through `map`
+    /// (a saved 3MF's ids to the ones a load gave its objects). `Err`
+    /// names the first id `map` doesn't have: the organisation doesn't
+    /// fit the file.
+    pub fn remapped(&self, map: &BTreeMap<ObjectId, ObjectId>) -> Result<Organisation, ObjectId> {
+        let id = |o: &ObjectId| map.get(o).copied().ok_or(*o);
+        let entry = |e: &Entry| match e {
+            Entry::Object(o) => id(o).map(Entry::Object),
+            Entry::Group(g) => Ok(Entry::Group(*g)),
+        };
+        let flags = |m: &BTreeMap<ObjectId, bool>| {
+            m.iter()
+                .map(|(o, v)| Ok((id(o)?, *v)))
+                .collect::<Result<BTreeMap<_, _>, ObjectId>>()
+        };
+        Ok(Organisation {
+            groups: self
+                .groups
+                .iter()
+                .map(|g| {
+                    Ok(Group {
+                        id: g.id,
+                        name: g.name.clone(),
+                        order: g.order.iter().map(entry).collect::<Result<_, _>>()?,
+                    })
+                })
+                .collect::<Result<_, ObjectId>>()?,
+            root: self.root.iter().map(entry).collect::<Result<_, _>>()?,
+            hidden: flags(&self.hidden)?,
+            locked: flags(&self.locked)?,
+            next_group: self.next_group,
+        })
     }
 }
 
@@ -355,7 +386,9 @@ mod tests {
             root: vec![Entry::Object(ObjectId(1)), Entry::Object(ObjectId(2))],
             ..Default::default()
         };
-        let org = org.with_hidden(ObjectId(1), true).without_object(ObjectId(1));
+        let org = org
+            .with_hidden(ObjectId(1), true)
+            .without_object(ObjectId(1));
         assert_eq!(org.root, vec![Entry::Object(ObjectId(2))]);
         assert!(!org.is_hidden(ObjectId(1)));
     }

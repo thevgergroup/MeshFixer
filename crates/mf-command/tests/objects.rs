@@ -1128,3 +1128,111 @@ fn a_bad_recorded_created_id_is_refused_by_name() {
         }
     }
 }
+
+/// The Browser's organisation (`meshfixer:browser`) round-trips through
+/// a saved 3MF even when the saved object ids aren't the ones a fresh
+/// load assigns (an object deleted first): the group still holds the
+/// same objects and the hidden one stays hidden (final review I1).
+#[test]
+fn organisation_round_trips_through_3mf_after_a_delete() {
+    use mf_command::{Entry, Organisation};
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, ids) = session_with(
+        dir.path(),
+        vec![
+            ("a", cube(1.0), IDENTITY),
+            ("b", cube(2.0), IDENTITY),
+            ("c", tetrahedron(), IDENTITY),
+        ],
+    );
+    s.execute(plain("object.delete", ids[0])).unwrap();
+    let (org, group) = s.document().organisation().with_new_group(
+        "pair".into(),
+        &[Entry::Object(ids[1]), Entry::Object(ids[2])],
+    );
+    let org = org.with_hidden(ids[2], true);
+    assert!(s.set_organisation(org, "Group".into()));
+    // c is attached to b (a connector member naming its piece).
+    assert!(s.set_properties(
+        vec![mf_command::PropertyChange {
+            object: ids[2],
+            key: mf_operations::shapes::ATTACH_TO.into(),
+            value: Some(ids[1].0.to_string()),
+        }],
+        "Attach".into(),
+    ));
+    assert_eq!(s.document().organisation().members(group).len(), 2);
+
+    let model = Model {
+        metadata: s.document().model_metadata(),
+        unit: s.document().units(),
+        objects: s
+            .document()
+            .objects()
+            .iter()
+            .map(|o| ModelObject {
+                metadata: o.metadata(),
+                name: o.name.clone(),
+                mesh: o.mesh().unwrap().clone(),
+                transform: o.transform,
+            })
+            .collect(),
+    };
+    let out = dir.path().join("organised.3mf");
+    write_model_path(&model, &out).unwrap();
+    let mut loaded = Session::new();
+    let (new_ids, warnings) = loaded.import_model(read_model(&out).unwrap());
+    assert!(warnings.is_empty(), "{warnings:?}");
+    let doc = loaded.document();
+    let name = |id: ObjectId| doc.object(id).map(|o| o.name.clone());
+    let org: &Organisation = doc.organisation();
+    let [Entry::Group(g)] = org.root_order() else {
+        panic!("one group at the root: {:?}", org.root_order())
+    };
+    let mut members: Vec<_> = org.members(*g).into_iter().map(name).collect();
+    members.sort();
+    assert_eq!(members, vec![Some("b".to_string()), Some("c".to_string())]);
+    let c = new_ids
+        .iter()
+        .copied()
+        .find(|&i| name(i).as_deref() == Some("c"))
+        .unwrap();
+    let b = new_ids
+        .iter()
+        .copied()
+        .find(|&i| name(i).as_deref() == Some("b"))
+        .unwrap();
+    assert!(org.is_hidden(c), "c stays hidden");
+    assert!(!org.is_hidden(b), "b stays visible");
+    assert_eq!(
+        doc.object(c).unwrap().properties[mf_operations::shapes::ATTACH_TO],
+        b.0.to_string(),
+        "c is still attached to b"
+    );
+}
+
+/// Malformed `meshfixer:browser` metadata isn't silently dropped: the
+/// import names it in a warning (final review I1, no silent fallbacks).
+#[test]
+fn malformed_browser_metadata_warns_by_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("bad.3mf");
+    let model = Model {
+        metadata: BTreeMap::from([("meshfixer:browser".to_string(), "{not json".to_string())]),
+        unit: Unit::Millimeter,
+        objects: vec![ModelObject {
+            metadata: Default::default(),
+            name: "a".into(),
+            mesh: cube(1.0),
+            transform: IDENTITY,
+        }],
+    };
+    write_model_path(&model, &path).unwrap();
+    let mut s = Session::new();
+    let (ids, warnings) = s.import_model(read_model(&path).unwrap());
+    assert_eq!(ids.len(), 1);
+    assert!(
+        warnings.iter().any(|w| w.contains("meshfixer:browser")),
+        "{warnings:?}"
+    );
+}

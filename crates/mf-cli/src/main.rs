@@ -690,7 +690,9 @@ fn threemf_model(doc: &mf_command::Document) -> Result<mf_io::threemf::Model, Fa
         })
         .collect::<Result<Vec<_>, Failure>>()?;
     Ok(mf_io::threemf::Model {
-        metadata: Default::default(),
+        // The Browser's organisation and saved object ids, as the desktop
+        // writes them: a CLI run on an organised 3MF keeps it.
+        metadata: doc.model_metadata(),
         unit: doc.units(),
         objects,
     })

@@ -473,12 +473,14 @@ pub struct MeshFixerApp {
     /// is always safe, and the error is shown only when the document's
     /// own content makes the command invalid.
     in_flight_invocation: Option<(Invocation, String)>,
-    /// A later command asked for while one is already running: only the
-    /// latest is kept (one queue slot, not a list), run once the running
-    /// one finishes. Replaces a queued entry for the same op and target
+    /// Later commands asked for while one is already running, in order,
+    /// run one at a time once the running one finishes. A command for
+    /// the same op and target as the *last* queued one replaces it
     /// (coalescing: a slider drag's last value wins over its earlier
-    /// ones), so rapid edits leave one pending step, not a backlog.
-    pending_invocation: Option<(Invocation, String)>,
+    /// ones), so rapid edits leave one pending step, not a backlog; any
+    /// other command queues behind it and is never dropped (final
+    /// review I2: a single overwritten slot lost queued edits silently).
+    pending_invocation: std::collections::VecDeque<(Invocation, String)>,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
     pub refusal: Option<crate::shape_tools::Refusal>,
@@ -878,7 +880,7 @@ impl MeshFixerApp {
             pending_open_transform: None,
             last_invocation_op: None,
             in_flight_invocation: None,
-            pending_invocation: None,
+            pending_invocation: std::collections::VecDeque::new(),
             refusal: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
@@ -1247,15 +1249,11 @@ impl MeshFixerApp {
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
-        // Only written when there's something to say (a group, a hidden
-        // or locked object): a plain document with everything at the
-        // root exports with no Browser metadata at all.
-        let mut metadata = BTreeMap::new();
-        if doc.organisation() != &mf_command::Organisation::default() {
-            metadata.insert("meshfixer:browser".to_owned(), doc.organisation().to_json());
-        }
+        // The Browser's organisation and the saved object ids, only when
+        // there's something to say: a plain document with everything at
+        // the root exports with no MeshFixer model metadata at all.
         Ok(mf_io::threemf::Model {
-            metadata,
+            metadata: doc.model_metadata(),
             unit: doc.units(),
             objects,
         })
@@ -1797,7 +1795,7 @@ impl MeshFixerApp {
     /// coalesced run of rapid edits without caring how many were asked
     /// for, since only the latest is ever kept.
     pub fn pending_invocation_depth(&self) -> usize {
-        self.pending_invocation.is_some() as usize
+        self.pending_invocation.len()
     }
 
     /// True while the hole markers asked for haven't come back.
@@ -2144,8 +2142,8 @@ impl MeshFixerApp {
     /// status bar), as a whole-object tool's Apply does. The single choke
     /// point every command (a tool's Apply, a slider or drag commit, an
     /// auto re-aim, `move_group`...) goes through: with a command already
-    /// running, `inv` is queued instead of raced against it (one queue
-    /// slot; coalesced with whatever was already queued for the same op
+    /// running, `inv` is queued instead of raced against it (in order;
+    /// coalesced with the last queued command when it has the same op
     /// and target, latest params winning), and run once the running one's
     /// result has been handled (`drain_pending_invocation`). This is what
     /// keeps two app-issued commands from ever preparing against the same
@@ -2153,14 +2151,14 @@ impl MeshFixerApp {
     /// while the command ran").
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
         if self.busy.is_some() {
-            match &mut self.pending_invocation {
+            match self.pending_invocation.back_mut() {
                 Some((queued, queued_label))
                     if queued.op_id == inv.op_id && queued.target == inv.target =>
                 {
                     *queued = inv;
                     *queued_label = label;
                 }
-                _ => self.pending_invocation = Some((inv, label)),
+                _ => self.pending_invocation.push_back((inv, label)),
             }
             return;
         }
@@ -2206,7 +2204,7 @@ impl MeshFixerApp {
         if self.busy.is_some() {
             return;
         }
-        if let Some((inv, label)) = self.pending_invocation.take() {
+        if let Some((inv, label)) = self.pending_invocation.pop_front() {
             self.start_invocation(inv, label);
         }
     }
@@ -5591,6 +5589,10 @@ impl MeshFixerApp {
         while let Ok(msg) = self.rx.try_recv() {
             self.handle(msg);
         }
+        // A command queued behind a job that isn't a command (an export,
+        // an import, a replay) starts once that job is over, not only
+        // when some later command finishes (final review I2).
+        self.drain_pending_invocation();
         crate::shape_panel::run_pending_reorient(self);
         if self.busy.is_none()
             && let Some(pending) = self.pending_open_transform.take()

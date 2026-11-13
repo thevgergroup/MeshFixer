@@ -1,7 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, Instant};
 
-use mf_document::{Document, Geometry, IDENTITY_TRANSFORM, Object, ObjectId, RevisionId, Unit};
+use mf_document::{
+    BROWSER_METADATA, Document, Geometry, IDENTITY_TRANSFORM, OBJECT_IDS_METADATA, Object,
+    ObjectId, RevisionId, Unit,
+};
 use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
@@ -665,7 +668,9 @@ impl Session {
 
     /// Every named checkpoint, in revision order.
     pub fn checkpoints(&self) -> impl Iterator<Item = (RevisionId, &str)> {
-        self.checkpoints.iter().map(|(&id, name)| (id, name.as_str()))
+        self.checkpoints
+            .iter()
+            .map(|(&id, name)| (id, name.as_str()))
     }
 
     /// Names `id` as a checkpoint ("Name this point…"), replacing its
@@ -775,21 +780,108 @@ impl Session {
                 self.document().units()
             ));
         }
+        // What the file's ids were when saved (`meshfixer:object_ids`):
+        // a load numbers objects afresh, so the organisation and the
+        // properties that name objects (`attach_to`) are mapped onto the
+        // new ids (final review I1). A file from before the list existed
+        // is read as numbered from where the ids it names start.
+        let first_new = self.next_object;
+        let saved_ids: Option<Vec<ObjectId>> = match model.metadata.get(OBJECT_IDS_METADATA) {
+            None => None,
+            Some(text) => {
+                let parsed: Result<Vec<ObjectId>, _> = text
+                    .split(',')
+                    .map(|t| t.trim().parse::<u64>().map(ObjectId))
+                    .collect();
+                match parsed {
+                    Ok(ids) if ids.len() == model.objects.len() => Some(ids),
+                    Ok(ids) => {
+                        warnings.push(format!(
+                            "{OBJECT_IDS_METADATA} lists {} objects but the file has {}; \
+                             objects it names keep their saved numbers",
+                            ids.len(),
+                            model.objects.len()
+                        ));
+                        None
+                    }
+                    Err(e) => {
+                        warnings.push(format!(
+                            "{OBJECT_IDS_METADATA} is malformed ({e}); \
+                             objects it names keep their saved numbers"
+                        ));
+                        None
+                    }
+                }
+            }
+        };
+        let id_map: BTreeMap<ObjectId, ObjectId> = match &saved_ids {
+            Some(saved) => saved
+                .iter()
+                .enumerate()
+                .map(|(k, &old)| (old, ObjectId(first_new + k as u64)))
+                .collect(),
+            None => (0..model.objects.len() as u64)
+                .map(|k| (ObjectId(first_new + k), ObjectId(first_new + k)))
+                .collect(),
+        };
         // Only a 3MF this document started from carries the Browser's own
         // groups/order/hidden/locked (`meshfixer:browser`); merging a
         // file into an existing document leaves the current organisation
         // alone (its new objects just join the root, as `with_object`
-        // already does).
-        let organisation = first_import
-            .then(|| model.metadata.get("meshfixer:browser"))
+        // already does). Malformed or unfitting metadata is reported by
+        // name, never silently dropped.
+        let organisation = match first_import
+            .then(|| model.metadata.get(BROWSER_METADATA))
             .flatten()
-            .and_then(|s| mf_document::Organisation::from_json(s));
+        {
+            None => None,
+            Some(text) => match mf_document::Organisation::from_json(text) {
+                Err(e) => {
+                    warnings.push(format!(
+                        "{BROWSER_METADATA} is malformed ({e}); groups, hidden and locked \
+                         objects weren't restored"
+                    ));
+                    None
+                }
+                Ok(org) => match org.remapped(&id_map) {
+                    Ok(org) => Some(org),
+                    Err(missing) => {
+                        warnings.push(format!(
+                            "{BROWSER_METADATA} names object {missing}, which the file doesn't \
+                             have; groups, hidden and locked objects weren't restored"
+                        ));
+                        None
+                    }
+                },
+            },
+        };
         let ids: Vec<ObjectId> = model
             .objects
             .into_iter()
             .enumerate()
             .map(|(part, o)| {
                 let units = first_import.then_some(model.unit);
+                let mut properties = mf_document::properties_from_metadata(&o.metadata);
+                let attach = mf_operations::shapes::ATTACH_TO;
+                if let Some(to) = properties.get(attach).cloned() {
+                    // allow-swallow: an unparsable or unknown attach_to is dropped with a warning naming it
+                    let saved = to.parse::<u64>().ok();
+                    match saved.and_then(|n| id_map.get(&ObjectId(n))) {
+                        Some(new) => {
+                            properties.insert(attach.to_owned(), new.0.to_string());
+                        }
+                        // Kept, it would name some other object of this
+                        // document: dropped, by name.
+                        None => {
+                            properties.remove(attach);
+                            warnings.push(format!(
+                                "object '{}' is attached to object {to}, which the file \
+                                 doesn't have; it was detached",
+                                o.name
+                            ));
+                        }
+                    }
+                }
                 self.add_object(
                     Geometry::Mesh(o.mesh),
                     o.name,
@@ -797,10 +889,16 @@ impl Session {
                     part,
                     o.transform,
                     units,
-                    mf_document::properties_from_metadata(&o.metadata),
+                    properties,
                 )
             })
             .collect();
+        debug_assert!(
+            ids.iter()
+                .enumerate()
+                .all(|(k, id)| id.0 == first_new + k as u64),
+            "import_model's id map assumes consecutive new ids"
+        );
         if let Some(organisation) = organisation
             && !ids.is_empty()
         {

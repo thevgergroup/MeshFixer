@@ -81,6 +81,13 @@ pub const GROUP: &str = "group";
 pub const PARAMETRIC_KEYS: [&str; 2] = [GENERATOR, GROUP];
 /// The 3MF metadata prefix of an object property.
 const METADATA_PREFIX: &str = "meshfixer:";
+/// The 3MF model metadata holding the Browser's organisation as JSON.
+pub const BROWSER_METADATA: &str = "meshfixer:browser";
+/// The 3MF model metadata listing each object's id when saved, in object
+/// order (comma separated): what the organisation and object properties
+/// that name objects (`attach_to`) mean, since a load numbers objects
+/// afresh (final review I1).
+pub const OBJECT_IDS_METADATA: &str = "meshfixer:object_ids";
 
 /// The object properties in 3MF object metadata (the `meshfixer:` entries,
 /// prefix removed); other entries are left alone.
@@ -150,6 +157,23 @@ impl Document {
 
     pub fn organisation(&self) -> &Organisation {
         &self.organisation
+    }
+
+    /// The document's own 3MF model metadata: the Browser's organisation
+    /// ([`BROWSER_METADATA`]) when there's something to say (a group, a
+    /// hidden or locked object), and the saved object ids
+    /// ([`OBJECT_IDS_METADATA`]) whenever any metadata could name an
+    /// object. A plain document has none.
+    pub fn model_metadata(&self) -> BTreeMap<String, String> {
+        let mut metadata = BTreeMap::new();
+        if self.organisation != Organisation::default() {
+            metadata.insert(BROWSER_METADATA.to_owned(), self.organisation.to_json());
+        }
+        if !metadata.is_empty() || self.objects.iter().any(|o| !o.properties.is_empty()) {
+            let ids: Vec<String> = self.objects.iter().map(|o| o.id.0.to_string()).collect();
+            metadata.insert(OBJECT_IDS_METADATA.to_owned(), ids.join(","));
+        }
+        metadata
     }
 
     /// A new document with a different organisation (groups, order,

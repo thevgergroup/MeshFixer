@@ -405,6 +405,54 @@ fn two_quick_edits_both_land_with_no_stale_error() {
     );
 }
 
+/// The queue never drops a command it was given (final review I2): with
+/// one edit running and another object's edit queued, a third edit on a
+/// *different* op/target than the queued one must queue behind it, not
+/// replace it. Before, the single queue slot was overwritten, and the
+/// queued edit vanished with no message.
+#[test]
+fn a_queued_edit_is_never_dropped_by_a_later_different_one() {
+    require_gpu!("a_queued_edit_is_never_dropped_by_a_later_different_one");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    let a = place(&mut h, "Box");
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    let b = place(&mut h, "Magnet pocket");
+    settle(&mut h);
+    let before = h.state().session.history_labels().len();
+
+    // a's edit runs; b's queues; a's second edit (not b's op/target)
+    // arrives while b's is still waiting.
+    h.state_mut().set_active(a);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "width", mf_spec::ParamValue::Float(18.0));
+    assert!(h.state().busy.is_some(), "a's edit is running");
+    h.state_mut().set_active(b);
+    mf_desktop::shape_panel::set_param(
+        h.state_mut(),
+        "magnet_diameter",
+        mf_spec::ParamValue::Float(8.0),
+    );
+    h.state_mut().set_active(a);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "width", mf_spec::ParamValue::Float(22.0));
+    wait_until(&mut h, "every edit to land", |a| {
+        a.busy.is_none() && a.pending_invocation_depth() == 0
+    });
+    settle(&mut h);
+
+    assert!(h.state().error.is_none(), "{:?}", h.state().error);
+    assert_eq!(
+        recipe(&h, b).params.get_float("magnet_diameter").unwrap(),
+        8.0,
+        "b's queued edit still ran"
+    );
+    assert!((width(&h, a) - 22.0).abs() < 1e-9, "a's last edit won");
+    assert_eq!(
+        h.state().session.history_labels().len(),
+        before + 3,
+        "three edits, three undo steps"
+    );
+}
+
 /// Fix item 9's auto re-aim (`shape_panel::after_commit`) is queued
 /// behind the move that triggers it rather than racing it: forcing the
 /// move's `object.set_transform` and the re-aim's
