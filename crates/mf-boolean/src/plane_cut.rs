@@ -1127,8 +1127,10 @@ fn cut_half_core(
                         }
                     }
                 }
-                let moved: Vec<usize> = around.remove(&gone).unwrap_or_default();
-                around.entry(keep_id).or_default().extend(moved);
+                // `gone` is a cut point, so it is in a piece: it has an entry.
+                if let Some(moved) = around.remove(&gone) {
+                    around.entry(keep_id).or_default().extend(moved);
+                }
                 remap.insert(gone, keep_id);
             }
             let mut kept = Vec::with_capacity(pieces.len());
@@ -1325,7 +1327,8 @@ fn cut_half_core(
                 },
             )?);
         }
-        section_regions = regions(&loops2d, &oriented, frame);
+        let faces = loop_faces(mesh, &oriented, input, ctx)?;
+        section_regions = regions(&loops2d, &faces, frame);
         // Each region's own crossing faces, same order as
         // `section_regions`: the outer loops (positive signed area, the
         // same filter `regions()` applies) and `section_regions` share
@@ -1335,7 +1338,7 @@ fn cut_half_core(
             .collect();
         region_crossing_faces = outer_loop_indices
             .iter()
-            .map(|&i| oriented[i].iter().map(|&(_, f)| f).collect())
+            .map(|&i| faces[i].iter().copied().collect())
             .collect();
     }
     span.finish();
@@ -1922,14 +1925,83 @@ fn contains(l: &[[f64; 2]], p: [f64; 2]) -> bool {
     inside
 }
 
+/// Each loop's input faces, for its region's identity
+/// ([`SectionRegion::seed_face`]) and membership
+/// ([`HalfCut::region_crossing_faces`]): the face each loop edge came
+/// from and, for an edge between two input vertices (on the plane, so
+/// along an input edge), also the face across that edge. A crossing face
+/// gives the same edge to both sides, but an on-plane edge comes from a
+/// face on the kept side only; with the face across it too, a region is
+/// named by the same faces whichever side reads it (split-harden: a
+/// sphere's equator on the plane, its Above loop from the upper band's
+/// faces and its Below loop from the lower band's).
+fn loop_faces(
+    mesh: &Mesh,
+    loops: &[Vec<(u32, FaceId)>],
+    input: u32,
+    ctx: &RunContext,
+) -> Result<Vec<Vec<FaceId>>, CutError> {
+    // The input edges along the section, both ways round.
+    let mut along: HashSet<(u32, u32)> = HashSet::new();
+    for l in loops {
+        for (k, &(u, _)) in l.iter().enumerate() {
+            let w = l[(k + 1) % l.len()].0;
+            if u < input && w < input {
+                along.insert((w, u));
+                along.insert((u, w));
+            }
+        }
+    }
+    let mut across: HashMap<(u32, u32), FaceId> = HashMap::new();
+    if !along.is_empty() {
+        let found: Vec<((u32, u32), FaceId)> = (0..mesh.face_chunk_count())
+            .into_par_iter()
+            .flat_map_iter(|k| {
+                let along = &along;
+                mesh.faces_in_chunk(k).flat_map(move |(f, t)| {
+                    (0..3)
+                        .map(move |i| (t[i], t[(i + 1) % 3]))
+                        .filter(|e| along.contains(e))
+                        .map(move |e| (e, f))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect();
+        ctx.checkpoint()?;
+        across.extend(found);
+    }
+    Ok(loops
+        .iter()
+        .map(|l| {
+            let mut faces: Vec<FaceId> = Vec::with_capacity(l.len());
+            for (k, &(u, f)) in l.iter().enumerate() {
+                faces.push(f);
+                let w = l[(k + 1) % l.len()].0;
+                // The face whose own edge runs the other way: the other
+                // side's face along this edge (whichever way the loop was
+                // turned, one of the two directions is `f`'s own).
+                for e in [(w, u), (u, w)] {
+                    if let Some(&g) = across.get(&e).filter(|&&g| g != f) {
+                        faces.push(g);
+                    }
+                }
+            }
+            faces.sort_unstable();
+            faces.dedup();
+            faces
+        })
+        .collect())
+}
+
 /// The section's regions: each counter-clockwise loop with the clockwise
 /// loops directly inside it (the smallest outer loop containing them).
-/// `oriented`, indexed exactly as `loops`, carries each loop vertex's
-/// source face so each region's [`SectionRegion::seed_face`] (the lowest
-/// id among them) is a stable identity (Phase 1b).
+/// `faces`, indexed exactly as `loops`, holds each loop's input faces
+/// ([`loop_faces`]), so each region's [`SectionRegion::seed_face`] (the
+/// lowest id among them) is a stable identity (Phase 1b), the same from
+/// either side.
 fn regions(
     loops: &[Vec<[f64; 2]>],
-    oriented: &[Vec<(u32, FaceId)>],
+    faces: &[Vec<FaceId>],
     frame: PlaneFrame,
 ) -> Vec<SectionRegion> {
     let areas: Vec<f64> = loops.iter().map(|l| signed_area(l)).collect();
@@ -1940,11 +2012,7 @@ fn regions(
             outer: loops[i].clone(),
             holes: Vec::new(),
             frame,
-            seed_face: oriented[i]
-                .iter()
-                .map(|&(_, f)| f)
-                .min()
-                .unwrap_or(FaceId(0)), // allow-swallow: an outer loop always has at least one vertex, so this never actually falls back
+            seed_face: faces[i].iter().copied().min().unwrap_or(FaceId(0)), // allow-swallow: an outer loop always has at least one vertex, so this never actually falls back
         })
         .collect();
     for (h, l) in loops.iter().enumerate() {
