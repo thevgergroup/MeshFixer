@@ -11,7 +11,8 @@
 //! inflate stroke with "stay on surface" leaving a split's cap
 //! untouched; a Transform move and its Undo; and a parametric shape
 //! param edit and its Undo; and Parts' "Combine with <target>" union
-//! and its Undo.
+//! and its Undo; and Hollow (one undo step), then a vase by Split with
+//! Cap off, Keep Bottom.
 //!
 //! Run with `scripts/core-workflows.sh` (kept under 3 minutes at `-j 4`).
 
@@ -538,6 +539,221 @@ fn cap_off_leaves_the_parts_open_with_no_joint() {
         let topo = mesh.topology_with(&mf_runtime::RunContext::none()).unwrap();
         assert!(topo.boundary_edges > 0, "{name}: left open at the cut");
     }
+}
+
+// ---------------------------------------------------------------------
+// Hollow, then a vase: Split with Cap off, Keep Bottom.
+// ---------------------------------------------------------------------
+
+/// Saves the current frame as `<MF_ARTIFACTS>/hollow/<name>.png` (the
+/// Hollow tool's checkpoint captures), a no-op without `MF_ARTIFACTS`.
+fn still(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir).join("hollow");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.render()
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
+}
+
+fn mesh_of(h: &Harness<'_, MeshFixerApp>, name: &str) -> Mesh {
+    h.state()
+        .session
+        .document()
+        .object(id_of(h, name))
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone()
+}
+
+/// Hollow (MF-ISSUE-112): the preview shows the ball hollowed and cut
+/// open (the section view); "Hollow" makes it a closed shell of two
+/// surfaces in one undo step (Undo puts the solid back, Redo the shell);
+/// then Split with Cap off, Keep Bottom leaves an open-top vase: the
+/// outside and the inside wall, each open at the rim, with a floor a wall
+/// thick.
+#[test]
+fn hollow_then_split_cap_off_keep_bottom_makes_an_open_vase() {
+    require_gpu!("hollow_then_split_cap_off_keep_bottom_makes_an_open_vase");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let solid = mesh_of(&h, "ball").content_hash();
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "hollow");
+    let id = id_of(&h, "ball");
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    assert!(
+        mf_desktop::shape_tools::split_preview(h.state()).is_some(),
+        "the section view cuts the preview open"
+    );
+    still(&mut h, "1-preview-section");
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let shell = mesh_of(&h, "ball");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed");
+    assert_eq!(topo.components.len(), 2, "the outside and the inside wall");
+    let hollowed = shell.content_hash();
+
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "the undo", |a| {
+        a.busy.is_none()
+            && a.session
+                .document()
+                .object(id)
+                .and_then(|o| o.mesh())
+                .is_some_and(|m| m.content_hash() == solid)
+    });
+    h.get_by_label("Redo").click();
+    wait_until(&mut h, "the redo", |a| {
+        a.busy.is_none()
+            && a.session
+                .document()
+                .object(id)
+                .and_then(|o| o.mesh())
+                .is_some_and(|m| m.content_hash() == hollowed)
+    });
+    settle(&mut h);
+
+    // The vase: cut 15 above the centre, no cap, keep the bottom.
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 45.0;
+    h.state_mut().split.cap = false;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert_eq!(names, ["ball (bottom)"], "{names:?}");
+    still(&mut h, "2-vase");
+    let vase = mesh_of(&h, "ball (bottom)");
+    let topo = vase.topology_with(&mf_runtime::RunContext::none()).unwrap();
+    assert_eq!(topo.components.len(), 2, "outside and inside wall");
+    assert_eq!(
+        topo.boundary_loops.len(),
+        2,
+        "open at the rim, outside and in"
+    );
+    let bb = world_bounds(&h, id_of(&h, "ball (bottom)"));
+    assert!((bb.max[2] - 45.0).abs() < 1e-6, "{bb:?}");
+    assert!(bb.min[2] < 1.0, "{bb:?}");
+    // The inside wall's floor is a wall (2 mm) above the outside's.
+    let floors: Vec<f64> = topo
+        .components
+        .iter()
+        .map(|c| {
+            c.iter()
+                .flat_map(|&f| vase.face(mf_geometry::FaceId(f)).unwrap())
+                .map(|v| vase.corner_position(v)[2])
+                .fold(f64::INFINITY, f64::min)
+        })
+        .collect();
+    let (outer_floor, inner) = (floors[0].min(floors[1]), floors[0].max(floors[1]));
+    assert!(
+        (inner - outer_floor - 2.0).abs() < 0.6,
+        "floor {inner} over {outer_floor}"
+    );
+}
+
+/// A mushroom: a stem 30 across and 20 tall under a cap 60 across and 3
+/// thick (a revolved profile, closed). With a 2 mm wall the cap stays
+/// solid.
+fn mushroom() -> Mesh {
+    let profile = [(15.0, 0.0), (15.0, 20.0), (30.0, 20.0), (30.0, 23.0)];
+    let segments = 64u32;
+    let mut positions = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 23.0]];
+    for k in 0..segments {
+        let a = std::f64::consts::TAU * f64::from(k) / f64::from(segments);
+        for &(r, z) in &profile {
+            positions.push([r * a.cos(), r * a.sin(), z]);
+        }
+    }
+    let p = profile.len() as u32;
+    let at = |k: u32, i: u32| 2 + (k % segments) * p + i;
+    let mut tris = Vec::new();
+    for k in 0..segments {
+        tris.push([0, at(k + 1, 0), at(k, 0)]);
+        tris.push([1, at(k, p - 1), at(k + 1, p - 1)]);
+        for i in 0..p - 1 {
+            let (a, b, c, d) = (at(k, i), at(k + 1, i), at(k + 1, i + 1), at(k, i + 1));
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        }
+    }
+    Mesh::new(positions, tris).unwrap()
+}
+
+/// The preview outlines the parts left solid and says so in plain words;
+/// a placed drain hole is clicked on the surface, and Hollow cuts it, so
+/// the inside opens to the outside (one connected surface).
+#[test]
+fn hollow_shows_thin_parts_and_cuts_a_placed_drain_hole() {
+    require_gpu!("hollow_shows_thin_parts_and_cuts_a_placed_drain_hole");
+    let mut h = opened(vec![
+        ("mushroom", mushroom(), at([0.0, 0.0, 0.0])),
+        ("ball", ball(30.0), at([120.0, 0.0, 30.0])),
+    ]);
+    row(&h, "mushroom").click();
+    settle(&mut h);
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    let mushroom_id = id_of(&h, "mushroom");
+    wait_until(&mut h, "the mushroom's preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, mushroom_id).is_some()
+    });
+    settle(&mut h);
+    assert!(
+        mf_desktop::hollow_tool::thin_layer(h.state()).is_some(),
+        "the cap is outlined as left solid"
+    );
+    h.get_by_label("Parts thinner than 4 mm were left solid");
+    still(&mut h, "3-thin-parts");
+
+    // A placed hole on the ball.
+    row(&h, "ball").click();
+    settle(&mut h);
+    let ball_id = id_of(&h, "ball");
+    h.get_by_label("Placed").click();
+    settle(&mut h);
+    wait_until(&mut h, "the ball's preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, ball_id).is_some()
+    });
+    settle(&mut h);
+    let p = facing_point(&h, [120.0, 0.0, 30.0], 30.0);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(h.state().hollow.points.len(), 1, "one hole placed");
+    h.get_by_label("Holes placed: 1");
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let shell = mesh_of(&h, "ball");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed");
+    assert_eq!(
+        topo.components.len(),
+        1,
+        "the hole joins the inside to the outside"
+    );
 }
 
 /// Owner 2026-11-12: with only "ball" selected (a plain Browser click,

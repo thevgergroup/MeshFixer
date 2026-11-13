@@ -29,6 +29,11 @@ pub const RECENT_REPAIR: Color32 = Color32::from_rgb(80, 205, 120);
 /// has moved most since the tool opened.
 pub const SCULPT_CHANGED: Color32 = Color32::from_rgb(180, 244, 52);
 
+/// Hollow's preview: the parts left solid because they're thinner than
+/// twice the wall (MF-ISSUE-112) — a sand tan, apart from `HOLE`'s
+/// orange, `LOOSE_PIECE`'s amber and `SPLIT_SIDE_A`.
+pub const THIN_WALL: Color32 = Color32::from_rgb(0xC8, 0xA0, 0x78);
+
 /// Where two objects cross (`mesh.intersections`), drawn while Combine is
 /// open: a violet, apart from the accent's indigo and `CRACK`'s magenta.
 pub const INTERSECTION: Color32 = Color32::from_rgb(0xB3, 0x6B, 0xFF);

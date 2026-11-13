@@ -180,6 +180,7 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
                     ObjectChange::Geometry { mesh, .. } => Some(mesh.face_count()),
                     _ => None,
                 })
+                // allow-swallow: an accepted hollow always changes the geometry; 0 would only mean no change
                 .unwrap_or(0),
             out.report.clone(),
         ),

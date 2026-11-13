@@ -463,6 +463,70 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hole.flat_top", "Flat-top"),
     ("hole.round", "Round"),
     ("hole.teardrop", "Teardrop"),
+    ("hollow.apply", "Hollow"),
+    ("hollow.detail_auto", "Automatic"),
+    (
+        "hollow.detail_help",
+        "The size of the grid the inside is built on: smaller follows the wall more closely but takes longer. It can be at most half the wall.",
+    ),
+    ("hollow.detail_is", "Built on a {cell} {unit} grid"),
+    (
+        "hollow.done",
+        "Hollowed. Every part was thick enough to hollow.",
+    ),
+    ("hollow.holes.auto", "Auto"),
+    (
+        "hollow.holes.auto_help",
+        "At the lowest points of the inside, as the object sits on the plate.",
+    ),
+    ("hollow.holes.clear", "Clear holes"),
+    ("hollow.holes.count", "How many"),
+    ("hollow.holes.diameter", "Diameter ({unit})"),
+    ("hollow.holes.none", "None"),
+    ("hollow.holes.placed", "Placed"),
+    ("hollow.holes.placed_count", "Holes placed: {n}"),
+    (
+        "hollow.holes.placed_help",
+        "Click the surface where each hole goes.",
+    ),
+    ("hollow.holes.profile", "Shape"),
+    (
+        "hollow.holes_help",
+        "Holes from the hollow inside to the outside, so resin or powder can drain out.",
+    ),
+    ("hollow.measuring", "Measuring the object…"),
+    (
+        "hollow.preview_ready",
+        "Inner wall: {faces} faces, on a {cell} {unit} grid",
+    ),
+    ("hollow.preview_refused", "This can't be hollowed yet"),
+    ("hollow.previewing", "Working out the walls…"),
+    ("hollow.section.detail", "Detail ({unit})"),
+    ("hollow.section.holes", "Drain holes"),
+    ("hollow.section.preview", "Preview"),
+    ("hollow.section.wall", "Wall thickness ({unit})"),
+    ("hollow.section_view", "Section view"),
+    (
+        "hollow.section_view.tip",
+        "Cut the preview open so you can see the walls",
+    ),
+    (
+        "hollow.thin",
+        "Parts thinner than {size} {unit} were left solid",
+    ),
+    ("hollow.thin_share", "{percent}% of the surface (outlined)"),
+    (
+        "hollow.tradeoff",
+        "Thinner walls save more material but are weaker.",
+    ),
+    (
+        "hollow.wall_help",
+        "How thick the walls are; parts thinner than twice this stay solid",
+    ),
+    (
+        "hollow.what",
+        "Makes the object a shell: the outside stays exactly as it is, and the inside is hollowed out to walls of the thickness you choose.",
+    ),
     (
         "inspect.help",
         "Everything the analysis measured, in plain numbers",
@@ -937,6 +1001,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("tool.connectors.name", "Connectors"),
     ("tool.export.help", "Write the model to 3MF, STL or OBJ"),
     ("tool.export.name", "Export"),
+    (
+        "tool.hollow.help",
+        "Make a solid a shell with walls of a chosen thickness",
+    ),
+    ("tool.hollow.name", "Hollow"),
     ("tool.inspect.help", "Every number the analysis reports"),
     ("tool.inspect.name", "Inspect"),
     (

@@ -436,6 +436,10 @@ pub struct MeshFixerApp {
     /// stays open, so switching objects starts a fresh baseline.
     pub sculpt_baseline: Option<(ObjectId, Mesh)>,
     pub solid: crate::shape_tools::SolidState,
+    /// The Hollow tool's settings and preview (MF-ISSUE-112).
+    pub hollow: crate::hollow_tool::HollowState,
+    /// Works out Hollow's preview on a worker, the latest settings only.
+    pub(crate) hollow_worker: LatestWorker<crate::hollow_tool::PreviewRequest>,
     /// The Parts tool's state (Task 23): search, the part last placed
     /// and its Join-to-scan settings.
     pub parts: crate::parts_tool::PartsState,
@@ -780,6 +784,20 @@ impl MeshFixerApp {
                 },
             )
         };
+        let hollow_worker = {
+            let (tx, ctx, gpu) = (tx.clone(), cc.egui_ctx.clone(), gpu.clone());
+            LatestWorker::new(
+                workers.background(),
+                move |req: crate::hollow_tool::PreviewRequest, run: &RunContext| {
+                    crate::hollow_tool::preview_work(req, run, &gpu)
+                },
+                move |msg| {
+                    // allow-swallow: the receiver only disappears while the app is closing
+                    let _ = tx.send(msg);
+                    ctx.request_repaint();
+                },
+            )
+        };
         let peg_preview_worker = {
             let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
             LatestWorker::new(workers.background(), worker::peg_preview, move |msg| {
@@ -863,6 +881,8 @@ impl MeshFixerApp {
             alignment: Default::default(),
             peg_preview: None,
             peg_preview_worker,
+            hollow: Default::default(),
+            hollow_worker,
             peg_preview_asked: None,
             combine: Default::default(),
             picked: Vec::new(),
@@ -2788,6 +2808,7 @@ impl MeshFixerApp {
                         // connectors applied.
                         crate::split_flow::after_commit(self, op, &r);
                         crate::shape_panel::after_commit(self, op);
+                        crate::hollow_tool::after_commit(self, op, &r);
                         // The command's result stays: a filled hole's
                         // "selection cleared" would only repeat it.
                         if let Some(note) = self.retarget_selection()
@@ -3096,6 +3117,9 @@ impl MeshFixerApp {
                 {
                     self.intersections = Some((key, curves));
                 }
+            }
+            Message::HollowPreview(preview) => {
+                crate::hollow_tool::on_preview(self, *preview);
             }
             Message::PegPreview(preview) => {
                 // The latest request only (a slower, older one finishing
@@ -3415,6 +3439,9 @@ impl MeshFixerApp {
                     // revision's own render mesh is ready to swap in,
                     // whole, in one frame (owner: no flicker on release).
                     r.clone()
+                } else if active && let Some(r) = crate::hollow_tool::preview_render(self, o.id) {
+                    // Hollow's preview: the object hollowed, in its place.
+                    r
                 } else if active {
                     // `displayed` may still hold a previously active
                     // object's render mesh until this one's analysis
@@ -4317,6 +4344,10 @@ impl MeshFixerApp {
         {
             layers.push(lines(object, o.origin, &o.lines, theme::HOVER));
         }
+        // Hollow's preview: the parts left solid.
+        if let Some(layer) = crate::hollow_tool::thin_layer(self) {
+            layers.push(layer);
+        }
         // Overlays are built for the current revision: while the active
         // object still shows its previous one, they wouldn't line up.
         let stale = (!self.shows_current_revision())
@@ -4902,6 +4933,13 @@ impl MeshFixerApp {
             count: key.count,
             min_wall: key.min_wall,
         });
+    }
+
+    /// What the view shows for the active object now (its render mesh),
+    /// if it's this object's.
+    pub(crate) fn active_render(&self) -> Option<Arc<RenderMesh>> {
+        let (object, _, r) = self.displayed.as_ref()?;
+        (Some(*object) == self.active).then(|| r.clone())
     }
 
     /// The Alignment panel's current hole preview, for the active
@@ -5835,6 +5873,7 @@ impl MeshFixerApp {
         self.refresh_markers();
         self.refresh_intersections();
         self.refresh_peg_preview();
+        crate::hollow_tool::refresh_preview(self, &ctx);
 
         let objects = self.object_views();
         let empty = crate::panels::empty_state();
