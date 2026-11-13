@@ -34,6 +34,12 @@ pub(crate) fn builtin_generators() -> Vec<&'static dyn crate::Generator> {
         &joint::Magnet,
         &joint::Insert,
     ];
+    #[cfg(feature = "test-kinds")]
+    all.push({
+        #[path = "test_key.rs"]
+        mod test_key;
+        &test_key::TestKey
+    });
     all
 }
 
