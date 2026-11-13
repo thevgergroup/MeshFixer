@@ -82,6 +82,14 @@ pub struct SectionRegion {
     pub outer: Vec<[f64; 2]>,
     pub holes: Vec<Vec<[f64; 2]>>,
     pub frame: PlaneFrame,
+    /// A stable identity for this region (Phase 1b, cross-section
+    /// picking): the lowest input-mesh [`FaceId`] among the crossing
+    /// faces that contributed to the region's outer loop. Input face
+    /// ids never change for faces away from the plane, so this id is
+    /// the same across a replay of the same cut, letting a caller name
+    /// one region (`mesh.split_plane`'s `regions` param) by this value
+    /// alone, recorded once and replayed exactly.
+    pub seed_face: FaceId,
 }
 
 /// Which side of the plane a part is.
@@ -103,6 +111,12 @@ pub struct HalfCut {
     pub cap_faces: Vec<FaceId>,
     /// The section this part's cap covers.
     pub section_regions: Vec<SectionRegion>,
+    /// Each `section_regions` entry's own input (pre-cut) crossing
+    /// faces, same length and order as `section_regions` (Phase 1b:
+    /// [`cut_half_with_regions`]'s pass 1 uses this to build its
+    /// exclusion set). Empty whenever `section_regions` is (uncapped,
+    /// or no boundary loops at all).
+    pub region_crossing_faces: Vec<HashSet<FaceId>>,
 }
 
 /// Both sides of a cut through one plane.
@@ -140,6 +154,13 @@ pub enum CutError {
     MissesObject { grazed: bool },
     #[error("the section crosses or touches itself near {at:?}")]
     SectionSelfIntersects { at: [f64; 3] },
+    /// Phase 1b, the bounded cut plane: a section region's outer loop
+    /// straddles the bound's edge (some of it inside, some outside) —
+    /// ambiguous which way it should go, so the cut refuses by name
+    /// rather than guessing. `seed_face` is that region's stable
+    /// identity ([`SectionRegion::seed_face`]).
+    #[error("a cut region crosses the cut area's edge")]
+    RegionCrossesBound { seed_face: FaceId },
     #[error(transparent)]
     Geometry(#[from] GeometryError),
     #[error("cancelled by the user")]
@@ -356,6 +377,152 @@ pub fn cut_half_with(
     cap: bool,
     ctx: &RunContext,
 ) -> Result<HalfCut, CutError> {
+    cut_half_impl(mesh, plane, keep, cap, None, ctx)
+}
+
+/// A bounded cut area (Phase 1b, "Limit to area"): a disc or rectangle
+/// in the plane's own 2D frame, centred at the frame's origin (the
+/// caller positions it by choosing the plane's point). Only a region
+/// whose outer loop lies entirely inside the bound is cut; one entirely
+/// outside is left whole (as if unticked); one straddling the edge is
+/// refused by name ([`CutError::RegionCrossesBound`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Bound {
+    Disc { radius: f64 },
+    Rect { width: f64, height: f64 },
+}
+
+/// How one [`SectionRegion`]'s outer loop relates to a [`Bound`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BoundCheck {
+    AllInside,
+    AllOutside,
+    Crosses,
+}
+
+impl Bound {
+    /// Whether `[x, y]` (plane frame coordinates) is strictly inside.
+    /// Exactly on the edge is never "inside" (Phase 1b: a region that
+    /// only touches the bound's edge, with no point strictly inside,
+    /// must not read as cleanly contained).
+    fn strictly_inside(&self, p: [f64; 2]) -> bool {
+        match *self {
+            Bound::Disc { radius } => p[0] * p[0] + p[1] * p[1] < radius * radius,
+            Bound::Rect { width, height } => {
+                p[0].abs() < width / 2.0 && p[1].abs() < height / 2.0
+            }
+        }
+    }
+
+    /// Whether `[x, y]` is strictly outside (the mirror of
+    /// [`Self::strictly_inside`] with the inequality reversed — a point
+    /// exactly on the edge is neither strictly inside nor strictly
+    /// outside, which is what makes a loop that only touches the edge
+    /// classify as [`BoundCheck::Crosses`], never [`BoundCheck::
+    /// AllInside`] or [`BoundCheck::AllOutside`]).
+    fn strictly_outside(&self, p: [f64; 2]) -> bool {
+        match *self {
+            Bound::Disc { radius } => p[0] * p[0] + p[1] * p[1] > radius * radius,
+            Bound::Rect { width, height } => {
+                p[0].abs() > width / 2.0 || p[1].abs() > height / 2.0
+            }
+        }
+    }
+}
+
+/// Classifies `region`'s outer loop against `bound` (Phase 1b):
+/// [`BoundCheck::AllInside`] only when every point is strictly inside;
+/// [`BoundCheck::AllOutside`] only when every point is strictly outside;
+/// [`BoundCheck::Crosses`] otherwise (including a loop that only ever
+/// touches the bound's edge, with no point strictly on either side).
+pub fn classify_region(region: &SectionRegion, bound: &Bound) -> BoundCheck {
+    let all_in = region.outer.iter().all(|&p| bound.strictly_inside(p));
+    if all_in {
+        return BoundCheck::AllInside;
+    }
+    let all_out = region.outer.iter().all(|&p| bound.strictly_outside(p));
+    if all_out {
+        return BoundCheck::AllOutside;
+    }
+    BoundCheck::Crosses
+}
+
+/// As [`cut_half_with`], restricted to named regions and/or a bound
+/// (Phase 1b: cross-section picking and the bounded cut plane).
+///
+/// - `regions`: `None` or `Some(&[])` cuts every region (today's
+///   behaviour). `Some(seeds)` cuts only the regions whose
+///   [`SectionRegion::seed_face`] is in `seeds`; every other region is
+///   left whole — the plane simply doesn't cut the object there, so
+///   that part of the model stays in one piece across the plane,
+///   uncapped and unseamed (not a smaller capped remainder). A seed
+///   face that doesn't match any real region (stale or unknown) is
+///   silently inert: nothing matches it, so nothing is cut because of
+///   it — never a panic.
+/// - `bound`: when given, a region whose outer loop lies entirely
+///   inside the bound ([`BoundCheck::AllInside`]) is still subject to
+///   `regions`; one entirely outside ([`BoundCheck::AllOutside`]) is
+///   left whole, exactly like an unticked region; one that straddles
+///   the bound's edge ([`BoundCheck::Crosses`]) refuses the whole call
+///   with [`CutError::RegionCrossesBound`], naming that region's seed
+///   face.
+///
+/// Implementation note: finding which regions exist, and which input
+/// faces belong to each, needs the cut's own boundary loops — not known
+/// until every crossing face is classified. So when either filter is
+/// active this cuts the mesh twice: pass 1 ([`cut_half_impl`] with no
+/// exclusion) to learn each region's seed face and member crossing
+/// faces ([`HalfCut::region_crossing_faces`]); pass 2, the one result
+/// returned, with the excluded regions' crossing faces turned into
+/// "kept whole" or "removed" rather than split. Acceptable for Phase
+/// 1b; a future pass could avoid the first cut if profiling on a large
+/// mesh ever shows this matters.
+pub fn cut_half_with_regions(
+    mesh: &Mesh,
+    plane: &Plane,
+    keep: Side,
+    cap: bool,
+    regions: Option<&[FaceId]>,
+    bound: Option<&Bound>,
+    ctx: &RunContext,
+) -> Result<HalfCut, CutError> {
+    let no_regions_filter = regions.is_none_or(<[FaceId]>::is_empty);
+    if no_regions_filter && bound.is_none() {
+        return cut_half_impl(mesh, plane, keep, cap, None, ctx);
+    }
+    // Pass 1, cap forced on regardless of `cap` (section regions are
+    // only ever computed while capping), purely to learn each region's
+    // membership.
+    let learn = cut_half_impl(mesh, plane, keep, true, None, ctx)?;
+    let mut excluded: HashSet<FaceId> = HashSet::new();
+    for (region, crossing_faces) in learn.section_regions.iter().zip(&learn.region_crossing_faces) {
+        let bound_check = bound.map(|b| classify_region(region, b));
+        if let Some(BoundCheck::Crosses) = bound_check {
+            return Err(CutError::RegionCrossesBound {
+                seed_face: region.seed_face,
+            });
+        }
+        let outside_bound = bound_check == Some(BoundCheck::AllOutside);
+        let not_ticked =
+            !no_regions_filter && !regions.is_some_and(|seeds| seeds.contains(&region.seed_face));
+        if outside_bound || not_ticked {
+            excluded.extend(crossing_faces.iter().copied());
+        }
+    }
+    if excluded.is_empty() {
+        return cut_half_impl(mesh, plane, keep, cap, None, ctx);
+    }
+    cut_half_impl(mesh, plane, keep, cap, Some(&excluded), ctx)
+}
+
+fn cut_half_impl(
+    mesh: &Mesh,
+    plane: &Plane,
+    keep: Side,
+    cap: bool,
+    exclude: Option<&HashSet<FaceId>>,
+    ctx: &RunContext,
+) -> Result<HalfCut, CutError> {
     let frame = PlaneFrame::new(plane).ok_or(CutError::InvalidPlane)?;
     let [a, b, c] = exact_points(plane).map(c3);
     let keep_sign: i8 = match keep {
@@ -394,6 +561,41 @@ pub fn cut_half_with(
     let live = |v: usize| mesh.is_vertex_live(VertexId(v as u32));
     ctx.checkpoint()?;
 
+    // 1b. Phase 1b (region picking/bound): an excluded region's whole
+    // connected island — every face reachable from its crossing faces
+    // by a shared vertex, not just the crossing faces themselves — is
+    // kept entirely unmodified, on whichever side has the majority of
+    // its vertices (a deterministic, side-agnostic computation: both
+    // the `Side::Above` and `Side::Below` calls for the same `exclude`
+    // set compute the same island and the same majority side, so the
+    // island appears whole on exactly one of the two resulting parts,
+    // never duplicated into both and never split between them).
+    let excluded_island: HashSet<FaceId> = match exclude {
+        Some(seeds) if !seeds.is_empty() => expand_island(mesh, seeds),
+        _ => HashSet::new(),
+    };
+    let island_favours_keep = if excluded_island.is_empty() {
+        false
+    } else {
+        let mut majority = 0_i64;
+        for &f in &excluded_island {
+            if let Some(tri) = mesh.face(f) {
+                for v in tri {
+                    majority += i64::from(side[v as usize]);
+                }
+            }
+        }
+        // Fixed, side-independent tie-break (never consults
+        // `keep_sign`) so the `Side::Above` and `Side::Below` calls for
+        // the same `exclude` set always agree on which single side gets
+        // the island whole: positive majority (more vertices on
+        // [`Side::Above`]'s side) keeps it on Above; negative on
+        // Below; an exact tie (a symmetric island) always resolves to
+        // Above, by convention.
+        let island_side_sign: i8 = if majority < 0 { -1 } else { 1 };
+        island_side_sign == keep_sign
+    };
+
     // 2. Classify faces, per chunk, in parallel; concatenated in face order.
     let face_chunks = mesh.face_chunk_count();
     let span = ctx.span(CUTTING, 0.0, 0.8, face_chunks);
@@ -403,6 +605,22 @@ pub fn cut_half_with(
             span.step(k)?;
             let mut out = ChunkScan::default();
             for (f, tri) in mesh.faces_in_chunk(k) {
+                if excluded_island.contains(&f) {
+                    // Phase 1b: this face's region is being left whole
+                    // — never split, never a source of boundary/plane
+                    // edges, regardless of which side(s) its own
+                    // corners happen to be on. It goes wholly to the
+                    // side `island_favours_keep` already chose (the
+                    // same choice both the Above and Below calls make
+                    // independently, so the island lands on exactly
+                    // one of the two final parts).
+                    if island_favours_keep {
+                        out.kept_faces += 1;
+                    } else {
+                        out.removed.push(f);
+                    }
+                    continue;
+                }
                 let s = tri.map(|v| side[v as usize]);
                 if s == [0, 0, 0] {
                     // Lying wholly in the plane: owned by SOS_SIDE,
@@ -484,9 +702,21 @@ pub fn cut_half_with(
         used_on_plane.extend(scan.used_on_plane.iter().copied());
     }
     ctx.checkpoint()?;
+    // A kept-whole island face's own vertices must survive even on
+    // the discarded side's sign (Phase 1b): the face still references
+    // them, whichever side of the plane they happen to sit on.
+    let island_vertices: HashSet<u32> = if excluded_island.is_empty() || !island_favours_keep {
+        HashSet::new()
+    } else {
+        excluded_island
+            .iter()
+            .filter_map(|&f| mesh.face(f))
+            .flatten()
+            .collect()
+    };
     let discarded: Vec<u32> = (0..slots)
         .into_par_iter()
-        .filter(|&v| side[v] == -keep_sign && live(v))
+        .filter(|&v| side[v] == -keep_sign && live(v) && !island_vertices.contains(&(v as u32)))
         .map(|v| v as u32)
         .collect();
     for &v in &discarded {
@@ -560,7 +790,7 @@ pub fn cut_half_with(
         .into_par_iter()
         .filter(|&v| side[v] == 0 && live(v))
         .map(|v| v as u32)
-        .filter(|v| !used_on_plane.contains(v))
+        .filter(|v| !used_on_plane.contains(v) && !island_vertices.contains(v))
         .collect();
     for &v in &on_plane_unused {
         edit.remove_vertex(VertexId(v))?;
@@ -651,6 +881,7 @@ pub fn cut_half_with(
     let loops = boundary_loops(&plane_edges, &pos)?;
     let mut cap_faces = Vec::new();
     let mut section_regions = Vec::new();
+    let mut region_crossing_faces: Vec<HashSet<FaceId>> = Vec::new();
     if cap && !loops.is_empty() {
         // Counter-clockwise outer loops seen from above: the part below's
         // boundary runs the other way round its cap.
@@ -690,7 +921,18 @@ pub fn cut_half_with(
                 },
             )?);
         }
-        section_regions = regions(&loops2d, frame);
+        section_regions = regions(&loops2d, &oriented, frame);
+        // Each region's own crossing faces, same order as
+        // `section_regions`: the outer loops (positive signed area, the
+        // same filter `regions()` applies) and `section_regions` share
+        // that relative order.
+        let outer_loop_indices: Vec<usize> = (0..loops2d.len())
+            .filter(|&i| signed_area(&loops2d[i]) > 0.0)
+            .collect();
+        region_crossing_faces = outer_loop_indices
+            .iter()
+            .map(|&i| oriented[i].iter().map(|&(_, f)| f).collect())
+            .collect();
     }
     span.finish();
     let (mesh, provenance) = edit.finish()?;
@@ -699,6 +941,7 @@ pub fn cut_half_with(
         provenance,
         cap_faces,
         section_regions,
+        region_crossing_faces,
     })
 }
 
@@ -747,6 +990,37 @@ fn degenerate(p: [[f64; 3]; 3]) -> bool {
 /// traced into loops of `(vertex, source face)`. A doubled edge, a vertex
 /// with two ways out (two loops pinched together) or a dead end makes the
 /// section ambiguous.
+/// Every face reachable from `seeds` by a shared vertex (Phase 1b: an
+/// excluded region's whole connected island — not just its crossing
+/// faces — so the region's entire appendage, both the part above the
+/// plane and the part below it, is kept together rather than split by
+/// vertex side). A flood fill over a vertex→faces adjacency built once
+/// for `mesh`.
+fn expand_island(mesh: &Mesh, seeds: &HashSet<FaceId>) -> HashSet<FaceId> {
+    let mut by_vertex: HashMap<u32, Vec<FaceId>> = HashMap::new();
+    for (f, tri) in mesh.faces() {
+        for v in tri {
+            by_vertex.entry(v).or_default().push(f);
+        }
+    }
+    let mut island: HashSet<FaceId> = HashSet::new();
+    let mut queue: Vec<FaceId> = seeds.iter().copied().collect();
+    while let Some(f) = queue.pop() {
+        if !island.insert(f) {
+            continue;
+        }
+        let Some(tri) = mesh.face(f) else { continue };
+        for v in tri {
+            for &neighbour in by_vertex.get(&v).into_iter().flatten() {
+                if !island.contains(&neighbour) {
+                    queue.push(neighbour);
+                }
+            }
+        }
+    }
+    island
+}
+
 fn boundary_loops(
     edges: &[(u32, u32, FaceId)],
     pos: &dyn Fn(u32) -> [f64; 3],
@@ -833,7 +1107,14 @@ fn contains(l: &[[f64; 2]], p: [f64; 2]) -> bool {
 
 /// The section's regions: each counter-clockwise loop with the clockwise
 /// loops directly inside it (the smallest outer loop containing them).
-fn regions(loops: &[Vec<[f64; 2]>], frame: PlaneFrame) -> Vec<SectionRegion> {
+/// `oriented`, indexed exactly as `loops`, carries each loop vertex's
+/// source face so each region's [`SectionRegion::seed_face`] (the lowest
+/// id among them) is a stable identity (Phase 1b).
+fn regions(
+    loops: &[Vec<[f64; 2]>],
+    oriented: &[Vec<(u32, FaceId)>],
+    frame: PlaneFrame,
+) -> Vec<SectionRegion> {
     let areas: Vec<f64> = loops.iter().map(|l| signed_area(l)).collect();
     let outers: Vec<usize> = (0..loops.len()).filter(|&i| areas[i] > 0.0).collect();
     let mut out: Vec<SectionRegion> = outers
@@ -842,6 +1123,11 @@ fn regions(loops: &[Vec<[f64; 2]>], frame: PlaneFrame) -> Vec<SectionRegion> {
             outer: loops[i].clone(),
             holes: Vec::new(),
             frame,
+            seed_face: oriented[i]
+                .iter()
+                .map(|&(_, f)| f)
+                .min()
+                .unwrap_or(FaceId(0)), // allow-swallow: an outer loop always has at least one vertex, so this never actually falls back
         })
         .collect();
     for (h, l) in loops.iter().enumerate() {
