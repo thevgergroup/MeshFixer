@@ -2767,9 +2767,11 @@ dependencies = [
 name = "mf-desktop"
 version = "0.0.1"
 dependencies = [
+ "blake3",
  "eframe",
  "egui_kittest",
  "glam",
+ "image",
  "mf-boolean",
  "mf-command",
  "mf-fixtures",
