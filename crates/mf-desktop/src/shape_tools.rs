@@ -328,12 +328,32 @@ fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
     r
 }
 
-/// The active object's world bounding box.
+/// The active object's world bounding box, at the transform it's shown
+/// at (a live drag or hover preview, else the document's own).
 pub(crate) fn world_bounds(app: &MeshFixerApp, id: ObjectId) -> Option<(DVec3, DVec3)> {
+    let o = app.session.document().object(id)?;
+    let t = app.shown_transform(id).unwrap_or(o.transform);
+    world_bounds_at(app, id, t)
+}
+
+/// `id`'s world bounding box at the document's own transform, ignoring
+/// any live drag or hover preview: what [`preview_for`](crate::align_tool::preview_for)
+/// must measure from, so a preview that's already drawn (because the
+/// pointer never left a dot after it committed, D-ALIGN-2) is computed
+/// fresh from the committed document each time, not from its own
+/// previous frame's answer — [`world_bounds`]' `shown_transform` lookup
+/// would otherwise feed a preview's own output back into the next
+/// preview, a loop that never converges and keeps the view "changed"
+/// forever (never settling: MF-ALIGN-003).
+pub(crate) fn world_bounds_committed(app: &MeshFixerApp, id: ObjectId) -> Option<(DVec3, DVec3)> {
+    let o = app.session.document().object(id)?;
+    world_bounds_at(app, id, o.transform)
+}
+
+fn world_bounds_at(app: &MeshFixerApp, id: ObjectId, t: [f64; 12]) -> Option<(DVec3, DVec3)> {
     let o = app.session.document().object(id)?;
     let mesh = o.mesh()?;
     let bb = mesh.bounding_box()?;
-    let t = app.shown_transform(id).unwrap_or(o.transform);
     let (lo, hi) = (DVec3::from(bb.min), DVec3::from(bb.max));
     let mut min = DVec3::splat(f64::MAX);
     let mut max = DVec3::splat(f64::MIN);

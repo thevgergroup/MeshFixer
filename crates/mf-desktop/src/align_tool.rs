@@ -208,11 +208,13 @@ fn hit_dot(
 // ---------------------------------------------------------------------
 
 /// Every selected object's world bounding box, in `selected_objects`'s
-/// order; `None` for an object with no geometry yet.
+/// order, measured from the *document's own* transform (never a live
+/// drag or hover preview — see [`crate::shape_tools::world_bounds_committed`]):
+/// `None` for an object with no geometry yet.
 fn target_boxes(app: &MeshFixerApp) -> Vec<(ObjectId, Option<(DVec3, DVec3)>)> {
     app.selected_objects()
         .into_iter()
-        .map(|id| (id, crate::shape_tools::world_bounds(app, id)))
+        .map(|id| (id, crate::shape_tools::world_bounds_committed(app, id)))
         .collect()
 }
 
@@ -220,13 +222,21 @@ fn target_boxes(app: &MeshFixerApp) -> Vec<(ObjectId, Option<(DVec3, DVec3)>)> {
 /// for `axis`/`mode`, anchored as [`dot_box`] decides (the same rule the
 /// `object.align` operation uses): `(object id, new transform)`, one per
 /// object with geometry.
+///
+/// Measures every box from the document's own committed transform, not
+/// [`crate::MeshFixerApp::shown_transform`] (which would prefer this very
+/// preview's own last answer once Apply has committed but the pointer
+/// never left the dot — a feedback loop that never converges, since
+/// each frame's preview would be computed on top of the previous
+/// frame's preview instead of the real document, D-ALIGN-2 fix round
+/// 2026-11-13).
 pub fn preview_for(app: &MeshFixerApp, axis: usize, mode: Mode) -> Vec<(ObjectId, [f64; 12])> {
     let targets = target_boxes(app);
     let anchor_box = app
         .align
         .anchor
         .filter(|&a| app.selected_objects().contains(&a))
-        .and_then(|a| crate::shape_tools::world_bounds(app, a));
+        .and_then(|a| crate::shape_tools::world_bounds_committed(app, a));
     match mode {
         Mode::Min | Mode::Centre | Mode::Max => {
             let value_of = |lo: f64, hi: f64| match mode {
