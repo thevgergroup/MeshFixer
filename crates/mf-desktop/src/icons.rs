@@ -46,6 +46,7 @@ pub fn font(size: f32) -> egui::FontId {
 // so the rail reads as one family when they arrive.
 pub const SELECT: &str = "\u{E1DC}"; // cursor
 pub const TRANSFORM: &str = "\u{E0A4}"; // arrows-out-cardinal
+pub const ALIGN: &str = "\u{E50A}"; // align-center-horizontal
 pub const REPAIR: &str = "\u{E0B2}"; // bandaids
 pub const INSPECT: &str = "\u{EBE0}"; // list-magnifying-glass
 pub const SPLIT: &str = "\u{EAE0}"; // scissors

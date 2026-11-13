@@ -442,6 +442,7 @@ impl Shell {
 pub fn builtin() -> Shell {
     let mut shell = Shell::default();
     crate::tool_panels::register(&mut shell).expect("the built-in tools register");
+    crate::align_tool::register(&mut shell).expect("the Align tool registers");
     crate::shape_tools::register(&mut shell).expect("the Shape tools register");
     crate::connect_tool::register(&mut shell).expect("the Connect tool registers");
     crate::sculpt_tool::register(&mut shell).expect("the Sculpt tool registers");
@@ -621,6 +622,7 @@ mod tests {
             [
                 "select",
                 "transform",
+                "align",
                 "split",
                 "connect",
                 "combine",

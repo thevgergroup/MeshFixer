@@ -25,8 +25,11 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     }
 }
 
+/// A world bounding box, min then max.
+type Bounds = ([f64; 3], [f64; 3]);
+
 /// `target`'s world bounding box (min, max), or `None` for an empty mesh.
-fn world_bounds(input: &OperandInput, ctx: &RunContext) -> Result<Option<([f64; 3], [f64; 3])>, OpError> {
+fn world_bounds(input: &OperandInput, ctx: &RunContext) -> Result<Option<Bounds>, OpError> {
     let Some(bb) = input.mesh.bounding_box_with(ctx)? else {
         return Ok(None);
     };
@@ -445,7 +448,7 @@ mod tests {
             let ObjectChange::Transform { operand, transform } = c else {
                 panic!("{c:?}")
             };
-            assert_eq!(*operand < 2, true);
+            assert!(*operand < 2);
             assert!(
                 (transform[9] - 5.0).abs() < 1e-9,
                 "operand {operand} should centre on the anchor's x=5: {transform:?}"

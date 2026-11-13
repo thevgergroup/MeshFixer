@@ -122,6 +122,29 @@ macro_rules! tp {
 /// The English catalogue, sorted by id (a unit test checks the order, so
 /// lookups can binary-search).
 static CATALOGUE: &[(&str, &str)] = &[
+    (
+        "align.anchor_hint",
+        "Click one of the selected objects to anchor it: it won't move, the others align to it",
+    ),
+    ("align.anchor_set", "Anchored to {name}: it won't move"),
+    ("align.centre", "Centre"),
+    (
+        "align.distribute_hint",
+        "Spaces the objects between the two outermost ones evenly along the axis",
+    ),
+    ("align.distribute_needs_three", "Select 3 or more objects to distribute"),
+    ("align.dots_hint", "Click a dot to align every selected object to it"),
+    ("align.equal_centres", "Equal centres"),
+    ("align.equal_gaps", "Equal gaps"),
+    ("align.max", "Max"),
+    ("align.min", "Min"),
+    ("align.section.align", "Align"),
+    ("align.section.distribute", "Distribute"),
+    ("align.select_more", "Select 2 or more objects to align"),
+    (
+        "align.what",
+        "Dots mark each axis's min, centre and max; click one to align every selected object to it",
+    ),
     ("alignment.depth.above", "Above"),
     ("alignment.depth.below", "Below"),
     ("alignment.dowel_size", "Dowel {diameter} × {length} {unit}"),
@@ -862,6 +885,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "status.stats.tip",
         "The active object: triangles, and size along X, Y and Z",
     ),
+    (
+        "tool.align.help",
+        "Line up or evenly space the selected objects along an axis",
+    ),
+    ("tool.align.name", "Align"),
     (
         "tool.combine.help",
         "Join the selected solids and cut the holes",

@@ -1,6 +1,7 @@
 //! MeshFixer desktop app: a thin client of the command/session core.
 //! Geometry work never runs on the UI thread (MF-RT-001).
 
+pub mod align_tool;
 pub mod analysis;
 pub mod app;
 pub mod connect_tool;

@@ -626,6 +626,10 @@ pub struct MeshFixerApp {
     /// (`grouped_breadcrumb`'s row, keyed on its first revision): `None`
     /// keeps every eligible run collapsed.
     pub expanded_run: Option<RevisionId>,
+    /// The Align tool's state (Phase 1 modelling tools, Tinkercad-style
+    /// Align): the anchor, the hovered dot, and the Distribute choices
+    /// per axis.
+    pub align: crate::align_tool::AlignState,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -937,6 +941,7 @@ impl MeshFixerApp {
             browser_search: String::new(),
             checkpoint_naming: None,
             expanded_run: None,
+            align: Default::default(),
         };
         if let Some(path) = initial {
             app.open(path);
@@ -1683,6 +1688,9 @@ impl MeshFixerApp {
     /// makes its object active (MF-ISSUE-042); shift adds to a same-kind,
     /// same-object selection.
     pub fn click(&mut self, click: Click) {
+        if crate::align_tool::anchor_click(self, click.px) {
+            return;
+        }
         let (Some(active), Some(cam)) = (self.active, self.camera) else {
             return;
         };
@@ -5048,6 +5056,9 @@ impl MeshFixerApp {
         {
             return Some(d.current);
         }
+        if let Some(&(_, t)) = self.align.preview.iter().find(|(o, _)| *o == id) {
+            return Some(t);
+        }
         self.preview
             .filter(|(o, _)| *o == id)
             .map(|(_, t)| t)
@@ -5914,6 +5925,7 @@ impl MeshFixerApp {
         crate::tool_panels::first_use_hint(self, &ctx);
         crate::panels::overlays_popover(self, &ctx);
         crate::shape_tools::view_overlay(self, &ctx);
+        crate::align_tool::view_overlay(self, &ctx);
         crate::sculpt_tool::cursor_overlay(self, &ctx);
         if let Some(c) = out.click
             && self.busy.is_none()
