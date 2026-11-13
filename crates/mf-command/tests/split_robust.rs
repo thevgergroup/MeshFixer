@@ -102,6 +102,38 @@ fn assert_closed_manifold(mesh: &Mesh, what: &str) {
     assert_eq!(topo.inconsistent_edges, 0, "{what}: misoriented edges");
 }
 
+/// Manifold and consistently oriented, and every open edge's ends on the
+/// world plane `(point, normal)` (to rounding): an uncapped cut is open
+/// only where it was cut.
+fn assert_open_only_along(
+    mesh: &Mesh,
+    transform: &[f64; 12],
+    point: [f64; 3],
+    normal: [f64; 3],
+    what: &str,
+) {
+    let topo = mesh.topology_with(&RunContext::none()).unwrap();
+    assert!(
+        topo.non_manifold_edges.is_empty(),
+        "{what}: {} non-manifold edges",
+        topo.non_manifold_edges.len()
+    );
+    assert_eq!(topo.inconsistent_edges, 0, "{what}: misoriented edges");
+    let len = normal.iter().map(|c| c * c).sum::<f64>().sqrt();
+    let n = normal.map(|c| c / len);
+    let diagonal = mesh.bounding_box().map_or(1.0, |b| b.diagonal().max(1.0));
+    for l in &topo.boundary_loops {
+        for &v in &l.vertices {
+            let p = apply(transform, mesh.corner_position(v));
+            let d: f64 = (0..3).map(|i| (p[i] - point[i]) * n[i]).sum();
+            assert!(
+                d.abs() <= 1e-9 * diagonal,
+                "{what}: an open edge {d} off the plane"
+            );
+        }
+    }
+}
+
 fn mesh_of(s: &Session, name: &str) -> Mesh {
     s.document()
         .objects()
@@ -387,7 +419,9 @@ fn env_u64(name: &str, default: u64) -> u64 {
 /// at planes through vertex rings, single vertices and faces, keeping
 /// both, above or below, capped: never refused (only a plane that
 /// genuinely leaves nothing on a side, `plane_misses_object`), and every part is
-/// closed and manifold ([`assert_closed_manifold`]).
+/// closed and manifold ([`assert_closed_manifold`]). Uncapped (both
+/// kept, cap off): never refused either, every part manifold and
+/// consistently oriented, and open only along the plane.
 #[test]
 fn random_unions_cut_through_vertices_and_faces_are_never_refused() {
     let cases = env_u64("MF_SPLIT_PROPERTY_CASES", 24);
@@ -425,9 +459,14 @@ fn random_unions_cut_through_vertices_and_faces_are_never_refused() {
         assert_solid(&mesh, &format!("seed {seed:#x}: the combined input"));
         let mesh_before = mesh.clone();
         for (point, normal) in planes(&mut r, &prims, &mesh, &transform) {
-            for keep in ["both", "above", "below"] {
+            for (keep, cap) in [
+                ("both", true),
+                ("above", true),
+                ("below", true),
+                ("both", false),
+            ] {
                 let what = format!(
-                    "seed {seed:#x}: plane ({}) normal ({}) keep {keep}",
+                    "seed {seed:#x}: plane ({}) normal ({}) keep {keep} cap {cap}",
                     v3(point),
                     v3(normal)
                 );
@@ -438,6 +477,7 @@ fn random_unions_cut_through_vertices_and_faces_are_never_refused() {
                         ("plane_point", v3(point)),
                         ("plane_normal", v3(normal)),
                         ("keep", keep.into()),
+                        ("cap", cap.to_string()),
                     ],
                 ));
                 match res {
@@ -463,6 +503,10 @@ fn random_unions_cut_through_vertices_and_faces_are_never_refused() {
                 for o in s.document().objects() {
                     let mesh = o.mesh().unwrap();
                     let topo = mesh.topology_with(&RunContext::none()).unwrap();
+                    if !cap {
+                        assert_open_only_along(mesh, &o.transform, point, normal, &what);
+                        continue;
+                    }
                     if topo.boundary_edges > 0
                         || !topo.non_manifold_edges.is_empty()
                         || topo.inconsistent_edges > 0
