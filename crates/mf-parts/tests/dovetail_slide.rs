@@ -10,8 +10,8 @@
 
 use std::collections::BTreeMap;
 
+use mf_parts::Generator;
 use mf_parts::connectors::dovetail_slide::{DovetailSlide, exits_piece, extended_length};
-use mf_parts::{Connector, ConnectorParts};
 use mf_runtime::RunContext;
 
 fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
@@ -23,17 +23,19 @@ fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
     spec.validate(&raw).unwrap()
 }
 
-fn generate(extra: &[(&str, &str)]) -> ConnectorParts {
+fn generate(extra: &[(&str, &str)]) -> Vec<mf_parts::ShapePart> {
     DovetailSlide
-        .generate(&params(extra), &RunContext::none())
+        .generate(
+            &params(extra),
+            &mf_parts::GenContext::new(&RunContext::none()),
+        )
         .unwrap()
 }
 
-fn part<'a>(parts: &'a ConnectorParts, role: &str) -> &'a mf_geometry::Mesh {
+fn part<'a>(parts: &'a [mf_parts::ShapePart], role: &str) -> &'a mf_geometry::Mesh {
     &parts
-        .parts
         .iter()
-        .find(|p| p.role == role)
+        .find(|p| p.name == role)
         .unwrap_or_else(|| panic!("no part with role {role}"))
         .mesh
 }
@@ -55,13 +57,13 @@ fn x_bounds(mesh: &mf_geometry::Mesh) -> (f64, f64) {
 #[test]
 fn the_tail_joins_side_a_and_the_groove_cuts_side_b() {
     let parts = generate(&[]);
-    assert_eq!(parts.parts.len(), 2);
-    let tail = parts.parts.iter().find(|p| p.role == "tail").unwrap();
-    let groove = parts.parts.iter().find(|p| p.role == "groove").unwrap();
-    assert_eq!(tail.side, mf_parts::Side::A);
-    assert_eq!(tail.join, mf_parts::JoinKind::Union);
-    assert_eq!(groove.side, mf_parts::Side::B);
-    assert_eq!(groove.join, mf_parts::JoinKind::Subtract);
+    assert_eq!(parts.len(), 2);
+    let tail = parts.iter().find(|p| p.name == "tail").unwrap();
+    let groove = parts.iter().find(|p| p.name == "groove").unwrap();
+    assert_eq!(tail.attach_to, mf_parts::Side::A);
+    assert_eq!(tail.join(), mf_parts::JoinKind::Union);
+    assert_eq!(groove.attach_to, mf_parts::Side::B);
+    assert_eq!(groove.join(), mf_parts::JoinKind::Subtract);
 }
 
 /// The widest span of `mesh` along y, over every vertex (a convex
@@ -172,7 +174,8 @@ fn the_clearance_as_wide_as_the_tail_is_refused() {
         ("machine_tolerance".to_owned(), "0".to_owned()),
     ]);
     let params = spec.validate(&raw).unwrap();
-    let err = match DovetailSlide.generate(&params, &RunContext::none()) {
+    let err = match DovetailSlide.generate(&params, &mf_parts::GenContext::new(&RunContext::none()))
+    {
         Ok(_) => panic!("expected clearance_too_wide"),
         Err(e) => e,
     };

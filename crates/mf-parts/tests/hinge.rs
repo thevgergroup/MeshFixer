@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 use glam::DMat4;
 use mf_geometry::{Bvh, FaceId, minimum_distance};
 use mf_parts::connectors::hinge::PinHinge;
-use mf_parts::{Connector, FitClass, MachineProfile, Side};
+use mf_parts::{FitClass, Generator, MachineProfile, Side};
 use mf_runtime::RunContext;
 
 fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
@@ -34,17 +34,19 @@ fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
     spec.validate(&raw).unwrap()
 }
 
-fn generate(extra: &[(&str, &str)]) -> mf_parts::ConnectorParts {
+fn generate(extra: &[(&str, &str)]) -> Vec<mf_parts::ShapePart> {
     PinHinge
-        .generate(&params(extra), &RunContext::none())
+        .generate(
+            &params(extra),
+            &mf_parts::GenContext::new(&RunContext::none()),
+        )
         .unwrap()
 }
 
-fn leaf<'a>(parts: &'a mf_parts::ConnectorParts, role: &str) -> &'a mf_geometry::Mesh {
+fn leaf<'a>(parts: &'a [mf_parts::ShapePart], role: &str) -> &'a mf_geometry::Mesh {
     &parts
-        .parts
         .iter()
-        .find(|p| p.role == role)
+        .find(|p| p.name == role)
         .unwrap_or_else(|| panic!("no part with role {role}"))
         .mesh
 }
@@ -61,25 +63,15 @@ fn assert_closed_solid(mesh: &mf_geometry::Mesh, label: &str) {
 #[test]
 fn hinge_parts_closed_and_manifold() {
     let parts = generate(&[]);
-    assert_eq!(parts.parts.len(), 2);
+    assert_eq!(parts.len(), 2);
     assert_closed_solid(leaf(&parts, "leaf_a"), "leaf_a");
     assert_closed_solid(leaf(&parts, "leaf_b"), "leaf_b");
     assert_eq!(
-        parts
-            .parts
-            .iter()
-            .find(|p| p.role == "leaf_a")
-            .unwrap()
-            .side,
+        parts.iter().find(|p| p.name == "leaf_a").unwrap().attach_to,
         Side::A
     );
     assert_eq!(
-        parts
-            .parts
-            .iter()
-            .find(|p| p.role == "leaf_b")
-            .unwrap()
-            .side,
+        parts.iter().find(|p| p.name == "leaf_b").unwrap().attach_to,
         Side::B
     );
 }

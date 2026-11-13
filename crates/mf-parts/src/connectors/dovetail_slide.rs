@@ -30,10 +30,11 @@
 use std::sync::OnceLock;
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
+use crate::shape::ShapeRole;
 
 const SPEC_YAML: &str = include_str!("../../../../specs/connectors/dovetail.slide.yaml");
 
@@ -160,16 +161,11 @@ fn prism_x(section: &[[f64; 2]], x0: f64, x1: f64) -> Mesh {
     Mesh::new(turned, t).expect("a turned prism is a valid mesh")
 }
 
-fn part(role: &'static str, mesh: Mesh, side: Side, join: JoinKind) -> ConnectorPart {
-    ConnectorPart {
-        role,
-        mesh,
-        side,
-        join,
-    }
+fn part(name: &'static str, mesh: Mesh, side: Side, role: ShapeRole) -> ShapePart {
+    ShapePart::new(name, role, side, mesh)
 }
 
-fn generate(params: &Params) -> Result<ConnectorParts, ConnectorError> {
+fn generate(params: &Params) -> Result<Vec<ShapePart>, ConnectorError> {
     let s = sizes(params)?;
     let half = s.length / 2.0;
     let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
@@ -182,22 +178,20 @@ fn generate(params: &Params) -> Result<ConnectorParts, ConnectorError> {
     let groove = section(s.width, s.angle_deg, -s.width / 4.0, s.depth, b);
     let root = (b - a + s.depth).min(0.25 * (s.width - s.clearance) / t.max(1e-6));
     let tail = section(s.width - s.clearance, s.angle_deg, -root, s.depth, b);
-    Ok(ConnectorParts {
-        parts: vec![
-            part(
-                "tail",
-                prism_x(&tail, -half, half),
-                Side::A,
-                JoinKind::Union,
-            ),
-            part(
-                "groove",
-                prism_x(&groove, -half, half),
-                Side::B,
-                JoinKind::Subtract,
-            ),
-        ],
-    })
+    Ok(vec![
+        part(
+            "tail",
+            prism_x(&tail, -half, half),
+            Side::A,
+            ShapeRole::Solid,
+        ),
+        part(
+            "groove",
+            prism_x(&groove, -half, half),
+            Side::B,
+            ShapeRole::Hole,
+        ),
+    ])
 }
 
 /// The length (along the slide axis) the tail needs to clear the target
@@ -234,7 +228,15 @@ pub fn exits_piece(length: f64, target_lo: f64, target_hi: f64) -> bool {
 
 pub struct DovetailSlide;
 
-impl Connector for DovetailSlide {
+impl Generator for DovetailSlide {
+    fn name(&self) -> &'static str {
+        "Dovetail"
+    }
+
+    fn placement_hint(&self) -> PlacementHint {
+        PlacementHint::Surface
+    }
+
     fn id(&self) -> &'static str {
         "dovetail.slide"
     }
@@ -250,8 +252,8 @@ impl Connector for DovetailSlide {
     fn generate(
         &self,
         params: &Params,
-        _ctx: &RunContext,
-    ) -> Result<ConnectorParts, ConnectorError> {
+        _ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         generate(params)
     }
 }

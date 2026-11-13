@@ -32,7 +32,9 @@ use mf_geometry::Mesh;
 use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
+use crate::shape::ShapeRole;
 
 const SPEC_YAML: &str = include_str!("../../../../specs/connectors/hinge.leaf.yaml");
 
@@ -286,7 +288,19 @@ fn separate_pin(s: &Sizes) -> Mesh {
 
 pub struct LeafHinge;
 
-impl Connector for LeafHinge {
+impl Generator for LeafHinge {
+    fn name(&self) -> &'static str {
+        "Pin hinge"
+    }
+
+    fn placement_hint(&self) -> PlacementHint {
+        PlacementHint::Surface
+    }
+
+    fn moving_gap(&self, params: &Params) -> f64 {
+        params.get_float("gap").unwrap_or(0.0)
+    }
+
     fn id(&self) -> &'static str {
         "hinge.leaf"
     }
@@ -302,8 +316,9 @@ impl Connector for LeafHinge {
     fn generate(
         &self,
         params: &Params,
-        ctx: &RunContext,
-    ) -> Result<ConnectorParts, ConnectorError> {
+        ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
+        let ctx = ctx.run;
         let s = sizes(params)?;
         let separate = params
             .get_choice("pin_mode")
@@ -316,27 +331,10 @@ impl Connector for LeafHinge {
         } else {
             captive_pin(&s)
         };
-        Ok(ConnectorParts {
-            parts: vec![
-                ConnectorPart {
-                    role: "leaf_a",
-                    mesh: leaf_a,
-                    side: Side::A,
-                    join: JoinKind::Union,
-                },
-                ConnectorPart {
-                    role: "leaf_b",
-                    mesh: leaf_b,
-                    side: Side::B,
-                    join: JoinKind::Union,
-                },
-                ConnectorPart {
-                    role: "pin",
-                    mesh: pin,
-                    side: Side::Neither,
-                    join: JoinKind::Separate,
-                },
-            ],
-        })
+        Ok(vec![
+            ShapePart::new("leaf_a", ShapeRole::Solid, Side::A, leaf_a),
+            ShapePart::new("leaf_b", ShapeRole::Solid, Side::B, leaf_b),
+            ShapePart::new("pin", ShapeRole::Solid, Side::Neither, pin),
+        ])
     }
 }

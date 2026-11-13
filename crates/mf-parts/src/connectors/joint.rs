@@ -736,7 +736,7 @@ fn upgrade_dovetail(raw: &mut std::collections::BTreeMap<String, String>) {
     }
     let half = raw
         .get("groove_length")
-        .and_then(|v| v.parse::<f64>().ok())
+        .and_then(|v| v.parse::<f64>().ok()) // allow-swallow: an unreadable legacy length reads as the old default, as it always did
         .unwrap_or(200.0)
         / 2.0;
     raw.insert("groove_a".into(), half.to_string());

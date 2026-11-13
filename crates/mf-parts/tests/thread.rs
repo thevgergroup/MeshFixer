@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use glam::DMat4;
 use mf_geometry::{Bvh, FaceId, intersections_between, minimum_distance};
 use mf_parts::connectors::thread::Thread;
-use mf_parts::{Connector, JoinKind, Side};
+use mf_parts::{Generator, JoinKind, Side};
 use mf_runtime::RunContext;
 
 fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
@@ -22,9 +22,12 @@ fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
     spec.validate(&raw).unwrap()
 }
 
-fn generate(extra: &[(&str, &str)]) -> mf_parts::ConnectorParts {
+fn generate(extra: &[(&str, &str)]) -> Vec<mf_parts::ShapePart> {
     Thread
-        .generate(&params(extra), &RunContext::none())
+        .generate(
+            &params(extra),
+            &mf_parts::GenContext::new(&RunContext::none()),
+        )
         .unwrap()
 }
 
@@ -46,8 +49,8 @@ fn every_metric_coarse_preset_generates_a_closed_bolt() {
         "M1", "M1.2", "M1.6", "M2", "M2.5", "M3", "M4", "M5", "M6", "M8", "M10", "M12",
     ] {
         let parts = generate(&[("size", size), ("length", "12"), ("shape", "bolt_hex")]);
-        assert_eq!(parts.parts.len(), 1);
-        assert_closed_solid(&parts.parts[0].mesh, size);
+        assert_eq!(parts.len(), 1);
+        assert_closed_solid(&parts[0].mesh, size);
     }
 }
 
@@ -55,10 +58,10 @@ fn every_metric_coarse_preset_generates_a_closed_bolt() {
 fn bolt_shapes_are_separate_loose_parts() {
     for shape in ["bolt_hex", "bolt_socket"] {
         let parts = generate(&[("shape", shape)]);
-        let p = &parts.parts[0];
-        assert_eq!(p.role, "bolt");
-        assert_eq!(p.side, Side::Neither);
-        assert_eq!(p.join, JoinKind::Separate);
+        let p = &parts[0];
+        assert_eq!(p.name, "bolt");
+        assert_eq!(p.attach_to, Side::Neither);
+        assert_eq!(p.join(), JoinKind::Separate);
     }
 }
 
@@ -70,7 +73,7 @@ fn nut_is_closed_and_bored_to_clear_the_major_diameter() {
         ("fit_clearance", "0.1"),
         ("machine_tolerance", "0.05"),
     ]);
-    let nut = &parts.parts[0].mesh;
+    let nut = &parts[0].mesh;
     assert_closed_solid(nut, "nut");
     // M3 major diameter 3.0, bore = 3.0 + 0.1 + 0.05 = 3.15.
     let bb = nut.bounding_box().unwrap();
@@ -97,17 +100,17 @@ fn threaded_and_clearance_holes_are_subtract_tools_with_different_diameters() {
         ("fit_clearance", "0.2"),
     ]);
     for parts in [&threaded, &clearance] {
-        let p = &parts.parts[0];
-        assert_eq!(p.side, Side::A);
-        assert_eq!(p.join, JoinKind::Subtract);
+        let p = &parts[0];
+        assert_eq!(p.attach_to, Side::A);
+        assert_eq!(p.join(), JoinKind::Subtract);
     }
     let r = |m: &mf_geometry::Mesh| {
         m.vertices()
             .map(|(_, p)| (p[0] * p[0] + p[1] * p[1]).sqrt())
             .fold(0.0, f64::max)
     };
-    let r_threaded = r(&threaded.parts[0].mesh);
-    let r_clearance = r(&clearance.parts[0].mesh);
+    let r_threaded = r(&threaded[0].mesh);
+    let r_clearance = r(&clearance[0].mesh);
     assert!(
         r_clearance > r_threaded,
         "clearance {r_clearance} should be wider than tap-drill {r_threaded}"
@@ -120,10 +123,10 @@ fn threaded_and_clearance_holes_are_subtract_tools_with_different_diameters() {
 #[test]
 fn nut_trap_is_one_closed_subtract_tool() {
     let parts = generate(&[("size", "M4"), ("shape", "nut_trap"), ("length", "20")]);
-    let p = &parts.parts[0];
-    assert_eq!(p.role, "nut_trap");
-    assert_eq!(p.side, Side::A);
-    assert_eq!(p.join, JoinKind::Subtract);
+    let p = &parts[0];
+    assert_eq!(p.name, "nut_trap");
+    assert_eq!(p.attach_to, Side::A);
+    assert_eq!(p.join(), JoinKind::Subtract);
     assert_closed_solid(&p.mesh, "nut_trap");
 }
 
@@ -139,8 +142,8 @@ fn bolt_shaft_clears_a_matching_nuts_bore() {
         ("fit_clearance", "0.2"),
         ("machine_tolerance", "0.0"),
     ]);
-    let bolt = &bolt_parts.parts[0].mesh;
-    let nut = &nut_parts.parts[0].mesh;
+    let bolt = &bolt_parts[0].mesh;
+    let nut = &nut_parts[0].mesh;
     let ctx = RunContext::none();
     let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
     // The bolt's shaft is centred on the axis; so is the nut's bore:
@@ -163,8 +166,8 @@ fn bolt_shaft_clears_a_matching_nuts_bore() {
 fn nut_trap_and_bolt_dont_intersect_when_placed_apart() {
     let trap_parts = generate(&[("size", "M4"), ("shape", "nut_trap")]);
     let bolt_parts = generate(&[("size", "M4"), ("shape", "bolt_hex")]);
-    let trap = &trap_parts.parts[0].mesh;
-    let bolt = &bolt_parts.parts[0].mesh;
+    let trap = &trap_parts[0].mesh;
+    let bolt = &bolt_parts[0].mesh;
     let ctx = RunContext::none();
     let trap_bvh = Bvh::build(trap, &ctx).unwrap();
     let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
@@ -207,8 +210,8 @@ fn bolt_and_nut_clear_each_other_by_the_resolved_clearance_when_mated() {
             ("fit_clearance", &fit_clearance.to_string()),
             ("machine_tolerance", &machine_tolerance.to_string()),
         ]);
-        let bolt = &bolt_parts.parts[0].mesh;
-        let nut = &nut_parts.parts[0].mesh;
+        let bolt = &bolt_parts[0].mesh;
+        let nut = &nut_parts[0].mesh;
         let ctx = RunContext::none();
         let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
 
@@ -260,8 +263,8 @@ fn rotating_the_nut_one_turn_and_translating_one_pitch_preserves_the_helix() {
             ("fit_clearance", "0.2"),
             ("machine_tolerance", "0.0"),
         ]);
-        let bolt = &bolt_parts.parts[0].mesh;
-        let nut = &nut_parts.parts[0].mesh;
+        let bolt = &bolt_parts[0].mesh;
+        let nut = &nut_parts[0].mesh;
         let ctx = RunContext::none();
         let bolt_bvh = Bvh::build(bolt, &ctx).unwrap();
 
@@ -302,6 +305,10 @@ fn unknown_size_is_refused_by_name() {
     // connector's own lookup refusal is exercised through `lookup`
     // directly instead, since an out-of-enum value never reaches
     // `generate`.
-    assert!(Thread.generate(&params, &RunContext::none()).is_ok());
+    assert!(
+        Thread
+            .generate(&params, &mf_parts::GenContext::new(&RunContext::none()))
+            .is_ok()
+    );
     assert!(mf_parts::connectors::thread::lookup("M7").is_none());
 }

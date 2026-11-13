@@ -7,11 +7,12 @@
 //! support, per the brief.
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 use std::sync::OnceLock;
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
+use crate::shape::ShapeRole;
 
 const SPEC_YAML: &str = include_str!("../../../../specs/connectors/hinge.pin.yaml");
 
@@ -122,7 +123,19 @@ fn merge_with_mesh(parts: &[SolidParts], extra: &Mesh) -> Mesh {
 
 pub struct PinHinge;
 
-impl Connector for PinHinge {
+impl Generator for PinHinge {
+    fn name(&self) -> &'static str {
+        "Knuckle hinge"
+    }
+
+    fn placement_hint(&self) -> PlacementHint {
+        PlacementHint::Manual
+    }
+
+    fn moving_gap(&self, params: &Params) -> f64 {
+        params.get_float("gap").unwrap_or(0.0)
+    }
+
     fn id(&self) -> &'static str {
         "hinge.pin"
     }
@@ -138,8 +151,8 @@ impl Connector for PinHinge {
     fn generate(
         &self,
         params: &Params,
-        _ctx: &RunContext,
-    ) -> Result<ConnectorParts, ConnectorError> {
+        _ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         let length = params
             .get_float("length")
             .map_err(|e| refuse("invalid_parameter", e.to_string()))?;
@@ -219,21 +232,9 @@ impl Connector for PinHinge {
         let leaf_a = merge_with_mesh(&leaf_a_solids, &pin);
         let leaf_b = merge(&leaf_b_solids);
 
-        Ok(ConnectorParts {
-            parts: vec![
-                ConnectorPart {
-                    role: "leaf_a",
-                    mesh: leaf_a,
-                    side: Side::A,
-                    join: JoinKind::Union,
-                },
-                ConnectorPart {
-                    role: "leaf_b",
-                    mesh: leaf_b,
-                    side: Side::B,
-                    join: JoinKind::Union,
-                },
-            ],
-        })
+        Ok(vec![
+            ShapePart::new("leaf_a", ShapeRole::Solid, Side::A, leaf_a),
+            ShapePart::new("leaf_b", ShapeRole::Solid, Side::B, leaf_b),
+        ])
     }
 }

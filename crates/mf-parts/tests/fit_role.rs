@@ -12,7 +12,7 @@
 use std::collections::BTreeMap;
 
 use mf_parts::connectors::dovetail_slide::DovetailSlide;
-use mf_parts::{Connector, FitClass, MachineProfile, fill_fit_role_params};
+use mf_parts::{FitClass, Generator, MachineProfile, fill_fit_role_params};
 
 fn class(clearance: f64) -> FitClass {
     FitClass {
@@ -81,7 +81,10 @@ fn an_outer_xy_role_adds_the_machine_profiles_outer_xy_deviation() {
     fill_fit_role_params(spec, &mut raw, &class(0.2), &machine());
     let gap: f64 = raw.get("gap").unwrap().parse().unwrap();
     let pin_clearance: f64 = raw.get("pin_clearance").unwrap().parse().unwrap();
-    assert!((gap - 0.31).abs() < 1e-9, "0.2 clearance + 0.11 outer_xy: {gap}");
+    assert!(
+        (gap - 0.31).abs() < 1e-9,
+        "0.2 clearance + 0.11 outer_xy: {gap}"
+    );
     assert!(
         (pin_clearance - 0.42).abs() < 1e-9,
         "0.2 clearance + 0.22 hole_undersize: {pin_clearance}"

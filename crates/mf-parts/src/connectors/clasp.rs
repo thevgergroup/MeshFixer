@@ -20,11 +20,12 @@
 //! alone.
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 use std::sync::OnceLock;
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
+use crate::shape::ShapeRole;
 
 /// A rectangle, `[0, sx] x [0, sy]`, counter-clockwise.
 fn rect(sx: f64, sy: f64) -> Vec<[f64; 2]> {
@@ -156,7 +157,15 @@ pub const MAX_SAFE_STRAIN: f64 = 0.03;
 
 pub struct SnapClasp;
 
-impl Connector for SnapClasp {
+impl Generator for SnapClasp {
+    fn name(&self) -> &'static str {
+        "Snap clasp"
+    }
+
+    fn placement_hint(&self) -> PlacementHint {
+        PlacementHint::Surface
+    }
+
     fn id(&self) -> &'static str {
         "clasp.snap"
     }
@@ -172,8 +181,8 @@ impl Connector for SnapClasp {
     fn generate(
         &self,
         params: &Params,
-        _ctx: &RunContext,
-    ) -> Result<ConnectorParts, ConnectorError> {
+        _ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         let width = params
             .get_float("width")
             .map_err(|e| refuse("invalid_parameter", e.to_string()))?;
@@ -238,22 +247,10 @@ impl Connector for SnapClasp {
         let arm_z1 = arm_z0 + arm_thickness;
         let hook = box_from_to(0.0, 0.0, arm_z0, arm_length, width, arm_z1);
 
-        Ok(ConnectorParts {
-            parts: vec![
-                ConnectorPart {
-                    role: "catch",
-                    mesh: catch,
-                    side: Side::A,
-                    join: JoinKind::Union,
-                },
-                ConnectorPart {
-                    role: "hook",
-                    mesh: hook,
-                    side: Side::B,
-                    join: JoinKind::Union,
-                },
-            ],
-        })
+        Ok(vec![
+            ShapePart::new("catch", ShapeRole::Solid, Side::A, catch),
+            ShapePart::new("hook", ShapeRole::Solid, Side::B, hook),
+        ])
     }
 }
 

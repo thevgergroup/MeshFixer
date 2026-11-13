@@ -14,34 +14,21 @@ pub mod thread;
 
 use mf_geometry::Mesh;
 
-use crate::connector::Connector;
-use crate::generator::PlacementHint;
-
-/// The built-in connectors already on the [`Generator`] trait, in
-/// registry order (after the ones still adapted, below).
+/// Every built-in connector, in registry order (the library lists the
+/// ones offered on a surface in this order; Connect its cut-face ones).
 pub(crate) fn builtin_generators() -> Vec<&'static dyn crate::Generator> {
     vec![
+        &hinge::PinHinge,
+        &leaf_hinge::LeafHinge,
+        &flap::FlapHinge,
+        &clasp::SnapClasp,
+        &thread::Thread,
+        &dovetail_slide::DovetailSlide,
         &joint::Dowel,
         &joint::Peg,
         &joint::Dovetail,
         &joint::Magnet,
         &joint::Insert,
-    ]
-}
-
-/// Every built-in connector with its library name, where it's offered
-/// and whether it's deprecated (kept for old saves only), in registry order (the library lists its `Surface` ones in
-/// this order; Connect its cut-face ones).
-pub(crate) fn builtin_connectors()
--> Vec<(&'static dyn Connector, &'static str, PlacementHint, bool)> {
-    use PlacementHint::*;
-    vec![
-        (&hinge::PinHinge, "Knuckle hinge", Manual, false),
-        (&leaf_hinge::LeafHinge, "Pin hinge", Surface, false),
-        (&flap::FlapHinge, "Flap hinge", Surface, false),
-        (&clasp::SnapClasp, "Snap clasp", Surface, false),
-        (&thread::Thread, "Thread", Surface, false),
-        (&dovetail_slide::DovetailSlide, "Dovetail", Surface, false),
     ]
 }
 

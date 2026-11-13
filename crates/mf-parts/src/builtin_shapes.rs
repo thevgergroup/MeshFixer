@@ -7,13 +7,13 @@
 use std::sync::OnceLock;
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 
 use crate::connector::ConnectorError;
 use crate::connectors::hole_profile::{HoleProfile, hole_outline};
 use crate::connectors::joint::{keyed_profile, n_gon, prism_z};
-use crate::shape::{P, Shape, ShapeRole, choice, float, int, refuse, spec_of};
+use crate::generator::{GenContext, Generator, ShapePart, TargetSlot};
+use crate::shape::{P, ShapeRole, choice, float, int, refuse, spec_of};
 
 /// A built-in shape: its id, name, default role, spec and generator.
 struct Simple {
@@ -24,7 +24,7 @@ struct Simple {
     make: fn(&Params) -> Result<Mesh, ConnectorError>,
 }
 
-impl Shape for Simple {
+impl Generator for Simple {
     fn id(&self) -> &'static str {
         self.id
     }
@@ -40,10 +40,23 @@ impl Shape for Simple {
     fn role(&self) -> ShapeRole {
         self.role
     }
-    fn generate(&self, params: &Params, ctx: &RunContext) -> Result<Mesh, ConnectorError> {
-        ctx.checkpoint()
+    fn is_shape(&self) -> bool {
+        true
+    }
+    fn generate(
+        &self,
+        params: &Params,
+        ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
+        ctx.run
+            .checkpoint()
             .map_err(|_| refuse("cancelled", "cancelled by the user"))?;
-        (self.make)(params)
+        Ok(vec![ShapePart::new(
+            "shape",
+            self.role,
+            TargetSlot::Neither,
+            (self.make)(params)?,
+        )])
     }
 }
 
@@ -379,7 +392,7 @@ fn make_insert_pocket(p: &Params) -> Result<Mesh, ConnectorError> {
 }
 
 /// Every built-in shape, in library order.
-pub fn builtin_shapes() -> Vec<&'static dyn Shape> {
+pub fn builtin_shapes() -> Vec<&'static dyn Generator> {
     static ALL: OnceLock<Vec<Simple>> = OnceLock::new();
     ALL.get_or_init(|| {
         vec![
@@ -707,6 +720,6 @@ pub fn builtin_shapes() -> Vec<&'static dyn Shape> {
         ]
     })
     .iter()
-    .map(|s| s as &dyn Shape)
+    .map(|s| s as &dyn Generator)
     .collect()
 }

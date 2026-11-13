@@ -202,7 +202,7 @@ pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
         let text = match spec.parameter(k).map(|ps| &ps.kind) {
             Some(mf_spec::ParamKind::Choice { values, .. }) => {
                 let i = v.round().clamp(0.0, (values.len().max(1) - 1) as f64) as usize;
-                values.get(i).cloned().unwrap_or_default()
+                values.get(i).cloned().unwrap_or_default() // allow-swallow: i is clamped into values; empty values validate as a refusal below
             }
             Some(_) => v.to_string(),
             // Not in the spec: an old field, for `upgrade_params`.
@@ -596,7 +596,9 @@ fn anchors(placements: &[Placement], gap_mm: f64) -> Vec<Option<mf_parts::Anchor
     placements
         .iter()
         .map(|p| {
+            // allow-swallow: a placement that can't be read has no anchor; its own checks say why
             let g = placement_generator(p).ok()?;
+            // allow-swallow: as above
             let params = placement_params(p, gap_mm).ok()?;
             Some(g.anchor(&params))
         })

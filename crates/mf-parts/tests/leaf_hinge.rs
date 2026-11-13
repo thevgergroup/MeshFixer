@@ -11,10 +11,10 @@ use std::collections::BTreeMap;
 use glam::{DMat4, DVec3};
 use mf_geometry::{Bvh, FaceId, Mesh};
 use mf_parts::swing::{SwingBody, swing};
-use mf_parts::{Connector, Side};
+use mf_parts::{Generator, Side};
 use mf_runtime::RunContext;
 
-fn hinge() -> &'static dyn Connector {
+fn hinge() -> &'static dyn Generator {
     &mf_parts::connectors::leaf_hinge::LeafHinge
 }
 
@@ -57,8 +57,8 @@ fn distance(a: &Mesh, b: &Mesh) -> f64 {
         .unwrap()
 }
 
-fn part<'a>(parts: &'a mf_parts::ConnectorParts, role: &str) -> &'a mf_parts::ConnectorPart {
-    parts.parts.iter().find(|p| p.role == role).unwrap()
+fn part<'a>(parts: &'a [mf_parts::ShapePart], role: &str) -> &'a mf_parts::ShapePart {
+    parts.iter().find(|p| p.name == role).unwrap()
 }
 
 /// A hinge produces three separate pieces, leaf A with the odd knuckles
@@ -68,14 +68,16 @@ fn a_hinge_is_three_objects_with_alternating_knuckles() {
     let ctx = RunContext::none();
     for (knuckles, mode) in [("5", "captive"), ("4", "separate")] {
         let p = params(&[("knuckles", knuckles), ("pin_mode", mode)]);
-        let parts = hinge().generate(&p, &ctx).unwrap();
-        let roles: Vec<&str> = parts.parts.iter().map(|p| p.role).collect();
+        let parts = hinge()
+            .generate(&p, &mf_parts::GenContext::new(&ctx))
+            .unwrap();
+        let roles: Vec<&str> = parts.iter().map(|p| p.name).collect();
         assert_eq!(roles, ["leaf_a", "leaf_b", "pin"]);
-        assert_eq!(part(&parts, "leaf_a").side, Side::A);
-        assert_eq!(part(&parts, "leaf_b").side, Side::B);
-        assert_eq!(part(&parts, "pin").side, Side::Neither);
-        for q in &parts.parts {
-            assert_closed_solid(&q.mesh, q.role);
+        assert_eq!(part(&parts, "leaf_a").attach_to, Side::A);
+        assert_eq!(part(&parts, "leaf_b").attach_to, Side::B);
+        assert_eq!(part(&parts, "pin").attach_to, Side::Neither);
+        for q in &parts {
+            assert_closed_solid(&q.mesh, q.name);
         }
         // A point in each knuckle's wall: inside exactly one leaf, A for
         // the odd knuckles and B for the even.
@@ -108,7 +110,9 @@ fn the_gaps_equal_the_fit_clearance() {
             ("gap", &gap.to_string()),
             ("pin_clearance", &clearance.to_string()),
         ]);
-        let parts = hinge().generate(&p, &ctx).unwrap();
+        let parts = hinge()
+            .generate(&p, &mf_parts::GenContext::new(&ctx))
+            .unwrap();
         let (a, b, pin) = (
             &part(&parts, "leaf_a").mesh,
             &part(&parts, "leaf_b").mesh,
@@ -135,7 +139,7 @@ fn the_gaps_equal_the_fit_clearance() {
 #[test]
 fn no_clearance_is_refused_by_name() {
     let p = params(&[("gap", "0")]);
-    let Err(err) = hinge().generate(&p, &RunContext::none()) else {
+    let Err(err) = hinge().generate(&p, &mf_parts::GenContext::new(&RunContext::none())) else {
         panic!("a hinge with no gap is refused");
     };
     assert!(err.to_string().contains("fused"), "{err}");
@@ -169,7 +173,9 @@ fn body(mesh: Mesh) -> SwingBody {
 fn the_swing_reports_the_first_contact_at_the_clasp_lip() {
     let ctx = RunContext::none();
     let p = params(&[]);
-    let parts = hinge().generate(&p, &ctx).unwrap();
+    let parts = hinge()
+        .generate(&p, &mf_parts::GenContext::new(&ctx))
+        .unwrap();
     let (origin, dir) = mf_parts::connectors::leaf_hinge::axis(&p).unwrap();
     let (origin, dir) = (DVec3::from(origin), DVec3::from(dir));
     let seam = 0.3; // the box and lid are a gap apart

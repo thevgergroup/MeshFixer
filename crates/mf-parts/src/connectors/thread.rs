@@ -27,18 +27,19 @@
 //! outward rather than just boring a wider plain cylinder, so the
 //! resolved gap holds all along the flanks, not just at the crest.
 //!
-//! `threaded_hole`/`nut_trap` stay `Side::A`/`JoinKind::Subtract` tools
+//! `threaded_hole`/`nut_trap` stay `Side::A`/`ShapeRole::Hole` tools
 //! (D22): the boolean kernel that already applies every connector's
 //! Subtract parts (`connector.join`, `mf-operations`) cuts the internal
 //! thread into the target part; this module only has to produce the
 //! tool's mesh.
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 use std::sync::OnceLock;
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
+use crate::shape::ShapeRole;
 
 const SPEC_YAML: &str = include_str!("../../../../specs/connectors/thread.yaml");
 
@@ -735,7 +736,19 @@ fn wall_z(
 
 pub struct Thread;
 
-impl Connector for Thread {
+impl Generator for Thread {
+    fn name(&self) -> &'static str {
+        "Thread"
+    }
+
+    fn placement_hint(&self) -> PlacementHint {
+        PlacementHint::Surface
+    }
+
+    fn quick_params(&self) -> &'static [&'static str] {
+        &["size", "length"]
+    }
+
     fn id(&self) -> &'static str {
         "thread"
     }
@@ -751,8 +764,8 @@ impl Connector for Thread {
     fn generate(
         &self,
         params: &Params,
-        _ctx: &RunContext,
-    ) -> Result<ConnectorParts, ConnectorError> {
+        _ctx: &GenContext,
+    ) -> Result<Vec<ShapePart>, ConnectorError> {
         let size = params
             .get_choice("size")
             .map_err(|e| refuse("invalid_parameter", e.to_string()))?;
@@ -784,24 +797,24 @@ impl Connector for Thread {
         let hole_clearance = fit_clearance + machine_tolerance;
         let radial_clearance = hole_clearance.max(0.0) / 2.0;
 
-        let (role, mesh, side, join): (&'static str, Mesh, Side, JoinKind) = match shape {
+        let (name, mesh, side, role): (&'static str, Mesh, Side, ShapeRole) = match shape {
             "bolt_hex" => (
                 "bolt",
                 bolt(major_d, pitch, length, true),
                 Side::Neither,
-                JoinKind::Separate,
+                ShapeRole::Solid,
             ),
             "bolt_socket" => (
                 "bolt",
                 bolt(major_d, pitch, length, false),
                 Side::Neither,
-                JoinKind::Separate,
+                ShapeRole::Solid,
             ),
             "nut" => (
                 "nut",
                 nut(major_d, pitch, radial_clearance),
                 Side::Neither,
-                JoinKind::Separate,
+                ShapeRole::Solid,
             ),
             "threaded_hole" => {
                 // The internal thread's own negative space: the fit
@@ -811,7 +824,7 @@ impl Connector for Thread {
                 let machine_radial = machine_tolerance.max(0.0) / 2.0;
                 let (mesh, _realized_length) =
                     thread_surface(major_d, pitch, length, -length, false, machine_radial);
-                ("threaded_hole", mesh, Side::A, JoinKind::Subtract)
+                ("threaded_hole", mesh, Side::A, ShapeRole::Hole)
             }
             "clearance_hole" => {
                 // A loose hole for a bought bolt's shaft: never
@@ -824,7 +837,7 @@ impl Connector for Thread {
                     "clearance_hole",
                     prism_z(&round(d / 2.0, segments), -length, 1e-3),
                     Side::A,
-                    JoinKind::Subtract,
+                    ShapeRole::Hole,
                 )
             }
             "nut_trap" => {
@@ -846,7 +859,7 @@ impl Connector for Thread {
                         1e-3,
                     ),
                     Side::A,
-                    JoinKind::Subtract,
+                    ShapeRole::Hole,
                 )
             }
             other => {
@@ -857,14 +870,7 @@ impl Connector for Thread {
             }
         };
 
-        Ok(ConnectorParts {
-            parts: vec![ConnectorPart {
-                role,
-                mesh,
-                side,
-                join,
-            }],
-        })
+        Ok(vec![ShapePart::new(name, role, side, mesh)])
     }
 }
 
@@ -875,7 +881,7 @@ mod tests {
     use mf_geometry::{Bvh, FaceId};
 
     fn assert_closed_solid(mesh: &Mesh, label: &str) {
-        let ctx = RunContext::none();
+        let ctx = mf_runtime::RunContext::none();
         let bvh = Bvh::build(mesh, &ctx).unwrap();
         let all: Vec<FaceId> = mesh.faces().map(|(f, _)| f).collect();
         mf_geometry::validate_solid(mesh, &all, &bvh, &ctx)

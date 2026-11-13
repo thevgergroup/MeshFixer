@@ -353,8 +353,10 @@ pub(crate) fn attach(
                 ),
             ));
         }
+        let params = mf_parts::generator::upgraded(generator, &g.generator.params)
+            .map_err(generator_error)?;
         let made = generator
-            .generate(&g.generator.params, &mf_parts::GenContext::new(ctx))
+            .generate(&params, &mf_parts::GenContext::new(ctx))
             .map_err(generator_error)?;
         for part in made {
             let host = match part.attach_to {

@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use glam::DMat4;
 use mf_geometry::{Bvh, FaceId, intersections_between, minimum_distance};
 use mf_parts::connectors::flap::FlapHinge;
-use mf_parts::{Connector, ConnectorParts, JoinKind, Side};
+use mf_parts::{Generator, JoinKind, Side};
 use mf_runtime::RunContext;
 
 fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
@@ -22,17 +22,19 @@ fn params(extra: &[(&str, &str)]) -> mf_spec::Params {
     spec.validate(&raw).unwrap()
 }
 
-fn generate(extra: &[(&str, &str)]) -> ConnectorParts {
+fn generate(extra: &[(&str, &str)]) -> Vec<mf_parts::ShapePart> {
     FlapHinge
-        .generate(&params(extra), &RunContext::none())
+        .generate(
+            &params(extra),
+            &mf_parts::GenContext::new(&RunContext::none()),
+        )
         .unwrap()
 }
 
-fn leaf<'a>(parts: &'a ConnectorParts, role: &str) -> &'a mf_geometry::Mesh {
+fn leaf<'a>(parts: &'a [mf_parts::ShapePart], role: &str) -> &'a mf_geometry::Mesh {
     &parts
-        .parts
         .iter()
-        .find(|p| p.role == role)
+        .find(|p| p.name == role)
         .unwrap_or_else(|| panic!("no part with role {role}"))
         .mesh
 }
@@ -49,16 +51,11 @@ fn assert_closed_solid(mesh: &mf_geometry::Mesh, label: &str) {
 #[test]
 fn captive_mode_makes_exactly_two_parts_with_the_pin_fused_into_leaf_a() {
     let parts = generate(&[("pin_mode", "captive")]);
-    assert_eq!(parts.parts.len(), 2, "no separate pin part in captive mode");
+    assert_eq!(parts.len(), 2, "no separate pin part in captive mode");
     assert_closed_solid(leaf(&parts, "leaf_a"), "leaf_a");
     assert_closed_solid(leaf(&parts, "leaf_b"), "leaf_b");
     assert_eq!(
-        parts
-            .parts
-            .iter()
-            .find(|p| p.role == "leaf_a")
-            .unwrap()
-            .join,
+        parts.iter().find(|p| p.name == "leaf_a").unwrap().join(),
         JoinKind::Union
     );
 }
@@ -66,10 +63,10 @@ fn captive_mode_makes_exactly_two_parts_with_the_pin_fused_into_leaf_a() {
 #[test]
 fn separate_mode_makes_a_third_loose_pin_part() {
     let parts = generate(&[("pin_mode", "separate"), ("gap", "0.3")]);
-    assert_eq!(parts.parts.len(), 3, "leaf_a, leaf_b and a loose pin");
-    let pin = parts.parts.iter().find(|p| p.role == "pin").unwrap();
-    assert_eq!(pin.side, Side::Neither);
-    assert_eq!(pin.join, JoinKind::Separate);
+    assert_eq!(parts.len(), 3, "leaf_a, leaf_b and a loose pin");
+    let pin = parts.iter().find(|p| p.name == "pin").unwrap();
+    assert_eq!(pin.attach_to, Side::Neither);
+    assert_eq!(pin.join(), JoinKind::Separate);
     assert_closed_solid(&pin.mesh, "pin");
     assert_closed_solid(leaf(&parts, "leaf_a"), "leaf_a");
     assert_closed_solid(leaf(&parts, "leaf_b"), "leaf_b");
@@ -151,7 +148,10 @@ fn flap_opens_90_degrees_without_collision() {
 
 #[test]
 fn knuckles_must_be_odd_is_still_enforced() {
-    match FlapHinge.generate(&params(&[("knuckles", "4")]), &RunContext::none()) {
+    match FlapHinge.generate(
+        &params(&[("knuckles", "4")]),
+        &mf_parts::GenContext::new(&RunContext::none()),
+    ) {
         Err(mf_parts::ConnectorError::Failed { code, .. }) => {
             assert_eq!(code, "knuckles_must_be_odd")
         }

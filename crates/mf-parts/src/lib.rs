@@ -22,9 +22,7 @@ pub mod shape;
 pub mod swing;
 
 pub use builtin::builtins;
-pub use connector::{
-    Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, RoleFaceRange, Side,
-};
+pub use connector::{ConnectorError, JoinKind, Side};
 pub use fit::{
     BUILTIN_NAME, Compensation, FIT_PROFILES_FILE, FitClass, FitClasses, FitError, FitProfile,
     FitProfiles, fill_fit_role_params, resolve,
@@ -45,6 +43,4 @@ pub use machine::{
     UNCALIBRATED_NAME,
 };
 pub use manifest::{Attach, PartKind, PartManifest};
-pub use shape::{
-    GeneratorRecord, Shape, ShapeRole, builtin_shapes, new_record, record_spec, regenerate,
-};
+pub use shape::{GeneratorRecord, ShapeRole, builtin_shapes, new_record, record_spec, regenerate};

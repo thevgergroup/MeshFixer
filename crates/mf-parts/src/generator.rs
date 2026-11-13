@@ -280,121 +280,13 @@ pub trait Generator: Send + Sync {
 }
 
 // ---------------------------------------------------------------------
-// Adapters: the older `Shape` and `Connector` traits, as generators.
-// ---------------------------------------------------------------------
-
-/// A [`crate::Shape`] as a generator.
-pub struct ShapeAdapter(pub &'static dyn crate::Shape);
-
-impl Generator for ShapeAdapter {
-    fn id(&self) -> &'static str {
-        self.0.id()
-    }
-    fn name(&self) -> &'static str {
-        self.0.name()
-    }
-    fn version(&self) -> u32 {
-        self.0.version()
-    }
-    fn spec(&self) -> &'static OperationSpec {
-        self.0.spec()
-    }
-    fn role(&self) -> ShapeRole {
-        self.0.role()
-    }
-    fn is_shape(&self) -> bool {
-        true
-    }
-    fn generate(
-        &self,
-        params: &Params,
-        ctx: &GenContext,
-    ) -> Result<Vec<ShapePart>, ConnectorError> {
-        Ok(vec![ShapePart::new(
-            "shape",
-            self.0.role(),
-            TargetSlot::Neither,
-            self.0.generate(params, ctx.run)?,
-        )])
-    }
-}
-
-/// A [`crate::Connector`] as a generator, with the library facts the old
-/// trait didn't carry.
-pub struct ConnectorAdapter {
-    pub inner: &'static dyn crate::Connector,
-    pub name: &'static str,
-    pub hint: PlacementHint,
-    pub deprecated: bool,
-}
-
-impl Generator for ConnectorAdapter {
-    fn id(&self) -> &'static str {
-        self.inner.id()
-    }
-    fn name(&self) -> &'static str {
-        self.name
-    }
-    fn version(&self) -> u32 {
-        self.inner.version()
-    }
-    fn spec(&self) -> &'static OperationSpec {
-        self.inner.spec()
-    }
-    fn placement_hint(&self) -> PlacementHint {
-        self.hint
-    }
-    fn deprecated(&self) -> bool {
-        self.deprecated
-    }
-    fn generate(
-        &self,
-        params: &Params,
-        ctx: &GenContext,
-    ) -> Result<Vec<ShapePart>, ConnectorError> {
-        Ok(self
-            .inner
-            .generate(params, ctx.run)?
-            .parts
-            .into_iter()
-            .map(|p| {
-                let role = if p.join == JoinKind::Subtract {
-                    ShapeRole::Hole
-                } else {
-                    ShapeRole::Solid
-                };
-                let attach_to = if p.join == JoinKind::Separate {
-                    TargetSlot::Neither
-                } else {
-                    p.side
-                };
-                ShapePart::new(p.role, role, attach_to, p.mesh)
-            })
-            .collect())
-    }
-}
-
-// ---------------------------------------------------------------------
 // The registry.
 // ---------------------------------------------------------------------
 
 fn builtin() -> &'static [&'static dyn Generator] {
     static ALL: OnceLock<Vec<&'static dyn Generator>> = OnceLock::new();
     ALL.get_or_init(|| {
-        let mut all: Vec<&'static dyn Generator> = crate::builtin_shapes()
-            .into_iter()
-            .map(|s| &*Box::leak(Box::new(ShapeAdapter(s))) as &'static dyn Generator)
-            .collect();
-        all.extend(crate::connectors::builtin_connectors().into_iter().map(
-            |(inner, name, hint, deprecated)| {
-                &*Box::leak(Box::new(ConnectorAdapter {
-                    inner,
-                    name,
-                    hint,
-                    deprecated,
-                })) as &'static dyn Generator
-            },
-        ));
+        let mut all = crate::builtin_shapes();
         all.extend(crate::connectors::builtin_generators());
         all
     })
@@ -460,4 +352,37 @@ pub fn validate_raw(
         code: "invalid_parameter",
         message: format!("{}'s parameters: {e}", g.name()),
     })
+}
+
+/// Recorded `params` (a saved shape's, a log's) brought up to `g`'s
+/// current schema: [`Generator::upgrade_params`] applied, and any param
+/// added since filled with its default. A record already current comes
+/// back unchanged, so regenerating it stays Exact.
+pub fn upgraded(g: &dyn Generator, params: &Params) -> Result<Params, ConnectorError> {
+    let text = |v: &ParamValue| match v {
+        ParamValue::Float(f) => format!("{f}"),
+        other => other.to_string(),
+    };
+    let before: BTreeMap<String, String> =
+        params.0.iter().map(|(k, v)| (k.clone(), text(v))).collect();
+    let mut raw = before.clone();
+    g.upgrade_params(&mut raw);
+    if raw != before {
+        raw.retain(|k, _| g.spec().parameter(k).is_some());
+        return validate_raw(g, raw);
+    }
+    let missing = g
+        .spec()
+        .parameters
+        .iter()
+        .any(|p| !params.0.contains_key(&p.name));
+    if !missing {
+        return Ok(params.clone());
+    }
+    let defaults = validate_raw(g, BTreeMap::new())?;
+    let mut out = params.clone();
+    for (k, v) in defaults.0 {
+        out.0.entry(k).or_insert(v);
+    }
+    Ok(out)
 }

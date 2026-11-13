@@ -64,25 +64,6 @@ pub enum ShapeRole {
     Hole,
 }
 
-/// A parametric shape generator (the older one-mesh trait, seen by the
-/// registry through [`crate::generator::ShapeAdapter`]).
-pub trait Shape: Send + Sync {
-    /// Stable id, namespaced (`"shape.box"`).
-    fn id(&self) -> &'static str;
-    /// Its name in the library ("Box").
-    fn name(&self) -> &'static str;
-    /// Bumped when the generated geometry's meaning changes.
-    fn version(&self) -> u32;
-    /// Its parameters (only `parameters:` is used).
-    fn spec(&self) -> &'static OperationSpec;
-    /// How it's placed by default.
-    fn role(&self) -> ShapeRole {
-        ShapeRole::Solid
-    }
-    /// One closed mesh from validated `params`.
-    fn generate(&self, params: &Params, ctx: &RunContext) -> Result<Mesh, ConnectorError>;
-}
-
 /// The record a new shape or connector gets: `g`'s own version and its
 /// spec's defaults, overridden by `raw` (upgraded from an older schema,
 /// then validated, so an unknown name or an out-of-range value is
@@ -135,7 +116,8 @@ pub fn regenerate(record: &GeneratorRecord, ctx: &RunContext) -> Result<Mesh, Co
     if g.version() != record.version {
         return Err(version_mismatch(&record.id, record.version, g.version()));
     }
-    let parts = g.generate(&record.params, &crate::GenContext::new(ctx))?;
+    let params = crate::generator::upgraded(g, &record.params)?;
+    let parts = g.generate(&params, &crate::GenContext::new(ctx))?;
     match &record.part {
         Some(role) => parts
             .into_iter()
@@ -320,9 +302,9 @@ pub fn part_of(
     let role = record.part.as_deref()?;
     let g = crate::find_generator(&record.id)?;
     // allow-swallow: a part that no longer generates simply has no side; regenerating it reports why
-    let parts = g
-        .generate(&record.params, &crate::GenContext::new(ctx))
-        .ok()?;
+    let params = crate::generator::upgraded(g, &record.params).ok()?;
+    // allow-swallow: as above
+    let parts = g.generate(&params, &crate::GenContext::new(ctx)).ok()?;
     parts
         .iter()
         .find(|p| p.name == role)

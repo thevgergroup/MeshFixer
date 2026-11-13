@@ -11,7 +11,7 @@ use mf_fixtures::{cube, translated};
 use mf_geometry::{Bvh, inspect, minimum_distance};
 use mf_io::threemf::IDENTITY;
 use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
-use mf_parts::Connector;
+use mf_parts::Generator;
 use mf_parts::connectors::clasp::SnapClasp;
 use mf_spec::Params;
 
@@ -223,9 +223,11 @@ fn saved_connector_regenerates_identically() {
         .unwrap();
     let params = spec.validate(&raw).unwrap();
     let ctx = RunContext::none();
-    let original = SnapClasp.generate(&params, &ctx).unwrap();
+    let original = SnapClasp
+        .generate(&params, &mf_parts::GenContext::new(&ctx))
+        .unwrap();
     let mut original_mesh_positions = Vec::new();
-    for p in &original.parts {
+    for p in &original {
         original_mesh_positions.push(p.mesh.to_arrays());
     }
 
