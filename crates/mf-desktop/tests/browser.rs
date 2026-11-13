@@ -1241,3 +1241,132 @@ fn browser_rows_are_left_aligned_and_dont_shift_on_hover() {
         );
     }
 }
+
+/// The Browser panel's own content rect, right of the viewport (the
+/// right dock's `size_range` and `default_size` are set in `panels.rs`;
+/// nothing names the dock itself, so this derives its bound from the
+/// viewport's own rect, which fills everything the dock doesn't).
+fn browser_panel_rect(h: &Harness<'_, MeshFixerApp>) -> egui::Rect {
+    let viewport = h.state().viewport.last_rect.expect("viewport laid out");
+    let window = h.ctx.content_rect();
+    egui::Rect::from_min_max(egui::pos2(viewport.right(), window.top()), window.max)
+}
+
+/// A galley of `name` at the Browser row's own body font
+/// (`theme::TYPE_BODY`, `RichText`'s default when nothing overrides it:
+/// `object_row`'s `text` never sets a size), to measure how wide it
+/// would be unwrapped — the same text `tree_row`'s button lays out.
+fn name_natural_width(h: &Harness<'_, MeshFixerApp>, name: &str) -> f32 {
+    let galley = h.ctx.fonts_mut(|f| {
+        f.layout_no_wrap(
+            name.to_owned(),
+            egui::FontId::proportional(mf_desktop::theme::TYPE_BODY),
+            egui::Color32::WHITE,
+        )
+    });
+    galley.size().x
+}
+
+/// Fix round 2026-11-13 (owner screenshot, the same one as the Align
+/// dots): object names were ellipsised far too early ("cr…", "pr…")
+/// because the Browser's old 248pt default width, less the chevron and
+/// swatch columns and `HOVER_ACTIONS_WIDTH` (114pt reserved for the
+/// hide/lock/role/delete/move icons — always, whether or not any of
+/// them are actually showing), left the name only about 80pt: a name
+/// comfortably short enough for the panel's own width was still cut off
+/// because that fixed reservation ate more than a third of it. Rather
+/// than touch how (or how reliably) those hover icons' own click
+/// detection works — this is the one part of the Browser's row layout
+/// where "zero layout shift on hover" has to hold exactly, since a
+/// click here doubles as a hit-test boundary, not just a visual one —
+/// the fix widens the Browser's own default (`BROWSER_WIDTH`, 248 to
+/// 320) so the same, unchanged reservation leaves the name real room.
+/// This checks a name that used to be ellipsised at the old width but
+/// fits at the new one renders whole, and that hovering (which is when
+/// the icons actually paint) still doesn't move the row or change its
+/// width at all — `object_row`'s own layout never was, and still isn't,
+/// hover-dependent.
+#[test]
+fn long_object_names_use_the_full_name_column_width() {
+    require_gpu!("long_object_names_use_the_full_name_column_width");
+    let long_name = "crate_holder_part";
+    let mut h = opened_several(&[long_name, "probe"]);
+    h.run_steps(3);
+
+    let natural = name_natural_width(&h, long_name);
+    let panel = browser_panel_rect(&h);
+    // `HOVER_ACTIONS_WIDTH` (hide/lock/role/delete/move) plus the right
+    // dock's own inner margin (`theme::SPACE_S`, both sides): the
+    // constant cost every name budget below has to account for,
+    // whatever the panel's own width.
+    const FIXED_COST: f32 = 114.0 + 2.0 * 8.0;
+    let name_budget = |panel_width: f32| {
+        panel_width
+            - mf_desktop::theme::ROW_CHEVRON_WIDTH
+            - mf_desktop::theme::ROW_SWATCH_WIDTH
+            - FIXED_COST
+    };
+    let new_budget = name_budget(panel.width());
+    // Sanity: at the *old* 248pt default this name would have been too
+    // wide for its own budget (so the old code really did truncate it);
+    // at today's wider default it fits — otherwise this test wouldn't
+    // actually exercise the fix.
+    let old_name_budget = name_budget(248.0);
+    assert!(
+        natural > old_name_budget,
+        "{long_name:?} (natural width {natural}) should be too wide for the old 248pt \
+         default's own name budget ({old_name_budget}) for this test to mean anything"
+    );
+    assert!(
+        natural < new_budget,
+        "{long_name:?} (natural width {natural}) should fit today's name budget \
+         ({new_budget}, from a {0}pt-wide Browser)",
+        panel.width()
+    );
+
+    let unhovered = row_node(&h, long_name).rect();
+    assert!(
+        unhovered.width() >= natural - 1.0,
+        "{long_name:?}'s row ({}) is narrower than its own natural width ({natural}): it's \
+         being truncated though the panel has room",
+        unhovered.width()
+    );
+
+    // Hovering (when the hide/lock/role/delete/move icons actually
+    // paint, in their own always-reserved slots) must not move the row
+    // or change the name's own width at all: this layout was never
+    // hover-dependent, before or after this fix.
+    h.event(egui::Event::PointerMoved(unhovered.center()));
+    h.run_steps(3);
+    let hovered = row_node(&h, long_name).rect();
+    assert_eq!(
+        hovered, unhovered,
+        "{long_name:?} row shifted when hovered: {unhovered:?} -> {hovered:?}",
+    );
+    h.event(egui::Event::PointerGone);
+    h.run_steps(2);
+
+    // A name wider than even the full name column (chevron, swatch and
+    // the hover-icons' own always-reserved width aside) still truncates
+    // — the fix only stops truncating *early*, it doesn't turn
+    // truncation off.
+    let absurd_name = "a_name_so_long_nobody_would_ever_actually_type_it_into_a_dialog_box";
+    let mut h2 = opened_several(&[absurd_name, "probe"]);
+    h2.run_steps(3);
+    let panel2 = browser_panel_rect(&h2);
+    let natural2 = name_natural_width(&h2, absurd_name);
+    let full_name_budget = name_budget(panel2.width());
+    assert!(
+        natural2 > full_name_budget,
+        "{absurd_name:?} (natural width {natural2}) should be wider than the full name \
+         column ({full_name_budget}) for this half of the test to mean anything"
+    );
+    let row2 = row_node(&h2, absurd_name).rect();
+    assert!(
+        row2.width() <= full_name_budget + 1.0,
+        "{absurd_name:?}'s row ({}) overflows the name column ({full_name_budget}) instead \
+         of truncating",
+        row2.width()
+    );
+}
+

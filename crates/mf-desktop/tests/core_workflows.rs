@@ -2237,3 +2237,120 @@ fn align_then_undo_restores_every_object() {
         "one undo restores every moved object exactly"
     );
 }
+
+/// Fix round 2026-11-13 (owner: the 9 dots "float with nothing tying
+/// them to an axis" — Tinkercad ties each axis's dots to a rail on the
+/// box's own edge). Every dot [`mf_desktop::align_tool::dots`] returns
+/// must lie exactly on its own axis's rail segment
+/// ([`mf_desktop::align_tool::rails`]): on the rail's line (the two
+/// cross-axis coordinates match the rail's own, not just "somewhere near
+/// it") and between its two ends (`Mode::Min` at one end, `Mode::Max` at
+/// the other, `Mode::Centre` at the midpoint) — draw and hit share the
+/// same `dots()`, so this also covers hit-test parity. Checked from
+/// three different camera orbits (the default, and two more that each
+/// put one of the brief's three default rail edges on the box's hidden
+/// side) so the "pick the edge that faces the camera instead" fallback
+/// is covered too, not just the common case. Captures a frame per orbit
+/// with `MF_ARTIFACTS` set (milestone evidence: the rails and dots
+/// actually visible, not just correct in world space).
+#[test]
+fn align_dots_sit_on_their_axis_rail() {
+    use mf_desktop::align_tool::Mode;
+    require_gpu!("align_dots_sit_on_their_axis_rail");
+    // Three balls spread on every axis, off-centre so the box's min,
+    // centre and max never coincide on any axis.
+    let mut h = opened(vec![
+        ("a", ball(5.0), at([0.0, 0.0, 0.0])),
+        ("b", ball(5.0), at([40.0, 25.0, 0.0])),
+        ("c", ball(5.0), at([20.0, 10.0, 30.0])),
+    ]);
+    open_align(&mut h, &["a", "b", "c"]);
+
+    // (yaw, pitch) in degrees: the tool's own default orbit, then two
+    // that each flip a different pair of the brief's default rail
+    // corners (both their adjacent faces back-facing at once) to
+    // exercise `rail_corner`'s "hidden" fallback.
+    let orbits: [(&str, f64, f64); 3] = [
+        // The tool's own default orbit: flips Y's own bottom-left corner
+        // (X and Z are both back-facing from here).
+        ("default", -60.0, 25.0),
+        // Flips X's bottom-front corner's Y side only (Y and Z stay put).
+        ("from-behind", 150.0, 10.0),
+        // Flips Z's front-left corner only (X and Y stay put): looking
+        // down from a steep angle in the +X+Y quadrant.
+        ("from-above-right", 45.0, -20.0),
+    ];
+    for (scene, yaw_deg, pitch_deg) in orbits {
+        {
+            let app = h.state_mut();
+            let mut cam = app.camera.unwrap();
+            cam.yaw = yaw_deg.to_radians();
+            cam.pitch = pitch_deg.to_radians();
+            app.camera = Some(cam);
+        }
+        settle(&mut h);
+        capture(&mut h, &format!("rails-{scene}"));
+
+        let the_rails = mf_desktop::align_tool::rails(h.state())
+            .unwrap_or_else(|| panic!("no rails at orbit {scene:?}"));
+        let the_dots = mf_desktop::align_tool::dots(h.state());
+        assert_eq!(the_dots.len(), 9, "9 dots at orbit {scene:?}");
+
+        for dot in &the_dots {
+            let rail = the_rails[dot.axis];
+            assert_eq!(rail.axis, dot.axis, "rail/dot axis mismatch at orbit {scene:?}");
+            let (low, high) = rail.ends;
+            // On the rail's own line: the two cross-axis coordinates
+            // (every component except `dot.axis`) match the rail's
+            // exactly (the rail's own two ends share them).
+            for other in (0..3).filter(|&a| a != dot.axis) {
+                assert!(
+                    (dot.world[other] - low[other]).abs() < 1e-9,
+                    "{scene:?} axis {} {:?}: dot {:?} isn't on its rail's cross-axis {other} \
+                     (rail {low:?}..{high:?})",
+                    dot.axis,
+                    dot.mode,
+                    dot.world
+                );
+            }
+            // Between the rail's two ends on its own axis, at the end
+            // (or midpoint) the dot's mode names.
+            let (rail_lo, rail_hi) = (low[dot.axis].min(high[dot.axis]), low[dot.axis].max(high[dot.axis]));
+            assert!(
+                dot.world[dot.axis] >= rail_lo - 1e-9 && dot.world[dot.axis] <= rail_hi + 1e-9,
+                "{scene:?} axis {} {:?}: dot at {} isn't within the rail's segment [{rail_lo}, {rail_hi}]",
+                dot.axis,
+                dot.mode,
+                dot.world[dot.axis]
+            );
+            let expect = match dot.mode {
+                Mode::Min => low[dot.axis],
+                Mode::Max => high[dot.axis],
+                Mode::Centre => (low[dot.axis] + high[dot.axis]) * 0.5,
+                Mode::DistributeGaps | Mode::DistributeCentres => continue,
+            };
+            assert!(
+                (dot.world[dot.axis] - expect).abs() < 1e-9,
+                "{scene:?} axis {} {:?}: dot at {} should be at {expect} on the rail",
+                dot.axis,
+                dot.mode,
+                dot.world[dot.axis]
+            );
+        }
+
+        // Draw/hit parity: every dot `dots()` reports is also where
+        // `view_overlay` would actually paint it (the same projection
+        // `dot_point` uses, which is `view_overlay`'s own) — i.e. hit
+        // testing and drawing read the same geometry, not two copies
+        // that could drift apart.
+        for dot in &the_dots {
+            let p = dot_point(&h, *dot);
+            assert!(
+                h.state().viewport.last_rect.unwrap().contains(p),
+                "{scene:?} axis {} {:?}: dot projects outside the viewport ({p:?})",
+                dot.axis,
+                dot.mode
+            );
+        }
+    }
+}

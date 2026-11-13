@@ -16,8 +16,19 @@ use crate::{icons, t, theme};
 pub const BROWSER: &str = "browser";
 pub const HISTORY: &str = "history";
 
-/// The Browser's width (points), and its range.
-const BROWSER_WIDTH: f32 = 248.0;
+/// The Browser's width (points), and its range. Widened from 248 (fix
+/// round 2026-11-13, owner screenshot: object names ellipsised far too
+/// early, "cr…", "pr…", even with plenty of width to spare) — the
+/// column grid `object_row`/`group_entry` reserve for the hover-only
+/// icons (hide, lock, Solid/Hole, delete, reorder:
+/// `HOVER_ACTIONS_WIDTH`, 114pt) is a fixed cost regardless of the
+/// panel's own width, so at the old 248pt default it alone ate over
+/// a third of the name's own space; at 320 the name gets roughly as
+/// much room back as it lost, without touching how (or how reliably)
+/// those icons' own hover and click detection works — unlike the row's
+/// name button itself, raising the panel's width can't introduce a new
+/// way for a click to land on the wrong control.
+const BROWSER_WIDTH: f32 = 320.0;
 const BROWSER_WIDTH_MAX: f32 = 420.0;
 
 /// The built-in panels and overlays.

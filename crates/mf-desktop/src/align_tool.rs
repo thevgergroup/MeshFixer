@@ -141,41 +141,141 @@ fn dot_box(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
     bounds
 }
 
-/// The 9 dot handles (3 axes x min/centre/max), placed on the dots' box
-/// (see [`dot_box`]): each axis's three dots run along their own edge of
-/// the box (a different edge per axis, offset from the box's centroid
-/// on the *other* two axes), so no two dots — in particular no two
-/// axes' centre dots — ever land on the same point.
+/// One axis's rail: the box edge its 3 dots sit on, as a world-space
+/// line segment from its low end to its high end (`world` field order
+/// matches `Mode::Min`/`Mode::Max`: `ends.0` is always the low end,
+/// `ends.1` the high end, whichever corner of the box that turned out to
+/// be — see [`rails`]).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Rail {
+    pub axis: usize,
+    pub ends: (DVec3, DVec3),
+}
+
+/// Whether the box's `lo`-side face on `axis` (outward normal pointing
+/// in `axis`'s negative direction) is back-facing from `eye` — i.e.
+/// hidden behind the box from the current view: `dot(-axis, eye - mid)
+/// <= 0`, the standard convex-hull back-face test, done per axis
+/// without needing a normal vector (just which side of `mid[axis]` the
+/// eye sits on).
+fn back_facing_lo(axis: usize, mid: DVec3, eye: DVec3) -> bool {
+    eye[axis] >= mid[axis]
+}
+
+/// The box corner (as `lo`/`hi` picks on the two axes named by `other`,
+/// a rail's own axis's "other two") its rail runs along: the brief's
+/// own fixed corner (`lo`/`lo`) unless the camera genuinely can't see
+/// that edge — both its adjacent faces back-facing at once, the only
+/// case a box edge is actually hidden rather than merely not the
+/// nearest — in which case it flips to the diagonally opposite corner on
+/// those two axes (`hi`/`hi`), which is then guaranteed front-facing on
+/// both (a box's two "visible extreme" corners, along any one axis, are
+/// always this pair).
+fn rail_corner(other: (usize, usize), lo: DVec3, hi: DVec3, eye: DVec3) -> (f64, f64) {
+    let mid = (lo + hi) * 0.5;
+    let (oa, ob) = other;
+    let hidden = back_facing_lo(oa, mid, eye) && back_facing_lo(ob, mid, eye);
+    if hidden {
+        (hi[oa], hi[ob])
+    } else {
+        (lo[oa], lo[ob])
+    }
+}
+
+/// How far apart [`rails`] nudges the three rails' shared corner, as a
+/// fraction of the box's own diagonal (kept visually proportionate to
+/// the model, not a fixed world size): small enough that the three
+/// rails still read as meeting at one corner, but never so small that
+/// float error could still land two dots on the same point.
+const RAIL_CORNER_SPREAD_FRAC: f64 = 0.04;
+/// The floor under that nudge in world units, for a box so small (or so
+/// flat on two axes — exactly `dot_box`'s own common case: objects
+/// spread out on only one axis, so the box is a sliver on the other two)
+/// that a fraction of its diagonal would otherwise round away to nothing.
+const RAIL_CORNER_SPREAD_MIN: f64 = 1e-3;
+
+/// The 3 axis rails the dots sit on (see [`dots`]): a different box edge
+/// per axis, meeting by default at the box's own min corner (owner
+/// brief: X along the bottom-front edge, Y along the bottom-left edge, Z
+/// up the front-left vertical edge — this app's own front=-Y/bottom=-Z/
+/// left=-X convention, `edge_word`'s), each flipped to the opposite
+/// corner on its own two cross-axes if the camera genuinely can't see
+/// that edge (`rail_corner`), so the rails (and the dots on them) are
+/// never stranded on the far side of the mesh.
+///
+/// Each rail's own cross-position is nudged a little further from the
+/// shared corner along exactly one of its two cross-axes (X's own rail
+/// nudges on Z; Y's on X; Z's on Y — a stable, distinct choice per axis,
+/// `nudge_axis` below), so the three rails meet *near* one corner
+/// without any two ever sharing an exact point. Without this, three
+/// objects spread out on only one axis (`dot_box`'s box is then a sliver
+/// on the other two, e.g. three same-radius balls placed apart on X
+/// alone) put every rail's own min corner at the identical world point:
+/// `hit_dot` would then pick whichever axis's dot happened to iterate
+/// first for a click plainly meant for a different axis — the dot the
+/// owner brief's tests, and a real user, click by its drawn position,
+/// not by winning a tie-break (fix round 2026-11-13, found by
+/// `align_min_centre_max_on_each_axis` timing out on "nothing to
+/// change" for the wrong axis). `None` with fewer than 2 objects
+/// selected, same as [`dots`].
+pub fn rails(app: &MeshFixerApp) -> Option<[Rail; 3]> {
+    let (lo, hi) = dot_box(app)?;
+    let eye = app.camera.map(|c| c.eye()).unwrap_or(hi + DVec3::ONE);
+    let diagonal = (hi - lo).length();
+    let spread = (diagonal * RAIL_CORNER_SPREAD_FRAC).max(RAIL_CORNER_SPREAD_MIN);
+    // (this axis's rail, the other two axes, in a stable order so every
+    // rail's cross-position is picked deterministically) and which of
+    // those two axes this rail nudges outward.
+    let others = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
+    let nudge_axis = [2usize, 0usize, 1usize];
+    let mut out = [Rail {
+        axis: 0,
+        ends: (DVec3::ZERO, DVec3::ZERO),
+    }; 3];
+    for axis in 0..3 {
+        let (oa, ob) = others[axis];
+        let (ca, cb) = rail_corner((oa, ob), lo, hi, eye);
+        let mut low_end = lo;
+        low_end[oa] = ca;
+        low_end[ob] = cb;
+        low_end[axis] = lo[axis];
+        // Nudge towards the box's own centre on `nudge_axis`, whichever
+        // corner `rail_corner` picked for it: moving towards `mid` can
+        // never cross past it (clamped below), so this always lands
+        // strictly between the picked corner and the centre, inside the
+        // box, whether that corner was `lo` or (flipped) `hi`.
+        let n = nudge_axis[axis];
+        let mid_n = (lo[n] + hi[n]) * 0.5;
+        let towards_mid = (mid_n - low_end[n]).clamp(-spread, spread);
+        low_end[n] += towards_mid;
+        let mut high_end = low_end;
+        high_end[axis] = hi[axis];
+        out[axis] = Rail {
+            axis,
+            ends: (low_end, high_end),
+        };
+    }
+    Some(out)
+}
+
+/// The 9 dot handles (3 axes x min/centre/max), each exactly on its
+/// axis's rail (see [`rails`]) at that rail's low end, midpoint, or high
+/// end — no two dots share a point, since `rails` nudges each rail's own
+/// cross-position a little apart from the others near their shared
+/// corner (`RAIL_CORNER_SPREAD_FRAC`).
 pub fn dots(app: &MeshFixerApp) -> Vec<Dot> {
-    let Some((lo, hi)) = dot_box(app) else {
+    let Some(the_rails) = rails(app) else {
         return Vec::new();
     };
-    let mid = (lo + hi) * 0.5;
-    // Each axis's three dots run along their own edge: offset, on the
-    // *other* two axes, three quarters of the way from the box's
-    // centre towards its low corner. Every axis picks a different pair
-    // of other axes to offset, so no two axes' dots — in particular no
-    // two centre dots — ever land on the same point.
-    let corners = [(1usize, 2usize), (0usize, 2usize), (0usize, 1usize)];
-    // 3/4 of the way from the centre towards that axis's low corner.
-    let toward_low = |a: usize| mid[a] + (lo[a] - mid[a]) * 0.75;
     let mut out = Vec::with_capacity(9);
-    for axis in 0..3 {
-        let (oa, ob) = corners[axis];
-        let mut base = mid;
-        base[oa] = toward_low(oa);
-        base[ob] = toward_low(ob);
-        for (mode, value) in [
-            (Mode::Min, lo[axis]),
-            (Mode::Centre, mid[axis]),
-            (Mode::Max, hi[axis]),
-        ] {
-            let mut p = base;
-            p[axis] = value;
+    for rail in the_rails {
+        let (low, high) = rail.ends;
+        let mid = (low + high) * 0.5;
+        for (mode, world) in [(Mode::Min, low), (Mode::Centre, mid), (Mode::Max, high)] {
             out.push(Dot {
-                axis,
+                axis: rail.axis,
                 mode,
-                world: p,
+                world,
             });
         }
     }
@@ -656,8 +756,11 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 // ---------------------------------------------------------------------
-// The view overlay: the 9 dots, in their axis colours, the hovered one
-// larger; the anchor's box outlined.
+// The view overlay (Tinkercad-style, fix round 2026-11-13: the dots used
+// to float free with nothing tying them to an axis): the dots' box as a
+// faint wireframe, one coloured axis rail per axis along a box edge (see
+// `rails`), the 9 dots on their rails, the hovered one larger with a
+// label, and (still) the anchor's own box outlined more strongly.
 // ---------------------------------------------------------------------
 
 pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
@@ -668,6 +771,12 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
         return;
     };
     let view = (rect.width() as f64, rect.height() as f64);
+    let Some((lo, hi)) = dot_box(app) else {
+        return;
+    };
+    let Some(the_rails) = rails(app) else {
+        return;
+    };
     let the_dots = dots(app);
     if the_dots.is_empty() {
         return;
@@ -677,24 +786,73 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
         egui::Id::unique("align overlay"),
     ));
     let painter = painter.with_clip_rect(rect);
+    let at = |p: DVec3| {
+        mf_render::screen_position(&cam, cam.target, view, p.to_array())
+            .map(|(x, y)| rect.left_top() + egui::vec2(x as f32, y as f32))
+    };
+    // The box itself, faint: it's what ties every rail and dot to an
+    // axis, so it's always drawn, not just when there's an anchor.
+    draw_box(&painter, &cam, view, rect, lo, hi, theme::TEXT_MUTED.gamma_multiply(0.35));
+    // One coloured rail per axis, along the edge `rails` picked.
+    for rail in &the_rails {
+        let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][rail.axis];
+        if let (Some(a), Some(b)) = (at(rail.ends.0), at(rail.ends.1)) {
+            painter.line_segment([a, b], egui::Stroke::new(2.5, color.gamma_multiply(0.9)));
+        }
+    }
     for dot in &the_dots {
-        let Some((x, y)) = mf_render::screen_position(&cam, cam.target, view, dot.world.to_array())
-        else {
-            continue;
-        };
-        let p = rect.left_top() + egui::vec2(x as f32, y as f32);
+        let Some(p) = at(dot.world) else { continue };
         let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][dot.axis];
         let hovered = app.align.hover == Some(*dot);
         let radius = if hovered { 7.0 } else { 5.0 };
         painter.circle_filled(p, radius, color);
         painter.circle_stroke(p, radius, egui::Stroke::new(1.5, theme::TEXT_STRONG));
+        if hovered {
+            hover_label(&painter, p, dot.axis, dot.mode);
+        }
     }
     if let Some(id) = app.align.anchor
         && app.selected_objects().contains(&id)
-        && let Some((lo, hi)) = crate::shape_tools::world_bounds(app, id)
+        && let Some((alo, ahi)) = crate::shape_tools::world_bounds(app, id)
     {
-        draw_box(&painter, &cam, view, rect, lo, hi, theme::SELECTED);
+        draw_box(&painter, &cam, view, rect, alo, ahi, theme::SELECTED);
     }
+}
+
+/// The hovered dot's label, just above it: "X min: align left edges", "X
+/// centre", "X max: align right edges" (owner brief's own examples) —
+/// built from the same `axis_name`/`edge_word` the History label and the
+/// panel already use, through the `align.hover.*` catalogue entries, so
+/// it's one of the few things in the overlay that reads through `t!`
+/// rather than being painted from a raw literal.
+fn hover_label(painter: &egui::Painter, dot_pos: egui::Pos2, axis: usize, mode: Mode) {
+    let text = match mode {
+        Mode::Centre => t!("align.hover.centre", axis = axis_name(axis)),
+        Mode::Min => t!(
+            "align.hover.min",
+            axis = axis_name(axis),
+            edge = edge_word(axis, mode)
+        ),
+        Mode::Max => t!(
+            "align.hover.max",
+            axis = axis_name(axis),
+            edge = edge_word(axis, mode)
+        ),
+        Mode::DistributeGaps | Mode::DistributeCentres => return,
+    };
+    let galley = painter.layout_no_wrap(
+        text,
+        egui::FontId::proportional(theme::TYPE_CAPTION),
+        theme::TEXT_STRONG,
+    );
+    let pad = egui::vec2(6.0, 3.0);
+    let size = galley.size() + 2.0 * pad;
+    let rect = egui::Rect::from_min_size(
+        dot_pos - egui::vec2(size.x / 2.0, size.y + 12.0),
+        size,
+    );
+    painter.rect_filled(rect, theme::RADIUS, theme::PANEL.gamma_multiply(0.95));
+    painter.galley(rect.min + pad, galley, theme::TEXT_STRONG);
 }
 
 /// A world box's 12 edges as screen lines, for the anchor's highlight.

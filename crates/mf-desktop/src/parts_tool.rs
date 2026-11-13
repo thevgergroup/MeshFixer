@@ -423,6 +423,52 @@ const NAME_HEIGHT: f32 = 18.0;
 /// regardless.
 const ACTIONS_HEIGHT: f32 = TILE_HEIGHT - THUMB - NAME_HEIGHT;
 
+/// The name's own sub-rect within a tile's clickable button rect (the
+/// picture-plus-name footprint the `Role::Button` node covers, `THUMB +
+/// NAME_HEIGHT` tall — the parts-grid layout test already measures it by
+/// accesskit): the bottom `NAME_HEIGHT` of it, full width, exactly as
+/// `cell_ui` computes `name_rect` from `tile_rect`.
+pub fn name_rect_in_tile_button(button_rect: egui::Rect) -> egui::Rect {
+    egui::Rect::from_min_size(
+        egui::pos2(button_rect.left(), button_rect.bottom() - NAME_HEIGHT),
+        egui::vec2(button_rect.width(), NAME_HEIGHT),
+    )
+}
+
+/// A tile's name, laid out as one line (ellipsised, never wrapped to a
+/// second line, if it doesn't fit `name_rect`'s width — the full name is
+/// still in the tooltip and the hover preview) and centred horizontally
+/// in `name_rect`: `(galley, the point to paint it at)`.
+///
+/// `LayoutJob::halign` centres a row on its own *natural* width (egui's
+/// `halign_and_justify_row`, since this job never justifies), not on
+/// `wrap.max_width`, so the galley's own origin (`x = 0`) already sits at
+/// the text's centre; painting it at `name_rect.left()` put that centre
+/// at the tile's *left* edge instead of its middle, clipping off the
+/// left half of anything but the shortest names (owner screenshot,
+/// "ox", "nder", "ere", "rus": fix round 2026-11-13). Painting at
+/// `name_rect.center().x` instead lines the text's own centre up with
+/// the tile's.
+pub fn name_galley(
+    painter: &egui::Painter,
+    name: &str,
+    name_rect: egui::Rect,
+) -> (std::sync::Arc<egui::Galley>, egui::Pos2) {
+    let mut job = egui::text::LayoutJob::simple_singleline(
+        name.to_owned(),
+        egui::FontId::proportional(theme::TYPE_CAPTION),
+        theme::TEXT,
+    );
+    job.wrap = egui::text::TextWrapping::truncate_at_width(name_rect.width());
+    job.halign = egui::Align::Center;
+    let galley = painter.layout_job(job);
+    let text_pos = egui::pos2(
+        name_rect.center().x - galley.size().x / 2.0,
+        name_rect.center().y - galley.size().y / 2.0,
+    );
+    (galley, text_pos)
+}
+
 /// One grid tile: its picture (once rendered, or just its place before
 /// then) on top, its name centred below on one line (ellipsised if it
 /// doesn't fit; the tooltip and hover preview have it whole); a click
@@ -482,22 +528,7 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
                     egui::pos2(tile_rect.left(), thumb_rect.bottom()),
                     egui::vec2(TILE_WIDTH, NAME_HEIGHT),
                 );
-                // One line, ellipsised if it doesn't fit (never wrapped to
-                // a second line, which `Painter::layout` would do): the
-                // full name is still in the tooltip above, and in the
-                // hover preview.
-                let mut job = egui::text::LayoutJob::simple_singleline(
-                    cell.name.clone(),
-                    egui::FontId::proportional(theme::TYPE_CAPTION),
-                    theme::TEXT,
-                );
-                job.wrap = egui::text::TextWrapping::truncate_at_width(TILE_WIDTH);
-                job.halign = egui::Align::Center;
-                let galley = ui.painter().layout_job(job);
-                let text_pos = egui::pos2(
-                    name_rect.left(),
-                    name_rect.center().y - galley.size().y / 2.0,
-                );
+                let (galley, text_pos) = name_galley(ui.painter(), &cell.name, name_rect);
                 ui.painter()
                     .with_clip_rect(name_rect)
                     .galley(text_pos, galley, theme::TEXT);

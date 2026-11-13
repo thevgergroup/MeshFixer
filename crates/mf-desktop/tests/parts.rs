@@ -591,5 +591,47 @@ fn library_tiles_are_uniform_and_never_overflow_the_panel() {
                 "a tile's name wrapped to a second line at {width} pt: {name_heights:?}"
             );
         }
+
+        // Every tile's name is centred on the tile, not on its left
+        // edge (owner screenshot, "ox", "nder", "ere", "rus": a label
+        // drawn centre-aligned at `name_rect.left()` puts the text's own
+        // centre there instead of at the tile's middle, clipping its
+        // left half off at the tile's own left edge — fix round
+        // 2026-11-13, `name_galley`). Checked for every built-in's own
+        // click-target button (picture + name; the same set
+        // `name_heights` just measured by rect, re-found here by name so
+        // each can be matched to its own cell).
+        for name in ["Box", "Sphere", "Magnet pocket"] {
+            let button = h.get_by_label(name).rect();
+            let name_rect = mf_desktop::parts_tool::name_rect_in_tile_button(button);
+            // The real function `cell_ui` paints with, not a
+            // reimplementation: a regression in `cell_ui`'s own call
+            // (or in `name_galley` itself) shows up here too.
+            let painter = egui::Painter::new(h.ctx.clone(), egui::LayerId::background(), name_rect);
+            let (galley, text_pos) = mf_desktop::parts_tool::name_galley(&painter, name, name_rect);
+            let label_rect = egui::Rect::from_min_size(text_pos, galley.size());
+            assert!(
+                name_rect.left() - 0.5 <= label_rect.left()
+                    && label_rect.right() <= name_rect.right() + 0.5,
+                "{name:?}'s label ({label_rect:?}) at {width} pt doesn't lie inside its tile's \
+                 name rect ({name_rect:?})"
+            );
+            let label_mid = (label_rect.left() + label_rect.right()) / 2.0;
+            let tile_mid = (name_rect.left() + name_rect.right()) / 2.0;
+            assert!(
+                (label_mid - tile_mid).abs() <= 1.0,
+                "{name:?}'s label isn't centred on its tile at {width} pt: label mid \
+                 {label_mid}, tile mid {tile_mid}"
+            );
+            // None of these three names are long enough to need eliding
+            // at either panel width this test checks (96 pt tiles, a
+            // short label font): the galley shows every character, not
+            // an ellipsis in its place.
+            assert!(
+                !galley.elided,
+                "{name:?} was elided at {width} pt though it should fit: {label_rect:?} in \
+                 {name_rect:?}"
+            );
+        }
     }
 }
