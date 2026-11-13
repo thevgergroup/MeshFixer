@@ -482,7 +482,10 @@ fn report(what: &str, frames: &[GatedFrame], app: &MeshFixerApp) {
 /// with a corner of a changed face (its smooth normal may differ).
 fn touched_chunk_bytes(prev: &Mesh, next: &Mesh) -> u64 {
     use mf_geometry::{CHUNK, FaceId};
-    assert!(next.moved_vertices(prev).is_empty(), "a fill moves no vertex");
+    assert!(
+        next.moved_vertices(prev).is_empty(),
+        "a fill moves no vertex"
+    );
     let chunks = next.face_chunk_count();
     let slots = next.face_slots().max(prev.face_slots()) as usize;
     let mut corners = std::collections::HashSet::new();
