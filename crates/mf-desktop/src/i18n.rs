@@ -767,6 +767,16 @@ static CATALOGUE: &[(&str, &str)] = &[
         "Rebuilds the surface as one closed solid, closing holes and removing overlaps.",
     ),
     ("split.apply", "Cut"),
+    ("split.bound", "Limit to area"),
+    ("split.bound.diameter", "Diameter ({unit})"),
+    ("split.bound.disc", "Disc"),
+    ("split.bound.height", "Height ({unit})"),
+    ("split.bound.rect", "Rectangle"),
+    ("split.bound.width", "Width ({unit})"),
+    (
+        "split.bound_help",
+        "Only material inside the shown area is cut. A region crossing its edge is refused.",
+    ),
     ("split.box.centre", "Centre on selection"),
     (
         "split.box.fits",
@@ -832,6 +842,16 @@ static CATALOGUE: &[(&str, &str)] = &[
     (
         "split.refuse_open",
         "The model has holes; cutting needs a closed model. Fill the holes in Repair, then split.",
+    ),
+    ("split.region.area", "{area} {unit}²"),
+    ("split.regions", "Cross-section regions"),
+    (
+        "split.regions_help",
+        "Each separate piece the plane would cut. Untick one to leave it whole.",
+    ),
+    (
+        "split.regions_multi_object",
+        "Picking regions needs a single selected object.",
     ),
     (
         "split.result",
