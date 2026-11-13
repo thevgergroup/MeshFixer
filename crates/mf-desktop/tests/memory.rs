@@ -153,6 +153,9 @@ fn realistic_session_rss_is_reported() {
     let mut samples = vec![sample("open", h.state())];
 
     let labels = h.state().session.history_labels().len();
+    // Repair holds the whole-object repairs (ui-plan.md §7).
+    h.get_by_label("Repair").click();
+    h.run_steps(2);
     h.get_by_label("Fill all holes").click();
     h.run_steps(2);
     h.get_by_label("Apply").click();
