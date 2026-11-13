@@ -131,7 +131,12 @@ pub fn axis_tilt(local_to_world: DMat3, local_z: DVec3) -> f64 {
 /// cross-section at all — there's no "up" within the hole's own circle,
 /// which is exactly the case [`axis_tilt`] reports as 90°, where the
 /// hole prints fine round and the point's direction is moot).
-pub fn local_up(local_to_world: DMat3, local_x: DVec3, local_y: DVec3, local_z: DVec3) -> Option<[f64; 2]> {
+pub fn local_up(
+    local_to_world: DMat3,
+    local_x: DVec3,
+    local_y: DVec3,
+    local_z: DVec3,
+) -> Option<[f64; 2]> {
     let world_z = (local_to_world * local_z).normalize_or(DVec3::Z);
     let world_up = (DVec3::Z - world_z * world_z.dot(DVec3::Z)).try_normalize()?;
     let to_local = local_to_world.inverse() * world_up;
@@ -171,13 +176,13 @@ pub fn hole_outline(
         }
     };
     let right = [up[1], -up[0]]; // 90° clockwise from `up`: the local "+x".
-    let to_local = |p: [f64; 2]| [p[0] * right[0] + p[1] * right[1], p[0] * up[0] + p[1] * up[1]];
-    let from_local = |x: f64, y: f64| {
+    let to_local = |p: [f64; 2]| {
         [
-            right[0] * x + up[0] * y,
-            right[1] * x + up[1] * y,
+            p[0] * right[0] + p[1] * right[1],
+            p[0] * up[0] + p[1] * up[1],
         ]
     };
+    let from_local = |x: f64, y: f64| [right[0] * x + up[0] * y, right[1] * x + up[1] * y];
     let theta = overhang_deg.clamp(1.0, 89.0).to_radians();
     let (sin_t, cos_t) = theta.sin_cos();
     // The tangent points, in local (right, up) coordinates.
@@ -275,8 +280,14 @@ mod tests {
     fn forty_five_degrees_is_r_times_sqrt_2() {
         let r = 5.0;
         let outline = hole_outline(HoleProfile::Teardrop, r, [0.0, 1.0], 45.0, TOL);
-        let apex_y = outline.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
-        assert!((apex_y - r * std::f64::consts::SQRT_2).abs() < 1e-6, "{apex_y}");
+        let apex_y = outline
+            .iter()
+            .map(|p| p[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (apex_y - r * std::f64::consts::SQRT_2).abs() < 1e-6,
+            "{apex_y}"
+        );
     }
 
     #[test]
@@ -284,7 +295,10 @@ mod tests {
         let r = 6.0;
         for theta in [10.0, 45.0, 80.0] {
             let outline = hole_outline(HoleProfile::FlatTop, r, [0.0, 1.0], theta, TOL);
-            let top = outline.iter().map(|p| p[1]).fold(f64::NEG_INFINITY, f64::max);
+            let top = outline
+                .iter()
+                .map(|p| p[1])
+                .fold(f64::NEG_INFINITY, f64::max);
             assert!((top - r).abs() < 1e-6, "theta={theta}: top {top}");
         }
     }
@@ -328,12 +342,12 @@ mod tests {
         // outline's furthest point, in the +x direction.
         let r = 3.0;
         let outline = hole_outline(HoleProfile::Teardrop, r, [1.0, 0.0], 45.0, TOL);
-        let apex = outline
-            .iter()
-            .max_by(|a, b| a[0].total_cmp(&b[0]))
-            .unwrap();
+        let apex = outline.iter().max_by(|a, b| a[0].total_cmp(&b[0])).unwrap();
         assert!(apex[0] > r, "apex.x = {}", apex[0]);
-        assert!(apex[1].abs() < 1e-6, "apex should be on the x axis: {apex:?}");
+        assert!(
+            apex[1].abs() < 1e-6,
+            "apex should be on the x axis: {apex:?}"
+        );
     }
 
     /// The outline is a simple, convex, counter-clockwise polygon for
@@ -351,7 +365,10 @@ mod tests {
                     for i in 0..n {
                         let (p, q, s) = (o[i], o[(i + 1) % n], o[(i + 2) % n]);
                         let cross = (q[0] - p[0]) * (s[1] - q[1]) - (q[1] - p[1]) * (s[0] - q[0]);
-                        assert!(cross > -1e-9, "{profile:?} up {up:?} θ {theta}: turn {i} is {cross}");
+                        assert!(
+                            cross > -1e-9,
+                            "{profile:?} up {up:?} θ {theta}: turn {i} is {cross}"
+                        );
                     }
                     let far = o
                         .iter()
@@ -369,7 +386,11 @@ mod tests {
     fn auto_picks_teardrop_within_45_degrees_of_horizontal_and_round_otherwise() {
         assert_eq!(HoleProfile::auto(0.0), HoleProfile::Teardrop, "horizontal");
         assert_eq!(HoleProfile::auto(44.9), HoleProfile::Teardrop);
-        assert_eq!(HoleProfile::auto(45.0), HoleProfile::Teardrop, "the boundary itself");
+        assert_eq!(
+            HoleProfile::auto(45.0),
+            HoleProfile::Teardrop,
+            "the boundary itself"
+        );
         assert_eq!(HoleProfile::auto(45.1), HoleProfile::Round);
         assert_eq!(HoleProfile::auto(90.0), HoleProfile::Round, "vertical");
     }

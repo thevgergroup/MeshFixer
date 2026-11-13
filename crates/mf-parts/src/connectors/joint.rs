@@ -26,10 +26,14 @@
 use std::sync::OnceLock;
 
 use mf_geometry::Mesh;
-use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
 
-use crate::connector::{Connector, ConnectorError, ConnectorPart, ConnectorParts, JoinKind, Side};
+use crate::connector::{ConnectorError, Side};
+use crate::generator::{
+    Anchor, FitProbe, Fix, GenCheck, GenContext, Generator, Handles, ParamPatch, PlacementHint,
+    ShapePart,
+};
+use crate::shape::ShapeRole;
 
 /// The flank angle of a dovetail, from the cut's normal (as the Split
 /// alignment dovetail's, D12).
@@ -331,13 +335,8 @@ fn sizes(params: &Params, with_allowance: bool) -> Result<Sizes, ConnectorError>
     Ok(s)
 }
 
-fn part(role: &'static str, mesh: Mesh, side: Side, join: JoinKind) -> ConnectorPart {
-    ConnectorPart {
-        role,
-        mesh,
-        side,
-        join,
-    }
+fn part(name: &'static str, mesh: Mesh, side: Side, role: ShapeRole) -> ShapePart {
+    ShapePart::new(name, role, side, mesh)
 }
 
 /// The dowel's length: `dowel_length`, or (0) the two depths plus the
@@ -371,7 +370,7 @@ fn shape_of(params: &Params) -> Shape {
     Shape::from_code(shape, sides)
 }
 
-fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError> {
+fn generate(id: &str, params: &Params) -> Result<Vec<ShapePart>, ConnectorError> {
     match id {
         "joint.dowel" => {
             let s = sizes(params, true)?;
@@ -389,32 +388,30 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                 ));
             }
             let mid = (s.depth_other - s.depth_on) / 2.0;
-            Ok(ConnectorParts {
-                parts: vec![
-                    part(
-                        "hole",
-                        prism_z(&hole, a - s.depth_on, a + over),
-                        Side::A,
-                        JoinKind::Subtract,
+            Ok(vec![
+                part(
+                    "hole",
+                    prism_z(&hole, a - s.depth_on, a + over),
+                    Side::A,
+                    ShapeRole::Hole,
+                ),
+                part(
+                    "counterpart hole",
+                    prism_z(&hole, b - over, b + s.depth_other),
+                    Side::B,
+                    ShapeRole::Hole,
+                ),
+                part(
+                    "dowel",
+                    prism_z(
+                        &shape_pin_profile(shape, s.d, s.clearance, tol),
+                        mid - len / 2.0,
+                        mid + len / 2.0,
                     ),
-                    part(
-                        "counterpart hole",
-                        prism_z(&hole, b - over, b + s.depth_other),
-                        Side::B,
-                        JoinKind::Subtract,
-                    ),
-                    part(
-                        "dowel",
-                        prism_z(
-                            &shape_pin_profile(shape, s.d, s.clearance, tol),
-                            mid - len / 2.0,
-                            mid + len / 2.0,
-                        ),
-                        Side::Neither,
-                        JoinKind::Separate,
-                    ),
-                ],
-            })
+                    Side::Neither,
+                    ShapeRole::Solid,
+                ),
+            ])
         }
         "joint.peg" => {
             let s = sizes(params, true)?;
@@ -429,30 +426,28 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
                      deeper.",
                 ));
             }
-            Ok(ConnectorParts {
-                parts: vec![
-                    part(
-                        "peg",
-                        prism_z(
-                            &shape_pin_profile(shape, s.d, s.clearance, tol),
-                            a - s.depth_on,
-                            b + stick,
-                        ),
-                        Side::A,
-                        JoinKind::Union,
+            Ok(vec![
+                part(
+                    "peg",
+                    prism_z(
+                        &shape_pin_profile(shape, s.d, s.clearance, tol),
+                        a - s.depth_on,
+                        b + stick,
                     ),
-                    part(
-                        "counterpart hole",
-                        prism_z(
-                            &hole_outline_for(params, shape, s.d, tol),
-                            b - s.d,
-                            b + s.depth_other,
-                        ),
-                        Side::B,
-                        JoinKind::Subtract,
+                    Side::A,
+                    ShapeRole::Solid,
+                ),
+                part(
+                    "counterpart hole",
+                    prism_z(
+                        &hole_outline_for(params, shape, s.d, tol),
+                        b - s.d,
+                        b + s.depth_other,
                     ),
-                ],
-            })
+                    Side::B,
+                    ShapeRole::Hole,
+                ),
+            ])
         }
         "joint.dovetail" => {
             let s = sizes(params, true)?;
@@ -480,70 +475,64 @@ fn generate(id: &str, params: &Params) -> Result<ConnectorParts, ConnectorError>
             let groove = dovetail_section(s.d, -s.d / 4.0, s.depth_other, b);
             let root = (b - a + s.depth_on).min(0.25 * (s.d - s.clearance) / t);
             let tail = dovetail_section(s.d - s.clearance, -root, stick, b);
-            Ok(ConnectorParts {
-                parts: vec![
-                    part(
-                        "tail",
-                        prism_x(&tail, -length / 2.0, length / 2.0),
-                        Side::A,
-                        JoinKind::Union,
-                    ),
-                    part(
-                        "counterpart groove",
-                        prism_x(&groove, -ga, gb),
-                        Side::B,
-                        JoinKind::Subtract,
-                    ),
-                ],
-            })
+            Ok(vec![
+                part(
+                    "tail",
+                    prism_x(&tail, -length / 2.0, length / 2.0),
+                    Side::A,
+                    ShapeRole::Solid,
+                ),
+                part(
+                    "counterpart groove",
+                    prism_x(&groove, -ga, gb),
+                    Side::B,
+                    ShapeRole::Hole,
+                ),
+            ])
         }
         "joint.magnet" => {
             let s = sizes(params, false)?;
             let tol = chord_tol(s.d, s.clearance);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
             let pocket = round_hole(params, (s.d + s.clearance) / 2.0, tol);
-            Ok(ConnectorParts {
-                parts: vec![
-                    part(
-                        "pocket",
-                        prism_z(&pocket, a - s.depth_on, a + s.d),
-                        Side::A,
-                        JoinKind::Subtract,
-                    ),
-                    part(
-                        "counterpart pocket",
-                        prism_z(&pocket, b - s.d, b + s.depth_other),
-                        Side::B,
-                        JoinKind::Subtract,
-                    ),
-                ],
-            })
+            Ok(vec![
+                part(
+                    "pocket",
+                    prism_z(&pocket, a - s.depth_on, a + s.d),
+                    Side::A,
+                    ShapeRole::Hole,
+                ),
+                part(
+                    "counterpart pocket",
+                    prism_z(&pocket, b - s.d, b + s.depth_other),
+                    Side::B,
+                    ShapeRole::Hole,
+                ),
+            ])
         }
         "joint.insert" => {
             let s = sizes(params, false)?;
             let screw = float(params, "screw_diameter")?;
             let tol = chord_tol(s.d, s.clearance);
             let (a, b) = (-s.gap / 2.0, s.gap / 2.0);
-            Ok(ConnectorParts {
-                parts: vec![
-                    part(
-                        "insert pocket",
-                        prism_z(&round_hole(params, s.d / 2.0, tol), a - s.depth_on, a + s.d),
-                        Side::A,
-                        JoinKind::Subtract,
+            Ok(vec![
+                part(
+                    "insert pocket",
+                    prism_z(&round_hole(params, s.d / 2.0, tol), a - s.depth_on, a + s.d),
+                    Side::A,
+                    ShapeRole::Hole,
+                ),
+                part(
+                    "counterpart screw hole",
+                    prism_z(
+                        &round_hole(params, (screw + s.clearance) / 2.0, tol),
+                        b - s.d,
+                        b + s.depth_other,
                     ),
-                    part(
-                        "counterpart screw hole",
-                        prism_z(
-                            &round_hole(params, (screw + s.clearance) / 2.0, tol),
-                            b - s.d,
-                            b + s.depth_other,
-                        ),
-                        Side::B,
-                        JoinKind::Subtract,
-                    ),
-                ],
-            })
+                    Side::B,
+                    ShapeRole::Hole,
+                ),
+            ])
         }
         _ => Err(refuse(
             "unknown_connector",
@@ -584,7 +573,7 @@ pub fn footprint(id: &str, params: &Params) -> Result<Vec<[f64; 2]>, ConnectorEr
 /// mouth would touch there whatever the clearance). `None` for a
 /// connector with no mating part of its own (magnet, insert: their fit
 /// is against a bought part).
-pub fn fit_probe(id: &str, params: &Params) -> Result<Option<(Mesh, Mesh)>, ConnectorError> {
+pub fn fit_probe(id: &str, params: &Params) -> Result<Option<FitProbe>, ConnectorError> {
     let parts = match id {
         "joint.dowel" | "joint.peg" | "joint.dovetail" => generate(id, params)?,
         _ => return Ok(None),
@@ -593,9 +582,8 @@ pub fn fit_probe(id: &str, params: &Params) -> Result<Option<(Mesh, Mesh)>, Conn
     let b = s.gap / 2.0;
     let margin = s.clearance.abs().max(0.1);
     let hole = parts
-        .parts
         .iter()
-        .find(|p| p.side == Side::B && p.join == JoinKind::Subtract)
+        .find(|p| p.attach_to == Side::B && p.role == ShapeRole::Hole)
         .map(|p| p.mesh.clone());
     let Some(hole) = hole else { return Ok(None) };
     // Inside side B's hole: from its mouth to short of its floor.
@@ -619,16 +607,153 @@ pub fn fit_probe(id: &str, params: &Params) -> Result<Option<(Mesh, Mesh)>, Conn
             z1,
         ),
     };
-    Ok(Some((hole, pin)))
+    let label = match id {
+        "joint.dowel" => "Dowel to hole",
+        "joint.peg" => "Peg to hole",
+        _ => "Tail to groove",
+    };
+    Ok(Some(FitProbe {
+        label: label.to_owned(),
+        hole,
+        pin,
+    }))
+}
+
+/// A joint connector's own checks: a dowel no longer than its two holes;
+/// a stopped dovetail end that falls short of the cut face's edge (it
+/// can't be slid in or out from there, D23), measured through `ctx`'s
+/// targets.
+fn checks(id: &str, params: &Params, ctx: &GenContext) -> Vec<GenCheck> {
+    let mut out = Vec::new();
+    match id {
+        "joint.dowel" => {
+            if let (Ok(len), Ok(room), Ok(allowance)) = (
+                dowel_length(params),
+                dowel_room(params),
+                float(params, "length_allowance"),
+            ) && len > room - 1e-9
+            {
+                out.push(GenCheck {
+                    id: "dowel_length".into(),
+                    message: format!(
+                        "The dowel ({len:.1} mm) is longer than its two holes together \
+                         ({room:.1} mm), so the pieces won't close."
+                    ),
+                    fix: Some(Fix {
+                        label: "Shorten the dowel".into(),
+                        patch: ParamPatch::float("dowel_length", room - allowance.max(0.1)),
+                    }),
+                });
+            }
+        }
+        "joint.dovetail" => {
+            let Ok(reach) = dovetail_reach(params) else {
+                return out;
+            };
+            // The groove is cut into the other piece (side B): its cut
+            // face is the boundary a stopped end must reach.
+            for (open, len, dir, end, key) in [
+                (reach.open_a, reach.a, [-1.0, 0.0], "a", "groove_a"),
+                (reach.open_b, reach.b, [1.0, 0.0], "b", "groove_b"),
+            ] {
+                if open {
+                    continue;
+                }
+                let Some(to_edge) = ctx.boundary_along(Side::B, dir) else {
+                    continue;
+                };
+                if len < to_edge - 1e-6 {
+                    out.push(GenCheck {
+                        id: format!("dovetail_stopped.{end}"),
+                        message: "Can't slide together: extend it to the edge".to_owned(),
+                        // A touch past the edge, never short of it however
+                        // the ray's rounding falls, so it can't re-fire.
+                        fix: Some(Fix {
+                            label: "Extend to the edge".into(),
+                            patch: ParamPatch::float(key, to_edge + 0.5),
+                        }),
+                    });
+                }
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// How a joint connector holds the joint against turning (D22).
+fn anchor(id: &str, params: &Params) -> Anchor {
+    match id {
+        "joint.dovetail" | "joint.insert" => Anchor::Resists,
+        "joint.dowel" | "joint.peg" => match shape_of(params) {
+            Shape::Round => Anchor::RoundPin {
+                fix: Fix {
+                    label: "Make square".into(),
+                    patch: ParamPatch::float("shape", Shape::Square.code()),
+                },
+            },
+            _ => Anchor::Resists,
+        },
+        _ => Anchor::None,
+    }
+}
+
+/// A dovetail dragged as a line (D23): its groove reaches from the line's
+/// centre to the other piece's cut face on each side, through (recorded
+/// well past the edge) when the drag reached it, stopped at exactly the
+/// dragged length when it fell short on purpose.
+fn line_params(half: f64, ctx: &GenContext) -> ParamPatch {
+    const OVER_THE_EDGE: f64 = 1000.0;
+    const SLIVER: f64 = 10.0;
+    let mut patch = ParamPatch::default();
+    for (dir, reach_key, open_key) in [
+        ([-1.0, 0.0], "groove_a", "open_a"),
+        ([1.0, 0.0], "groove_b", "open_b"),
+    ] {
+        let (reach, open) = match ctx.boundary_along(Side::B, dir) {
+            Some(edge) if half >= edge - 1e-6 => (edge + OVER_THE_EDGE, true),
+            _ => (half.max(SLIVER), false),
+        };
+        patch.set.insert(
+            reach_key.into(),
+            mf_spec::ParamValue::Float((reach * 10.0).round() / 10.0),
+        );
+        patch.set.insert(
+            open_key.into(),
+            mf_spec::ParamValue::Float(if open { 1.0 } else { 0.0 }),
+        );
+    }
+    patch
+}
+
+/// A placement saved before `groove_a`/`groove_b` existed (D23) has only
+/// the old single symmetric `groove_length`: split in two, before
+/// validation fills `groove_a`/`groove_b` with their own (unrelated)
+/// defaults, so an old save keeps its old shape.
+fn upgrade_dovetail(raw: &mut std::collections::BTreeMap<String, String>) {
+    if raw.contains_key("groove_a") || raw.contains_key("groove_b") {
+        return;
+    }
+    let half = raw
+        .get("groove_length")
+        .and_then(|v| v.parse::<f64>().ok())
+        .unwrap_or(200.0)
+        / 2.0;
+    raw.insert("groove_a".into(), half.to_string());
+    raw.insert("groove_b".into(), half.to_string());
 }
 
 macro_rules! joint_connector {
-    ($name:ident, $id:literal, $file:literal) => {
+    ($name:ident, $id:literal, $label:literal, $file:literal, $hint:expr, $size:literal) => {
         pub struct $name;
 
-        impl Connector for $name {
+        impl Generator for $name {
             fn id(&self) -> &'static str {
                 $id
+            }
+
+            fn name(&self) -> &'static str {
+                $label
             }
 
             fn version(&self) -> u32 {
@@ -649,16 +774,99 @@ macro_rules! joint_connector {
             fn generate(
                 &self,
                 params: &Params,
-                _ctx: &RunContext,
-            ) -> Result<ConnectorParts, ConnectorError> {
+                _ctx: &GenContext,
+            ) -> Result<Vec<ShapePart>, ConnectorError> {
                 generate($id, params)
+            }
+
+            fn placement_hint(&self) -> PlacementHint {
+                $hint
+            }
+
+            fn deprecated(&self) -> bool {
+                // The dovetail moved to `dovetail.slide` (owner
+                // 2026-11-12); this one stays for old joints and logs.
+                $id == "joint.dovetail"
+            }
+
+            fn checks(&self, params: &Params, ctx: &GenContext) -> Vec<GenCheck> {
+                checks($id, params, ctx)
+            }
+
+            fn fit_probe(&self, params: &Params) -> Result<Option<FitProbe>, ConnectorError> {
+                fit_probe($id, params)
+            }
+
+            fn anchor(&self, params: &Params) -> Anchor {
+                anchor($id, params)
+            }
+
+            fn checks_breakout(&self) -> bool {
+                // A groove runs out of its piece on purpose.
+                $id != "joint.dovetail"
+            }
+
+            fn handles(&self) -> Handles {
+                Handles {
+                    size: Some($size),
+                    depth: Some("depth_on"),
+                }
+            }
+
+            fn line_params(&self, half: f64, ctx: &GenContext) -> ParamPatch {
+                if $id == "joint.dovetail" {
+                    line_params(half, ctx)
+                } else {
+                    ParamPatch::default()
+                }
+            }
+
+            fn upgrade_params(&self, raw: &mut std::collections::BTreeMap<String, String>) {
+                if $id == "joint.dovetail" {
+                    upgrade_dovetail(raw);
+                }
             }
         }
     };
 }
 
-joint_connector!(Dowel, "joint.dowel", "joint.dowel.yaml");
-joint_connector!(Peg, "joint.peg", "joint.peg.yaml");
-joint_connector!(Dovetail, "joint.dovetail", "joint.dovetail.yaml");
-joint_connector!(Magnet, "joint.magnet", "joint.magnet.yaml");
-joint_connector!(Insert, "joint.insert", "joint.insert.yaml");
+joint_connector!(
+    Dowel,
+    "joint.dowel",
+    "Dowel",
+    "joint.dowel.yaml",
+    PlacementHint::Point,
+    "diameter"
+);
+joint_connector!(
+    Peg,
+    "joint.peg",
+    "Peg",
+    "joint.peg.yaml",
+    PlacementHint::Point,
+    "diameter"
+);
+joint_connector!(
+    Dovetail,
+    "joint.dovetail",
+    "Dovetail",
+    "joint.dovetail.yaml",
+    PlacementHint::DragLine,
+    "length"
+);
+joint_connector!(
+    Magnet,
+    "joint.magnet",
+    "Magnet",
+    "joint.magnet.yaml",
+    PlacementHint::Point,
+    "diameter"
+);
+joint_connector!(
+    Insert,
+    "joint.insert",
+    "Insert",
+    "joint.insert.yaml",
+    PlacementHint::Point,
+    "diameter"
+);

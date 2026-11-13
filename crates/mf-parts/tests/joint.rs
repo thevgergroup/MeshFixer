@@ -10,10 +10,10 @@
 use std::collections::BTreeMap;
 
 use mf_parts::connectors::joint::{Dovetail, Dowel, Peg, Shape, dovetail_reach, footprint};
-use mf_parts::{Connector, ConnectorParts};
+use mf_parts::{GenContext, Generator, ShapePart};
 use mf_runtime::RunContext;
 
-fn params(connector: &dyn Connector, extra: &[(&str, &str)]) -> mf_spec::Params {
+fn params(connector: &dyn Generator, extra: &[(&str, &str)]) -> mf_spec::Params {
     let spec = connector.spec();
     let mut raw: BTreeMap<String, String> = BTreeMap::new();
     for (k, v) in extra {
@@ -22,17 +22,19 @@ fn params(connector: &dyn Connector, extra: &[(&str, &str)]) -> mf_spec::Params 
     spec.validate(&raw).unwrap()
 }
 
-fn generate(connector: &dyn Connector, extra: &[(&str, &str)]) -> ConnectorParts {
+fn generate(connector: &dyn Generator, extra: &[(&str, &str)]) -> Vec<ShapePart> {
     connector
-        .generate(&params(connector, extra), &RunContext::none())
+        .generate(
+            &params(connector, extra),
+            &GenContext::new(&RunContext::none()),
+        )
         .unwrap()
 }
 
-fn part<'a>(parts: &'a ConnectorParts, role: &str) -> &'a mf_geometry::Mesh {
+fn part<'a>(parts: &'a [ShapePart], role: &str) -> &'a mf_geometry::Mesh {
     &parts
-        .parts
         .iter()
-        .find(|p| p.role == role)
+        .find(|p| p.name == role)
         .unwrap_or_else(|| panic!("no part with role {role}"))
         .mesh
 }
@@ -74,7 +76,10 @@ fn a_round_dowel_defaults_unchanged_by_the_shape_param() {
     // Shape defaults to Round (0): the hole is exactly `circle` as it
     // always was, so an existing save with no shape param at all still
     // generates the same geometry (replay stability).
-    let round = generate(&Dowel, &[("diameter", "6"), ("depth_on", "5"), ("depth_other", "5")]);
+    let round = generate(
+        &Dowel,
+        &[("diameter", "6"), ("depth_on", "5"), ("depth_other", "5")],
+    );
     let square = generate(
         &Dowel,
         &[
@@ -210,13 +215,17 @@ fn dovetail_reach_defaults_to_the_legacy_groove_length_when_groove_a_b_are_absen
     // declared field) so this is a test of `dovetail_reach` itself.
     use mf_spec::{ParamValue, Params};
     use std::collections::BTreeMap;
-    let p = Params(BTreeMap::from([
-        ("groove_length".to_owned(), ParamValue::Float(80.0)),
-    ]));
+    let p = Params(BTreeMap::from([(
+        "groove_length".to_owned(),
+        ParamValue::Float(80.0),
+    )]));
     let reach = dovetail_reach(&p).unwrap();
     assert_eq!(reach.a, 40.0);
     assert_eq!(reach.b, 40.0);
-    assert!(reach.open_a && reach.open_b, "legacy placements slide both ways");
+    assert!(
+        reach.open_a && reach.open_b,
+        "legacy placements slide both ways"
+    );
 }
 
 #[test]

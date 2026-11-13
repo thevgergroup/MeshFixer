@@ -720,8 +720,10 @@ pub(crate) fn refresh_checks(app: &mut MeshFixerApp) {
                 mf_operations::check_placement(&joint.frame, [&p[0], &p[1]], pl, &s, &ctx)
                     .unwrap_or_else(|e| {
                         vec![Check {
-                            kind: mf_operations::CheckKind::OffCap,
+                            id: mf_operations::check_id::OFF_CAP.to_owned(),
                             message: e.to_string(),
+                            fix_label: None,
+                            patch: None,
                         }]
                     })
             })

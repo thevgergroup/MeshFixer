@@ -23,7 +23,7 @@ use mf_desktop::{MeshFixerApp, Settings};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::threemf::{ModelObject, Unit};
 use mf_io::{Format, ImportedModel, SourceInfo, SourcePrecision};
-use mf_operations::{CheckKind, JointSide};
+use mf_operations::{JointSide, check_id};
 
 const WINDOW: (f32, f32) = (1440.0, 1000.0);
 
@@ -375,9 +375,7 @@ fn place_drag_check_and_apply_on_the_joint() {
     settle(&mut h);
     let checks = h.state().split_flow.checks().unwrap();
     assert!(
-        checks[0]
-            .iter()
-            .any(|c| c.kind == CheckKind::Breakout(JointSide::A)),
+        checks[0].iter().any(|c| c.id == check_id::BREAKOUT_A),
         "{checks:?}"
     );
     still(&mut h, "breakout");
@@ -636,7 +634,7 @@ fn a_warning_row_expands_on_click_to_show_its_fix() {
     assert!(
         h.state().split_flow.checks().unwrap()[0]
             .iter()
-            .any(|c| c.kind == CheckKind::Breakout(JointSide::A)),
+            .any(|c| c.id == check_id::BREAKOUT_A),
         "a breakout warning is live"
     );
 
@@ -750,8 +748,12 @@ fn the_kind_picker_no_longer_offers_dovetail_but_the_shortcut_button_does() {
     settle(&mut h);
     let names = objects(&h);
     assert!(
-        names.iter().any(|n| n.contains("Dovetail") && n.contains("tail"))
-            && names.iter().any(|n| n.contains("Dovetail") && n.contains("groove")),
+        names
+            .iter()
+            .any(|n| n.contains("Dovetail") && n.contains("tail"))
+            && names
+                .iter()
+                .any(|n| n.contains("Dovetail") && n.contains("groove")),
         "the shortcut placed a linked tail/groove pair: {names:?}"
     );
     still(&mut h, "dovetail-shortcut");
@@ -779,18 +781,20 @@ fn a_legacy_dovetail_placement_still_edits_its_reach_and_open_state() {
         let a = h.state_mut();
         let j = a.split_flow.joint.unwrap_or(0);
         let on = a.split_flow.joints[j].transparent.other();
-        a.split_flow.joints[j].placements.push(mf_operations::Placement {
-            connector: "joint.dovetail".to_owned(),
-            on,
-            at: [0.0, 0.0],
-            angle: 0.0,
-            params: std::collections::BTreeMap::from([
-                ("groove_a".to_owned(), 20.0),
-                ("groove_b".to_owned(), 20.0),
-                ("open_a".to_owned(), 1.0),
-                ("open_b".to_owned(), 1.0),
-            ]),
-        });
+        a.split_flow.joints[j]
+            .placements
+            .push(mf_operations::Placement {
+                connector: "joint.dovetail".to_owned(),
+                on,
+                at: [0.0, 0.0],
+                angle: 0.0,
+                params: std::collections::BTreeMap::from([
+                    ("groove_a".to_owned(), 20.0),
+                    ("groove_b".to_owned(), 20.0),
+                    ("open_a".to_owned(), 1.0),
+                    ("open_b".to_owned(), 1.0),
+                ]),
+            });
         a.split_flow.selected = Some(0);
     }
     settle(&mut h);

@@ -169,70 +169,84 @@ fn find_connector(id: &str) -> Option<&'static dyn Generator> {
 }
 
 /// The hole profile choices, by the code a [`Placement`] records them as
-/// (`hole_profile`: 0 auto, 1 round, 2 teardrop, 3 flat-top).
+/// (`hole_profile`: 0 auto, 1 round, 2 teardrop, 3 flat-top): its spec's
+/// own choice order, as every choice param a placement records.
 pub const HOLE_PROFILES: [&str; 4] = ["auto", "round", "teardrop", "flat_top"];
 
-/// The placement's full, validated connector parameters (its spec's
-/// defaults for anything not set), with the joint's gap (`gap_mm`).
-pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
-    let connector = find_connector(&p.connector)
+/// The placement's generator, if it's one placed on a cut face.
+pub fn placement_generator(p: &Placement) -> Result<&'static dyn Generator, OpError> {
+    find_connector(&p.connector)
         .filter(|g| g.placement_hint().on_cut())
         .ok_or_else(|| {
             failed(
                 "unknown_connector",
                 format!("'{}' isn't a connector that goes across a cut", p.connector),
             )
-        })?;
-    let mut raw: BTreeMap<String, String> = p
-        .params
-        .iter()
-        .filter(|(k, _)| k.as_str() != "gap")
-        .map(|(k, v)| (k.clone(), v.to_string()))
-        .collect();
+        })
+}
+
+/// The placement's full, validated connector parameters (its spec's
+/// defaults for anything not set), with the joint's gap (`gap_mm`). A
+/// placement's params are numbers: a choice param is recorded as its
+/// index in the spec's values and handed to the generator as the word;
+/// a placement recorded by an older schema is upgraded first
+/// (`Generator::upgrade_params`).
+pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
+    let connector = placement_generator(p)?;
+    let spec = connector.spec();
+    let mut raw: BTreeMap<String, String> = BTreeMap::new();
+    for (k, v) in &p.params {
+        if k == "gap" {
+            continue;
+        }
+        let text = match spec.parameter(k).map(|ps| &ps.kind) {
+            Some(mf_spec::ParamKind::Choice { values, .. }) => {
+                let i = v.round().clamp(0.0, (values.len().max(1) - 1) as f64) as usize;
+                values.get(i).cloned().unwrap_or_default()
+            }
+            Some(_) => v.to_string(),
+            // Not in the spec: an old field, for `upgrade_params`.
+            None => v.to_string(),
+        };
+        raw.insert(k.clone(), text);
+    }
     raw.insert("gap".into(), gap_mm.max(0.0).to_string());
-    // A placement's params are numbers: its hole profile is recorded as a
-    // code (fix item 9; absent means auto) and handed to the connector
-    // as the word its spec takes.
-    raw.remove("hole_profile");
-    if let Some(code) = p.params.get("hole_profile")
-        && connector.spec().parameter("hole_profile").is_some()
-    {
-        raw.insert(
-            "hole_profile".into(),
-            HOLE_PROFILES
-                .get(code.round().clamp(0.0, 3.0) as usize)
-                .copied()
-                .unwrap_or("auto")
-                .into(),
-        );
-    }
-    if p.connector == "joint.dovetail"
-        && !raw.contains_key("groove_a")
-        && !raw.contains_key("groove_b")
-    {
-        // A placement saved before `groove_a`/`groove_b` existed (D23)
-        // has only the old single symmetric `groove_length`: split it
-        // in two here, before validation fills `groove_a`/`groove_b`
-        // with their own (unrelated) spec defaults, so an old save
-        // keeps its old shape instead of silently becoming two 100 mm
-        // reaches. `length_allowance`'s own validated default (0.4 mm)
-        // is used by `generate` either way; the half-length only needs
-        // `groove_length`'s own default (200 mm) when that, too, was
-        // never set.
-        let half = raw
-            .get("groove_length")
-            .and_then(|v| v.parse::<f64>().ok())
-            .unwrap_or(200.0)
-            / 2.0;
-        raw.insert("groove_a".into(), half.to_string());
-        raw.insert("groove_b".into(), half.to_string());
-    }
-    connector.spec().validate(&raw).map_err(|e| {
+    connector.upgrade_params(&mut raw);
+    raw.retain(|k, _| spec.parameter(k).is_some());
+    spec.validate(&raw).map_err(|e| {
         failed(
             "invalid_connector_params",
             format!("{}'s parameters: {e}", p.connector),
         )
     })
+}
+
+/// `p` with `patch` applied to its recorded params (a choice recorded as
+/// its index in the spec's values, like every placement param).
+pub fn patched(p: &Placement, patch: &mf_parts::ParamPatch) -> Placement {
+    let spec = find_connector(&p.connector).map(|g| g.spec());
+    let mut q = p.clone();
+    for (k, v) in &patch.set {
+        let n = match v {
+            mf_spec::ParamValue::Float(f) => Some(*f),
+            mf_spec::ParamValue::Int(i) => Some(*i as f64),
+            mf_spec::ParamValue::Bool(b) => Some(if *b { 1.0 } else { 0.0 }),
+            mf_spec::ParamValue::Text(t) => {
+                spec.and_then(|s| s.parameter(k))
+                    .and_then(|ps| match &ps.kind {
+                        mf_spec::ParamKind::Choice { values, .. } => {
+                            values.iter().position(|x| x == t).map(|i| i as f64)
+                        }
+                        _ => None,
+                    })
+            }
+            _ => None,
+        };
+        if let Some(n) = n {
+            q.params.insert(k.clone(), n);
+        }
+    }
+    q
 }
 
 /// The connector's local frame in the world: `mm` document units per
@@ -507,155 +521,163 @@ pub struct CheckSettings {
     pub mm: f64,
 }
 
-/// What a check is about (each has its own one-click fix, [`fix`]).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckKind {
-    OffCap,
-    Breakout(JointSide),
-    EdgeDistance,
-    DowelLength,
-    Fit,
-    /// A dovetail's `-x` (`true`) or `+x` (`false`) end is stopped
-    /// (`open_a`/`open_b` false) but its recorded reach falls short of
-    /// the cap's own outline on that side, so the tail can't actually
-    /// be slid fully in or out from there either (D23).
-    DovetailStopped(bool),
+/// The generic checks' ids (every placement gets them, whatever its
+/// generator); a generator's own checks carry their own ids.
+pub mod check_id {
+    /// Its centre isn't on both cut faces.
+    pub const OFF_CAP: &str = "off_cap";
+    /// Too close to (or over) a cut face's edge.
+    pub const EDGE_DISTANCE: &str = "edge_distance";
+    /// A hole too close to the outside of the piece on side A or B.
+    pub const BREAKOUT_A: &str = "breakout.a";
+    pub const BREAKOUT_B: &str = "breakout.b";
+    /// The mating pair's exact gap against the Fit class.
+    pub const FIT: &str = "fit";
+
+    pub fn breakout(side: super::JointSide) -> &'static str {
+        match side {
+            super::JointSide::A => BREAKOUT_A,
+            super::JointSide::B => BREAKOUT_B,
+        }
+    }
 }
 
-/// One live warning about a placement, in plain words.
+/// One live warning about a placement, in plain words, with its one-click
+/// fix's words. A generator's own check carries its fix (a param patch);
+/// a generic one's is worked out when it's clicked ([`fix`]).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Check {
-    pub kind: CheckKind,
+    pub id: String,
     pub message: String,
+    pub fix_label: Option<String>,
+    pub patch: Option<mf_parts::ParamPatch>,
 }
 
-/// What a joint-wide check is about (D22): unlike [`CheckKind`], this
-/// isn't about one placement, it's about the whole set — so it has no
-/// single placement index to fix, and lives next to the connector list
-/// rather than under one of its rows (`joint_checks`, the Connect
-/// panel's own joint-level summary area).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JointCheckKind {
-    /// Exactly one round dowel or peg, and nothing else on the joint
-    /// resists turning about it.
-    SingleRoundDowel,
+impl Check {
+    fn generic(id: &str, message: String, fix_label: &str) -> Check {
+        Check {
+            id: id.to_owned(),
+            message,
+            fix_label: Some(fix_label.to_owned()),
+            patch: None,
+        }
+    }
 }
 
-/// One live, joint-wide warning, in plain words, with each one-click fix
-/// it offers (by name: the Connect panel turns the name back into the
-/// actual fix with [`fix_joint`]).
+/// One joint-wide fix: its id (for [`fix_joint`]) and its button's words.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JointFix {
+    pub id: String,
+    pub label: String,
+}
+
+/// One live, joint-wide warning (D22): about the whole set of
+/// placements, not one, so it lives next to the connector list. Today's
+/// only one, [`SINGLE_ROUND_PIN`]: exactly one round pin and nothing
+/// else on the joint resists turning about it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct JointCheck {
-    pub kind: JointCheckKind,
+    pub id: &'static str,
     pub message: String,
-    pub fixes: Vec<&'static str>,
+    pub fixes: Vec<JointFix>,
 }
 
-/// Whether connector `id`'s placement, with `params`, resists the joint
-/// turning about some other axis on its own: a dovetail, an insert (its
-/// screw is a second, independent anchor point as far as rotation
-/// goes), or a dowel/peg that isn't round (D22's whole point). A magnet
-/// pulls the faces together but never resists an in-plane turn, so it
-/// doesn't count.
-fn resists_rotation(id: &str, params: &Params) -> bool {
-    match id {
-        "joint.dovetail" | "joint.insert" => true,
-        "joint.dowel" | "joint.peg" => !matches!(
-            mf_parts::connectors::joint::Shape::from_code(
-                params.get_float("shape").unwrap_or(0.0),
-                params.get_float("sides").unwrap_or(6.0),
-            ),
-            mf_parts::connectors::joint::Shape::Round
-        ),
-        _ => false,
-    }
-}
+/// [`JointCheck`]'s id for "the parts can rotate around one round pin".
+pub const SINGLE_ROUND_PIN: &str = "single_round_pin";
+/// [`fix_joint`]'s fix that adds a second pin like the first.
+pub const ADD_SECOND: &str = "add_second";
+/// [`fix_joint`]'s fix that makes the pin resist turning (its
+/// generator's own [`mf_parts::Anchor::RoundPin`] fix).
+pub const ANCHOR: &str = "anchor";
 
-/// The live, joint-wide checks (see [`JointCheckKind`]): today, only
-/// whether the joint's only alignment is a single round dowel or peg,
-/// free to turn about it since nothing else on the joint resists
-/// rotation (D22). `gap_mm` is the joint's own gap, for
-/// `placement_params`.
-pub fn joint_checks(placements: &[Placement], gap_mm: f64) -> Vec<JointCheck> {
-    let mut out = Vec::new();
-    let resisting: Vec<bool> = placements
+/// Each placement's [`mf_parts::Anchor`] (`None` for one that can't be
+/// read; its own checks say why).
+fn anchors(placements: &[Placement], gap_mm: f64) -> Vec<Option<mf_parts::Anchor>> {
+    placements
         .iter()
         .map(|p| {
-            placement_params(p, gap_mm)
-                .ok()
-                .is_some_and(|params| resists_rotation(&p.connector, &params))
+            let g = placement_generator(p).ok()?;
+            let params = placement_params(p, gap_mm).ok()?;
+            Some(g.anchor(&params))
         })
-        .collect();
-    let round_dowels: Vec<usize> = placements
-        .iter()
-        .enumerate()
-        .filter(|(i, p)| {
-            (p.connector == "joint.dowel" || p.connector == "joint.peg") && !resisting[*i]
-        })
-        .map(|(i, _)| i)
-        .collect();
-    if round_dowels.len() == 1 && resisting.iter().all(|r| !r) {
-        out.push(JointCheck {
-            kind: JointCheckKind::SingleRoundDowel,
-            message: "The parts can rotate around one round dowel. Add a second, or use a \
-                      square or keyed shape"
-                .to_owned(),
-            fixes: vec!["add_second_dowel", "make_square"],
-        });
+        .collect()
+}
+
+/// The only round pin on a joint where nothing resists turning: its index
+/// and its anchor fix.
+fn single_round_pin(placements: &[Placement], gap_mm: f64) -> Option<(usize, mf_parts::Fix)> {
+    use mf_parts::Anchor;
+    let anchors = anchors(placements, gap_mm);
+    if anchors.iter().any(|a| matches!(a, Some(Anchor::Resists))) {
+        return None;
     }
-    out
+    let pins: Vec<(usize, mf_parts::Fix)> = anchors
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, a)| match a {
+            Some(Anchor::RoundPin { fix }) => Some((i, fix)),
+            _ => None,
+        })
+        .collect();
+    match <[_; 1]>::try_from(pins) {
+        Ok([one]) => Some(one),
+        Err(_) => None,
+    }
+}
+
+/// The live, joint-wide checks: today, whether the joint's only alignment
+/// is a single round pin, free to turn about it (D22). `gap_mm` is the
+/// joint's own gap, for `placement_params`.
+pub fn joint_checks(placements: &[Placement], gap_mm: f64) -> Vec<JointCheck> {
+    let Some((i, fix)) = single_round_pin(placements, gap_mm) else {
+        return Vec::new();
+    };
+    let name = find_connector(&placements[i].connector).map_or_else(
+        || placements[i].connector.clone(),
+        |g| g.name().to_lowercase(),
+    );
+    vec![JointCheck {
+        id: SINGLE_ROUND_PIN,
+        message: format!(
+            "The parts can rotate around one round {name}. Add a second, or use a square or \
+             keyed shape"
+        ),
+        fixes: vec![
+            JointFix {
+                id: ADD_SECOND.into(),
+                label: format!("Add second {name}"),
+            },
+            JointFix {
+                id: ANCHOR.into(),
+                label: fix.label,
+            },
+        ],
+    }]
 }
 
 /// A joint-wide check's one-click fix, applied to `placements` (see
-/// [`joint_checks`]): `"add_second_dowel"` places a second
-/// `joint.dowel` (copying the first round dowel/peg's own size and
-/// clearance) mirrored across the solid cap's own bounds centre from
-/// the first — the simplest offset that's almost always still on the
-/// cap and far enough from the first hole not to collide with it, since
-/// a real cap is practically never a single point; `"make_square"`
-/// changes the existing dowel or peg's own `shape` param to Square in
-/// place, leaving everything else about it untouched. `cap` is the
-/// solid piece's own cut face, to place the second dowel sensibly;
-/// `None` if the fix doesn't apply (an unknown name, or there's no
-/// single round dowel/peg to fix).
+/// [`joint_checks`]): [`ADD_SECOND`] places a second pin like the first,
+/// mirrored across the solid cap's own bounds centre (the simplest offset
+/// that's almost always still on the cap and far from the first);
+/// [`ANCHOR`] applies the pin's own anti-rotation patch. `cap` is the
+/// solid piece's cut face; `None` if the fix doesn't apply.
 pub fn fix_joint(
     placements: &[Placement],
     gap_mm: f64,
     cap: &CapRegion,
     fix: &str,
 ) -> Option<Vec<Placement>> {
-    let resisting: Vec<bool> = placements
-        .iter()
-        .map(|p| {
-            placement_params(p, gap_mm)
-                .ok()
-                .is_some_and(|params| resists_rotation(&p.connector, &params))
-        })
-        .collect();
-    let round_dowels: Vec<usize> = placements
-        .iter()
-        .enumerate()
-        .filter(|(i, p)| {
-            (p.connector == "joint.dowel" || p.connector == "joint.peg") && !resisting[*i]
-        })
-        .map(|(i, _)| i)
-        .collect();
-    let &[i] = round_dowels.as_slice() else {
-        return None;
-    };
+    let (i, anchor_fix) = single_round_pin(placements, gap_mm)?;
     match fix {
-        "make_square" => {
+        ANCHOR => {
             let mut out = placements.to_vec();
-            out[i].params.insert("shape".into(), 1.0);
+            out[i] = patched(&placements[i], &anchor_fix.patch);
             Some(out)
         }
-        "add_second_dowel" => {
+        ADD_SECOND => {
             let (lo, hi) = cap.bounds()?;
             let centre = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
             let first = &placements[i];
-            // Mirrored across the cap's own centre: as far from the
-            // first hole as this one simple rule can put it, on a cap
-            // of any convex-ish shape.
             let at = [2.0 * centre[0] - first.at[0], 2.0 * centre[1] - first.at[1]];
             let at = if cap.contains(at) { at } else { centre };
             let mut second = first.clone();
@@ -739,13 +761,17 @@ fn part_side(p: &Placement, side: Side) -> Option<JointSide> {
     }
 }
 
-/// How deep a placement's hole goes into `side`, in mm (which parameter).
-fn depth_key(p: &Placement, side: JointSide) -> &'static str {
-    if side == p.on {
+/// The param that sets how deep a placement's hole goes into `side` (the
+/// cut-face connectors' shared convention), if its spec has it.
+fn depth_key(p: &Placement, side: JointSide) -> Option<&'static str> {
+    let key = if side == p.on {
         "depth_on"
     } else {
         "depth_other"
-    }
+    };
+    find_connector(&p.connector)
+        .is_some_and(|g| g.spec().parameter(key).is_some())
+        .then_some(key)
 }
 
 /// The fit check of one placement against `settings` (None for a
@@ -756,12 +782,13 @@ pub fn fit_check(
     settings: &CheckSettings,
     ctx: &RunContext,
 ) -> Result<Option<mf_parts::FitCheck>, OpError> {
-    let Some((hole, pin)) = mf_parts::connectors::joint::fit_probe(&p.connector, params)
+    let Some(probe) = placement_generator(p)?
+        .fit_probe(params)
         .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?
     else {
         return Ok(None);
     };
-    let bvh = Bvh::build(&hole, ctx).map_err(|_| OpError::Cancelled)?;
+    let bvh = Bvh::build(&probe.hole, ctx).map_err(|_| OpError::Cancelled)?;
     // `clearance` is diametral; the measured gap is radial, so the fit
     // class and machine numbers it's compared with are halved (as
     // `mesh.split_plane`'s alignment fit check does).
@@ -774,15 +801,11 @@ pub fn fit_check(
         ..settings.machine.clone()
     };
     check_fit(
-        match p.connector.as_str() {
-            "joint.dowel" => "Dowel to hole",
-            "joint.peg" => "Peg to hole",
-            _ => "Tail to groove",
-        },
+        &probe.label,
         MatingSurfaces {
-            a: &hole,
+            a: &probe.hole,
             a_bvh: &bvh,
-            b: &pin,
+            b: &probe.pin,
             b_to_a: &DMat4::IDENTITY,
         },
         FitExpectation {
@@ -801,6 +824,64 @@ pub fn wanted_clearance(settings: &CheckSettings) -> f64 {
     mf_parts::resolve(&settings.fit_class, &settings.machine, Compensation::Hole)
 }
 
+/// The cut faces as a generator's [`mf_parts::Targets`]: in placement
+/// `p`'s own local frame (x along its turn, y = outward × x, in mm), slot
+/// A is the piece it was placed on, B the other.
+pub struct CapTargets<'a> {
+    pub caps: [&'a CapRegion; 2],
+    pub placement: &'a Placement,
+    pub mm: f64,
+}
+
+impl mf_parts::Targets for CapTargets<'_> {
+    fn boundary_along(&self, slot: Side, dir: [f64; 2]) -> Option<f64> {
+        let p = self.placement;
+        let side = match slot {
+            Side::A => p.on,
+            Side::B => p.on.other(),
+            Side::Neither => return None,
+        };
+        let (s, c) = p.angle.to_radians().sin_cos();
+        // Local y is `outward × x`: on side B it runs the other way.
+        let flip = if p.on == JointSide::A { 1.0 } else { -1.0 };
+        let d = [
+            dir[0] * c - dir[1] * flip * s,
+            dir[0] * s + dir[1] * flip * c,
+        ];
+        self.caps[side.index()]
+            .ray_boundary(p.at, d)
+            .map(|t| t / self.mm)
+    }
+}
+
+/// The placement's generator's own checks, with the cut faces as its
+/// targets.
+pub fn generator_checks(
+    caps: [&CapRegion; 2],
+    p: &Placement,
+    params: &Params,
+    mm: f64,
+    ctx: &RunContext,
+) -> Result<Vec<Check>, OpError> {
+    let g = placement_generator(p)?;
+    let targets = CapTargets {
+        caps,
+        placement: p,
+        mm,
+    };
+    Ok(
+        g.checks(params, &mf_parts::GenContext::with_targets(ctx, &targets))
+            .into_iter()
+            .map(|c| Check {
+                id: c.id,
+                message: c.message,
+                fix_label: c.fix.as_ref().map(|f| f.label.clone()),
+                patch: c.fix.map(|f| f.patch),
+            })
+            .collect(),
+    )
+}
+
 /// The live checks of one placement (see the module docs). `pieces` is
 /// `[a, b]`.
 pub fn check_placement(
@@ -817,13 +898,14 @@ pub fn check_placement(
     let other = pieces[p.on.other().index()];
     if !on.cap.contains(p.at) || !other.cap.contains(p.at) {
         let off = if on.cap.contains(p.at) { other } else { on };
-        out.push(Check {
-            kind: CheckKind::OffCap,
-            message: format!(
+        out.push(Check::generic(
+            check_id::OFF_CAP,
+            format!(
                 "It's off the cut face of '{}'; drag it onto the face.",
                 off.name
             ),
-        });
+            "Move it inwards",
+        ));
         return Ok(out);
     }
     // Edge distance: the outline's closest point to either cap's edge.
@@ -833,9 +915,9 @@ pub fn check_placement(
         .map(|q| on.cap.edge_distance(*q).min(other.cap.edge_distance(*q)))
         .fold(f64::INFINITY, f64::min);
     if edge < settings.min_wall * mm {
-        out.push(Check {
-            kind: CheckKind::EdgeDistance,
-            message: if edge <= 0.0 {
+        out.push(Check::generic(
+            check_id::EDGE_DISTANCE,
+            if edge <= 0.0 {
                 "It runs over the edge of the cut face; move it inwards.".to_owned()
             } else {
                 format!(
@@ -845,16 +927,17 @@ pub fn check_placement(
                     settings.min_wall
                 )
             },
-        });
+            "Move it inwards",
+        ));
     }
     // Breakout, per side with a hole in it.
     for side in [JointSide::A, JointSide::B] {
-        if let Some(wall) = hole_wall(frame, pieces[side.index()], side, p, &params, settings, ctx)?
+        if let Some(wall) = hole_wall(frame, pieces[side.index()], side, p, settings, ctx)?
             && wall < settings.min_wall * mm
         {
-            out.push(Check {
-                kind: CheckKind::Breakout(side),
-                message: if wall <= 0.0 {
+            out.push(Check::generic(
+                check_id::breakout(side),
+                if wall <= 0.0 {
                     format!(
                         "The hole breaks out of '{}'; make it shallower or move it inwards.",
                         pieces[side.index()].name
@@ -868,86 +951,25 @@ pub fn check_placement(
                         settings.min_wall
                     )
                 },
-            });
+                "Make it shallower",
+            ));
         }
     }
-    if p.connector == "joint.dowel" {
-        let len = mf_parts::connectors::joint::dowel_length(&params)
-            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
-        let room = mf_parts::connectors::joint::dowel_room(&params)
-            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
-        if len > room - 1e-9 {
-            out.push(Check {
-                kind: CheckKind::DowelLength,
-                message: format!(
-                    "The dowel ({len:.1} mm) is longer than its two holes together ({room:.1} \
-                     mm), so the pieces won't close."
-                ),
-            });
-        }
-    }
-    if p.connector == "joint.dovetail" {
-        // The groove is cut into the "other" piece; its own cap outline
-        // is the boundary a stopped end must reach to be withdrawable.
-        let groove_cap = pieces[p.on.other().index()].cap;
-        let (s, c) = p.angle.to_radians().sin_cos();
-        let dir = [c, s];
-        let reach = mf_parts::connectors::joint::dovetail_reach(&params)
-            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
-        for (open, len, sign, a_end) in [
-            (reach.open_a, reach.a, -1.0, true),
-            (reach.open_b, reach.b, 1.0, false),
-        ] {
-            if open {
-                continue;
-            }
-            let d = [dir[0] * sign, dir[1] * sign];
-            let Some(to_edge) = groove_cap.ray_boundary(p.at, d) else {
-                continue;
-            };
-            if len * mm < to_edge - 1e-6 {
-                out.push(Check {
-                    kind: CheckKind::DovetailStopped(a_end),
-                    message: "Can't slide together: extend it to the edge".to_owned(),
-                });
-            }
-        }
-    }
+    out.extend(generator_checks(
+        [pieces[0].cap, pieces[1].cap],
+        p,
+        &params,
+        mm,
+        ctx,
+    )?);
     if let Some(c) = fit_check(p, &params, settings, ctx)?
         && (c.may_fuse || c.measured_gap < c.expected_gap * 0.75)
     {
-        out.push(Check {
-            kind: CheckKind::Fit,
-            message: c.message(),
-        });
-    }
-    Ok(out)
-}
-
-/// The placement's generator's own checks (until the joint connectors
-/// carry them themselves: the dowel's length against its two holes).
-fn generator_checks(
-    _frame: &JointFrame,
-    _caps: [&CapRegion; 2],
-    p: &Placement,
-    params: &Params,
-    _mm: f64,
-) -> Result<Vec<mf_parts::GenCheck>, OpError> {
-    let mut out = Vec::new();
-    if p.connector == "joint.dowel" {
-        let len = mf_parts::connectors::joint::dowel_length(params)
-            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
-        let room = mf_parts::connectors::joint::dowel_room(params)
-            .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
-        if len > room - 1e-9 {
-            out.push(mf_parts::GenCheck {
-                id: "dowel_length".into(),
-                message: format!(
-                    "the dowel ({len:.1} mm) is longer than its two holes together ({room:.1} mm)"
-                ),
-                fix: None,
-            });
-        }
+        out.push(Check::generic(
+            check_id::FIT,
+            c.message(),
+            "Use the fit's clearance",
+        ));
     }
     Ok(out)
 }
@@ -956,20 +978,18 @@ fn generator_checks(
 /// into it) and the piece's outer surface, document units: the BVH
 /// minimum distance to every face but the cut face, and 0 if the hole's
 /// column (from its floor back to the cap) leaves the piece. `None` if
-/// there's no hole on that side, or the nearest surface is further than
-/// a few walls away. A dovetail's groove runs out of the piece on
-/// purpose, so it isn't checked.
-#[allow(clippy::too_many_arguments)]
+/// there's no hole on that side, the nearest surface is further than a
+/// few walls away, or the generator's holes run out of the piece on
+/// purpose (`Generator::checks_breakout`).
 fn hole_wall(
     frame: &JointFrame,
     piece: &Piece<'_>,
     side: JointSide,
     p: &Placement,
-    params: &Params,
     settings: &CheckSettings,
     ctx: &RunContext,
 ) -> Result<Option<f64>, OpError> {
-    if p.connector == "joint.dovetail" {
+    if !placement_generator(p)?.checks_breakout() {
         return Ok(None);
     }
     let mm = settings.mm;
@@ -978,15 +998,22 @@ fn hole_wall(
     let tol = piece.cap.tol;
     let world_corner = |c: [DVec3; 3]| c.map(|q| place.transform_point3(q));
     let limit = (4.0 * settings.min_wall * mm).max(1e-9);
-    let depth = params
-        .get_float(depth_key(p, side))
-        .map_err(|e| failed("invalid_connector_params", e.to_string()))?
-        * mm;
+    let gap_mm = frame.gap / mm;
     let mut wall: Option<f64> = None;
     for part in placed_parts(frame, p, mm)? {
         if part.join != JoinKind::Subtract || part.side != Some(side) {
             continue;
         }
+        // How deep the hole reaches behind its own cap, from its own
+        // mesh (local z: side A's cap at -gap/2 facing +z, B's at +gap/2).
+        let Some(bb) = part.local.bounding_box() else {
+            continue;
+        };
+        let depth = if side == p.on {
+            -gap_mm / 2.0 - bb.min[2]
+        } else {
+            bb.max[2] - gap_mm / 2.0
+        } * mm;
         // Only the hole inside the piece: the part beyond the cap opens
         // onto the cut by design.
         let d = mf_geometry::minimum_distance_within(
@@ -1036,69 +1063,61 @@ fn hole_wall(
     Ok(wall.filter(|w| w.is_finite()))
 }
 
-/// The placement with check `kind`'s one-click fix applied, or `None`
-/// if there's nothing it can change to pass. Breakout: shallower (or,
-/// if no depth is shallow enough, moved inwards); edge distance or off
-/// the cap: moved towards the middle of the cut face; dowel length: the
-/// longest that seats; fit: the clearance the Fit class and Machine
-/// profile ask for.
+/// The placement with check `id`'s one-click fix applied, or `None` if
+/// there's nothing it can change to pass. A generator's own check
+/// carries its fix (a param patch); the generic ones: breakout makes the
+/// hole shallower (or, if no depth is shallow enough, moves it inwards);
+/// edge distance or off the cap moves it towards the middle of the cut
+/// face; fit sets the clearance the Fit class and Machine profile ask for.
 pub fn fix(
     frame: &JointFrame,
     pieces: [&Piece<'_>; 2],
     p: &Placement,
-    kind: CheckKind,
+    id: &str,
     settings: &CheckSettings,
     ctx: &RunContext,
 ) -> Result<Option<Placement>, OpError> {
-    let still = |q: &Placement, k: CheckKind| -> Result<bool, OpError> {
+    let still = |q: &Placement| -> Result<bool, OpError> {
         Ok(check_placement(frame, pieces, q, settings, ctx)?
             .iter()
-            .any(|c| c.kind == k))
+            .any(|c| c.id == id))
     };
-    match kind {
-        CheckKind::Breakout(side) => {
-            let key = depth_key(p, side);
-            let params = placement_params(p, frame.gap / settings.mm)?;
-            let depth = params
-                .get_float(key)
-                .map_err(|e| failed("invalid_connector_params", e.to_string()))?;
-            let min = 0.5_f64.min(depth);
-            let mut q = p.clone();
-            q.params.insert(key.into(), min);
-            if !still(&q, kind)? {
-                // Bisect for the deepest hole that stays inside.
-                let (mut lo, mut hi) = (min, depth);
-                for _ in 0..20 {
-                    let mid = (lo + hi) / 2.0;
-                    q.params.insert(key.into(), mid);
-                    if still(&q, kind)? {
-                        hi = mid;
-                    } else {
-                        lo = mid;
-                    }
+    let breakout = [JointSide::A, JointSide::B]
+        .into_iter()
+        .find(|s| check_id::breakout(*s) == id);
+    if let Some(side) = breakout {
+        let Some(key) = depth_key(p, side) else {
+            return move_inwards(frame, pieces, p, id, settings, ctx);
+        };
+        let params = placement_params(p, frame.gap / settings.mm)?;
+        let depth = params
+            .get_float(key)
+            .map_err(|e| failed("invalid_connector_params", e.to_string()))?;
+        let min = 0.5_f64.min(depth);
+        let mut q = p.clone();
+        q.params.insert(key.into(), min);
+        if !still(&q)? {
+            // Bisect for the deepest hole that stays inside.
+            let (mut lo, mut hi) = (min, depth);
+            for _ in 0..20 {
+                let mid = (lo + hi) / 2.0;
+                q.params.insert(key.into(), mid);
+                if still(&q)? {
+                    hi = mid;
+                } else {
+                    lo = mid;
                 }
-                q.params.insert(key.into(), (lo * 100.0).floor() / 100.0);
-                return Ok(Some(q));
             }
-            move_inwards(frame, pieces, p, kind, settings, ctx)
+            q.params.insert(key.into(), (lo * 100.0).floor() / 100.0);
+            return Ok(Some(q));
         }
-        CheckKind::EdgeDistance | CheckKind::OffCap => {
-            move_inwards(frame, pieces, p, kind, settings, ctx)
+        return move_inwards(frame, pieces, p, id, settings, ctx);
+    }
+    match id {
+        check_id::EDGE_DISTANCE | check_id::OFF_CAP => {
+            move_inwards(frame, pieces, p, id, settings, ctx)
         }
-        CheckKind::DowelLength => {
-            let params = placement_params(p, frame.gap / settings.mm)?;
-            let room = mf_parts::connectors::joint::dowel_room(&params).map_err(
-                |mf_parts::ConnectorError::Failed { code, message }| failed(code, message),
-            )?;
-            let allowance = params
-                .get_float("length_allowance")
-                .map_err(|e| failed("invalid_connector_params", e.to_string()))?;
-            let mut q = p.clone();
-            q.params
-                .insert("dowel_length".into(), room - allowance.max(0.1));
-            Ok(Some(q))
-        }
-        CheckKind::Fit => {
+        check_id::FIT => {
             let mut q = p.clone();
             q.params.insert(
                 "clearance".into(),
@@ -1106,22 +1125,11 @@ pub fn fix(
             );
             Ok(Some(q))
         }
-        CheckKind::DovetailStopped(a_end) => {
-            let groove_cap = pieces[p.on.other().index()].cap;
-            let (s, c) = p.angle.to_radians().sin_cos();
-            let sign = if a_end { -1.0 } else { 1.0 };
-            let d = [c * sign, s * sign];
-            let Some(to_edge) = groove_cap.ray_boundary(p.at, d) else {
-                return Ok(None);
-            };
-            let mut q = p.clone();
-            // A touch past the boundary (never short of it, however the
-            // ray's own rounding falls), so the check can't immediately
-            // re-fire on the fixed placement.
-            let key = if a_end { "groove_a" } else { "groove_b" };
-            q.params.insert(key.into(), to_edge / settings.mm + 0.5);
-            Ok(Some(q))
-        }
+        _ => Ok(check_placement(frame, pieces, p, settings, ctx)?
+            .into_iter()
+            .find(|c| c.id == id)
+            .and_then(|c| c.patch)
+            .map(|patch| patched(p, &patch))),
     }
 }
 
@@ -1160,7 +1168,7 @@ fn move_inwards(
     frame: &JointFrame,
     pieces: [&Piece<'_>; 2],
     p: &Placement,
-    kind: CheckKind,
+    id: &str,
     settings: &CheckSettings,
     ctx: &RunContext,
 ) -> Result<Option<Placement>, OpError> {
@@ -1179,9 +1187,9 @@ fn move_inwards(
             ..p.clone()
         };
         let checks = check_placement(frame, pieces, &q, settings, ctx)?;
-        Ok(checks.iter().any(|c| {
-            c.kind == kind || c.kind == CheckKind::OffCap || c.kind == CheckKind::EdgeDistance
-        }))
+        Ok(checks
+            .iter()
+            .any(|c| c.id == id || c.id == check_id::OFF_CAP || c.id == check_id::EDGE_DISTANCE))
     };
     if fails(1.0)? {
         return Ok(Some(Placement {
@@ -1378,7 +1386,7 @@ impl Operation for PlaceConnectors {
                 });
             }
             let fit = fit_check(p, &cp, &settings, ctx)?;
-            for c in generator_checks(&frame, [&caps[0], &caps[1]], p, &cp, mm)? {
+            for c in generator_checks([&caps[0], &caps[1]], p, &cp, mm, ctx)? {
                 warnings.push(format!("Connector {}: {}", k + 1, c.message));
             }
             if let Some(c) = &fit

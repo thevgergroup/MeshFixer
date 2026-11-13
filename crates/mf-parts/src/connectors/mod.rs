@@ -17,6 +17,18 @@ use mf_geometry::Mesh;
 use crate::connector::Connector;
 use crate::generator::PlacementHint;
 
+/// The built-in connectors already on the [`Generator`] trait, in
+/// registry order (after the ones still adapted, below).
+pub(crate) fn builtin_generators() -> Vec<&'static dyn crate::Generator> {
+    vec![
+        &joint::Dowel,
+        &joint::Peg,
+        &joint::Dovetail,
+        &joint::Magnet,
+        &joint::Insert,
+    ]
+}
+
 /// Every built-in connector with its library name, where it's offered
 /// and whether it's deprecated (kept for old saves only), in registry order (the library lists its `Surface` ones in
 /// this order; Connect its cut-face ones).
@@ -30,11 +42,6 @@ pub(crate) fn builtin_connectors()
         (&clasp::SnapClasp, "Snap clasp", Surface, false),
         (&thread::Thread, "Thread", Surface, false),
         (&dovetail_slide::DovetailSlide, "Dovetail", Surface, false),
-        (&joint::Dowel, "Dowel", Point, false),
-        (&joint::Peg, "Peg", Point, false),
-        (&joint::Dovetail, "Dovetail", DragLine, true),
-        (&joint::Magnet, "Magnet", Point, false),
-        (&joint::Insert, "Insert", Point, false),
     ]
 }
 

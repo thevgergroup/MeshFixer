@@ -17,8 +17,8 @@ use mf_geometry::Mesh;
 use mf_io::threemf::{Model, ModelObject, Unit};
 use mf_io::{read_model, write_model_path};
 use mf_operations::{
-    CheckKind, CheckSettings, JointCheckKind, JointFrame, JointSide, Piece, Placement, cap_region,
-    check_placement, fix_joint, joint_checks,
+    ADD_SECOND, ANCHOR, CheckSettings, JointFrame, JointSide, Piece, Placement, SINGLE_ROUND_PIN,
+    cap_region, check_id, check_placement, fix_joint, joint_checks,
 };
 use mf_runtime::RunContext;
 
@@ -637,9 +637,7 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
     };
     let checks = check_placement(&frame, [&pa, &pb], &deep, &settings, &ctx).unwrap();
     assert!(
-        checks
-            .iter()
-            .any(|c| c.kind == CheckKind::Breakout(JointSide::A)),
+        checks.iter().any(|c| c.id == check_id::BREAKOUT_A),
         "{checks:?}"
     );
     // 19 mm deep leaves 1.3 mm: still too thin.
@@ -650,7 +648,7 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
     let checks = check_placement(&frame, [&pa, &pb], &thin, &settings, &ctx).unwrap();
     let breakout = checks
         .iter()
-        .find(|c| c.kind == CheckKind::Breakout(JointSide::A))
+        .find(|c| c.id == check_id::BREAKOUT_A)
         .unwrap_or_else(|| panic!("{checks:?}"));
     assert!(
         breakout.message.contains("within 1.3 mm"),
@@ -662,7 +660,7 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
         &frame,
         [&pa, &pb],
         &deep,
-        CheckKind::Breakout(JointSide::A),
+        check_id::BREAKOUT_A,
         &settings,
         &ctx,
     )
@@ -681,14 +679,14 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
     };
     let checks = check_placement(&frame, [&pa, &pb], &edge, &settings, &ctx).unwrap();
     assert!(
-        checks.iter().any(|c| c.kind == CheckKind::EdgeDistance),
+        checks.iter().any(|c| c.id == check_id::EDGE_DISTANCE),
         "{checks:?}"
     );
     let moved = mf_operations::fix(
         &frame,
         [&pa, &pb],
         &edge,
-        CheckKind::EdgeDistance,
+        check_id::EDGE_DISTANCE,
         &settings,
         &ctx,
     )
@@ -702,20 +700,10 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
         ..deep.clone()
     };
     let checks = check_placement(&frame, [&pa, &pb], &long, &settings, &ctx).unwrap();
-    assert!(
-        checks.iter().any(|c| c.kind == CheckKind::DowelLength),
-        "{checks:?}"
-    );
-    let short = mf_operations::fix(
-        &frame,
-        [&pa, &pb],
-        &long,
-        CheckKind::DowelLength,
-        &settings,
-        &ctx,
-    )
-    .unwrap()
-    .unwrap();
+    assert!(checks.iter().any(|c| c.id == "dowel_length"), "{checks:?}");
+    let short = mf_operations::fix(&frame, [&pa, &pb], &long, "dowel_length", &settings, &ctx)
+        .unwrap()
+        .unwrap();
     assert!((short.params["dowel_length"] - 11.6).abs() < 1e-9);
     // A clearance tighter than the Fit class asks for, and its fix.
     let tight = Placement {
@@ -723,18 +711,12 @@ fn breakout_warning_fires_and_its_fix_clears_it() {
         ..deep.clone()
     };
     let checks = check_placement(&frame, [&pa, &pb], &tight, &settings, &ctx).unwrap();
-    assert!(
-        checks.iter().any(|c| c.kind == CheckKind::Fit),
-        "{checks:?}"
-    );
-    let eased = mf_operations::fix(&frame, [&pa, &pb], &tight, CheckKind::Fit, &settings, &ctx)
+    assert!(checks.iter().any(|c| c.id == check_id::FIT), "{checks:?}");
+    let eased = mf_operations::fix(&frame, [&pa, &pb], &tight, check_id::FIT, &settings, &ctx)
         .unwrap()
         .unwrap();
     let checks = check_placement(&frame, [&pa, &pb], &eased, &settings, &ctx).unwrap();
-    assert!(
-        !checks.iter().any(|c| c.kind == CheckKind::Fit),
-        "{checks:?}"
-    );
+    assert!(!checks.iter().any(|c| c.id == check_id::FIT), "{checks:?}");
 }
 
 /// A connector's counterpart is the same connector seen from across the
@@ -906,7 +888,7 @@ fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
     let checks = check_placement(&frame, [&pa, &pb], &p, &settings, &ctx).unwrap();
     let warning = checks
         .iter()
-        .find(|c| c.kind == CheckKind::DovetailStopped(false))
+        .find(|c| c.id == "dovetail_stopped.b")
         .unwrap_or_else(|| panic!("no stopped-end warning: {checks:?}"));
     assert_eq!(
         warning.message,
@@ -917,16 +899,14 @@ fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
     // the recorded number already accounts for reaching well past it,
     // never checked against the live cap.
     assert!(
-        !checks
-            .iter()
-            .any(|c| c.kind == CheckKind::DovetailStopped(true)),
+        !checks.iter().any(|c| c.id == "dovetail_stopped.a"),
         "{checks:?}"
     );
     let fixed = mf_operations::fix(
         &frame,
         [&pa, &pb],
         &p,
-        CheckKind::DovetailStopped(false),
+        "dovetail_stopped.b",
         &settings,
         &ctx,
     )
@@ -935,9 +915,7 @@ fn a_stopped_dovetail_short_of_the_edge_warns_and_its_fix_reaches_it() {
     assert!(fixed.params["groove_b"] > 20.0 - 1e-6, "{:?}", fixed.params);
     let checks = check_placement(&frame, [&pa, &pb], &fixed, &settings, &ctx).unwrap();
     assert!(
-        !checks
-            .iter()
-            .any(|c| matches!(c.kind, CheckKind::DovetailStopped(_))),
+        !checks.iter().any(|c| c.id.starts_with("dovetail_stopped")),
         "the fix cleared it: {checks:?}"
     );
 }
@@ -977,35 +955,30 @@ fn a_single_round_dowel_warns_about_rotation_and_both_fixes_clear_it() {
     // One round dowel alone: warns.
     let checks = joint_checks(std::slice::from_ref(&round_dowel), 0.0);
     assert_eq!(checks.len(), 1);
-    assert_eq!(checks[0].kind, JointCheckKind::SingleRoundDowel);
+    assert_eq!(checks[0].id, SINGLE_ROUND_PIN);
     assert_eq!(
         checks[0].message,
         "The parts can rotate around one round dowel. Add a second, or use a square or keyed \
          shape"
     );
-    assert_eq!(checks[0].fixes, vec!["add_second_dowel", "make_square"]);
+    assert_eq!(
+        checks[0]
+            .fixes
+            .iter()
+            .map(|f| (f.id.as_str(), f.label.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(ADD_SECOND, "Add second dowel"), (ANCHOR, "Make square")]
+    );
 
     // "Make square": the same one dowel, now square, no warning.
-    let squared = fix_joint(
-        std::slice::from_ref(&round_dowel),
-        0.0,
-        &acap,
-        "make_square",
-    )
-    .unwrap();
+    let squared = fix_joint(std::slice::from_ref(&round_dowel), 0.0, &acap, ANCHOR).unwrap();
     assert_eq!(squared.len(), 1);
     assert_eq!(squared[0].params["shape"], 1.0);
     assert!(joint_checks(&squared, 0.0).is_empty());
 
     // "Add second dowel": two round dowels, no warning either (a
     // second independent dowel resists rotation on its own).
-    let doubled = fix_joint(
-        std::slice::from_ref(&round_dowel),
-        0.0,
-        &acap,
-        "add_second_dowel",
-    )
-    .unwrap();
+    let doubled = fix_joint(std::slice::from_ref(&round_dowel), 0.0, &acap, ADD_SECOND).unwrap();
     assert_eq!(doubled.len(), 2);
     assert!(
         doubled[1].at != round_dowel.at,
@@ -1024,5 +997,5 @@ fn a_single_round_dowel_warns_about_rotation_and_both_fixes_clear_it() {
     // An unknown fix name, or a joint with no single round dowel/peg to
     // fix, fixes nothing.
     assert!(fix_joint(std::slice::from_ref(&round_dowel), 0.0, &acap, "nope").is_none());
-    assert!(fix_joint(&doubled, 0.0, &acap, "make_square").is_none());
+    assert!(fix_joint(&doubled, 0.0, &acap, ANCHOR).is_none());
 }

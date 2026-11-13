@@ -37,7 +37,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, RichText};
 use glam::DVec3;
 use mf_command::Invocation;
-use mf_operations::{CapRegion, Check, CheckKind, JointSide, Placement};
+use mf_operations::{CapRegion, Check, JointSide, Placement};
 
 use crate::MeshFixerApp;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
@@ -549,7 +549,10 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             widgets::caption(ui, t!("connect.apply.replaces"));
         }
     }
-    let off_cap = checks.iter().flatten().any(|c| c.kind == CheckKind::OffCap);
+    let off_cap = checks
+        .iter()
+        .flatten()
+        .any(|c| c.id == mf_operations::check_id::OFF_CAP);
     let can = app.busy.is_none() && !joint.placements.is_empty() && !off_cap;
     let label = if applied {
         t!("connect.apply.again")
@@ -957,23 +960,18 @@ fn check_card(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usize, c: 
                 .wrap(),
             );
         });
-        let label = match c.kind {
-            CheckKind::Breakout(_) => t!("connect.fix.breakout"),
-            CheckKind::EdgeDistance | CheckKind::OffCap => t!("connect.fix.inwards"),
-            CheckKind::DowelLength => t!("connect.fix.dowel"),
-            CheckKind::Fit => t!("connect.fix.fit"),
-            CheckKind::DovetailStopped(_) => t!("connect.fix.dovetail_edge"),
-        };
-        fix = widgets::wide_button(ui, Kind::Secondary, None, &label).clicked();
+        if let Some(label) = &c.fix_label {
+            fix = widgets::wide_button(ui, Kind::Secondary, None, label).clicked();
+        }
     });
     ui.add_space(theme::SPACE_XS);
     if fix {
-        apply_fix(app, j, i, c.kind);
+        apply_fix(app, j, i, &c.id);
     }
 }
 
-/// Apply check `kind`'s one-click fix to connector `i` of joint `j`.
-pub fn apply_fix(app: &mut MeshFixerApp, j: usize, i: usize, kind: CheckKind) {
+/// Apply check `id`'s one-click fix to connector `i` of joint `j`.
+pub fn apply_fix(app: &mut MeshFixerApp, j: usize, i: usize, id: &str) {
     let (Some(joint), Some(g)) = (
         app.split_flow.joints.get(j).cloned(),
         app.split_flow.geometry(),
@@ -988,7 +986,7 @@ pub fn apply_fix(app: &mut MeshFixerApp, j: usize, i: usize, kind: CheckKind) {
     let names = [name_of(app, joint.a), name_of(app, joint.b)];
     let fixed = {
         let pc = split_flow::pieces(&names, &g);
-        mf_operations::fix(&joint.frame, [&pc[0], &pc[1]], &p, kind, &s, &ctx)
+        mf_operations::fix(&joint.frame, [&pc[0], &pc[1]], &p, id, &s, &ctx)
     };
     match fixed {
         Ok(Some(q)) => {
@@ -1004,8 +1002,7 @@ pub fn apply_fix(app: &mut MeshFixerApp, j: usize, i: usize, kind: CheckKind) {
 
 /// A joint-wide warning (D22): not about one connector row, so it has
 /// no index of its own and no `connect.check` "Connector N:" prefix;
-/// one or more named fixes, each its own button (today's only one,
-/// `SingleRoundDowel`, offers two).
+/// one or more fixes, each its own button with its own words.
 fn joint_check_card(
     app: &mut MeshFixerApp,
     ui: &mut egui::Ui,
@@ -1022,20 +1019,15 @@ fn joint_check_card(
             );
             ui.add(egui::Label::new(RichText::new(&jc.message).color(theme::TEXT)).wrap());
         });
-        for &name in &jc.fixes {
-            let label = match name {
-                "add_second_dowel" => t!("connect.fix.add_second_dowel"),
-                "make_square" => t!("connect.fix.make_square"),
-                _ => continue,
-            };
-            if widgets::wide_button(ui, Kind::Secondary, None, &label).clicked() {
-                fix = Some(name);
+        for f in &jc.fixes {
+            if widgets::wide_button(ui, Kind::Secondary, None, &f.label).clicked() {
+                fix = Some(f.id.clone());
             }
         }
     });
     ui.add_space(theme::SPACE_XS);
-    if let Some(name) = fix {
-        apply_joint_fix(app, j, name);
+    if let Some(id) = fix {
+        apply_joint_fix(app, j, &id);
     }
 }
 

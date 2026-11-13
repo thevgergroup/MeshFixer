@@ -395,6 +395,7 @@ fn builtin() -> &'static [&'static dyn Generator] {
                 })) as &'static dyn Generator
             },
         ));
+        all.extend(crate::connectors::builtin_generators());
         all
     })
 }
