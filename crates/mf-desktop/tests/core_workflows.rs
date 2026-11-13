@@ -715,6 +715,12 @@ fn hollow_shows_thin_parts_and_cuts_a_placed_drain_hole() {
         mf_desktop::hollow_tool::preview_render(a, mushroom_id).is_some()
     });
     settle(&mut h);
+    // Drain holes default to None; the hint points at the custom-opening
+    // alternative (Parts + Combine) instead.
+    assert_eq!(h.state().hollow.drain, "none", "default is None");
+    h.get_by_label(
+        "Or place a cylinder from Parts, mark it as a Hole, and Combine for a custom opening.",
+    );
     assert!(
         mf_desktop::hollow_tool::thin_layer(h.state()).is_some(),
         "the cap is outlined as left solid"

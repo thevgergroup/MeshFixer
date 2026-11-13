@@ -597,6 +597,43 @@ fn hollow_open_through_without_faces_is_refused() {
     assert_eq!(code_of(&err), "open_through_needs_faces");
 }
 
+// ---------------------------------------------------------------------
+// Drain holes: optional, default none.
+// ---------------------------------------------------------------------
+
+/// `drain_holes` defaults to `none` (the spec's own default): a hollow
+/// run with no `drain_holes` given at all cuts no hole and reports
+/// none, leaving the outer and inner shells as two separate closed
+/// surfaces — Auto and Placed stay available by asking for them.
+#[test]
+fn hollow_drain_holes_defaults_to_none() {
+    let (out, report) = run(&ball(), &[("wall_thickness", "2"), ("inner_detail", "0.5")]).unwrap();
+    assert_solid(&out);
+    assert_eq!(
+        inspect(&out).components,
+        2,
+        "no hole joins the outer and inner shells"
+    );
+    assert_eq!(report["holes"].as_array().unwrap().len(), 0, "{report}");
+}
+
+/// Asking for `drain_holes: none` explicitly behaves the same as
+/// leaving it out.
+#[test]
+fn hollow_drain_holes_none_explicit_matches_the_default() {
+    let (default, _) = run(&ball(), &[("wall_thickness", "2"), ("inner_detail", "0.5")]).unwrap();
+    let (explicit, _) = run(
+        &ball(),
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("drain_holes", "none"),
+        ],
+    )
+    .unwrap();
+    assert_eq!(default.content_hash(), explicit.content_hash());
+}
+
 fn code_of(e: &OpError) -> &'static str {
     match e {
         OpError::Failed { code, .. } => code,
