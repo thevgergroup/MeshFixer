@@ -154,8 +154,15 @@ pub fn dovetail_reach(params: &Params) -> Result<DovetailReach, ConnectorError> 
     let legacy = params.get_float("groove_length").unwrap_or(200.0) / 2.0;
     let a = params.get_float("groove_a").unwrap_or(legacy);
     let b = params.get_float("groove_b").unwrap_or(legacy);
-    let open_a = params.get_float("open_a").map(|v| v != 0.0).unwrap_or(true);
-    let open_b = params.get_float("open_b").map(|v| v != 0.0).unwrap_or(true);
+    // Recorded as a bool now; a number (1 through, 0 stopped) by a
+    // record made before the schema said so.
+    let open = |k: &str| {
+        params
+            .get_bool(k)
+            .or_else(|_| params.get_float(k).map(|v| v != 0.0))
+            .unwrap_or(true) // allow-swallow: absent means through, as before open_a/open_b existed
+    };
+    let (open_a, open_b) = (open("open_a"), open("open_b"));
     Ok(DovetailReach {
         a: a.max(0.0),
         b: b.max(0.0),
@@ -365,10 +372,17 @@ pub fn dowel_room(params: &Params) -> Result<f64, ConnectorError> {
 /// picker existed, so an old saved connector keeps reading as the round
 /// pin it always was.
 fn shape_of(params: &Params) -> Shape {
-    let shape = params.get_float("shape").unwrap_or(0.0);
+    let shape = match params.get_choice("shape") {
+        Ok(word) => SHAPE_WORDS.iter().position(|w| *w == word).unwrap_or(0) as f64, // allow-swallow: the spec only allows these words
+        // A record made when the shape was a number (its code).
+        Err(_) => params.get_float("shape").unwrap_or(0.0), // allow-swallow: absent means round, as before the shape picker existed
+    };
     let sides = params.get_float("sides").unwrap_or(6.0);
     Shape::from_code(shape, sides)
 }
+
+/// The dowel and peg `shape` choice's words, in [`Shape::code`] order.
+pub const SHAPE_WORDS: [&str; 4] = ["round", "square", "n_sided", "keyed"];
 
 fn generate(id: &str, params: &Params) -> Result<Vec<ShapePart>, ConnectorError> {
     match id {
@@ -541,31 +555,6 @@ fn generate(id: &str, params: &Params) -> Result<Vec<ShapePart>, ConnectorError>
     }
 }
 
-/// The connector's outline on side A's cap (local x, y), for drawing it
-/// and for the edge-distance check. A dovetail's is its tail's
-/// footprint (the groove runs out of the piece on purpose); a dowel or
-/// peg's is its hole's shape ([`Shape`], D22), not always round.
-pub fn footprint(id: &str, params: &Params) -> Result<Vec<[f64; 2]>, ConnectorError> {
-    let d = float(params, "diameter")?;
-    let c = float(params, "clearance")?;
-    Ok(match id {
-        "joint.dovetail" => {
-            let l = float(params, "length")? / 2.0;
-            let h = d / 2.0;
-            vec![[-l, -h], [l, -h], [l, h], [-l, h]]
-        }
-        "joint.magnet" => round_hole(params, (d + c) / 2.0, chord_tol(d, c)),
-        "joint.insert" => {
-            let screw = float(params, "screw_diameter")?;
-            round_hole(params, (d / 2.0).max((screw + c) / 2.0), chord_tol(d, c))
-        }
-        "joint.dowel" | "joint.peg" => {
-            hole_outline_for(params, shape_of(params), d, chord_tol(d, c))
-        }
-        _ => circle(d / 2.0, chord_tol(d, c)),
-    })
-}
-
 /// The mating pair the fit check measures (the exact BVH minimum
 /// distance, `crate::check_fit`): the hole (or groove) and the dowel,
 /// peg or tail that goes in it, each trimmed back from the hole's mouth
@@ -689,7 +678,7 @@ fn anchor(id: &str, params: &Params) -> Anchor {
             Shape::Round => Anchor::RoundPin {
                 fix: Fix {
                     label: "Make square".into(),
-                    patch: ParamPatch::float("shape", Shape::Square.code()),
+                    patch: ParamPatch::one("shape", mf_spec::ParamValue::Text("square".into())),
                 },
             },
             _ => Anchor::Resists,
@@ -724,6 +713,23 @@ fn line_params(half: f64, ctx: &GenContext) -> ParamPatch {
         );
     }
     patch
+}
+
+/// A record made when `shape` was a number (its [`Shape::code`]) or
+/// `open_a`/`open_b` were (1 through, 0 stopped): the words and bools
+/// the schema takes now.
+fn upgrade(raw: &mut std::collections::BTreeMap<String, String>) {
+    // allow-swallow: only a number needs upgrading; a word is already current
+    if let Some(code) = raw.get("shape").and_then(|v| v.parse::<f64>().ok()) {
+        let word = SHAPE_WORDS[(code.round().clamp(0.0, 3.0)) as usize];
+        raw.insert("shape".into(), word.into());
+    }
+    for k in ["open_a", "open_b"] {
+        // allow-swallow: only a number needs upgrading; a bool is already current
+        if let Some(v) = raw.get(k).and_then(|v| v.parse::<f64>().ok()) {
+            raw.insert(k.into(), (v != 0.0).to_string());
+        }
+    }
 }
 
 /// A placement saved before `groove_a`/`groove_b` existed (D23) has only
@@ -822,6 +828,7 @@ macro_rules! joint_connector {
             }
 
             fn upgrade_params(&self, raw: &mut std::collections::BTreeMap<String, String>) {
+                upgrade(raw);
                 if $id == "joint.dovetail" {
                     upgrade_dovetail(raw);
                 }

@@ -386,3 +386,73 @@ pub fn upgraded(g: &dyn Generator, params: &Params) -> Result<Params, ConnectorE
     }
     Ok(out)
 }
+
+/// The outline a generator's parts make on a plane, from the parts
+/// themselves (parts-architecture-review.md, "Generic preview"): the
+/// convex hull, in x/y, of every part attached to `slot` cut by the plane
+/// z = `z`, or of their whole x/y projection if none crosses it. What
+/// Connect draws as a placement's footprint and measures its edge
+/// distance with: one source of truth, so a new generator never needs a
+/// hand-drawn outline.
+pub fn section_outline(parts: &[ShapePart], slot: TargetSlot, z: f64) -> Vec<[f64; 2]> {
+    let mine: Vec<&ShapePart> = parts.iter().filter(|p| p.attach_to == slot).collect();
+    let mut points = Vec::new();
+    for part in &mine {
+        for (_, c) in part.mesh.faces() {
+            let q = c.map(|v| part.mesh.corner_position(v));
+            for i in 0..3 {
+                let (a, b) = (q[i], q[(i + 1) % 3]);
+                let (da, db) = (a[2] - z, b[2] - z);
+                if da == 0.0 {
+                    points.push([a[0], a[1]]);
+                } else if da * db < 0.0 {
+                    let t = da / (da - db);
+                    points.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]);
+                }
+            }
+        }
+    }
+    if points.is_empty() {
+        for part in &mine {
+            points.extend(part.mesh.vertices().map(|(_, p)| [p[0], p[1]]));
+        }
+    }
+    convex_hull(points)
+}
+
+/// The convex hull of `points`, counter-clockwise, collinear points
+/// dropped (Andrew's monotone chain).
+pub fn convex_hull(mut points: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    points.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    points.dedup_by(|a, b| (a[0] - b[0]).abs() < 1e-12 && (a[1] - b[1]).abs() < 1e-12);
+    if points.len() < 3 {
+        return points;
+    }
+    let span = points
+        .iter()
+        .fold(0.0_f64, |m, p| m.max(p[0].abs()).max(p[1].abs()))
+        .max(1.0);
+    let eps = 1e-12 * span * span;
+    let cross = |o: [f64; 2], a: [f64; 2], b: [f64; 2]| {
+        (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
+    };
+    let mut hull: Vec<[f64; 2]> = Vec::with_capacity(points.len() * 2);
+    for pass in 0..2 {
+        let start = hull.len();
+        let iter: Box<dyn Iterator<Item = &[f64; 2]>> = if pass == 0 {
+            Box::new(points.iter())
+        } else {
+            Box::new(points.iter().rev())
+        };
+        for &p in iter {
+            while hull.len() >= start + 2
+                && cross(hull[hull.len() - 2], hull[hull.len() - 1], p) <= eps
+            {
+                hull.pop();
+            }
+            hull.push(p);
+        }
+        hull.pop();
+    }
+    hull
+}

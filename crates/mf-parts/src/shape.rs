@@ -379,7 +379,10 @@ pub fn sags_sideways(record: &GeneratorRecord, local_to_world: glam::DMat3) -> b
 /// dowel or peg that isn't round has no round hole to sag.
 pub fn params_sag_sideways(params: &Params, local_to_world: glam::DMat3) -> bool {
     use crate::connectors::hole_profile::{HoleProfile, axis_tilt};
-    let round_shape = params.get_float("shape").map_or(true, |s| s.round() == 0.0);
+    let round_shape = match params.get_choice("shape") {
+        Ok(word) => word == "round",
+        Err(_) => params.get_float("shape").map_or(true, |s| s.round() == 0.0),
+    };
     params.0.contains_key("hole_profile")
         && round_shape
         && chosen_profile(params) == HoleProfile::Round

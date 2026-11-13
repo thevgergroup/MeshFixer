@@ -29,6 +29,7 @@ parameters:
     type: float
     default: 0.2
     unit: mm
+    fit_role: hole
     description: "The pockets are this much wider than the magnet (diametral)"
   - name: gap
     type: float

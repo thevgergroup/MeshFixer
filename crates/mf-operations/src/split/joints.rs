@@ -204,6 +204,7 @@ pub fn placement_params(p: &Placement, gap_mm: f64) -> Result<Params, OpError> {
                 let i = v.round().clamp(0.0, (values.len().max(1) - 1) as f64) as usize;
                 values.get(i).cloned().unwrap_or_default() // allow-swallow: i is clamped into values; empty values validate as a refusal below
             }
+            Some(mf_spec::ParamKind::Bool { .. }) => (*v != 0.0).to_string(),
             Some(_) => v.to_string(),
             // Not in the spec: an old field, for `upgrade_params`.
             None => v.to_string(),
@@ -692,21 +693,31 @@ pub fn fix_joint(
     }
 }
 
-/// The connector's outline on the cap, in the joint's 2D frame.
+/// The connector's outline on the cap, in the joint's 2D frame: the
+/// section of its own generated parts on the side it was placed on, at
+/// that side's cap (`mf_parts::generator::section_outline`), so the
+/// footprint is always exactly what it builds.
 pub fn footprint_2d(p: &Placement, params: &Params, mm: f64) -> Result<Vec<[f64; 2]>, OpError> {
-    let local = mf_parts::connectors::joint::footprint(&p.connector, params)
-        .map_err(|mf_parts::ConnectorError::Failed { code, message }| failed(code, message))?;
+    let gap_mm = params.get_float("gap").unwrap_or(0.0); // allow-swallow: a generator without a gap param has its cap at z = 0
+    let local =
+        mf_parts::generator::section_outline(&generated(p, params)?, Side::A, -gap_mm / 2.0);
+    Ok(local_to_2d(p, &local, mm))
+}
+
+/// Points in placement `p`'s own frame (x along its turn, y = outward ×
+/// x, mm) as 2D points in the joint frame (document units).
+pub fn local_to_2d(p: &Placement, local: &[[f64; 2]], mm: f64) -> Vec<[f64; 2]> {
     let (s, c) = p.angle.to_radians().sin_cos();
     // The local y axis is `outward × x`: on side B (outward −normal) it
     // runs the other way in the joint frame.
     let flip = if p.on == JointSide::A { 1.0 } else { -1.0 };
-    Ok(local
-        .into_iter()
-        .map(|[x, y]| {
+    local
+        .iter()
+        .map(|&[x, y]| {
             let (x, y) = (x * mm, y * mm * flip);
             [p.at[0] + x * c - y * s, p.at[1] + x * s + y * c]
         })
-        .collect())
+        .collect()
 }
 
 fn generated(p: &Placement, params: &Params) -> Result<Vec<ShapePart>, OpError> {
@@ -1070,7 +1081,8 @@ fn hole_wall(
 /// carries its fix (a param patch); the generic ones: breakout makes the
 /// hole shallower (or, if no depth is shallow enough, moves it inwards);
 /// edge distance or off the cap moves it towards the middle of the cut
-/// face; fit sets the clearance the Fit class and Machine profile ask for.
+/// face; fit sets every fit-tied param to what the Fit class and Machine
+/// profile ask for.
 pub fn fix(
     frame: &JointFrame,
     pieces: [&Piece<'_>; 2],
@@ -1120,11 +1132,18 @@ pub fn fix(
             move_inwards(frame, pieces, p, id, settings, ctx)
         }
         check_id::FIT => {
+            // Every param the generator's schema ties to the fit
+            // (`fit_role`), resolved afresh from the Fit class and
+            // Machine profile the check measured against.
+            let spec = placement_generator(p)?.spec();
+            let mut raw = BTreeMap::new();
+            mf_parts::fill_fit_role_params(spec, &mut raw, &settings.fit_class, &settings.machine);
             let mut q = p.clone();
-            q.params.insert(
-                "clearance".into(),
-                (wanted_clearance(settings) * 1000.0).round() / 1000.0,
-            );
+            for (k, v) in raw {
+                if let Ok(v) = v.parse::<f64>() {
+                    q.params.insert(k, (v * 1000.0).round() / 1000.0);
+                }
+            }
             Ok(Some(q))
         }
         _ => Ok(check_placement(frame, pieces, p, settings, ctx)?

@@ -194,12 +194,12 @@ pub(crate) enum Drag {
         from_y: f64,
         depth: f64,
     },
-    /// Placing a dovetail by dragging a line across the cut face (owner
-    /// 2026-11-11, D23): `start` is where the press landed; the current
-    /// pointer (tracked by the caller, not stored here) is the line's
-    /// other end until release, when `connect_tool::add_dovetail` turns
-    /// the whole line into a placement.
-    PlaceDovetail { start: [f64; 2] },
+    /// Placing a connector placed as a line (`PlacementHint::DragLine`,
+    /// a dovetail, D23) by dragging across the cut face: `start` is where
+    /// the press landed; the current pointer (tracked by the caller, not
+    /// stored here) is the line's other end until release, when
+    /// `connect_tool::add_line` turns the whole line into a placement.
+    PlaceLine { start: [f64; 2] },
 }
 
 /// What the pointer is over in Connect.

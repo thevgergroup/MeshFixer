@@ -38,6 +38,7 @@ parameters:
     type: float
     default: 0.2
     unit: mm
+    fit_role: hole
     description: "The dowel is this much thinner than its holes (diametral: the chosen Fit class plus the Machine profile's hole compensation)"
   - name: length_allowance
     type: float
@@ -52,11 +53,10 @@ parameters:
     unit: mm
     description: "The cut's own gap between the two caps"
   - name: shape
-    type: float
-    default: 0.0
-    min: 0.0
-    max: 3.0
-    description: "Cross-section, as an anti-rotation shape (D22): 0 round, 1 square, 2 N-sided (see sides), 3 keyed (a D, one flat)"
+    type: choice
+    default: round
+    values: [round, square, n_sided, keyed]
+    description: "Cross-section, as an anti-rotation shape (D22): round, square, N-sided (see sides) or keyed (a D, one flat); a placement records it as its index here"
   - name: sides
     type: float
     default: 6.0

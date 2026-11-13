@@ -1,11 +1,12 @@
 //! The Connectors tool on the rail (Phase 1 Task 29, MF-MODEL-005),
 //! registered through `shell::Tool` like Parts (`parts_tool.rs`).
 //!
-//! - **The library.** Pin hinge, Flap hinge, Snap clasp and Thread (the
-//!   connector registry, `mf_parts::connectors`), each a library entry
-//!   (Task 28's `PartKind::Connector`, registered in `mf_parts::builtin`).
-//!   Thread's size is "what's on the packet": a metric coarse preset
-//!   (M1…M12) and a length, shown as "M3 × 12".
+//! - **The library.** Every connector the generator registry offers on
+//!   a surface (`mf_parts::generators`), each a library entry (Task 28's
+//!   `PartKind::Connector`, derived in `mf_parts::builtin`). A connector
+//!   with params to pick before placing ("what's on the packet": a
+//!   thread's size and length, `Generator::quick_params`) shows them as
+//!   fields built from its own schema.
 //! - **Fit class and Machine profile** pickers: the design-intent gap
 //!   and the measured print-tolerance compensation (owner requirements
 //!   2026-11-11); a profile the user hasn't calibrated says so.
@@ -55,14 +56,15 @@ pub struct PlacedConnector {
     pub side_b: Option<ObjectId>,
 }
 
-/// The Connectors tool's state: the search filter, the thread size/
-/// length pickers, the Fit class and Machine profile choices, and the
-/// connector last placed.
+/// The Connectors tool's state: the search filter, each connector's
+/// quick params (picked before placing), the Fit class and Machine
+/// profile choices, and the connector last placed.
 #[derive(Debug, Clone)]
 pub struct ConnectorsState {
     pub search: String,
-    pub thread_size: String,
-    pub thread_length: f64,
+    /// Per connector id: its quick params' values (its schema's defaults
+    /// until picked).
+    pub quick: BTreeMap<String, mf_spec::Params>,
     pub fit_class: String,
     pub machine_profile: String,
     pub placed: Option<PlacedConnector>,
@@ -72,8 +74,7 @@ impl Default for ConnectorsState {
     fn default() -> ConnectorsState {
         ConnectorsState {
             search: String::new(),
-            thread_size: "M3".into(),
-            thread_length: 12.0,
+            quick: BTreeMap::new(),
             fit_class: mf_parts::FitClass::builtins()[1].name.clone(), // "Snug"
             machine_profile: mf_parts::UNCALIBRATED_NAME.into(),
             placed: None,
@@ -168,19 +169,6 @@ fn connector_library(app: &MeshFixerApp) -> mf_parts::Library {
     mf_parts::Library::load(dir.as_deref(), &ctx).0
 }
 
-/// Thread's size choices, "what's on the packet" (owner requirements
-/// 2026-11-11): the connector spec's own metric coarse presets.
-fn thread_sizes() -> Vec<String> {
-    mf_spec::builtin::get("thread")
-        .and_then(|s| s.parameter("size"))
-        .map(|p| match &p.kind {
-            mf_spec::ParamKind::Choice { values, .. } => values.clone(),
-            _ => Vec::new(),
-        })
-        // allow-swallow: "thread"'s spec and its "size" choice parameter are compiled in (specs/connectors/thread.yaml); a missing one is a bug this would surface as an empty picker, not a runtime condition to report to the user.
-        .unwrap_or_default()
-}
-
 fn run_on(
     app: &mut MeshFixerApp,
     target: ObjectId,
@@ -212,7 +200,7 @@ fn run_on(
 /// (`mf_parts::fill_fit_role_params`, parts-architecture-review.md: no
 /// more per-connector `if id == ...` branch). Thread's `size`/`length`
 /// are its own UI state, not a fit-role concern, so they're still set
-/// by hand here. The library part's own generated mesh
+/// from the card's quick params. The library part's own generated mesh
 /// (`object.add_part`) is sized from the connector's spec defaults, not
 /// this; what matters here is that `connector_params_json` (recorded on
 /// placement so Merge can regenerate the exact same parts, D22) is a
@@ -237,14 +225,25 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
     let spec = mf_parts::find_generator(id)
         .map(|c| c.spec())
         .ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
-    let mut raw: BTreeMap<String, String> = BTreeMap::new();
-    if id == "thread" {
-        raw.insert("size".to_owned(), app.connectors.thread_size.clone());
-        raw.insert(
-            "length".to_owned(),
-            app.connectors.thread_length.to_string(),
-        );
-    } else if spec.parameter("gap").is_some_and(|p| p.fit_role.is_none()) {
+    // The quick params picked in the library card (a thread's size and
+    // length), then the fit.
+    let mut raw: BTreeMap<String, String> = app
+        .connectors
+        .quick
+        .get(id)
+        .map(|q| {
+            q.0.iter()
+                .map(|(k, v)| {
+                    let text = match v {
+                        mf_spec::ParamValue::Float(f) => format!("{f}"),
+                        other => other.to_string(),
+                    };
+                    (k.clone(), text)
+                })
+                .collect()
+        })
+        .unwrap_or_default(); // allow-swallow: no quick params picked yet means the schema's defaults
+    if spec.parameter("gap").is_some_and(|p| p.fit_role.is_none()) && !raw.contains_key("gap") {
         // A connector whose own `gap` has no `fit_role` of its own (the
         // Connect point-placement joint connectors, whose `gap` instead
         // comes from the cut frame, never this picker): the plain,
@@ -476,17 +475,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .collect();
     connectors.sort_by(|a, b| a.1.cmp(&b.1));
     for (id, name) in &connectors {
-        if id == "thread" {
-            thread_row(app, ui, name);
-        } else if ui
-            .add_enabled_ui(app.busy.is_none(), |ui| {
-                widgets::wide_button(ui, Kind::Secondary, Some(icons::CONNECTORS), name)
-            })
-            .inner
-            .clicked()
-        {
-            place_connector(app, id);
-        }
+        library_entry(app, ui, id, name);
     }
     widgets::caption(ui, t!("connectors.click_help"));
 
@@ -501,35 +490,68 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 }
 
-fn thread_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, name: &str) {
-    widgets::card(ui, |ui| {
-        widgets::body(ui, name);
-        ui.horizontal(|ui| {
-            egui::ComboBox::from_id_salt("thread size")
-                .selected_text(app.connectors.thread_size.clone())
-                .show_ui(ui, |ui| {
-                    for size in thread_sizes() {
-                        ui.selectable_value(&mut app.connectors.thread_size, size.clone(), size);
-                    }
-                });
-            ui.label("×");
-            ui.add(
-                egui::DragValue::new(&mut app.connectors.thread_length)
-                    .speed(0.5)
-                    .range(1.0..=200.0)
-                    .suffix(" mm"),
-            );
-        });
-        widgets::caption(
-            ui,
-            t!(
-                "connectors.thread_preset",
-                size = app.connectors.thread_size.clone(),
-                length = app.connectors.thread_length
-            ),
-        );
+/// One library connector: a button that places it, or — for one with
+/// quick params to pick first — a card with those fields (built from its
+/// own schema) and an Add button.
+fn library_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: &str, name: &str) {
+    let Some(g) = mf_parts::find_generator(id) else {
+        return;
+    };
+    let quick = g.quick_params();
+    if quick.is_empty() {
         if ui
             .add_enabled_ui(app.busy.is_none(), |ui| {
+                widgets::wide_button(ui, Kind::Secondary, Some(icons::CONNECTORS), name)
+            })
+            .inner
+            .clicked()
+        {
+            place_connector(app, id);
+        }
+        return;
+    }
+    let hidden: Vec<&str> = g
+        .spec()
+        .parameters
+        .iter()
+        .map(|p| p.name.as_str())
+        .filter(|n| !quick.contains(n))
+        .collect();
+    let options = crate::shape_panel::text_options(app);
+    let idle = app.busy.is_none();
+    let entry = app
+        .connectors
+        .quick
+        .entry(id.to_owned())
+        .or_insert_with(|| {
+            let defaults = g.spec().validate(&BTreeMap::new()).unwrap_or_default(); // allow-swallow: a spec always validates its own defaults
+            mf_spec::Params(
+                defaults
+                    .0
+                    .into_iter()
+                    .filter(|(k, _)| quick.contains(&k.as_str()))
+                    .collect(),
+            )
+        });
+    let mut add = false;
+    widgets::card(ui, |ui| {
+        widgets::body(ui, name);
+        if let Some((k, v)) = crate::shape_panel::param_grid(
+            ui,
+            ("connector quick params", id),
+            g.spec(),
+            entry,
+            &crate::shape_panel::GridOptions {
+                hidden: &hidden,
+                live: true,
+                idle,
+                text_options: &options,
+            },
+        ) {
+            entry.0.insert(k, v);
+        }
+        add = ui
+            .add_enabled_ui(idle, |ui| {
                 widgets::wide_button(
                     ui,
                     Kind::Secondary,
@@ -538,11 +560,11 @@ fn thread_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, name: &str) {
                 )
             })
             .inner
-            .clicked()
-        {
-            place_connector(app, "thread");
-        }
+            .clicked();
     });
+    if add {
+        place_connector(app, id);
+    }
 }
 
 fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {

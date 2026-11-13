@@ -167,12 +167,34 @@ const STATUS_BAR_HEIGHT: f32 = 36.0;
 /// the status bar at the bottom), then clicks it (Connect's panel is
 /// taller than the window).
 fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
+    scroll_and_click_by(h, label, None);
+}
+
+/// [`scroll_and_click`] on the control with `role` and `label` (a schema
+/// field's control shares its name with the field's text label).
+fn scroll_and_click_role(
+    h: &mut Harness<'_, MeshFixerApp>,
+    role: egui::accesskit::Role,
+    label: &str,
+) {
+    scroll_and_click_by(h, label, Some(role));
+}
+
+fn scroll_and_click_by(
+    h: &mut Harness<'_, MeshFixerApp>,
+    label: &str,
+    role: Option<egui::accesskit::Role>,
+) {
+    let rect_of = |h: &Harness<'_, MeshFixerApp>| match role {
+        Some(r) => h.get_by_role_and_label(r, label).rect(),
+        None => h.get_by_label(label).rect(),
+    };
     let over = egui::pos2(200.0, WINDOW.1 * 0.5);
     h.event(egui::Event::PointerMoved(over));
     h.step();
     let mut tries = 0;
     loop {
-        let rect = h.get_by_label(label).rect();
+        let rect = rect_of(h);
         if rect.bottom() <= WINDOW.1 - STATUS_BAR_HEIGHT && rect.top() >= 40.0 {
             break;
         }
@@ -189,7 +211,10 @@ fn scroll_and_click(h: &mut Harness<'_, MeshFixerApp>, label: &str) {
         h.run_steps(2);
     }
     h.run_steps(10);
-    h.get_by_label(label).click();
+    match role {
+        Some(r) => h.get_by_role_and_label(r, label).click(),
+        None => h.get_by_label(label).click(),
+    }
 }
 
 /// A press and release at `p` (window points), no drag.
@@ -806,8 +831,9 @@ fn a_legacy_dovetail_placement_still_edits_its_reach_and_open_state() {
         "through, as seeded"
     );
 
-    // Unchecking the start end's "Through" box makes it stopped.
-    scroll_and_click(&mut h, "Through (start end)");
+    // Unchecking the start end's "Open a" box (built from the schema's
+    // own bool) makes it stopped.
+    scroll_and_click_role(&mut h, egui::accesskit::Role::CheckBox, "Open a");
     settle(&mut h);
     let ps = placements(&h);
     assert_eq!(ps[0].params["open_a"], 0.0, "unchecked: now stopped");
@@ -816,7 +842,8 @@ fn a_legacy_dovetail_placement_still_edits_its_reach_and_open_state() {
 
 /// D22 (owner 2026-11-11): a dowel's shape picker in the details block
 /// switches its cross-section, recorded in the placement so replay is
-/// Exact; "N-sided" reveals a "Sides" field.
+/// Exact (the generic schema field: a choice is a combo box of its
+/// words).
 #[test]
 fn the_dowel_shape_picker_switches_its_cross_section() {
     require_gpu!("the_dowel_shape_picker_switches_its_cross_section");
@@ -836,15 +863,20 @@ fn the_dowel_shape_picker_switches_its_cross_section() {
     );
     still(&mut h, "dowel-shape-round");
 
-    scroll_and_click(&mut h, "Square");
+    // The schema's own choice: a combo box of its words.
+    scroll_and_click_role(&mut h, egui::accesskit::Role::ComboBox, "Shape");
+    settle(&mut h);
+    h.get_by_label("Square").click();
     settle(&mut h);
     assert_eq!(placements(&h)[0].params["shape"], 1.0);
     still(&mut h, "dowel-shape-square");
 
-    scroll_and_click(&mut h, "N-sided");
+    scroll_and_click_role(&mut h, egui::accesskit::Role::ComboBox, "Shape");
+    settle(&mut h);
+    h.get_by_label("N sided").click();
     settle(&mut h);
     assert_eq!(placements(&h)[0].params["shape"], 2.0);
-    // The "Sides" field appears once N-sided is picked.
+    // Its "Sides" field.
     h.get_by_label("Sides");
     still(&mut h, "dowel-shape-nsided");
 }

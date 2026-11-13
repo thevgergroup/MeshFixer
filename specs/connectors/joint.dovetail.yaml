@@ -38,17 +38,13 @@ parameters:
     unit: mm
     description: "How far the groove reaches from the placement's centre towards its drag line's end (the +x end, D23)"
   - name: open_a
-    type: float
-    default: 1.0
-    min: 0.0
-    max: 1.0
-    description: "The -x end is through (1, reaches well past the cap so the assembly slides apart that way) or stopped (0, ends exactly at groove_a, short of the edge on purpose)"
+    type: bool
+    default: true
+    description: "The -x end is through (reaches well past the cap so the assembly slides apart that way) or stopped (ends exactly at groove_a, short of the edge on purpose); a placement records it as 1 or 0"
   - name: open_b
-    type: float
-    default: 1.0
-    min: 0.0
-    max: 1.0
-    description: "The +x end is through (1) or stopped (0), see open_a"
+    type: bool
+    default: true
+    description: "The +x end is through or stopped, see open_a"
   - name: depth_on
     type: float
     default: 3.0
@@ -65,6 +61,7 @@ parameters:
     type: float
     default: 0.2
     unit: mm
+    fit_role: hole
     description: "The tail is this much narrower than the groove across its flanks (both sides together)"
   - name: length_allowance
     type: float

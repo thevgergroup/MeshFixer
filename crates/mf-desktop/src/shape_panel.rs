@@ -114,8 +114,8 @@ pub fn attach_sides(app: &MeshFixerApp, id: ObjectId) -> Option<(String, ObjectI
             Some(mf_parts::Side::B) => b = b.or(Some(to)),
             _ => a = a.or(Some(to)),
         }
-        if record.id.starts_with("hinge.") {
-            gap = record.params.get_float("gap").unwrap_or(0.0);
+        if let Some(g) = mf_parts::find_generator(&record.id) {
+            gap = f64::max(gap, g.moving_gap(&record.params));
         }
     }
     let (a, b) = (a?, b?);
@@ -146,16 +146,19 @@ pub fn set_params(app: &mut MeshFixerApp, id: ObjectId, params: Params) {
     let Some((_, first)) = members.first() else {
         return;
     };
-    let spec = match mf_parts::record_spec(first) {
-        Ok(s) => s,
-        Err(e) => return refuse(app, e.to_string()),
+    let Some(g) = mf_parts::find_generator(&first.id) else {
+        return refuse(app, format!("'{}' isn't available in this build", first.id));
     };
-    let raw: BTreeMap<String, String> = params
+    let spec = g.spec();
+    // Recorded params from an older schema are upgraded first
+    // (`Generator::upgrade_params`), then checked against the current one.
+    let mut raw: BTreeMap<String, String> = params
         .0
         .iter()
-        .filter(|(k, _)| spec.parameter(k).is_some())
         .map(|(k, v)| (k.clone(), v.to_string()))
         .collect();
+    g.upgrade_params(&mut raw);
+    raw.retain(|k, _| spec.parameter(k).is_some());
     let params = match spec.validate(&raw) {
         Ok(p) => p,
         Err(e) => return refuse(app, e.to_string()),
@@ -443,6 +446,8 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let Some(n) = sagging_hole(app, id) {
         sideways_warning(app, ui, n);
     }
+    // A dovetail's "ends inside the piece" warning: it decides for
+    // itself whether `id` is a dovetail.
     crate::dovetail_tool::warning_section(app, ui, id);
     let members = members(app, id);
     if members.len() > 1 {
@@ -476,7 +481,9 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         app.shape_edit = Some(ShapeDraft {
             object: id,
             revision,
-            params: record.params.clone(),
+            params: mf_parts::find_generator(&record.id)
+                .and_then(|g| mf_parts::generator::upgraded(g, &record.params).ok()) // allow-swallow: an unreadable record shows its params as recorded; editing one says why
+                .unwrap_or_else(|| record.params.clone()),
         });
     }
     let Ok(spec) = mf_parts::record_spec(&record) else {
@@ -484,108 +491,22 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         return;
     };
     let idle = app.busy.is_none();
-    let (classes, _) = crate::connector_tool::fit_classes(app);
-    let (profiles, _) = crate::connector_tool::machine_profiles(app);
-    let mut commit: Option<(String, ParamValue)> = None;
+    let options = text_options(app);
     let Some(draft) = app.shape_edit.as_mut() else {
         return;
     };
-    egui::Grid::new(("shape params", id))
-        .num_columns(2)
-        .spacing([theme::SPACE_S, theme::SPACE_XS])
-        .show(ui, |ui| {
-            for p in &spec.parameters {
-                if DERIVED.contains(&p.name.as_str()) {
-                    continue;
-                }
-                let Some(value) = draft.params.0.get_mut(&p.name) else {
-                    continue;
-                };
-                ui.add(egui::Label::new(label(&p.name)).wrap_mode(egui::TextWrapMode::Extend))
-                    .on_hover_text(&p.description);
-                let suffix = match p.unit.as_deref() {
-                    Some("mm") => " mm",
-                    Some("deg") => "°",
-                    _ => "",
-                };
-                ui.add_enabled_ui(idle, |ui| match (&p.kind, value) {
-                    (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
-                        let r = ui.add(
-                            egui::DragValue::new(v)
-                                .speed(0.1)
-                                .range(min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX))
-                                .max_decimals(3)
-                                .suffix(suffix)
-                                .update_while_editing(false),
-                        );
-                        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                            commit = Some((p.name.clone(), ParamValue::Float(*v)));
-                        }
-                    }
-                    (ParamKind::Integer { min, max, .. }, ParamValue::Int(v)) => {
-                        let r = ui.add(
-                            egui::DragValue::new(v)
-                                .speed(0.1)
-                                .range(min.unwrap_or(i64::MIN)..=max.unwrap_or(i64::MAX))
-                                .update_while_editing(false),
-                        );
-                        if r.drag_stopped() || (r.changed() && !r.dragged()) {
-                            commit = Some((p.name.clone(), ParamValue::Int(*v)));
-                        }
-                    }
-                    (ParamKind::Choice { values, .. }, ParamValue::Text(v)) => {
-                        egui::ComboBox::from_id_salt(("shape choice", &p.name))
-                            .selected_text(label(v))
-                            .show_ui(ui, |ui| {
-                                for option in values {
-                                    if ui.selectable_label(v == option, label(option)).clicked()
-                                        && v != option
-                                    {
-                                        commit = Some((
-                                            p.name.clone(),
-                                            ParamValue::Text(option.clone()),
-                                        ));
-                                    }
-                                }
-                            });
-                    }
-                    (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
-                        if ui.checkbox(v, "").changed() {
-                            commit = Some((p.name.clone(), ParamValue::Bool(*v)));
-                        }
-                    }
-                    (ParamKind::Text { .. }, ParamValue::Text(v)) => {
-                        let options: Vec<String> = match p.name.as_str() {
-                            "fit_class" => classes.classes.iter().map(|c| c.name.clone()).collect(),
-                            "machine_profile" => {
-                                profiles.profiles.iter().map(|m| m.name.clone()).collect()
-                            }
-                            _ => Vec::new(),
-                        };
-                        if options.is_empty() {
-                            ui.label(v.as_str());
-                        } else {
-                            egui::ComboBox::from_id_salt(("shape text", &p.name))
-                                .selected_text(v.as_str())
-                                .show_ui(ui, |ui| {
-                                    for option in options {
-                                        if ui.selectable_label(*v == option, &option).clicked()
-                                            && *v != option
-                                        {
-                                            commit =
-                                                Some((p.name.clone(), ParamValue::Text(option)));
-                                        }
-                                    }
-                                });
-                        }
-                    }
-                    (_, other) => {
-                        ui.label(other.to_string());
-                    }
-                });
-                ui.end_row();
-            }
-        });
+    let commit = param_grid(
+        ui,
+        ("shape params", id),
+        spec,
+        &mut draft.params,
+        &GridOptions {
+            hidden: DERIVED,
+            live: false,
+            idle,
+            text_options: &options,
+        },
+    );
     if let (Ok(c), Ok(m)) = (
         record.params.get_float("fit_clearance"),
         record.params.get_float("machine_tolerance"),
@@ -595,9 +516,157 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let Some((name, value)) = commit {
         set_param(app, &name, value);
     }
-    if record.id == crate::hinge_tool::HINGE {
-        crate::hinge_tool::swing_section(app, ui, id);
+    // Each tool's own extra for a shape it made (a hinge's swing check):
+    // it decides for itself whether `id` is one of its own.
+    crate::hinge_tool::swing_section(app, ui, id);
+}
+
+/// What a free-text param may be set to, by name (the Fit class and
+/// Machine profile names a fit-aware generator records); empty for any
+/// other text, which is shown as is.
+pub fn text_options(app: &MeshFixerApp) -> impl Fn(&str) -> Vec<String> + use<> {
+    let (classes, _) = crate::connector_tool::fit_classes(app);
+    let (profiles, _) = crate::connector_tool::machine_profiles(app);
+    move |name: &str| match name {
+        "fit_class" => classes.classes.iter().map(|c| c.name.clone()).collect(),
+        "machine_profile" => profiles.profiles.iter().map(|m| m.name.clone()).collect(),
+        _ => Vec::new(),
     }
+}
+
+/// How [`param_grid`] shows a schema.
+pub struct GridOptions<'a> {
+    /// Params never shown as fields (worked out from other choices).
+    pub hidden: &'a [&'a str],
+    /// Commit every change as it happens (a placement still being
+    /// designed) rather than when a drag ends or Enter is pressed (an
+    /// edit that runs a command).
+    pub live: bool,
+    /// False while a command runs: the fields are shown but disabled.
+    pub idle: bool,
+    pub text_options: &'a dyn Fn(&str) -> Vec<String>,
+}
+
+/// One field per param of `spec`, built from the schema alone (its kind,
+/// unit, range, choices and description): the editor every generator
+/// gets, in the selection panel, Connect and the Connectors library.
+/// `params` holds the values being edited; returns the param a person
+/// just committed and its new value.
+pub fn param_grid(
+    ui: &mut egui::Ui,
+    salt: impl std::hash::Hash + std::fmt::Debug,
+    spec: &mf_spec::OperationSpec,
+    params: &mut Params,
+    opts: &GridOptions,
+) -> Option<(String, ParamValue)> {
+    let mut commit: Option<(String, ParamValue)> = None;
+    let done = |r: &egui::Response| {
+        if opts.live {
+            r.changed()
+        } else {
+            r.drag_stopped() || (r.changed() && !r.dragged())
+        }
+    };
+    egui::Grid::new(salt)
+        .num_columns(2)
+        .spacing([theme::SPACE_S, theme::SPACE_XS])
+        .show(ui, |ui| {
+            for p in &spec.parameters {
+                if opts.hidden.contains(&p.name.as_str()) {
+                    continue;
+                }
+                let Some(value) = params.0.get_mut(&p.name) else {
+                    continue;
+                };
+                let name = label(&p.name);
+                ui.add(egui::Label::new(&name).wrap_mode(egui::TextWrapMode::Extend))
+                    .on_hover_text(&p.description);
+                let suffix = match p.unit.as_deref() {
+                    Some("mm") => " mm",
+                    Some("deg") => "°",
+                    _ => "",
+                };
+                ui.add_enabled_ui(opts.idle, |ui| match (&p.kind, value) {
+                    (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
+                        let r = ui.add(
+                            egui::DragValue::new(v)
+                                .speed(0.1)
+                                .range(min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX))
+                                .max_decimals(3)
+                                .suffix(suffix)
+                                .update_while_editing(opts.live),
+                        );
+                        if done(&r) {
+                            commit = Some((p.name.clone(), ParamValue::Float(*v)));
+                        }
+                    }
+                    (ParamKind::Integer { min, max, .. }, ParamValue::Int(v)) => {
+                        let r = ui.add(
+                            egui::DragValue::new(v)
+                                .speed(0.1)
+                                .range(min.unwrap_or(i64::MIN)..=max.unwrap_or(i64::MAX))
+                                .update_while_editing(opts.live),
+                        );
+                        if done(&r) {
+                            commit = Some((p.name.clone(), ParamValue::Int(*v)));
+                        }
+                    }
+                    (ParamKind::Choice { values, .. }, ParamValue::Text(v)) => {
+                        let r = egui::ComboBox::from_id_salt(
+                            ui.make_persistent_id(("param choice", &p.name)),
+                        )
+                        .selected_text(label(v))
+                        .show_ui(ui, |ui| {
+                            for option in values {
+                                if ui.selectable_label(v == option, label(option)).clicked()
+                                    && v != option
+                                {
+                                    commit =
+                                        Some((p.name.clone(), ParamValue::Text(option.clone())));
+                                }
+                            }
+                        });
+                        r.response.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::ComboBox, true, &name)
+                        });
+                    }
+                    (ParamKind::Bool { .. }, ParamValue::Bool(v)) => {
+                        let r = ui.checkbox(v, "");
+                        r.widget_info(|| {
+                            egui::WidgetInfo::labeled(egui::Role::CheckBox, true, &name)
+                        });
+                        if r.changed() {
+                            commit = Some((p.name.clone(), ParamValue::Bool(*v)));
+                        }
+                    }
+                    (ParamKind::Text { .. }, ParamValue::Text(v)) => {
+                        let options = (opts.text_options)(&p.name);
+                        if options.is_empty() {
+                            ui.label(v.as_str());
+                        } else {
+                            egui::ComboBox::from_id_salt(
+                                ui.make_persistent_id(("param text", &p.name)),
+                            )
+                            .selected_text(v.as_str())
+                            .show_ui(ui, |ui| {
+                                for option in options {
+                                    if ui.selectable_label(*v == option, &option).clicked()
+                                        && *v != option
+                                    {
+                                        commit = Some((p.name.clone(), ParamValue::Text(option)));
+                                    }
+                                }
+                            });
+                        }
+                    }
+                    (_, other) => {
+                        ui.label(other.to_string());
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    commit
 }
 
 /// The Transform panel's own copy of the section, below its fields.

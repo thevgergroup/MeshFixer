@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-use mf_parts::connectors::joint::{Dovetail, Dowel, Peg, Shape, dovetail_reach, footprint};
+use mf_parts::connectors::joint::{Dovetail, Dowel, Peg, Shape, dovetail_reach};
 use mf_parts::{GenContext, Generator, ShapePart};
 use mf_runtime::RunContext;
 
@@ -37,6 +37,16 @@ fn part<'a>(parts: &'a [ShapePart], role: &str) -> &'a mf_geometry::Mesh {
         .find(|p| p.name == role)
         .unwrap_or_else(|| panic!("no part with role {role}"))
         .mesh
+}
+
+/// The outline a connector makes on the cut face it's placed on: the
+/// section of its own side-A parts at that cap (the generic footprint).
+fn footprint(connector: &dyn Generator, p: &mf_spec::Params) -> Vec<[f64; 2]> {
+    let parts = connector
+        .generate(p, &GenContext::new(&RunContext::none()))
+        .unwrap();
+    let gap = p.get_float("gap").unwrap();
+    mf_parts::generator::section_outline(&parts, mf_parts::TargetSlot::A, -gap / 2.0)
 }
 
 /// The outline's reach from its centre (max over its points), for
@@ -86,7 +96,7 @@ fn a_round_dowel_defaults_unchanged_by_the_shape_param() {
             ("diameter", "6"),
             ("depth_on", "5"),
             ("depth_other", "5"),
-            ("shape", "1"),
+            ("shape", "square"),
         ],
     );
     let hole_round = part(&round, "hole");
@@ -109,7 +119,7 @@ fn nsided_and_keyed_profiles_stay_within_the_fit_diameter() {
     // corners *do* reach past the circle by design — that shape's
     // extent is covered on its own below, not here.
     let d = 6.0_f64;
-    for (shape_code, sides) in [("2", "6"), ("2", "12"), ("3", "6")] {
+    for (shape_code, sides) in [("n_sided", "6"), ("n_sided", "12"), ("keyed", "6")] {
         let p = params(
             &Dowel,
             &[
@@ -120,7 +130,7 @@ fn nsided_and_keyed_profiles_stay_within_the_fit_diameter() {
                 ("sides", sides),
             ],
         );
-        let outline = footprint("joint.dowel", &p).unwrap();
+        let outline = footprint(&Dowel, &p);
         let r = reach(&outline);
         assert!(
             r <= d / 2.0 + 1e-6,
@@ -142,10 +152,10 @@ fn a_square_profile_is_diameter_wide_side_to_side_like_split_pegs_own_squares() 
             ("diameter", "6"),
             ("depth_on", "5"),
             ("depth_other", "5"),
-            ("shape", "1"),
+            ("shape", "square"),
         ],
     );
-    let outline = footprint("joint.dowel", &p).unwrap();
+    let outline = footprint(&Dowel, &p);
     assert_eq!(outline.len(), 4, "a square has four corners");
     let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
     for q in &outline {
@@ -167,11 +177,11 @@ fn an_nsided_peg_has_exactly_its_requested_corners() {
                 ("diameter", "6"),
                 ("depth_on", "3"),
                 ("depth_other", "6"),
-                ("shape", "2"),
+                ("shape", "n_sided"),
                 ("sides", &sides.to_string()),
             ],
         );
-        let outline = footprint("joint.peg", &p).unwrap();
+        let outline = footprint(&Peg, &p);
         assert_eq!(outline.len(), sides, "sides = {sides}");
     }
 }
@@ -186,7 +196,7 @@ fn a_shaped_peg_fits_its_own_shaped_counterpart_hole() {
             ("diameter", "6"),
             ("depth_on", "3"),
             ("depth_other", "6"),
-            ("shape", "2"),
+            ("shape", "n_sided"),
             ("sides", "6"),
         ],
     );

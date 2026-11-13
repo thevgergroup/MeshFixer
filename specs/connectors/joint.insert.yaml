@@ -35,6 +35,7 @@ parameters:
     type: float
     default: 0.2
     unit: mm
+    fit_role: hole
     description: "The screw's hole is this much wider than the screw (diametral)"
   - name: gap
     type: float

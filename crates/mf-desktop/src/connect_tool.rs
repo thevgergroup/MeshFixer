@@ -105,54 +105,6 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// A connector's parameters the panel edits, per kind: (name, label id).
-fn editable(kind: &str) -> &'static [(&'static str, &'static str)] {
-    match kind {
-        "joint.dowel" => &[
-            ("diameter", "connect.param.diameter"),
-            ("depth_on", "connect.param.depth_on"),
-            ("depth_other", "connect.param.depth_other"),
-            ("dowel_length", "connect.param.dowel_length"),
-            ("clearance", "connect.param.clearance"),
-        ],
-        "joint.dovetail" => &[
-            ("diameter", "connect.param.width"),
-            ("length", "connect.param.length"),
-            ("depth_on", "connect.param.root"),
-            ("depth_other", "connect.param.depth_other"),
-            ("clearance", "connect.param.clearance"),
-        ],
-        "joint.insert" => &[
-            ("diameter", "connect.param.insert"),
-            ("screw_diameter", "connect.param.screw"),
-            ("depth_on", "connect.param.depth_on"),
-            ("depth_other", "connect.param.depth_other"),
-            ("clearance", "connect.param.clearance"),
-        ],
-        "joint.magnet" => &[
-            ("diameter", "connect.param.magnet"),
-            ("depth_on", "connect.param.depth_on"),
-            ("depth_other", "connect.param.depth_other"),
-            ("clearance", "connect.param.clearance"),
-        ],
-        _ => &[
-            ("diameter", "connect.param.diameter"),
-            ("depth_on", "connect.param.peg_root"),
-            ("depth_other", "connect.param.depth_other"),
-            ("clearance", "connect.param.clearance"),
-        ],
-    }
-}
-
-/// True if `p`'s connector cuts a round hole (a round dowel or peg, a
-/// magnet or insert pocket): the ones that take a hole profile.
-fn has_round_hole(p: &Placement, gap_mm: f64) -> bool {
-    mf_operations::placement_params(p, gap_mm).is_ok_and(|params| {
-        params.0.contains_key("hole_profile")
-            && params.get_float("shape").map_or(true, |s| s.round() == 0.0)
-    })
-}
-
 /// True if `p` cuts a round hole that prints sideways on this joint
 /// (its axis within 45° of horizontal) but is kept round, so its top
 /// would sag.
@@ -165,118 +117,86 @@ pub fn sags_sideways(app: &MeshFixerApp, joint: &Joint, p: &Placement) -> bool {
     mf_parts::shape::params_sag_sideways(&params, glam::DMat3::from_mat4(world))
 }
 
-/// A placement's full parameters (its own and the spec's defaults), mm.
-fn full_params(p: &Placement, gap_mm: f64) -> BTreeMap<String, f64> {
-    mf_operations::placement_params(p, gap_mm)
-        .map(|params| {
-            params
-                .0
-                .iter()
-                .filter_map(|(k, v)| match v {
-                    mf_spec::ParamValue::Float(f) => Some((k.clone(), *f)),
-                    _ => None,
-                })
-                .collect()
-        })
-        .unwrap_or_else(|_| p.params.clone()) // allow-swallow: an invalid placement's check card says why; the fields show what was set
+/// A new placement's own params: every param its schema ties to the fit
+/// (`fit_role`) resolved from Connect's Fit class and the Machine
+/// profile (rounded to a micron), recorded as numbers like every
+/// placement param.
+fn new_params(app: &MeshFixerApp, kind: &str) -> BTreeMap<String, f64> {
+    let Some(g) = mf_parts::find_generator(kind) else {
+        return BTreeMap::new();
+    };
+    let s = split_flow::settings(app);
+    let mut raw = BTreeMap::new();
+    mf_parts::fill_fit_role_params(g.spec(), &mut raw, &s.fit_class, &s.machine);
+    raw.into_iter()
+        .filter_map(|(k, v)| Some((k, (v.parse::<f64>().ok()? * 1000.0).round() / 1000.0))) // allow-swallow: a fit-role value that isn't a number (a class's name) isn't a placement number
+        .collect()
 }
 
-/// A plain click's default dovetail length each way, mm (owner
-/// 2026-11-11, D23): the drag is the primary way to place one (its
-/// direction and the boundary it's dragged to set the slide direction
-/// and reach exactly), but a click without a drag still has to place
-/// something sensible rather than nothing — half of `length`'s own
-/// default (16 mm) each way, through both ends, the same "it runs out
-/// of the piece on purpose" shape every dovetail had before this (the
-/// old `groove_length: 10_000.0` hack), just not actually unbounded
-/// (`DEFAULT_CLICK_REACH` is already generous next to any real part).
-const DEFAULT_CLICK_REACH: f64 = 50.0;
-
 /// Add a connector of the chosen kind at `at` on the open joint's solid
-/// cut face, with the clearance the Fit class and Machine profile ask
-/// for; it becomes the picked one. A dovetail placed this way (a click,
-/// not a drag) gets a short default reach both ways, through both ends
-/// ([`DEFAULT_CLICK_REACH`]); [`add_dovetail`] is the drag path proper.
+/// cut face; it becomes the picked one. A kind placed as a line
+/// (`PlacementHint::DragLine`) placed with a click is a line of no length
+/// along the joint's own u.
 pub fn add_connector(app: &mut MeshFixerApp, at: [f64; 2]) {
     let kind = app.split_flow.kind();
-    let clearance = mf_operations::wanted_clearance(&split_flow::settings(app));
-    let mut params = BTreeMap::from([(
-        "clearance".to_owned(),
-        (clearance * 1000.0).round() / 1000.0,
-    )]);
-    if kind == "joint.dovetail" {
-        params.insert("groove_a".into(), DEFAULT_CLICK_REACH);
-        params.insert("groove_b".into(), DEFAULT_CLICK_REACH);
-        params.insert("open_a".into(), 1.0);
-        params.insert("open_b".into(), 1.0);
+    if mf_parts::find_generator(kind)
+        .is_some_and(|g| g.placement_hint() == mf_parts::PlacementHint::DragLine)
+    {
+        return add_line(app, at, at);
     }
+    let params = new_params(app, kind);
     push_placement(app, kind, at, 0.0, params);
 }
 
-/// Add a dovetail dragged from `start` to `end` on the open joint's
-/// solid cut face (owner 2026-11-11, D23): the line's direction is the
-/// slide direction (`angle`, the usual local-x turn every connector
-/// already has); the groove reaches from its centre to the solid cap's
-/// own outline on each side, along that direction, **through** (so the
-/// recorded reach is `OVER_THE_EDGE` past the boundary, same idea as
-/// the old `groove_length: 10_000.0` hack, just now a real, finite,
-/// recorded number instead of a magic one) unless the drag's own
-/// endpoint already fell short of the boundary, in which case that end
-/// is **stopped** at exactly the dragged length (the person dragged to
-/// a deliberately short reach, so the placement respects that rather
-/// than silently extending it to the edge).
-pub fn add_dovetail(app: &mut MeshFixerApp, start: [f64; 2], end: [f64; 2]) {
-    const OVER_THE_EDGE: f64 = 1000.0;
+/// Add a connector of the chosen kind dragged as a line from `start` to
+/// `end` on the open joint's solid cut face (`PlacementHint::DragLine`,
+/// D23): its centre is the line's middle and its turn the line's
+/// direction; its generator works out the rest from half the dragged
+/// length and the cut faces (`Generator::line_params`, measuring them
+/// through `mf_operations::CapTargets`).
+pub fn add_line(app: &mut MeshFixerApp, start: [f64; 2], end: [f64; 2]) {
+    let kind = app.split_flow.kind();
+    let Some(g) = mf_parts::find_generator(kind) else {
+        return;
+    };
     let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
     let len = (dx * dx + dy * dy).sqrt();
-    let (dir, dragged) = if len > 1e-6 {
-        ([dx / len, dy / len], len)
+    let dir = if len > 1e-6 {
+        [dx / len, dy / len]
     } else {
-        ([1.0, 0.0], 0.0)
+        [1.0, 0.0]
     };
-    let at = [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0];
-    let half_dragged = dragged / 2.0;
     let scale = mm(app);
-    let caps = app.split_flow.geometry();
-    let on = app
-        .split_flow
-        .open_joint()
-        .map_or(JointSide::A, |j| j.transparent.other());
-    // The groove is cut into the *other* piece from `on`: its cap is
-    // the boundary a dragged end can reach (mirrors the live check,
-    // `CheckKind::DovetailStopped`, and `generate`'s own `Side::B`
-    // groove in `mf_parts::connectors::joint`).
-    let groove_cap = caps.as_ref().map(|g| g.cap(on.other()));
-    let reach = |sign: f64| {
-        let d = [dir[0] * sign, dir[1] * sign];
-        let to_edge = groove_cap
-            .and_then(|cap| cap.ray_boundary(at, d))
-            .map(|t| t / scale);
-        match to_edge {
-            // The drag already reached (or passed) the boundary on this
-            // side: through, recorded well past it.
-            Some(edge) if half_dragged >= edge - 1e-6 => (edge + OVER_THE_EDGE, true),
-            // The drag stopped short on purpose: stopped, at exactly
-            // the dragged length (never less than a sliver, so a
-            // same-point click-drag still makes a usable dovetail).
-            _ => (half_dragged.max(DEFAULT_CLICK_REACH * 0.2), false),
-        }
+    let Some(on) = app.split_flow.open_joint().map(|j| j.transparent.other()) else {
+        return;
     };
-    let (reach_a, open_a) = reach(-1.0);
-    let (reach_b, open_b) = reach(1.0);
-    let angle = dir[1].atan2(dir[0]).to_degrees();
-    let clearance = mf_operations::wanted_clearance(&split_flow::settings(app));
-    let params = BTreeMap::from([
-        (
-            "clearance".to_owned(),
-            (clearance * 1000.0).round() / 1000.0,
+    let p = Placement {
+        connector: kind.to_owned(),
+        on,
+        at: [(start[0] + end[0]) / 2.0, (start[1] + end[1]) / 2.0],
+        angle: dir[1].atan2(dir[0]).to_degrees(),
+        params: new_params(app, kind),
+    };
+    let patch = match app.split_flow.geometry() {
+        Some(geom) => {
+            let targets = mf_operations::CapTargets {
+                caps: [geom.cap(JointSide::A), geom.cap(JointSide::B)],
+                placement: &p,
+                mm: scale,
+            };
+            let run = mf_runtime::RunContext::none();
+            g.line_params(
+                len / 2.0 / scale,
+                &mf_parts::GenContext::with_targets(&run, &targets),
+            )
+        }
+        None => g.line_params(
+            len / 2.0 / scale,
+            &mf_parts::GenContext::new(&mf_runtime::RunContext::none()),
         ),
-        ("groove_a".to_owned(), (reach_a * 10.0).round() / 10.0),
-        ("groove_b".to_owned(), (reach_b * 10.0).round() / 10.0),
-        ("open_a".to_owned(), if open_a { 1.0 } else { 0.0 }),
-        ("open_b".to_owned(), if open_b { 1.0 } else { 0.0 }),
-    ]);
-    push_placement(app, "joint.dovetail", at, angle, params);
+    };
+    let p = mf_operations::patched(&p, &patch);
+    push_placement(app, kind, p.at, p.angle, p.params);
 }
 
 fn push_placement(
@@ -522,7 +442,13 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .get_mut(j)
                 .and_then(|jt| jt.placements.get_mut(i))
         {
-            q.params.insert("hole_profile".into(), 2.0);
+            *q = mf_operations::patched(
+                q,
+                &mf_parts::ParamPatch::one(
+                    "hole_profile",
+                    mf_spec::ParamValue::Text("teardrop".into()),
+                ),
+            );
         }
     }
     if let Some(i) = app
@@ -741,10 +667,16 @@ fn fit_row(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     });
 }
 
+/// Params a placement never shows as fields: the joint sets its gap, and
+/// the rest are worked out from other choices (the hole profile's
+/// resolution and point direction).
+const PLACEMENT_DERIVED: &[&str] = &["gap", "profile", "up_x", "up_y"];
+
 fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usize, joint: &Joint) {
     let p = joint.placements[i].clone();
     let gap_mm = joint.frame.gap / mm(app);
-    let full = full_params(&p, gap_mm);
+    let spec = mf_parts::find_generator(&p.connector).map(|g| g.spec());
+    let options = crate::shape_panel::text_options(app);
     let mut removed = false;
     widgets::card(ui, |ui| {
         ui.label(
@@ -757,170 +689,36 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
         );
         let mut edited = p.clone();
         let mut changed = false;
-        for (name, label) in editable(&p.connector) {
-            let mut v = full.get(*name).copied().unwrap_or(0.0); // allow-swallow: every editable name is in its connector's spec, so validation always fills it
-            if *name == "dowel_length" && v == 0.0 {
-                v = mf_operations::placement_params(&p, gap_mm)
-                    .ok()
-                    .and_then(|params| mf_parts::connectors::joint::dowel_length(&params).ok())
-                    .unwrap_or(0.0); // allow-swallow: shows 0 (automatic) if the placement is invalid; its check says why
-            }
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(crate::i18n::tr(label, &[])).color(theme::TEXT_MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let r = ui.add(
-                        egui::DragValue::new(&mut v)
-                            .speed(0.05)
-                            .range(if *name == "clearance" {
-                                -2.0..=5.0
-                            } else {
-                                0.0..=1000.0
-                            })
-                            .suffix(" mm")
-                            .max_decimals(2),
-                    );
-                    let a11y = crate::i18n::tr(label, &[]);
-                    r.widget_info(|| {
-                        egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &a11y)
-                    });
-                    if r.changed() {
-                        edited.params.insert((*name).to_owned(), v);
-                        changed = true;
-                    }
-                });
+        // Its turn on the cut face: every placement has one.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(t!("connect.param.angle")).color(theme::TEXT_MUTED));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let r = ui.add(
+                    egui::DragValue::new(&mut edited.angle)
+                        .speed(1.0)
+                        .range(-180.0..=180.0)
+                        .suffix("°"),
+                );
+                changed |= r.changed();
             });
-        }
-        if has_round_hole(&p, gap_mm) {
-            // The round holes' cross-section (fix item 9): auto by default.
-            let code = p.params.get("hole_profile").copied().unwrap_or(0.0).round() as usize; // allow-swallow: absent means auto (code 0)
-            let names = [
-                t!("hole.auto"),
-                t!("hole.round"),
-                t!("hole.teardrop"),
-                t!("hole.flat_top"),
-            ];
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t!("connect.param.hole_profile")).color(theme::TEXT_MUTED));
-                egui::ComboBox::from_id_salt(("connect hole profile", i))
-                    .selected_text(names[code.min(3)].clone())
-                    .show_ui(ui, |ui| {
-                        for (k, name) in names.iter().enumerate() {
-                            if ui.selectable_label(k == code, name).clicked() && k != code {
-                                edited.params.insert("hole_profile".into(), k as f64);
-                                changed = true;
-                            }
-                        }
-                    });
-            });
-        }
-        if p.connector == "joint.dovetail" {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(t!("connect.param.angle")).color(theme::TEXT_MUTED));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let r = ui.add(
-                        egui::DragValue::new(&mut edited.angle)
-                            .speed(1.0)
-                            .range(-180.0..=180.0)
-                            .suffix("°"),
-                    );
-                    changed |= r.changed();
-                });
-            });
-            // Each end's reach and whether it's through (open) or
-            // stopped short of the edge on purpose (D23): `a` is the
-            // drag line's start side (-x, local frame), `b` its end (+x).
-            for (reach_key, open_key, label, through_label) in [
-                (
-                    "groove_a",
-                    "open_a",
-                    t!("connect.param.groove_a"),
-                    t!("connect.param.through_a"),
-                ),
-                (
-                    "groove_b",
-                    "open_b",
-                    t!("connect.param.groove_b"),
-                    t!("connect.param.through_b"),
-                ),
-            ] {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(label).color(theme::TEXT_MUTED));
-                    let mut open = full.get(open_key).copied().unwrap_or(1.0) != 0.0;
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut reach = full.get(reach_key).copied().unwrap_or(0.0);
-                        if !open {
-                            let r = ui.add(
-                                egui::DragValue::new(&mut reach)
-                                    .speed(0.5)
-                                    .range(0.0..=1000.0)
-                                    .suffix(" mm")
-                                    .max_decimals(1),
-                            );
-                            if r.changed() {
-                                edited.params.insert(reach_key.to_owned(), reach);
-                                changed = true;
-                            }
-                        }
-                        if ui.checkbox(&mut open, through_label).changed() {
-                            edited
-                                .params
-                                .insert(open_key.to_owned(), if open { 1.0 } else { 0.0 });
-                            changed = true;
-                        }
-                    });
-                });
-            }
-        }
-        if p.connector == "joint.dowel" || p.connector == "joint.peg" {
-            // The cross-section (D22, anti-rotation): round, square, an
-            // N-sided polygon (with its own `sides` field, 3..=12) or
-            // keyed. `mf_parts::connectors::joint::Shape` is the single
-            // source of truth for the encoding; the panel only ever
-            // reads/writes the same `shape`/`sides` params it records.
-            ui.label(RichText::new(t!("connect.param.shape")).color(theme::TEXT_MUTED));
-            {
-                let code = full.get("shape").copied().unwrap_or(0.0);
-                let sides = full.get("sides").copied().unwrap_or(6.0);
-                let shape = mf_parts::connectors::joint::Shape::from_code(code, sides);
-                let labels = [
-                    t!("connect.shape.round"),
-                    t!("connect.shape.square"),
-                    t!("connect.shape.nsided"),
-                    t!("connect.shape.keyed"),
-                ];
-                let options: Vec<(&str, &str, bool)> = labels
-                    .iter()
-                    .map(|l| (l.as_str(), l.as_str(), true))
-                    .collect();
-                let current = shape.code() as usize;
-                if let (Some(i), _) = widgets::segmented(ui, &options, current) {
-                    edited.params.insert("shape".to_owned(), i as f64);
-                    changed = true;
-                }
-            }
-            if matches!(
-                mf_parts::connectors::joint::Shape::from_code(
-                    full.get("shape").copied().unwrap_or(0.0),
-                    full.get("sides").copied().unwrap_or(6.0),
-                ),
-                mf_parts::connectors::joint::Shape::NSided { .. }
-            ) {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new(t!("connect.param.sides")).color(theme::TEXT_MUTED));
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        let mut sides = full.get("sides").copied().unwrap_or(6.0);
-                        let r = ui.add(
-                            egui::DragValue::new(&mut sides)
-                                .speed(1.0)
-                                .range(3.0..=12.0),
-                        );
-                        if r.changed() {
-                            edited.params.insert("sides".to_owned(), sides.round());
-                            changed = true;
-                        }
-                    });
-                });
-            }
+        });
+        // Every other param, from its generator's own schema.
+        if let (Some(spec), Ok(mut params)) = (spec, mf_operations::placement_params(&p, gap_mm))
+            && let Some((name, value)) = crate::shape_panel::param_grid(
+                ui,
+                ("connect params", i),
+                spec,
+                &mut params,
+                &crate::shape_panel::GridOptions {
+                    hidden: PLACEMENT_DERIVED,
+                    live: true,
+                    idle: true,
+                    text_options: &options,
+                },
+            )
+        {
+            edited = mf_operations::patched(&edited, &mf_parts::ParamPatch::one(&name, value));
+            changed = true;
         }
         if changed && let Some(jt) = app.split_flow.joints.get_mut(j) {
             jt.placements[i] = edited;
@@ -1129,9 +927,11 @@ struct PlaceView {
     frame: mf_operations::JointFrame,
     solid: JointSide,
     cap: CapRegion,
-    /// Each connector's centre and reach on the cap (2D), and its handles'
+    /// Each connector's centre and reach on the cap (2D), its reach along
+    /// its own direction (where the rim handle sits), and its handles'
     /// screen positions.
     connectors: Vec<([f64; 2], f64)>,
+    reach_x: Vec<f64>,
     selected: Option<usize>,
     handles: Option<((f64, f64), (f64, f64))>,
     /// The other joints: their frames and where their pieces overlap
@@ -1169,25 +969,46 @@ impl PlaceView {
         .clone();
         let scale = mm(app);
         let gap_mm = joint.frame.gap / scale;
-        let connectors: Vec<([f64; 2], f64)> = joint
+        let outlines: Vec<Option<Vec<[f64; 2]>>> = joint
             .placements
             .iter()
             .map(|p| {
-                let reach = mf_operations::placement_params(p, gap_mm)
-                    .ok()
-                    .and_then(|params| mf_operations::footprint_2d(p, &params, scale).ok())
-                    .map(|pts| {
-                        pts.iter()
-                            .map(|q| ((q[0] - p.at[0]).powi(2) + (q[1] - p.at[1]).powi(2)).sqrt())
-                            .fold(0.0, f64::max)
-                    })
-                    .unwrap_or(scale); // allow-swallow: an invalid placement is still pickable at a 1 mm reach; its check card says why
+                let params = mf_operations::placement_params(p, gap_mm).ok()?; // allow-swallow: an invalid placement is still pickable at a 1 mm reach; its check card says why
+                mf_operations::footprint_2d(p, &params, scale).ok() // allow-swallow: as above
+            })
+            .collect();
+        let connectors: Vec<([f64; 2], f64)> = joint
+            .placements
+            .iter()
+            .zip(&outlines)
+            .map(|(p, outline)| {
+                let reach = outline.as_ref().map_or(scale, |pts| {
+                    pts.iter()
+                        .map(|q| ((q[0] - p.at[0]).powi(2) + (q[1] - p.at[1]).powi(2)).sqrt())
+                        .fold(0.0, f64::max)
+                });
                 (p.at, reach)
+            })
+            .collect();
+        // Along each placement's own direction: how far its outline
+        // reaches (the rim handle's place, and what it resizes).
+        let reach_x: Vec<f64> = joint
+            .placements
+            .iter()
+            .zip(&outlines)
+            .map(|(p, outline)| {
+                let (s, c) = p.angle.to_radians().sin_cos();
+                outline.as_ref().map_or(scale, |pts| {
+                    pts.iter()
+                        .map(|q| (q[0] - p.at[0]) * c + (q[1] - p.at[1]) * s)
+                        .fold(0.0, f64::max)
+                })
             })
             .collect();
         let selected = f.selected.filter(|&i| i < connectors.len());
         let handles = selected.and_then(|i| {
-            let (at, reach) = connectors[i];
+            let at = connectors[i].0;
+            let reach = reach_x[i];
             let p = joint.placements[i].angle.to_radians();
             let rim = [at[0] + reach * p.cos(), at[1] + reach * p.sin()];
             let w = joint.frame.at(rim) + (joint.frame.cap_point(solid) - joint.frame.point);
@@ -1201,6 +1022,7 @@ impl PlaceView {
             solid,
             cap,
             connectors,
+            reach_x,
             selected,
             handles,
             others,
@@ -1283,6 +1105,18 @@ impl PlaceView {
     }
 }
 
+/// The param a placement's handle sets (`Generator::handles`, picked by
+/// `which`) and its current value (mm).
+fn handle_value(
+    p: &Placement,
+    gap_mm: f64,
+    which: impl Fn(mf_parts::Handles) -> Option<&'static str>,
+) -> Option<(&'static str, f64)> {
+    let name = which(mf_parts::find_generator(&p.connector)?.handles())?;
+    let params = mf_operations::placement_params(p, gap_mm).ok()?; // allow-swallow: an invalid placement has no handle to drag; its check card says why
+    Some((name, params.get_float(name).ok()?)) // allow-swallow: a handle param that isn't a number can't be dragged
+}
+
 fn claims(app: &MeshFixerApp) -> Option<crate::shell::Claims> {
     if app.busy.is_some() {
         return None;
@@ -1305,13 +1139,13 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                 Some(Hit::Size(i)) => Some(Drag::Size { index: i }),
                 Some(Hit::Depth(i)) => {
                     let p = &app.split_flow.joints[j].placements[i];
-                    full_params(p, app.split_flow.joints[j].frame.gap / scale)
-                        .get("depth_on")
-                        .map(|&depth| Drag::Depth {
+                    handle_value(p, app.split_flow.joints[j].frame.gap / scale, |h| h.depth).map(
+                        |(_, depth)| Drag::Depth {
                             index: i,
                             from_y: from.1,
                             depth,
-                        })
+                        },
+                    )
                 }
                 Some(Hit::Connector(i)) => {
                     app.split_flow.selected = Some(i);
@@ -1323,27 +1157,31 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                         }
                     })
                 }
-                // A dovetail is placed by dragging a line across the
-                // cut face, not a single click (owner 2026-11-11, D23):
-                // the press starts the line; every other kind still
-                // places on `Click` below, unchanged.
-                Some(Hit::Cap(uv)) if app.split_flow.kind() == "joint.dovetail" => {
-                    Some(Drag::PlaceDovetail { start: uv })
+                // A kind placed as a line is dragged across the cut face
+                // (`PlacementHint::DragLine`, D23): the press starts the
+                // line; every other kind places on `Click` below.
+                Some(Hit::Cap(uv))
+                    if mf_parts::find_generator(app.split_flow.kind()).is_some_and(|g| {
+                        g.placement_hint() == mf_parts::PlacementHint::DragLine
+                    }) =>
+                {
+                    Some(Drag::PlaceLine { start: uv })
                 }
                 _ => None,
             };
         }
         Some(ToolPointer::Move(px)) | Some(ToolPointer::End(px)) => {
             let drag = app.split_flow.drag;
-            if let Some(Drag::PlaceDovetail { start }) = drag {
+            if let Some(Drag::PlaceLine { start }) = drag {
                 if matches!(input.pointer, Some(ToolPointer::End(_))) {
                     let end = state.on_plane(px).unwrap_or(start);
                     app.split_flow.drag = None;
-                    add_dovetail(app, start, end);
+                    add_line(app, start, end);
                 }
                 app.split_flow.hover = None;
                 return Input::Consumed;
             }
+            let gap_mm = app.split_flow.joints[j].frame.gap / scale;
             let joint = &mut app.split_flow.joints[j];
             match drag {
                 Some(Drag::Move { index, grab }) => {
@@ -1354,22 +1192,17 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                     }
                 }
                 Some(Drag::Size { index }) => {
+                    // The rim follows the pointer: the generator's size
+                    // param grows by however much the outline's reach
+                    // along its direction has to change to get there.
                     if let (Some(uv), Some(p)) =
                         (state.on_plane(px), joint.placements.get_mut(index))
+                        && let Some((name, value)) = handle_value(p, gap_mm, |h| h.size)
                     {
                         let r = ((uv[0] - p.at[0]).powi(2) + (uv[1] - p.at[1]).powi(2)).sqrt();
-                        let mut value = (2.0 * r / scale).clamp(0.5, 200.0);
-                        if p.connector == "joint.dovetail" {
-                            // The rim handle is the tail's end: its length.
-                            p.params
-                                .insert("length".into(), (value * 10.0).round() / 10.0);
-                        } else {
-                            if p.connector == "joint.magnet" {
-                                value -= p.param("clearance").unwrap_or(0.0); // allow-swallow: add_connector always sets clearance
-                            }
-                            p.params
-                                .insert("diameter".into(), (value.max(0.5) * 10.0).round() / 10.0);
-                        }
+                        let reach = state.reach_x.get(index).copied().unwrap_or(r); // allow-swallow: index is the dragged placement's, always in range
+                        let v = (value + 2.0 * (r - reach) / scale).clamp(0.5, 200.0);
+                        p.params.insert(name.into(), (v * 10.0).round() / 10.0);
                     }
                 }
                 Some(Drag::Depth {
@@ -1381,15 +1214,16 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                     // Document units per point at the target, in mm.
                     let per_pt =
                         2.0 * cam.distance * (cam.fov_y / 2.0).tan() / size.1.max(1.0) / scale;
-                    if let Some(p) = joint.placements.get_mut(index) {
+                    if let Some(p) = joint.placements.get_mut(index)
+                        && let Some((name, _)) = handle_value(p, gap_mm, |h| h.depth)
+                    {
                         let d = (depth + (from_y - px.1) * per_pt).clamp(0.5, 500.0);
-                        p.params
-                            .insert("depth_on".into(), (d * 10.0).round() / 10.0);
+                        p.params.insert(name.into(), (d * 10.0).round() / 10.0);
                     }
                 }
                 // Handled above (returns early): kept here only so the
                 // match stays exhaustive as `Drag` grows.
-                Some(Drag::PlaceDovetail { .. }) | None => {}
+                Some(Drag::PlaceLine { .. }) | None => {}
             }
             if matches!(input.pointer, Some(ToolPointer::End(_))) {
                 app.split_flow.drag = None;
