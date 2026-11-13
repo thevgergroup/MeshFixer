@@ -25,6 +25,8 @@ use mf_metrics::{CountingAlloc, GpuBufferBytes, MemoryBreakdown, Phase, measure}
 use mf_runtime::{JobPool, PoolChoice, RunContext};
 use mf_selection::{Selection, SelectionKind, Translation};
 
+mod bench_split;
+
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
 
@@ -105,7 +107,7 @@ impl Metrics {
     }
 }
 
-enum Failure {
+pub(crate) enum Failure {
     Usage(String),
     Runtime(String),
     /// Ctrl-C: the job stopped and nothing was written.
@@ -397,7 +399,8 @@ fn cli() -> Command {
                             .action(clap::ArgAction::SetTrue)
                             .help("Print the measurements as JSON"),
                     ),
-            ),
+            )
+            .subcommand(bench_split::command()),
     );
     cmd = cmd
         .subcommand(
@@ -1675,8 +1678,9 @@ fn main() -> ExitCode {
         Some(("bench", m)) => match m.subcommand() {
             Some(("memory", m)) => bench_memory(m, &ctx),
             Some(("orbit", m)) => bench_orbit(m, &mut metrics, &ctx),
+            Some(("split", m)) => bench_split::run(m, &ctx),
             _ => Err(Failure::Usage(
-                "bench needs a measurement: memory or orbit".into(),
+                "bench needs a measurement: memory, orbit or split".into(),
             )),
         },
         Some(("run", m)) => run_sequence(m, &mut metrics, &ctx),

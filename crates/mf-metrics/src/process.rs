@@ -38,6 +38,37 @@ pub fn process_rss_bytes() -> Result<u64, String> {
     memory().map(|m| m.resident_bytes)
 }
 
+/// CPU time this process has used so far, user plus system, in seconds
+/// (every thread). Sampled twice, it gives how many cores a phase kept
+/// busy on average. macOS only (`getrusage`); an error elsewhere, never a
+/// guess.
+pub fn process_cpu_seconds() -> Result<f64, String> {
+    cpu_seconds()
+}
+
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // one libc call, with a buffer of the type it fills
+fn cpu_seconds() -> Result<f64, String> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    // SAFETY: `usage` is a writable `rusage`, the struct getrusage fills.
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return Err(format!(
+            "getrusage failed: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: the call succeeded and the struct was zeroed before.
+    let usage = unsafe { usage.assume_init() };
+    let s = |t: libc::timeval| t.tv_sec as f64 + t.tv_usec as f64 * 1e-6;
+    Ok(s(usage.ru_utime) + s(usage.ru_stime))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cpu_seconds() -> Result<f64, String> {
+    Err("process CPU time is only reported on macOS".into())
+}
+
 /// Page-ins so far (see [`ProcessMemory::page_ins`]).
 pub fn page_ins() -> Result<u64, String> {
     memory()?
