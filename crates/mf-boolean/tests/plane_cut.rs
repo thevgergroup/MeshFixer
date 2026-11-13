@@ -13,7 +13,10 @@ use mf_runtime::RunContext;
 /// no shared faces: two separate outer loops, never nested.
 fn two_lobes() -> Mesh {
     let sphere = uv_sphere(12, 16);
-    merge(&[translated(&sphere, [-3.0, 0.0, 0.0]), translated(&sphere, [3.0, 0.0, 0.0])])
+    merge(&[
+        translated(&sphere, [-3.0, 0.0, 0.0]),
+        translated(&sphere, [3.0, 0.0, 0.0]),
+    ])
 }
 
 fn plane() -> Plane {
@@ -28,9 +31,16 @@ fn section_regions_get_a_stable_seed_face() {
     let mesh = two_lobes();
     let ctx = RunContext::none();
     let a = cut_half(&mesh, &plane(), Side::Above, &ctx).unwrap();
-    assert_eq!(a.section_regions.len(), 2, "two disjoint lobes, two regions");
+    assert_eq!(
+        a.section_regions.len(),
+        2,
+        "two disjoint lobes, two regions"
+    );
     let seeds: Vec<u32> = a.section_regions.iter().map(|r| r.seed_face.0).collect();
-    assert_ne!(seeds[0], seeds[1], "distinct regions get distinct seed faces");
+    assert_ne!(
+        seeds[0], seeds[1],
+        "distinct regions get distinct seed faces"
+    );
 
     // Re-running the same cut gives the identical seed faces (replay
     // stability): input face ids don't change run to run.
@@ -47,9 +57,16 @@ fn ticking_one_region_leaves_the_other_lobe_whole() {
     assert_eq!(unrestricted.section_regions.len(), 2);
     let keep_seed = unrestricted.section_regions[0].seed_face;
 
-    let restricted =
-        cut_half_with_regions(&mesh, &plane(), Side::Above, true, Some(&[keep_seed]), None, &ctx)
-            .unwrap();
+    let restricted = cut_half_with_regions(
+        &mesh,
+        &plane(),
+        Side::Above,
+        true,
+        Some(&[keep_seed]),
+        None,
+        &ctx,
+    )
+    .unwrap();
     // Only the ticked region actually got cut/capped.
     assert_eq!(restricted.section_regions.len(), 1);
     assert_eq!(restricted.section_regions[0].seed_face, keep_seed);
@@ -89,8 +106,15 @@ fn unknown_seed_face_in_regions_list_is_ignored_not_a_panic() {
     // One real region; the allow-list names a face that doesn't exist
     // anywhere in the mesh, so nothing matches: the region isn't cut
     // (left whole), exactly as if it had been unticked.
-    let result =
-        cut_half_with_regions(&sphere, &plane(), Side::Above, true, Some(&[bogus]), None, &ctx);
+    let result = cut_half_with_regions(
+        &sphere,
+        &plane(),
+        Side::Above,
+        true,
+        Some(&[bogus]),
+        None,
+        &ctx,
+    );
     match result {
         Ok(half) => assert!(
             half.section_regions.is_empty(),
@@ -159,8 +183,15 @@ fn bound_crossing_a_region_is_refused_by_name() {
         normal: [0.0, 0.0, 1.0],
     };
     let bound = Bound::Disc { radius: 1.5 };
-    let result =
-        cut_half_with_regions(&sphere, &offset, Side::Above, true, None, Some(&bound), &ctx);
+    let result = cut_half_with_regions(
+        &sphere,
+        &offset,
+        Side::Above,
+        true,
+        None,
+        Some(&bound),
+        &ctx,
+    );
     match result {
         Err(CutError::RegionCrossesBound { seed_face }) => {
             assert_eq!(seed_face, seed);

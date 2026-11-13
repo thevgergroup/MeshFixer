@@ -476,7 +476,9 @@ pub fn region_preview(app: &MeshFixerApp) -> Vec<RegionPreview> {
             // alias is, at worst, a stale-by-one-frame preview, never
             // a wrong committed cut (Apply always reads the live
             // plane directly, not this cache).
-            normal.x.to_bits() ^ normal.y.to_bits().rotate_left(21) ^ normal.z.to_bits().rotate_left(42),
+            normal.x.to_bits()
+                ^ normal.y.to_bits().rotate_left(21)
+                ^ normal.z.to_bits().rotate_left(42),
         ],
     };
     let cached = REGION_PREVIEW_CACHE.with(|c| {
@@ -528,7 +530,12 @@ fn compute_region_preview(
         point: object_point.to_array(),
         normal: object_normal.to_array(),
     };
-    let half = mf_boolean::cut_half(mesh, &plane, mf_boolean::Side::Above, &mf_runtime::RunContext::none());
+    let half = mf_boolean::cut_half(
+        mesh,
+        &plane,
+        mf_boolean::Side::Above,
+        &mf_runtime::RunContext::none(),
+    );
     let Ok(half) = half else {
         return Vec::new();
     };
