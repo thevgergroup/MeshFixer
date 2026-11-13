@@ -641,8 +641,9 @@ fn wall_field(grid: &Grid, band: &Band, rays: &Rays, wall: f64, i: [usize; 3]) -
     }
 }
 
-/// An inner surface: its vertices and triangles.
-type Inner = (Vec<[f64; 3]>, Vec<[u32; 3]>);
+/// An inner surface: its vertices and triangles, and the grid cells it
+/// was built in (each triangle lies in one of them), sorted.
+type Inner = (Vec<[f64; 3]>, Vec<[u32; 3]>, Vec<u64>);
 
 /// Step 4: the inner surface (facing into the cavity), or `None` when
 /// nothing is deep enough to hollow.
@@ -729,6 +730,7 @@ fn inner_surface(
         .iter()
         .map(|(k, _)| Band::unkey(grid, *k))
         .collect();
+    let cells: Vec<u64> = crossing.iter().map(|(k, _)| *k).collect();
     drop(crossing);
     let value = |g: usize| values.get(&(g as u64)).copied().unwrap_or(w);
     let (verts, edges, tris) = march_cells(grid, &list, &value, ctx)?;
@@ -740,7 +742,7 @@ fn inner_surface(
     for t in &mut tris {
         t.swap(1, 2);
     }
-    Ok(Some((verts, tris)))
+    Ok(Some((verts, tris, cells)))
 }
 
 /// The surface without its specks: closed pieces enclosing less than
@@ -828,8 +830,6 @@ pub struct HollowShell {
     pub cell: f64,
     pub grid: [usize; 3],
     pub band_points: usize,
-    /// A BVH over `mesh`.
-    pub bvh: Bvh,
 }
 
 /// The cell size `inner_detail` asks for (0: automatic), for an object
@@ -919,7 +919,7 @@ pub fn hollow_shell(
 
     // 4. Building the inner surface.
     ctx.progress.report(STAGES[3], 0.0);
-    let Some((verts, tris)) = inner_surface(&grid, &band, &rays, wall, ctx)? else {
+    let Some((verts, tris, cells)) = inner_surface(&grid, &band, &rays, wall, ctx)? else {
         return Err(failed(
             "too_thin",
             format!(
@@ -963,7 +963,14 @@ pub fn hollow_shell(
 
     // 5. Checking the result.
     ctx.progress.report(STAGES[4], 0.0);
-    let bvh = Bvh::build(&mesh, ctx)?;
+    // Only an outer face whose bounds reach into a cell the inner surface
+    // was built in can touch it: the check's BVH is those and the inner
+    // faces (not the whole object).
+    let mut near = outer_near_cells(input, &grid, &cells, ctx)?;
+    drop(cells);
+    near.extend_from_slice(&inner);
+    let bvh = Bvh::build_subset(&mesh, &near, ctx)?;
+    drop(near);
     ctx.progress.report(STAGES[4], 0.3);
     if let Err(d) = mf_geometry::validate_solid(&mesh, &inner, &bvh, ctx)? {
         return Err(failed(
@@ -994,8 +1001,70 @@ pub fn hollow_shell(
         cell: h,
         grid: grid.n,
         band_points,
-        bvh,
     })
+}
+
+/// The outer faces whose bounds (a hair wider) reach into one of
+/// `cells` (sorted grid cell keys), sorted. A face whose bounds span more
+/// than 4096 cells is included without looking (a mesh with faces that
+/// big has few faces).
+fn outer_near_cells(
+    input: &Mesh,
+    grid: &Grid,
+    cells: &[u64],
+    ctx: &RunContext,
+) -> Result<Vec<FaceId>, Cancelled> {
+    const CHUNK: usize = 1 << 15;
+    let h = grid.h;
+    let mut set: KeyMap<()> = key_map(cells.len());
+    set.extend(cells.iter().map(|&k| (k, ())));
+    let slots = input.face_slots() as usize;
+    let parts: Vec<Vec<FaceId>> = (0..slots.div_ceil(CHUNK))
+        .into_par_iter()
+        .map(|k| -> Result<Vec<FaceId>, Cancelled> {
+            ctx.checkpoint()?;
+            let mut out = Vec::new();
+            for f in k * CHUNK..((k + 1) * CHUNK).min(slots) {
+                let id = FaceId(f as u32);
+                let Some(t) = input.face(id) else { continue };
+                let p = t.map(|v| input.corner_position(v));
+                let mut range = [(0usize, 0usize); 3];
+                let mut outside = false;
+                for a in 0..3 {
+                    let lo = p.iter().map(|q| q[a]).fold(f64::INFINITY, f64::min);
+                    let hi = p.iter().map(|q| q[a]).fold(f64::NEG_INFINITY, f64::max);
+                    let c0 = ((lo - grid.origin[a]) / h - 1e-3).floor();
+                    let c1 = ((hi - grid.origin[a]) / h + 1e-3).floor();
+                    let last = (grid.n[a] - 2) as f64;
+                    if c1 < 0.0 || c0 > last {
+                        outside = true;
+                        break;
+                    }
+                    range[a] = (c0.max(0.0) as usize, c1.min(last) as usize);
+                }
+                if outside {
+                    continue;
+                }
+                let span: usize = range.iter().map(|(a, b)| b - a + 1).product();
+                if span > 4096 {
+                    out.push(id);
+                    continue;
+                }
+                'cells: for z in range[2].0..=range[2].1 {
+                    for y in range[1].0..=range[1].1 {
+                        for x in range[0].0..=range[0].1 {
+                            if set.contains_key(&Band::key(grid, [x, y, z])) {
+                                out.push(id);
+                                break 'cells;
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .collect::<Result<_, _>>()?;
+    Ok(parts.into_iter().flatten().collect())
 }
 
 /// The outer faces left solid because the model is thinner than twice
@@ -1096,24 +1165,45 @@ struct Hole {
     depth: f64,
 }
 
-/// Where the ray from `from` along unit `dir` first meets `mesh` (faces
-/// for which `skip` is false), as (face, distance), using a BVH over the
-/// faces near the ray only.
+/// Where the ray from `from` along unit `dir` first meets `mesh`, as
+/// (face, distance), within `reach`: through a BVH over just the faces
+/// whose bounds meet the ray's box (`radius` wider), found in one pass.
 fn first_hit(
     mesh: &Mesh,
-    bvh: &Bvh,
     from: [f64; 3],
     dir: [f64; 3],
     reach: f64,
     radius: f64,
     ctx: &RunContext,
 ) -> Result<Option<(FaceId, f64)>, Cancelled> {
+    const CHUNK: usize = 1 << 15;
     let to: [f64; 3] = std::array::from_fn(|i| from[i] + dir[i] * reach);
     let lo: [f64; 3] = std::array::from_fn(|i| from[i].min(to[i]) - radius);
     let hi: [f64; 3] = std::array::from_fn(|i| from[i].max(to[i]) + radius);
-    let mut faces = Vec::new();
-    bvh.for_each_overlapping(lo, hi, |f| faces.push(f));
-    faces.sort_unstable();
+    let slots = mesh.face_slots() as usize;
+    let faces: Vec<FaceId> = (0..slots.div_ceil(CHUNK))
+        .into_par_iter()
+        .map(|k| -> Result<Vec<FaceId>, Cancelled> {
+            ctx.checkpoint()?;
+            let mut out = Vec::new();
+            for f in k * CHUNK..((k + 1) * CHUNK).min(slots) {
+                let id = FaceId(f as u32);
+                let Some(t) = mesh.face(id) else { continue };
+                let p = t.map(|v| mesh.corner_position(v));
+                if (0..3).all(|a| {
+                    let flo = p.iter().map(|q| q[a]).fold(f64::INFINITY, f64::min);
+                    let fhi = p.iter().map(|q| q[a]).fold(f64::NEG_INFINITY, f64::max);
+                    flo <= hi[a] && lo[a] <= fhi
+                }) {
+                    out.push(id);
+                }
+            }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
     let near = Bvh::build_subset(mesh, &faces, ctx)?;
     Ok(near.ray_pick(mesh, from, dir, &glam::DMat4::IDENTITY))
 }
@@ -1169,8 +1259,7 @@ fn auto_holes(
         // Straight down from just below the cavity's lowest point: the
         // first surface met is the outside.
         let from: [f64; 3] = std::array::from_fn(|k| p[k] + down[k] * 1e-7 * shell.cell);
-        let Some((_, t)) = first_hit(mesh, &shell.bvh, from, down, diag * 2.0, diameter, ctx)?
-        else {
+        let Some((_, t)) = first_hit(mesh, from, down, diag * 2.0, diameter, ctx)? else {
             return Err(failed(
                 "hole_misses_outside",
                 format!(
@@ -1232,7 +1321,7 @@ fn placed_holes(
         let p: [f64; 3] = std::array::from_fn(|k| s[1] * a[k] + s[2] * b[k] + s[3] * c[k]);
         let inward = n.map(|x| -x);
         let from: [f64; 3] = std::array::from_fn(|k| p[k] + inward[k] * 1e-7 * shell.cell);
-        let hit = first_hit(mesh, &shell.bvh, from, inward, diag * 2.0, diameter, ctx)?;
+        let hit = first_hit(mesh, from, inward, diag * 2.0, diameter, ctx)?;
         match hit {
             Some((g, t)) if g.0 >= first_inner => out.push(Hole {
                 outside: p,
