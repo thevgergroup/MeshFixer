@@ -83,6 +83,80 @@ fn hollow_undoes_in_one_step_and_replays_exact() {
     assert_eq!(hash(&s, id), before);
 }
 
+fn split(target: ObjectId, params: &[(&str, &str)]) -> Invocation {
+    Invocation {
+        op_id: "mesh.split_plane".into(),
+        target,
+        selection: None,
+        operands: Vec::new(),
+        raw_params: params
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect::<BTreeMap<_, _>>(),
+    }
+}
+
+/// `open_through` (owner 2026-11-13): a split-sphere cap, picked by its
+/// stable input-face seeds, opens into a single undo step that replays
+/// Exact — the picked region is recorded as face ids, not re-derived.
+#[test]
+fn hollow_open_through_undoes_in_one_step_and_replays_exact() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, id) = session_with(dir.path(), scaled(&uv_sphere(48, 96), 20.0));
+    let cut = s
+        .execute(split(
+            id,
+            &[
+                ("plane_point", "0,0,10"),
+                ("plane_normal", "0,0,1"),
+                ("keep", "above"),
+                ("cap", "true"),
+            ],
+        ))
+        .unwrap();
+    let mf_command::CommitOutcome::NewRevision { report } = cut else {
+        panic!("expected a new revision");
+    };
+    let cap_faces: Vec<u32> = report["parts"][0]["cap_faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|v| v.as_u64().unwrap() as u32)
+        .collect();
+    assert!(!cap_faces.is_empty(), "{report}");
+    let faces_param = cap_faces
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(",");
+    let before = hash(&s, id);
+    let revision = s.revision();
+    s.execute(hollow(
+        id,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param),
+        ],
+    ))
+    .unwrap();
+    let after = hash(&s, id);
+    assert_ne!(before, after);
+    let log = dir.path().join("session.mfx.log");
+    s.save_log(&log).unwrap();
+    let report = replay(&log).unwrap();
+    assert!(
+        report.results.iter().all(|(_, v)| *v == Verdict::Exact),
+        "{:?}",
+        report.results
+    );
+    assert_eq!(hash(&report.session, id), after);
+    assert!(s.undo());
+    assert_eq!(s.revision(), revision);
+    assert_eq!(hash(&s, id), before);
+}
+
 #[test]
 fn a_cancelled_hollow_changes_nothing_at_any_stage() {
     let dir = tempfile::tempdir().unwrap();

@@ -494,7 +494,21 @@ static CATALOGUE: &[(&str, &str)] = &[
         "hollow.holes_help",
         "Holes from the hollow inside to the outside, so resin or powder can drain out.",
     ),
+    (
+        "hollow.holes_hint",
+        "Or place a cylinder from Parts, mark it as a Hole, and Combine for a custom opening.",
+    ),
     ("hollow.measuring", "Measuring the object…"),
+    ("hollow.open_through", "Open through this surface"),
+    (
+        "hollow.open_through_help",
+        "Opens the cavity out through the picked surface, with a clean rim wall, instead of a closed shell there.",
+    ),
+    (
+        "hollow.open_through_needs_pick",
+        "Click a surface on the object to pick where it opens.",
+    ),
+    ("hollow.open_through_picked", "Opens through: {name}"),
     (
         "hollow.preview_ready",
         "Inner wall: {faces} faces, on a {cell} {unit} grid",
@@ -503,6 +517,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hollow.previewing", "Working out the walls…"),
     ("hollow.section.detail", "Detail ({unit})"),
     ("hollow.section.holes", "Drain holes"),
+    ("hollow.section.open_through", "Open through"),
     ("hollow.section.preview", "Preview"),
     ("hollow.section.wall", "Wall thickness ({unit})"),
     ("hollow.section_view", "Section view"),

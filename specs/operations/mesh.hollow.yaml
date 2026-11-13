@@ -47,17 +47,32 @@ parameters:
     type: samples
     default: []
     description: "Placed drain holes: face,b0,b1,b2,0 each (a point on a face of the input's surface), separated by ; — each hole goes straight in from there"
+  # Open through the picked surface (owner 2026-11-13): instead of (or
+  # as well as) a drain hole, the cavity can open straight out through
+  # a surface region picked before Hollow runs — a bowl or vase from a
+  # split's cap in the common case. The region is recorded as stable
+  # input-face seeds, so replay reads only recorded values (Exact).
+  - name: open_through
+    type: bool
+    default: false
+    description: "Open the cavity out through open_through_faces, leaving a clean rim wall, instead of a closed shell there"
+  - name: open_through_faces
+    type: faces
+    default: []
+    description: "The picked surface region's input faces (stable seeds) that open_through opens through; required when open_through is on"
 preconditions:
   - the object is closed, edge-manifold and consistently oriented, and encloses a positive volume; otherwise refused by name (open_input, non_manifold_input, inconsistent_input, inside_out_input), with Repair or Make solid as the next action
   - the cell size is at most half the wall thickness (cell_too_coarse)
   - the band of grid points around the surface fits in 16,000,000 points; otherwise refused by name (grid_too_large) with the cell size that would fit, never coarsened silently
   - some part of the object is at least twice the wall thick (too_thin otherwise)
   - "no fit clearance: drain holes are cut at their nominal diameter"
+  - open_through needs open_through_faces non-empty, and every id a live face of the input (open_through_needs_faces otherwise)
 postconditions:
   - the outer surface is bit-identical (same faces, vertices and ids); only an inner surface is added, facing into the hollow inside
   - the inner surface is within a cell of wall_thickness from the outer one, wherever the object is at least twice the wall thick; thinner parts stay solid and are reported (thin)
   - the result is closed, manifold, consistently oriented, has no degenerate faces and doesn't intersect itself (so the inner and outer surfaces don't touch), checked exactly (D4); its volume is positive; otherwise refused by name
   - each drain hole connects the hollow inside to the outside, cut by the boolean kernel and checked like any other cut; one that would miss the inside is refused by name (hole_misses_cavity)
+  - open_through leaves the rest of the outer surface bit-identical and gives a clean rim wall connecting the inner and outer boundaries where it opens
   - the same input and parameters give the same result at any thread count
 effects: [geometry_changes, topology_changes]
 runtime:

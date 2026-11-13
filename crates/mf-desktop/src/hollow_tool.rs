@@ -62,6 +62,12 @@ pub struct HollowState {
     /// "auto", "round", "teardrop" or "flat_top".
     pub profile: String,
     pub points: Vec<HolePoint>,
+    /// Open the cavity out through `picked_region`, instead of (or as
+    /// well as) a drain hole.
+    pub open_through: bool,
+    /// The picked surface region (stable input-face seeds), and the
+    /// object's revision it was picked on (a new revision clears it).
+    pub picked_region: Option<PickedRegion>,
     /// Cut the preview open (on by default).
     pub section: bool,
     pub for_object: Option<ObjectId>,
@@ -75,6 +81,18 @@ pub struct HollowState {
     made: Option<Mesh>,
     /// The last result's sentence about thin parts.
     pub last_result: Option<String>,
+}
+
+/// A picked surface region: its faces (stable input-face seeds) on the
+/// mesh it was picked from, and a name for the panel ("Cut face of scan
+/// (top)").
+#[derive(Debug, Clone)]
+pub struct PickedRegion {
+    pub faces: Vec<FaceId>,
+    pub name: String,
+    /// The mesh it was picked on: a new revision invalidates the pick
+    /// (its face ids may no longer mean the same thing).
+    mesh: Mesh,
 }
 
 /// What a preview depends on, besides the mesh (object units).
@@ -244,6 +262,8 @@ fn ensure_defaults(app: &mut MeshFixerApp, id: ObjectId) {
             count: 1,
             profile: "auto".into(),
             points: Vec::new(),
+            open_through: false,
+            picked_region: None,
             section,
             for_object: Some(id),
             changed_at: None,
@@ -382,11 +402,12 @@ pub fn section_plane(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
     Some((centre, toward))
 }
 
-/// While Placed drain holes are on, a press on the active object's
-/// surface is the tool's (a click there places a hole; elsewhere the
-/// camera and picking keep it).
+/// While Hollow is open, a press on the active object's surface is the
+/// tool's (placing a drain hole when Placed is chosen, else picking the
+/// surface region `open_through` opens through); elsewhere the camera
+/// and picking keep it.
 fn claims(app: &MeshFixerApp) -> Option<crate::shell::Claims> {
-    if app.hollow.drain != "placed" || app.busy.is_some() {
+    if app.busy.is_some() {
         return None;
     }
     let id = app.active?;
@@ -401,13 +422,14 @@ fn claims(app: &MeshFixerApp) -> Option<crate::shell::Claims> {
     }))
 }
 
-/// A click in the view while Placed drain holes are on: a hole where it
-/// meets the object.
+/// A click in the view while Hollow is open: a drain hole where it
+/// meets the object (Placed), or the surface region under it, for
+/// `open_through` (any other drain mode).
 fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
     let Some(ToolPointer::Click(px)) = input.pointer else {
         return Input::Pass;
     };
-    if app.hollow.drain != "placed" || app.busy.is_some() {
+    if app.busy.is_some() {
         return Input::Pass;
     }
     let (Some(id), Some(cam), Some(rect)) = (app.active, app.camera, app.viewport.last_rect) else {
@@ -426,21 +448,59 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
     let Some((face, t)) = bvh.ray_pick(&mesh, origin, dir, &model) else {
         return Input::Pass;
     };
-    let world = DVec3::from(origin) + DVec3::from(dir) * t;
-    let local = model.inverse().transform_point3(world);
-    let Some(tri) = mesh.face(face) else {
-        return Input::Pass;
-    };
-    let [a, b, c] = tri.map(|v| DVec3::from(mesh.corner_position(v)));
-    let bary = barycentric(local, a, b, c);
-    let local = a * bary[0] + b * bary[1] + c * bary[2];
-    app.hollow.points.push(HolePoint {
-        face,
-        bary,
-        local: local.to_array(),
+    if app.hollow.drain == "placed" {
+        let world = DVec3::from(origin) + DVec3::from(dir) * t;
+        let local = model.inverse().transform_point3(world);
+        let Some(tri) = mesh.face(face) else {
+            return Input::Pass;
+        };
+        let [a, b, c] = tri.map(|v| DVec3::from(mesh.corner_position(v)));
+        let bary = barycentric(local, a, b, c);
+        let local = a * bary[0] + b * bary[1] + c * bary[2];
+        app.hollow.points.push(HolePoint {
+            face,
+            bary,
+            local: local.to_array(),
+        });
+        changed(app);
+        return Input::Consumed;
+    }
+    let region = grow_region(&mesh, face);
+    app.hollow.picked_region = Some(PickedRegion {
+        faces: region,
+        name: region_name(app, id, &mesh, face),
+        mesh,
     });
-    changed(app);
     Input::Consumed
+}
+
+/// A name for the picked region, for the panel ("Cut face of scan
+/// (top)" for a planar cap aligned with an axis; "Picked surface of
+/// scan" otherwise).
+fn region_name(app: &MeshFixerApp, id: ObjectId, mesh: &Mesh, seed: FaceId) -> String {
+    let base = app
+        .session
+        .document()
+        .object(id)
+        .map(|o| o.name.clone())
+        // allow-swallow: id is the active object, checked live by the caller; a vanished one reads as an empty name for this frame.
+        .unwrap_or_default();
+    let Some(t) = mesh.face(seed) else {
+        return format!("Picked surface of {base}");
+    };
+    let p = t.map(|v| mesh.corner_position(v));
+    let (a, b, c) = (
+        glam::DVec3::from(p[0]),
+        glam::DVec3::from(p[1]),
+        glam::DVec3::from(p[2]),
+    );
+    let Some(normal) = (b - a).cross(c - a).try_normalize() else {
+        return format!("Picked surface of {base}");
+    };
+    // The cap's own outward normal is the direction the names are built
+    // from, so it's always "side a"'s name (the side a normal points to).
+    let (side_a, _) = mf_operations::split_names(&format!("Cut face of {base}"), normal.to_array());
+    side_a
 }
 
 /// `p`'s barycentric coordinates on triangle `abc` (projected onto its
@@ -456,6 +516,81 @@ fn barycentric(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> [f64; 3] {
     let v = ((d11 * d20 - d01 * d21) / den).clamp(0.0, 1.0);
     let w = ((d00 * d21 - d01 * d20) / den).clamp(0.0, 1.0 - v);
     [1.0 - v - w, v, w]
+}
+
+/// Past this many degrees between two adjacent faces' normals, the
+/// region stops growing (a sharp crease): for a planar split cap every
+/// face is coplanar (0 degrees) so the whole cap is picked up to its
+/// boundary; a curved (organic) surface keeps growing across gentle
+/// curvature but stops at a real edge.
+pub const CREASE_DEGREES: f64 = 60.0;
+
+/// The whole region a click at `seed` belongs to: every face reachable
+/// from it through edges whose two faces' normals are within
+/// [`CREASE_DEGREES`] of each other — a planar cap's whole disk up to
+/// its boundary (every face there is coplanar), or a curved surface's
+/// patch up to its first sharp crease. `mesh`'s own face ids are used
+/// directly (stable input-face seeds for replay).
+pub fn grow_region(mesh: &Mesh, seed: FaceId) -> Vec<FaceId> {
+    let cos_limit = CREASE_DEGREES.to_radians().cos();
+    let normal = |f: FaceId| -> Option<[f64; 3]> {
+        let t = mesh.face(f)?;
+        let p = t.map(|v| mesh.corner_position(v));
+        let (a, b, c) = (
+            glam::DVec3::from(p[0]),
+            glam::DVec3::from(p[1]),
+            glam::DVec3::from(p[2]),
+        );
+        (b - a).cross(c - a).try_normalize().map(|n| n.to_array())
+    };
+    // Undirected edge (low, high vertex) -> the faces sharing it (at
+    // most 2 on a manifold surface; more are never grown across).
+    let mut by_edge: std::collections::HashMap<(u32, u32), Vec<FaceId>> =
+        std::collections::HashMap::new();
+    for (f, t) in mesh.faces() {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            by_edge.entry(key).or_default().push(f);
+        }
+    }
+    let Some(seed_n) = normal(seed) else {
+        return vec![seed];
+    };
+    let mut region = vec![seed];
+    let mut normals: std::collections::HashMap<FaceId, [f64; 3]> =
+        std::collections::HashMap::from([(seed, seed_n)]);
+    let mut frontier = vec![seed];
+    while let Some(f) = frontier.pop() {
+        let Some(t) = mesh.face(f) else { continue };
+        let Some(&fn_) = normals.get(&f) else {
+            continue;
+        };
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            let key = (a.min(b), a.max(b));
+            let Some(neighbours) = by_edge.get(&key) else {
+                continue;
+            };
+            if neighbours.len() != 2 {
+                continue; // a boundary or non-manifold edge: the region's own edge
+            }
+            for &g in neighbours {
+                if g == f || normals.contains_key(&g) {
+                    continue;
+                }
+                let Some(gn) = normal(g) else { continue };
+                let cos = glam::DVec3::from(fn_).dot(glam::DVec3::from(gn));
+                if cos >= cos_limit {
+                    normals.insert(g, gn);
+                    region.push(g);
+                    frontier.push(g);
+                }
+            }
+        }
+    }
+    region.sort_unstable_by_key(|f| f.0);
+    region
 }
 
 /// The placed holes' markers over the view.
@@ -488,6 +623,8 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
     app.hollow.preview = None;
     app.hollow.asked = None;
     app.hollow.points.clear();
+    app.hollow.picked_region = None;
+    app.hollow.open_through = false;
     app.hollow.last_result = Some(match report["thin"]["below"].as_f64() {
         // allow-swallow: a report without a thin-face count has none to report
         Some(below) if report["thin"]["faces"].as_u64().unwrap_or(0) > 0 => t!(
@@ -514,6 +651,14 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let units = crate::defects::unit_symbol(app.session.document().units());
     let Some(id) = app.active else { return };
     ensure_defaults(app, id);
+    // A pick from a revision that's no longer shown (undo, redo, an
+    // edit elsewhere) doesn't mean what it used to.
+    if let Some(r) = &app.hollow.picked_region
+        && !app.active_mesh().is_some_and(|m| Mesh::ptr_eq(m, &r.mesh))
+    {
+        app.hollow.picked_region = None;
+        app.hollow.open_through = false;
+    }
     let Some((lo, hi)) = crate::shape_tools::world_bounds(app, id) else {
         widgets::caption(ui, t!("hollow.measuring"));
         return;
@@ -592,6 +737,21 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         }
     }
 
+    // Open through the picked surface.
+    section(ui, &t!("hollow.section.open_through"));
+    let picked = app.hollow.picked_region.clone();
+    ui.add_enabled_ui(picked.is_some(), |ui| {
+        ui.checkbox(&mut app.hollow.open_through, t!("hollow.open_through"))
+            .on_hover_text(t!("hollow.open_through_help"));
+    });
+    if app.hollow.open_through {
+        app.hollow.open_through = app.hollow.open_through && picked.is_some();
+    }
+    match &picked {
+        Some(r) => widgets::caption(ui, t!("hollow.open_through_picked", name = r.name.clone())),
+        None => widgets::caption(ui, t!("hollow.open_through_needs_pick")),
+    };
+
     // Drain holes.
     section(ui, &t!("hollow.section.holes"));
     widgets::caption(ui, t!("hollow.holes_help"));
@@ -611,6 +771,9 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .unwrap_or(0);
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
         app.hollow.drain = modes[i].0.into();
+    }
+    if app.hollow.drain == "none" {
+        widgets::caption(ui, t!("hollow.holes_hint"));
     }
     if app.hollow.drain != "none" {
         ui.add_space(theme::SPACE_XS);
@@ -719,8 +882,9 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
 
     ui.add_space(theme::SPACE_L);
-    let ready =
-        app.busy.is_none() && (app.hollow.drain != "placed" || !app.hollow.points.is_empty());
+    let ready = app.busy.is_none()
+        && (app.hollow.drain != "placed" || !app.hollow.points.is_empty())
+        && (!app.hollow.open_through || app.hollow.picked_region.is_some());
     if ui
         .add_enabled_ui(ready, |ui| {
             widgets::wide_button(ui, Kind::Primary, Some(icons::HOLLOW), &t!("hollow.apply"))
@@ -744,9 +908,21 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             ("hole_diameter".to_owned(), s.diameter.to_string()),
             ("hole_count".to_owned(), s.count.to_string()),
             ("hole_profile".to_owned(), s.profile.clone()),
+            ("open_through".to_owned(), s.open_through.to_string()),
         ]);
         if s.drain == "placed" {
             params.insert("hole_points".to_owned(), points.join(";"));
+        }
+        if s.open_through
+            && let Some(r) = &s.picked_region
+        {
+            let faces = r
+                .faces
+                .iter()
+                .map(|f| f.0.to_string())
+                .collect::<Vec<_>>()
+                .join(",");
+            params.insert("open_through_faces".to_owned(), faces);
         }
         app.refusal = None;
         app.run_invocation(

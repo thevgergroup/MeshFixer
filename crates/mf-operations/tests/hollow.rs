@@ -464,3 +464,142 @@ fn hollow_settings_are_in_document_units_under_a_scaled_placement() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// Open through the picked surface.
+// ---------------------------------------------------------------------
+
+/// A split sphere's dome: a ball cut at `z = at` (`mesh.split_plane`,
+/// `keep: above`), closed with a flat cap — the common case `open_through`
+/// is for. Returns the dome and its cap's input-face seeds (the faces
+/// `mesh.split_plane` created to close it).
+fn split_sphere_cap(radius: f64, at: f64) -> (Mesh, Vec<FaceId>) {
+    let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
+    let raw: BTreeMap<String, String> = [
+        ("plane_point", format!("0,0,{at}")),
+        ("plane_normal", "0,0,1".to_string()),
+        ("keep", "above".to_string()),
+        ("cap", "true".to_string()),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v))
+    .collect();
+    let params = spec.validate(&raw).unwrap();
+    let sphere = scaled(&uv_sphere(48, 96), radius);
+    let out = find("mesh.split_plane")
+        .unwrap()
+        .execute_doc(
+            &[OperandInput {
+                slot: "target",
+                object: ObjectId(1),
+                name: "scan",
+                mesh: &sphere,
+                transform: IDENTITY,
+                target: Target::WholeObject,
+            }],
+            &params,
+            &RunContext::none(),
+        )
+        .unwrap();
+    let ObjectChange::Geometry {
+        operand: 0,
+        mesh,
+        provenance,
+    } = out.changes.into_iter().next().unwrap()
+    else {
+        panic!("expected the target's own geometry to change");
+    };
+    let cap: Vec<FaceId> = provenance.created_faces.iter().map(|(f, _)| *f).collect();
+    assert!(!cap.is_empty(), "the cut should be capped");
+    (mesh, cap)
+}
+
+fn faces_param(faces: &[FaceId]) -> String {
+    faces
+        .iter()
+        .map(|f| f.0.to_string())
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+/// Hollowing a split-sphere's dome with `open_through` set to its cap
+/// gives a single open-topped shell: closed, manifold (D4's own check,
+/// `assert_solid`), with the rim connecting the inner and outer walls —
+/// and the rest of the outer surface (away from the cap) untouched. A
+/// large sphere, cut well short of its pole, so the cap is gently
+/// curved relative to the wall plus margin `open_through` extrudes
+/// through (a tight dome, like a cap cut close to a sphere's pole,
+/// tapers far too fast for any fixed-depth plug to track — not the
+/// "planar split cap" case this feature is for).
+#[test]
+fn hollow_open_through_a_split_cap_gives_an_open_topped_shell() {
+    let (dome, cap) = split_sphere_cap(20.0, 10.0);
+    let (out, report) = run(
+        &dome,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&cap)),
+        ],
+    )
+    .unwrap();
+    assert_solid(&out);
+    let topo = inspect(&out);
+    assert!(topo.is_closed && topo.is_manifold, "{topo:?}");
+    // One connected surface: the outer wall, the rim and the inner wall
+    // all join up (not two separate closed shells any more).
+    assert_eq!(topo.components, 1, "{report}");
+    // The spherical surface away from the cap moved nowhere (a boolean
+    // cut's own local window around the opening may give a nearby face
+    // a new id, same as any other cut, but never moves one).
+    let mut moved = 0;
+    for (f, t) in dome.faces() {
+        if cap.contains(&f) || !out.is_face_live(f) {
+            continue;
+        }
+        let before: Vec<[f64; 3]> = t.iter().map(|&v| dome.corner_position(v)).collect();
+        let after: Vec<[f64; 3]> = out
+            .face(f)
+            .unwrap()
+            .iter()
+            .map(|&v| out.corner_position(v))
+            .collect();
+        if before != after {
+            moved += 1;
+        }
+    }
+    assert_eq!(moved, 0, "{report}");
+    // No face of the cap itself survives: the opening replaces it.
+    for &f in &cap {
+        assert!(!out.is_face_live(f), "cap face {f:?} should be gone");
+    }
+    // A bowl's shell has no boundary at all — the rim joins the outer
+    // and inner surfaces into one closed, manifold surface (already
+    // checked by `assert_solid`); the opening into the cavity is purely
+    // topological (one component, not two separate closed shells).
+    assert_eq!(topo.boundary_loops.len(), 0, "{report}");
+}
+
+/// `open_through` needs a picked region; refused by name when it's on
+/// with no faces given.
+#[test]
+fn hollow_open_through_without_faces_is_refused() {
+    let err = run(
+        &ball(),
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(code_of(&err), "open_through_needs_faces");
+}
+
+fn code_of(e: &OpError) -> &'static str {
+    match e {
+        OpError::Failed { code, .. } => code,
+        other => panic!("expected a refusal, got {other:?}"),
+    }
+}

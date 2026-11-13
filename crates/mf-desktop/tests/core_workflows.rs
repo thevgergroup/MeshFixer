@@ -756,6 +756,72 @@ fn hollow_shows_thin_parts_and_cuts_a_placed_drain_hole() {
     );
 }
 
+/// `open_through` (owner 2026-11-13): Split cuts a ball into a dome
+/// with a flat cap (Keep: Top, Cap on); opening Hollow and clicking the
+/// cap picks the whole region (its checkbox lights up); Hollow with
+/// "Open through this surface" on gives a single open-topped shell —
+/// closed, manifold, with the rim present (one undo).
+#[test]
+fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
+    require_gpu!("hollow_open_through_the_picked_cap_gives_an_open_topped_shell");
+    let mut h = opened(vec![("ball", ball(20.0), at([0.0, 0.0, 20.0]))]);
+    let id = id_of(&h, "ball");
+
+    // Split the ball at world z = 30 (10 above its centre), Keep: Top,
+    // Cap on: a dome with a flat cap, well short of the pole (gentle
+    // curvature under the cap, the common case `open_through` is for).
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 30.0;
+    settle(&mut h);
+    let names = cut_with_keep(&mut h, "Top");
+    assert_eq!(names, ["ball (top)"], "{names:?}");
+    let dome = mesh_of(&h, "ball (top)");
+    let dome_topo = dome.topology_with(&mf_runtime::RunContext::none()).unwrap();
+    assert_eq!(dome_topo.boundary_edges, 0, "capped, so still closed");
+
+    // Open Hollow and click the cap: the whole region is picked.
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    wait_until(&mut h, "the dome's preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    let p = facing_point(&h, [0.0, 0.0, 30.0], 1.0);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert!(
+        h.state().hollow.picked_region.is_some(),
+        "the click should pick a region"
+    );
+    h.get_by_label("Open through this surface").click();
+    settle(&mut h);
+    assert!(h.state().hollow.open_through, "the checkbox should be on");
+
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let shell = mesh_of(&h, "ball (top)");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed, with a rim, not an opening");
+    assert!(
+        topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0,
+        "{topo:?}"
+    );
+    assert_eq!(
+        topo.components.len(),
+        1,
+        "the rim joins the outer and inner walls into one surface"
+    );
+}
+
 /// Owner 2026-11-12: with only "ball" selected (a plain Browser click,
 /// not Shift), Split must cut only "ball", even though the plane also
 /// crosses "cube", which was never selected. The panel says so by name
