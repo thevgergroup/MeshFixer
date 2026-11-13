@@ -428,6 +428,11 @@ fn walkthrough(
     wait_until(&mut h, "framed on the hole", SHORT, |a| {
         a.camera != Some(before)
     });
+    // Select's card offers the target's operation; it opens Repair with
+    // the hole as the target, where Apply is.
+    let fill = h.get_by_label("Fill hole").rect().center();
+    click_at(&mut h, fill);
+    h.run_steps(4);
     let revision = h.state().session.current();
     let apply = h.get_by_label("Apply").rect().center();
     click_at(&mut h, apply);
