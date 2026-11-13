@@ -126,7 +126,7 @@ fn place(h: &mut Harness<'_, MeshFixerApp>, label: &str) -> mf_command::ObjectId
     h.get_by_label("Parts").click();
     settle(h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label(label).click();
+    h.get_by_label(label).click_accesskit();
     wait_until(h, "the shape placed", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });

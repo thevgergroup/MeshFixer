@@ -256,8 +256,8 @@ fn dovetail_reach_reads_groove_a_b_and_open_a_b_independently() {
             ("length", "16"),
             ("groove_a", "30"),
             ("groove_b", "12"),
-            ("open_a", "1"),
-            ("open_b", "0"),
+            ("open_a", "true"),
+            ("open_b", "false"),
         ],
     );
     let reach = dovetail_reach(&p).unwrap();
@@ -281,8 +281,8 @@ fn a_stopped_dovetail_groove_ends_exactly_at_its_recorded_reach() {
             ("depth_other", "5"),
             ("groove_a", "20"),
             ("groove_b", "5"),
-            ("open_a", "0"),
-            ("open_b", "0"),
+            ("open_a", "false"),
+            ("open_b", "false"),
         ],
     );
     let groove = part(&parts, "counterpart groove");
@@ -310,8 +310,8 @@ fn the_groove_never_ends_up_shorter_than_the_tail_that_slides_through_it() {
             ("depth_other", "5"),
             ("groove_a", "2"),
             ("groove_b", "2"),
-            ("open_a", "0"),
-            ("open_b", "0"),
+            ("open_a", "false"),
+            ("open_b", "false"),
         ],
     );
     let groove = part(&parts, "counterpart groove");
