@@ -160,6 +160,32 @@ pub enum TreeItem {
     Group(mf_command::GroupId),
 }
 
+/// One row of the History panel's grouped view
+/// ([`MeshFixerApp::grouped_breadcrumb`]): a plain step, or a run of
+/// consecutive small steps on the same object collapsed into one
+/// expandable row ("Sculpted head (24 strokes)", Task "Project
+/// organisation" step 3).
+#[derive(Debug, Clone)]
+pub enum BreadcrumbRow {
+    Single {
+        id: RevisionId,
+        label: String,
+        details: String,
+        reached: bool,
+    },
+    Run {
+        /// Every revision the run collapses, in order; clicking the row
+        /// checks out the last one (same as the un-collapsed rows would).
+        ids: Vec<RevisionId>,
+        label: String,
+        reached: bool,
+    },
+    /// The first row of a run the caller expanded ([`MeshFixerApp::expand_run`]):
+    /// a "Collapse" control, shown just before that run's individual
+    /// [`Self::Single`] rows.
+    CollapseControl { run_id: RevisionId },
+}
+
 /// A row double-clicked: frame its item once what that needs is ready (its
 /// bounds, the picking BVHs).
 #[derive(Debug, Clone)]
@@ -591,6 +617,15 @@ pub struct MeshFixerApp {
     /// The Browser's search field (project organisation brief, step 2):
     /// filters rows by name; empty shows everything.
     pub browser_search: String,
+    /// A checkpoint name edit in progress (History row's right-click
+    /// "Name this point…"): which revision, and the text so far.
+    /// Committed on Enter or losing focus; Esc cancels it (Task
+    /// "Project organisation" step 3).
+    pub checkpoint_naming: Option<(RevisionId, String)>,
+    /// The collapsed run whose individual steps are shown expanded
+    /// (`grouped_breadcrumb`'s row, keyed on its first revision): `None`
+    /// keeps every eligible run collapsed.
+    pub expanded_run: Option<RevisionId>,
 }
 
 /// What the hole overview's markers depend on: a change asks again.
@@ -900,6 +935,8 @@ impl MeshFixerApp {
             intersections: None,
             renaming: None,
             browser_search: String::new(),
+            checkpoint_naming: None,
+            expanded_run: None,
         };
         if let Some(path) = initial {
             app.open(path);
@@ -1469,6 +1506,113 @@ impl MeshFixerApp {
                 ))
             })
             .collect()
+    }
+
+    /// Consecutive breadcrumb rows of the same small, repeatable
+    /// operation on the same object (sculpt strokes, transform nudges)
+    /// collapse into one: "Sculpted head (24 strokes)" (Task "Project
+    /// organisation" step 3). A lone step, or a run the caller has
+    /// expanded (`expanded_run`), is left as its own rows.
+    pub fn grouped_breadcrumb(&self) -> Vec<BreadcrumbRow> {
+        let flat = self.breadcrumb();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < flat.len() {
+            let run_len = self.run_length(&flat, i);
+            if run_len > 1 && self.expanded_run != Some(flat[i].0) {
+                let ids: Vec<RevisionId> = flat[i..i + run_len].iter().map(|r| r.0).collect();
+                let reached = flat[i + run_len - 1].3;
+                let noun = self.run_noun(flat[i].0);
+                let name = self.run_object_name(flat[i].0);
+                out.push(BreadcrumbRow::Run {
+                    ids,
+                    label: format!("{noun} {name} ({run_len} {})", self.run_unit(flat[i].0, run_len)),
+                    reached,
+                });
+                i += run_len;
+            } else if run_len > 1 {
+                // Expanded: a "Collapse" control, then its own rows.
+                out.push(BreadcrumbRow::CollapseControl { run_id: flat[i].0 });
+                for (id, label, details, reached) in &flat[i..i + run_len] {
+                    out.push(BreadcrumbRow::Single {
+                        id: *id,
+                        label: label.clone(),
+                        details: details.clone(),
+                        reached: *reached,
+                    });
+                }
+                i += run_len;
+            } else {
+                let (id, label, details, reached) = flat[i].clone();
+                out.push(BreadcrumbRow::Single {
+                    id,
+                    label,
+                    details,
+                    reached,
+                });
+                i += 1;
+            }
+        }
+        out
+    }
+
+    /// How many consecutive rows from `start` share a collapsible
+    /// operation and target (a run `grouped_breadcrumb` folds into one).
+    fn run_length(&self, flat: &[(RevisionId, String, String, bool)], start: usize) -> usize {
+        let Some(key) = self.run_key(flat[start].0) else {
+            return 1;
+        };
+        let mut n = 1;
+        while start + n < flat.len() && self.run_key(flat[start + n].0) == Some(key) {
+            n += 1;
+        }
+        n
+    }
+
+    /// `(op_id, target)` if revision `id`'s command is one
+    /// `grouped_breadcrumb` ever collapses with its neighbours
+    /// (currently: sculpt strokes and a plain `object.set_transform`
+    /// with no other document change).
+    fn run_key(&self, id: RevisionId) -> Option<(&'static str, ObjectId)> {
+        let rec = self.session.node(id)?.record.as_ref()?;
+        match rec.op_id.as_str() {
+            "mesh.sculpt_stroke" => Some(("mesh.sculpt_stroke", rec.target)),
+            "object.set_transform" => Some(("object.set_transform", rec.target)),
+            _ => None,
+        }
+    }
+
+    fn run_noun(&self, id: RevisionId) -> &'static str {
+        match self.run_key(id) {
+            Some(("mesh.sculpt_stroke", _)) => "Sculpted",
+            Some(("object.set_transform", _)) => "Nudged",
+            _ => "Changed",
+        }
+    }
+
+    fn run_unit(&self, id: RevisionId, n: usize) -> String {
+        let word = match self.run_key(id) {
+            Some(("mesh.sculpt_stroke", _)) => "stroke",
+            _ => "move",
+        };
+        format!("{word}{}", plural_s(n))
+    }
+
+    fn run_object_name(&self, id: RevisionId) -> String {
+        let Some((_, target)) = self.run_key(id) else {
+            return "the object".into();
+        };
+        self.session
+            .node(id)
+            .and_then(|n| n.document.object(target))
+            .map_or_else(|| "the object".into(), |o| o.name.clone())
+    }
+
+    /// Expands one collapsed run (clicking it in the History panel), so
+    /// its individual steps show as their own rows again; `None` keeps
+    /// every eligible run collapsed.
+    pub fn expand_run(&mut self, id: Option<RevisionId>) {
+        self.expanded_run = id;
     }
 
     /// Undo (mid-drag, it cancels the drag instead, as Esc does).
@@ -2543,6 +2687,14 @@ impl MeshFixerApp {
             },
             "Rename object".into(),
         );
+    }
+
+    /// Names (or renames) revision `id` as a History checkpoint ("Name
+    /// this point…", Task "Project organisation" step 3): not an undo
+    /// step (naming a point doesn't change the document). A blank name
+    /// removes it.
+    pub fn name_checkpoint(&mut self, id: RevisionId, name: String) {
+        self.session.name_checkpoint(id, name);
     }
 
     /// Keep `active` pointing at an object that exists in the current document.
@@ -6176,6 +6328,12 @@ fn history_label(
     rec: &mf_command::CommandRecord,
 ) -> Option<String> {
     match rec.op_id.as_str() {
+        "object.rename" => {
+            let id = rec.target;
+            let before = before_name(session, rec, id);
+            let after = result_name(node, id);
+            Some(format!("Renamed {before} to {after}"))
+        }
         "mesh.split_plane" | "mesh.split_box" => {
             let name = before_name(session, rec, rec.target);
             let pieces = rec.outputs.iter().filter(|o| o.created).count() + 1;
@@ -6284,6 +6442,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
         ],
         "object.set_transform" => &["transform"],
         "split.place_connectors" => &["connectors"],
+        "object.rename" => &["name"],
         _ => &[],
     };
     let mut lines: Vec<String> = spec

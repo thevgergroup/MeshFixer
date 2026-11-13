@@ -618,6 +618,11 @@ pub struct Session {
     cursor: RevisionId,
     next_object: u64,
     next_command: u64,
+    /// Named checkpoints (History "Name this point…"): a revision's own
+    /// label, shown as a marker in the history list, clicked to check
+    /// out that revision. Session-only (not document state: naming a
+    /// point doesn't change the model), so it isn't itself an undo step.
+    checkpoints: BTreeMap<RevisionId, String>,
 }
 
 impl Default for Session {
@@ -644,11 +649,40 @@ impl Session {
             cursor: RevisionId(0),
             next_object: 1,
             next_command: 1,
+            checkpoints: BTreeMap::new(),
         }
     }
 
     pub fn node(&self, id: RevisionId) -> Option<&RevisionNode> {
         self.nodes.get(id.0 as usize)
+    }
+
+    /// `id`'s checkpoint name, if it was given one ("Name this
+    /// point…").
+    pub fn checkpoint_name(&self, id: RevisionId) -> Option<&str> {
+        self.checkpoints.get(&id).map(String::as_str)
+    }
+
+    /// Every named checkpoint, in revision order.
+    pub fn checkpoints(&self) -> impl Iterator<Item = (RevisionId, &str)> {
+        self.checkpoints.iter().map(|(&id, name)| (id, name.as_str()))
+    }
+
+    /// Names `id` as a checkpoint ("Name this point…"), replacing its
+    /// name if it already had one; a blank name removes it. Does
+    /// nothing (returns false) if `id` isn't a real revision. Not an
+    /// undo step: naming a point doesn't change the document.
+    pub fn name_checkpoint(&mut self, id: RevisionId, name: String) -> bool {
+        if self.node(id).is_none() {
+            return false;
+        }
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            self.checkpoints.remove(&id);
+        } else {
+            self.checkpoints.insert(id, trimmed.to_owned());
+        }
+        true
     }
 
     pub fn revisions(&self) -> &[RevisionNode] {

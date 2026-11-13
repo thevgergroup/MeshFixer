@@ -1060,8 +1060,11 @@ fn browser(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 /// History: every step of the current path (click one to go back to it;
-/// the current one is highlighted, steps Redo would take are greyed), and
-/// any other branches.
+/// the current one is highlighted, steps Redo would take are greyed),
+/// any other branches, and named checkpoints as labelled markers
+/// (right-click a row, "Name this point…"; clicking the marker checks
+/// out that revision, same as clicking the row itself — Task "Project
+/// organisation" step 3).
 fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let idle = app.busy.is_none();
     let mut clicked = None;
@@ -1071,32 +1074,33 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .stick_to_bottom(true)
         .show(ui, |ui| {
             let current = app.session.current();
-            let crumbs = app.breadcrumb();
-            if crumbs.is_empty() {
+            let rows = app.grouped_breadcrumb();
+            if rows.is_empty() {
                 widgets::caption(ui, t!("history.empty"));
             }
-            for (id, label, details, reached) in crumbs {
-                let text = if reached {
-                    RichText::new(&label)
-                } else {
-                    RichText::new(&label).color(theme::TEXT_MUTED).italics()
-                };
-                let w = ui.available_width();
-                let tip = if details.is_empty() {
-                    t!("history.tip")
-                } else {
-                    format!("{}\n\n{details}", t!("history.tip"))
-                };
-                if ui
-                    .add_enabled(
-                        idle,
-                        egui::Button::selectable(id == current, text)
-                            .min_size(egui::vec2(w, theme::ROW_HEIGHT)),
-                    )
-                    .on_hover_text(tip)
-                    .clicked()
-                {
-                    clicked = Some(id);
+            for row in rows {
+                match row {
+                    crate::app::BreadcrumbRow::Run { ids, label, reached } => {
+                        history_run_row(app, ui, &ids, &label, reached, &mut clicked);
+                    }
+                    crate::app::BreadcrumbRow::Single {
+                        id,
+                        label,
+                        details,
+                        reached,
+                    } => {
+                        history_step_row(
+                            app, ui, idle, current, id, label, details, reached, &mut clicked,
+                        );
+                    }
+                    crate::app::BreadcrumbRow::CollapseControl { .. } => {
+                        if widgets::icon_button(ui, icons::CARET_DOWN, "Collapse this run", None, theme::ROW_HEIGHT)
+                            .on_hover_text("Collapse back into one row")
+                            .clicked()
+                        {
+                            app.expand_run(None);
+                        }
+                    }
                 }
             }
             if has_branches(app) {
@@ -1110,6 +1114,154 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         });
     if let Some(id) = clicked {
         app.checkout(id);
+    }
+}
+
+/// One plain step of the History panel (not part of a collapsed run):
+/// its label (a named checkpoint shows as "[name]" instead), a
+/// right-click menu to name or rename its checkpoint, and a click
+/// that checks it out.
+#[allow(clippy::too_many_arguments)]
+fn history_step_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    idle: bool,
+    current: mf_command::RevisionId,
+    id: mf_command::RevisionId,
+    label: String,
+    details: String,
+    reached: bool,
+    clicked: &mut Option<mf_command::RevisionId>,
+) {
+    if app
+        .checkpoint_naming
+        .as_ref()
+        .is_some_and(|(r, _)| *r == id)
+    {
+        checkpoint_name_row(app, ui, id);
+        return;
+    }
+    let checkpoint = app.session.checkpoint_name(id).map(str::to_owned);
+    let shown = match &checkpoint {
+        Some(name) => format!("[{name}]"),
+        None => label,
+    };
+    let text = if reached {
+        RichText::new(&shown)
+    } else {
+        RichText::new(&shown).color(theme::TEXT_MUTED).italics()
+    };
+    let w = ui.available_width();
+    let tip = match (checkpoint.is_some(), details.is_empty()) {
+        (true, true) => format!("Named checkpoint · {}", t!("history.tip")),
+        (true, false) => format!("Named checkpoint\n\n{details}"),
+        (false, true) => t!("history.tip"),
+        (false, false) => format!("{}\n\n{details}", t!("history.tip")),
+    };
+    let response = ui.add_enabled(
+        idle,
+        egui::Button::selectable(id == current, text).min_size(egui::vec2(w, theme::ROW_HEIGHT)),
+    );
+    response.context_menu(|ui| {
+        let title = if checkpoint.is_some() {
+            "Rename this point…"
+        } else {
+            "Name this point…"
+        };
+        if ui.button(title).clicked() {
+            app.checkpoint_naming = Some((id, checkpoint.clone().unwrap_or_default()));
+            ui.close();
+        }
+        if checkpoint.is_some() && ui.button("Remove checkpoint name").clicked() {
+            app.name_checkpoint(id, String::new());
+            ui.close();
+        }
+    });
+    if response.on_hover_text(tip).clicked() {
+        *clicked = Some(id);
+    }
+}
+
+/// A collapsed run of consecutive small steps on the same object
+/// ("Sculpted head (24 strokes)", Task "Project organisation" step 3):
+/// clicking it checks out its last revision, same as an uncollapsed
+/// run's last row would; its own caret expands it into its individual
+/// rows.
+fn history_run_row(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    ids: &[mf_command::RevisionId],
+    label: &str,
+    reached: bool,
+    clicked: &mut Option<mf_command::RevisionId>,
+) {
+    let idle = app.busy.is_none();
+    let current = app.session.current();
+    let last = *ids.last().expect("a run is never empty");
+    let w = ui.available_width();
+    let text = if reached {
+        RichText::new(label)
+    } else {
+        RichText::new(label).color(theme::TEXT_MUTED).italics()
+    };
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        ui.scope(|ui| {
+            ui.set_width(18.0);
+            ui.set_height(theme::ROW_HEIGHT);
+            if widgets::icon_button(ui, icons::CARET_RIGHT, "Expand this run", None, 18.0)
+                .on_hover_text("Show each step")
+                .clicked()
+            {
+                app.expand_run(Some(ids[0]));
+            }
+        });
+        ui.scope(|ui| {
+            ui.set_width(w - 18.0);
+            let response = ui.add_enabled(
+                idle,
+                egui::Button::selectable(ids.contains(&current), text)
+                    .min_size(egui::vec2(w - 18.0, theme::ROW_HEIGHT)),
+            );
+            if response
+                .on_hover_text(format!("{} · click to go to the last of them", t!("history.tip")))
+                .clicked()
+            {
+                *clicked = Some(last);
+            }
+        });
+    });
+}
+
+/// A history row while its checkpoint name is being edited: a text field
+/// pre-filled with its current name (empty for a new one), committing
+/// on Enter or losing focus and cancelling on Esc.
+fn checkpoint_name_row(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: mf_command::RevisionId) {
+    let mut text = app
+        .checkpoint_naming
+        .as_ref()
+        .filter(|(r, _)| *r == id)
+        .map_or_else(String::new, |(_, t)| t.clone());
+    let text_id = egui::Id::unique(("checkpoint name field", id));
+    let r = ui.add_sized(
+        egui::vec2(ui.available_width(), theme::ROW_HEIGHT),
+        egui::TextEdit::singleline(&mut text)
+            .id(text_id)
+            .hint_text("Checkpoint name"),
+    );
+    if r.changed() {
+        app.checkpoint_naming = Some((id, text.clone()));
+    }
+    let escaped = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let committed = r.lost_focus() && !escaped;
+    if !r.has_focus() && !committed {
+        ui.memory_mut(|m| m.request_focus(text_id));
+    }
+    if committed {
+        app.checkpoint_naming = None;
+        app.name_checkpoint(id, text);
+    } else if escaped {
+        app.checkpoint_naming = None;
     }
 }
 
