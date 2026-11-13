@@ -473,6 +473,14 @@ pub fn disclosure<R>(
     let open = state.is_open();
     ui.ctx()
         .accesskit_node_builder(r.id, |node| node.set_expanded(open));
+    // The same column grid as an object or group row's (owner
+    // 2026-11-12): a chevron slot, then a swatch-or-icon slot (this row's
+    // icon lives here, in its colour, where an object row's swatch
+    // would), then the name — so "Holes (3)" and "scan" line their names
+    // up at whatever depth they're both at.
+    let chevron_x = rect.left() + theme::ROW_CHEVRON_WIDTH / 2.0;
+    let icon_x = rect.left() + theme::ROW_CHEVRON_WIDTH + theme::ROW_SWATCH_WIDTH / 2.0;
+    let name_x = rect.left() + theme::ROW_CHEVRON_WIDTH + theme::ROW_SWATCH_WIDTH;
     if ui.is_rect_visible(rect) {
         if r.hovered() {
             ui.painter()
@@ -480,7 +488,7 @@ pub fn disclosure<R>(
         }
         let mid = rect.center().y;
         ui.painter().text(
-            egui::pos2(rect.left() + 8.0, mid),
+            egui::pos2(chevron_x, mid),
             egui::Align2::CENTER_CENTER,
             if open {
                 icons::CARET_DOWN
@@ -491,7 +499,7 @@ pub fn disclosure<R>(
             theme::TEXT_MUTED,
         );
         ui.painter().text(
-            egui::pos2(rect.left() + 26.0, mid),
+            egui::pos2(icon_x, mid),
             egui::Align2::CENTER_CENTER,
             d.icon,
             icons::font(theme::ICON_SIZE - 1.0),
@@ -504,11 +512,11 @@ pub fn disclosure<R>(
             d.name_color,
         );
         let clip = egui::Rect::from_min_max(
-            egui::pos2(rect.left() + 38.0, rect.top()),
+            egui::pos2(name_x, rect.top()),
             egui::pos2(rect.right() - badge_room, rect.bottom()),
         );
         ui.painter().with_clip_rect(clip).galley(
-            egui::pos2(rect.left() + 38.0, mid - galley.size().y / 2.0),
+            egui::pos2(name_x, mid - galley.size().y / 2.0),
             galley,
             d.name_color,
         );

@@ -1185,6 +1185,199 @@ fn transform_move_then_undo() {
 }
 
 // ---------------------------------------------------------------------
+// Transform: Scale mode (fix round 2026-11-12: dragging a scale handle
+// used to move the object instead of scaling it — `Gizmo::begin`'s
+// `ScaleAxis` anchor was the same shape as a move's, and `Drag::update`
+// couldn't tell them apart).
+// ---------------------------------------------------------------------
+
+/// Switches the open Transform tool to Scale mode (R) and waits for the
+/// gizmo to redraw in it.
+fn open_scale_mode(h: &mut Harness<'_, MeshFixerApp>) {
+    h.key_press(egui::Key::R);
+    wait_until(h, "scale mode", |a| {
+        a.transform_gizmo()
+            .is_some_and(|g| g.mode == mf_render::GizmoMode::Scale)
+    });
+    h.run_steps(2);
+}
+
+/// A point to grab (and the direction to drag it outward) on `handle`,
+/// read from the gizmo's own drawn geometry, the same way [`x_arrow`]
+/// does for a move handle.
+fn handle_point(
+    h: &Harness<'_, MeshFixerApp>,
+    handle: mf_render::Handle,
+) -> (egui::Pos2, egui::Vec2) {
+    let app = h.state();
+    let g = app.transform_gizmo().unwrap();
+    let cam = app.camera.unwrap();
+    let rect = app.viewport.last_rect.unwrap();
+    let view = (rect.width() as f64, rect.height() as f64);
+    let shape = g
+        .handles(&cam, view)
+        .into_iter()
+        .find(|s| s.handle == handle)
+        .unwrap_or_else(|| panic!("{handle:?} is drawn"));
+    let (at, dir) = match shape.geometry {
+        mf_render::HandleGeometry::Arrow {
+            shaft_start, tip, ..
+        } => {
+            let mid = ((shaft_start.0 + tip.0) / 2.0, (shaft_start.1 + tip.1) / 2.0);
+            let d = egui::vec2(
+                (tip.0 - shaft_start.0) as f32,
+                (tip.1 - shaft_start.1) as f32,
+            )
+            .normalized();
+            (mid, d)
+        }
+        // A point handle (`ScaleUniform`/`Centre`) has no arrow
+        // direction of its own: start the drag at its edge, straight
+        // down from its centre, same as a real grab (starting exactly
+        // on the centre pixel would make the drag's own start distance
+        // from the pivot ~0, blowing up the scale ratio on the very
+        // first step).
+        mf_render::HandleGeometry::Point { center, radius_px } => {
+            // Comfortably inside the disc's own hit tolerance (not
+            // exactly on its edge, which risks landing just outside by
+            // float error and hitting nothing), but away from dead
+            // centre, so the drag's own start distance from the pivot
+            // isn't ~0 (that blows up the scale ratio on the first step).
+            let near_edge = (center.0, center.1 + radius_px * 0.5);
+            (near_edge, egui::vec2(0.0, 1.0))
+        }
+        other => panic!("{handle:?}'s geometry is {other:?}, not a point or an arrow"),
+    };
+    (rect.left_top() + egui::vec2(at.0 as f32, at.1 as f32), dir)
+}
+
+/// Drags `handle` outward by `px` screen points and waits for the commit.
+fn drag_scale_handle(
+    h: &mut Harness<'_, MeshFixerApp>,
+    handle: mf_render::Handle,
+    px: f32,
+    history: usize,
+) {
+    let (p, dir) = handle_point(h, handle);
+    let to = p + dir * px;
+    drag(h, p, to, 10);
+    wait_until(h, "the scale commits", |a| {
+        a.busy.is_none() && a.session.history_labels().len() == history + 1
+    });
+    settle(h);
+}
+
+/// Dragging each `ScaleAxis` handle outward scales only that axis,
+/// leaves the other two at 1.0, keeps the object's translation fixed
+/// (a ball is centred on its own local origin, unlike
+/// `mf_fixtures::cube`, whose local origin is a corner: placed at the
+/// world origin, its bounding-box centre — the gizmo's pivot — coincides
+/// exactly with the transform's translation column), and one undo
+/// restores it exactly.
+#[test]
+fn transform_scale_axis_handles_scale_one_axis_and_undo_restores_it() {
+    require_gpu!("transform_scale_axis_handles_scale_one_axis_and_undo_restores_it");
+    for (i, axis_name) in [(0u8, "X"), (1, "Y"), (2, "Z")] {
+        let mut h = opened(vec![("ball", ball(5.0), at([0.0; 3]))]);
+        let id = id_of(&h, "ball");
+        open_transform(&mut h);
+        settle(&mut h);
+        open_scale_mode(&mut h);
+        let before = transform_of(&h, id);
+        let revision = h.state().session.current();
+        let history = history_len(&h);
+
+        drag_scale_handle(&mut h, mf_render::Handle::ScaleAxis(i), 60.0, history);
+
+        let after = transform_of(&h, id);
+        let decomp = mf_render::decompose(&after);
+        let scale = match decomp {
+            mf_render::Decomposed::Trs { scale, .. } => scale,
+            mf_render::Decomposed::Sheared => panic!("{axis_name}: expected Trs, got Sheared"),
+        };
+        let axes = [scale.x, scale.y, scale.z];
+        assert!(
+            axes[i as usize] > 1.0 + 1e-6,
+            "{axis_name}: dragging its handle outward should scale it up: {scale:?}"
+        );
+        for (j, &s) in axes.iter().enumerate() {
+            if j != i as usize {
+                assert!(
+                    (s - 1.0).abs() < 1e-6,
+                    "{axis_name}: axis {j} should stay 1.0, not scale: {scale:?}"
+                );
+            }
+        }
+        // The cube's own bounding-box centre is placed exactly at the
+        // world origin (the transform's translation column), so the
+        // gizmo's pivot coincides with it: a scale about the pivot
+        // leaves the transform's translation column untouched — unlike
+        // the bug, which moved it along the dragged axis.
+        assert_eq!(
+            after[9..12],
+            before[9..12],
+            "{axis_name}: the pivot (the object's own centre here) must stay fixed, \
+             translation must not change: before {before:?}, after {after:?}"
+        );
+
+        h.get_by_label("Undo").click();
+        wait_until(&mut h, "the undo", |a| {
+            a.busy.is_none() && a.session.current() == revision
+        });
+        settle(&mut h);
+        assert_eq!(
+            transform_of(&h, id),
+            before,
+            "{axis_name}: one undo puts it back exactly"
+        );
+    }
+}
+
+/// Dragging the uniform-scale centre handle scales all three axes
+/// equally, keeps the pivot (and so the translation, for a centred
+/// ball) fixed, and one undo restores it exactly.
+#[test]
+fn transform_uniform_scale_handle_scales_all_axes_and_undo_restores_it() {
+    require_gpu!("transform_uniform_scale_handle_scales_all_axes_and_undo_restores_it");
+    let mut h = opened(vec![("ball", ball(5.0), at([0.0; 3]))]);
+    let id = id_of(&h, "ball");
+    open_transform(&mut h);
+    settle(&mut h);
+    open_scale_mode(&mut h);
+    let before = transform_of(&h, id);
+    let revision = h.state().session.current();
+    let history = history_len(&h);
+
+    drag_scale_handle(&mut h, mf_render::Handle::ScaleUniform, 60.0, history);
+
+    let after = transform_of(&h, id);
+    let decomp = mf_render::decompose(&after);
+    let scale = match decomp {
+        mf_render::Decomposed::Trs { scale, .. } => scale,
+        mf_render::Decomposed::Sheared => panic!("expected Trs, got Sheared"),
+    };
+    assert!(scale.x > 1.0 + 1e-6, "{scale:?}");
+    assert!((scale.x - scale.y).abs() < 1e-6, "{scale:?}");
+    assert!((scale.y - scale.z).abs() < 1e-6, "{scale:?}");
+    assert_eq!(
+        after[9..12],
+        before[9..12],
+        "the pivot must stay fixed: before {before:?}, after {after:?}"
+    );
+
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "the undo", |a| {
+        a.busy.is_none() && a.session.current() == revision
+    });
+    settle(&mut h);
+    assert_eq!(
+        transform_of(&h, id),
+        before,
+        "one undo puts it back exactly"
+    );
+}
+
+// ---------------------------------------------------------------------
 // Parametric shape: edit a param, then Undo.
 // ---------------------------------------------------------------------
 
@@ -1583,7 +1776,6 @@ fn rename_then_split_gives_derived_names() {
     );
 }
 
-
 /// Grouping two objects (Cmd+G), then hiding and locking the group:
 /// every member's hidden/locked flag follows, it's undoable, and a
 /// locked object refuses to rename (Task "Project organisation" step 2
@@ -1625,7 +1817,10 @@ fn group_hide_and_lock() {
     assert!(h.state().is_hidden(block) && h.state().is_hidden(post));
     assert_eq!(history_len(&h), history + 1, "hide is one undo step");
     assert!(
-        !h.state().object_views().iter().any(|v| v.id == block || v.id == post),
+        !h.state()
+            .object_views()
+            .iter()
+            .any(|v| v.id == block || v.id == post),
         "hidden objects don't render"
     );
     h.state_mut().undo();
@@ -1639,7 +1834,14 @@ fn group_hide_and_lock() {
     h.state_mut().set_locked(&[block], true);
     settle(&mut h);
     assert!(h.state().is_locked(block));
-    let before_name = h.state().session.document().object(block).unwrap().name.clone();
+    let before_name = h
+        .state()
+        .session
+        .document()
+        .object(block)
+        .unwrap()
+        .name
+        .clone();
     h.state_mut().rename_object(block, "renamed".into());
     settle(&mut h);
     assert_eq!(
@@ -1672,7 +1874,8 @@ fn history_labels_contain_no_raw_parameters() {
     wait_until(&mut h, "the rename", |a| a.busy.is_none());
     settle(&mut h);
 
-    h.state_mut().commit_transform(id, at([12.0, 0.0, 30.0]), "moved".into());
+    h.state_mut()
+        .commit_transform(id, at([12.0, 0.0, 30.0]), "moved".into());
     wait_until(&mut h, "the move", |a| a.busy.is_none());
     settle(&mut h);
 
@@ -1687,7 +1890,10 @@ fn history_labels_contain_no_raw_parameters() {
         assert!(!label.contains("object.set_transform"), "{label:?}");
         assert!(!label.contains("mesh.split_plane"), "{label:?}");
         assert!(!label.contains("transform:"), "{label:?}");
-        assert!(!label.contains('['), "a raw matrix would show as [...]: {label:?}");
+        assert!(
+            !label.contains('['),
+            "a raw matrix would show as [...]: {label:?}"
+        );
         // A raw f64 array prints with a decimal point; "12 mm" and
         // "2 pieces" are fine, but "1.0, 0.0, 0.0, 0.0, 1.0" (the
         // identity transform's own text) must never appear.
@@ -1703,7 +1909,9 @@ fn history_labels_contain_no_raw_parameters() {
         .map(|(_, label, _, _)| label)
         .collect();
     assert!(
-        labels.iter().any(|l| l.starts_with("Renamed scan to widget")),
+        labels
+            .iter()
+            .any(|l| l.starts_with("Renamed scan to widget")),
         "{labels:?}"
     );
     assert!(
@@ -1711,7 +1919,9 @@ fn history_labels_contain_no_raw_parameters() {
         "{labels:?}"
     );
     assert!(
-        labels.iter().any(|l| l.starts_with("Split widget into 2 piece")),
+        labels
+            .iter()
+            .any(|l| l.starts_with("Split widget into 2 piece")),
         "{labels:?}"
     );
     for label in &labels {
@@ -1741,7 +1951,8 @@ fn a_named_checkpoint_can_be_checked_out() {
         "after"
     );
 
-    h.state_mut().name_checkpoint(checkpoint, "Before the second rename".into());
+    h.state_mut()
+        .name_checkpoint(checkpoint, "Before the second rename".into());
     settle(&mut h);
     assert_eq!(
         h.state().session.checkpoint_name(checkpoint),

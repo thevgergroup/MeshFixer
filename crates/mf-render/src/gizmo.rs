@@ -1101,7 +1101,15 @@ impl Drag {
     /// same drag with pixel positions under that same camera and viewport.
     pub fn update(&self, px: (f64, f64), snap: &Snap) -> [f64; 12] {
         match self.anchor {
-            DragAnchor::Axis { axis, start_param } => self.update_move(axis, start_param, px, snap),
+            // `Handle::Axis` (move) and `Handle::ScaleAxis` (scale) both
+            // reduce to the same ray-closest-point-on-a-line anchor at
+            // `begin` (D8 fix: dispatch on the handle, not just the
+            // anchor shape, so a scale handle doesn't fall through to
+            // the move it happens to share its anchor type with).
+            DragAnchor::Axis { axis, start_param } => match self.handle {
+                Handle::ScaleAxis(_) => self.update_scale_axis(axis, start_param, px, snap),
+                _ => self.update_move(axis, start_param, px, snap),
+            },
             DragAnchor::Plane {
                 normal,
                 start_offset,
@@ -1209,9 +1217,46 @@ impl Drag {
         if let Some(step) = snap.scale_step {
             factor = round_to_step(factor, step).max(1e-6);
         }
-        let linear = DMat3::from_diagonal(DVec3::splat(factor)) * linear_part(&self.start);
+        self.scale_about_pivot(DVec3::splat(factor))
+    }
+
+    /// A single-axis scale about the pivot (`Handle::ScaleAxis`, D8: dragging
+    /// a scale handle used to fall through to [`Self::update_move`], which
+    /// moved the object instead of scaling it, because its `DragAnchor` was
+    /// the same `Axis` variant [`Handle::Axis`]'s move uses — `update` could
+    /// not tell them apart). `axis` is the world axis the handle's arm runs
+    /// along ([`AXES`]); the factor is the ratio of the ray's closest point
+    /// on that axis (from the pivot) now to at drag start, so the handle's
+    /// own tip tracks the pointer the same way a move handle's does.
+    fn update_scale_axis(
+        &self,
+        axis: DVec3,
+        start_param: f64,
+        px: (f64, f64),
+        snap: &Snap,
+    ) -> [f64; 12] {
+        let (ro, rd) = self.ray(px);
+        let param = closest_point_on_line_param(self.pivot, axis, ro, rd);
+        let mut factor = (param / start_param.max(1e-9)).max(1e-6);
+        if let Some(step) = snap.scale_step {
+            factor = round_to_step(factor, step).max(1e-6);
+        }
+        // `factor` on `axis`'s own component, 1.0 (unscaled) on the other
+        // two: a world-axis scale, like `Handle::Axis`'s move is a
+        // world-axis translation, not the object's own (possibly rotated)
+        // local axis.
+        let scale = DVec3::ONE + (factor - 1.0) * axis.abs();
+        self.scale_about_pivot(scale)
+    }
+
+    /// Scales the start transform about the pivot by `scale` (one factor
+    /// per world axis: `splat(f)` for a uniform scale, `ONE + (f-1)*axis.abs()`
+    /// for one world axis only — the factor itself already snapped by the
+    /// caller).
+    fn scale_about_pivot(&self, scale: DVec3) -> [f64; 12] {
+        let linear = DMat3::from_diagonal(scale) * linear_part(&self.start);
         let start_translate = DVec3::new(self.start[9], self.start[10], self.start[11]);
-        let translate = factor * (start_translate - self.pivot) + self.pivot;
+        let translate = scale * (start_translate - self.pivot) + self.pivot;
         to_rows(linear, translate)
     }
 }

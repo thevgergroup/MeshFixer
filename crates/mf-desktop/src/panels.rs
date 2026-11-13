@@ -1080,7 +1080,11 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             }
             for row in rows {
                 match row {
-                    crate::app::BreadcrumbRow::Run { ids, label, reached } => {
+                    crate::app::BreadcrumbRow::Run {
+                        ids,
+                        label,
+                        reached,
+                    } => {
                         history_run_row(app, ui, &ids, &label, reached, &mut clicked);
                     }
                     crate::app::BreadcrumbRow::Single {
@@ -1090,13 +1094,27 @@ fn history(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                         reached,
                     } => {
                         history_step_row(
-                            app, ui, idle, current, id, label, details, reached, &mut clicked,
+                            app,
+                            ui,
+                            idle,
+                            current,
+                            id,
+                            label,
+                            details,
+                            reached,
+                            &mut clicked,
                         );
                     }
                     crate::app::BreadcrumbRow::CollapseControl { .. } => {
-                        if widgets::icon_button(ui, icons::CARET_DOWN, "Collapse this run", None, theme::ROW_HEIGHT)
-                            .on_hover_text("Collapse back into one row")
-                            .clicked()
+                        if widgets::icon_button(
+                            ui,
+                            icons::CARET_DOWN,
+                            "Collapse this run",
+                            None,
+                            theme::ROW_HEIGHT,
+                        )
+                        .on_hover_text("Collapse back into one row")
+                        .clicked()
                         {
                             app.expand_run(None);
                         }
@@ -1224,7 +1242,10 @@ fn history_run_row(
                     .min_size(egui::vec2(w - 18.0, theme::ROW_HEIGHT)),
             );
             if response
-                .on_hover_text(format!("{} · click to go to the last of them", t!("history.tip")))
+                .on_hover_text(format!(
+                    "{} · click to go to the last of them",
+                    t!("history.tip")
+                ))
                 .clicked()
             {
                 *clicked = Some(last);
@@ -1446,10 +1467,7 @@ fn entry_matches_search(app: &MeshFixerApp, entry: mf_command::Entry) -> bool {
                 return false;
             };
             matches_search(app, &group.name)
-                || group
-                    .order
-                    .iter()
-                    .any(|&e| entry_matches_search(app, e))
+                || group.order.iter().any(|&e| entry_matches_search(app, e))
         }
     }
 }
@@ -1500,6 +1518,44 @@ fn entries_tree(
     }
 }
 
+/// Reserves exactly `size` of space for a hover-only control, painted or
+/// not, so showing or hiding it on hover never changes how much room the
+/// row around it takes (owner 2026-11-12: the hover buttons used to push
+/// and shift the row's content sideways). `draw` gets a child `Ui` capped
+/// to `size`, so even a control whose natural size would otherwise differ
+/// (a real `menu_button`'s padding, say) can't widen the slot.
+fn fixed_slot(ui: &mut egui::Ui, size: egui::Vec2, draw: impl FnOnce(&mut egui::Ui)) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    if ui.is_rect_visible(rect) {
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(rect)
+                .layout(egui::Layout::left_to_right(egui::Align::Center)),
+        );
+        draw(&mut child);
+    }
+}
+
+/// A fixed-width reorder trigger (a caret that opens the Move up/down/out
+/// menu): painted like [`widgets::icon_button`] rather than a real
+/// `menu_button`, whose padding would otherwise make it wider than its
+/// [`MOVE_MENU_WIDTH`] slot and shift the row when it appears on hover.
+fn reorder_trigger(
+    ui: &mut egui::Ui,
+    label: &str,
+    size: f32,
+    add_contents: impl FnOnce(&mut egui::Ui),
+) -> egui::Response {
+    let button = egui::Button::new(RichText::new(icons::CARET_DOWN).font(icons::font(12.0)))
+        .frame(false)
+        .min_size(egui::vec2(size, size));
+    let (response, _) =
+        egui::containers::menu::MenuButton::from_button(button).ui(ui, add_contents);
+    let owned = label.to_owned();
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &owned));
+    response.on_hover_text(label)
+}
+
 /// Where a row sits among its siblings, for its Move up/down actions:
 /// the group it's in (`None`: the root), its index there, and whether
 /// it's first or last among the rows currently shown (so the actions
@@ -1518,7 +1574,12 @@ struct Reorder {
 /// brief, step 2). Plain, explicit actions rather than a pointer drag,
 /// so reordering is as reliable and accessible as every other action
 /// here.
-fn reorder_actions(app: &mut MeshFixerApp, ui: &mut egui::Ui, entry: mf_command::Entry, r: Reorder) {
+fn reorder_actions(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    entry: mf_command::Entry,
+    r: Reorder,
+) {
     if !r.at_start
         && ui
             .add_enabled(app.busy.is_none(), egui::Button::new("Move up"))
@@ -1591,7 +1652,11 @@ fn object_entry(
         "{}{} · Shift-click to select it too · double-click to frame it · right-click for \
          more; the reorder menu moves it",
         count(tris, "triangle"),
-        if active { "" } else { " · click to work on it" }
+        if active {
+            ""
+        } else {
+            " · click to work on it"
+        }
     );
     object_row(app, ui, id, &name, text, &label, &tip, reorder);
     if app.tree_expanded() == Some(id) {
@@ -1603,7 +1668,12 @@ fn object_entry(
 /// pair acting on every member, and its own members indented underneath
 /// (always expanded; collapsing is left for later). Clicking the row
 /// selects every member (project organisation brief, step 2).
-fn group_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, g: mf_command::GroupId, reorder: Reorder) {
+fn group_entry(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    g: mf_command::GroupId,
+    reorder: Reorder,
+) {
     let Some(group) = app.session.document().organisation().group(g).cloned() else {
         return;
     };
@@ -1616,19 +1686,14 @@ fn group_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, g: mf_command::GroupId
     let row_hovered = ui.rect_contains_pointer(row_rect);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.scope(|ui| {
-            ui.set_width(SWATCH_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-        });
+        // A group has no collapse chevron yet either (it's always
+        // expanded): the slot stays, empty, for the same grid as an
+        // object row's and a defect category's.
+        fixed_slot(ui, egui::vec2(CHEVRON_WIDTH, theme::ROW_HEIGHT), |_| {});
+        fixed_slot(ui, egui::vec2(SWATCH_WIDTH, theme::ROW_HEIGHT), |_| {});
         ui.scope(|ui| {
             ui.set_width(
-                full_width
-                    - SWATCH_WIDTH
-                    - HIDE_TOGGLE_WIDTH
-                    - LOCK_TOGGLE_WIDTH
-                    - ROLE_TOGGLE_WIDTH
-                    - DELETE_BUTTON_WIDTH
-                    - MOVE_MENU_WIDTH,
+                (full_width - CHEVRON_WIDTH - SWATCH_WIDTH - HOVER_ACTIONS_WIDTH).max(0.0),
             );
             let selected = app.tree_selected(&TreeItem::Group(g));
             tree_row(
@@ -1653,65 +1718,70 @@ fn group_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, g: mf_command::GroupId
                 },
             );
         });
-        let hide_label = format!("{} group {}", if any_hidden { "Show" } else { "Hide" }, group.name);
-        ui.scope(|ui| {
-            ui.set_width(HIDE_TOGGLE_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-            if row_hovered || any_hidden {
-                if widgets::icon_button(
+        let hide_label = format!(
+            "{} group {}",
+            if any_hidden { "Show" } else { "Hide" },
+            group.name
+        );
+        fixed_slot(ui, egui::vec2(HIDE_TOGGLE_WIDTH, theme::ROW_HEIGHT), |ui| {
+            if (row_hovered || any_hidden)
+                && widgets::icon_button(
                     ui,
-                    if any_hidden { icons::HIDDEN } else { icons::SHOWN },
+                    if any_hidden {
+                        icons::HIDDEN
+                    } else {
+                        icons::SHOWN
+                    },
                     &hide_label,
                     None,
-                    20.0,
+                    HIDE_TOGGLE_WIDTH,
                 )
                 .on_hover_text(if any_hidden { "Show" } else { "Hide" })
                 .clicked()
-                {
-                    app.set_hidden(&members, !any_hidden);
-                }
-            } else {
-                ui.allocate_space(egui::vec2(20.0, 20.0));
+            {
+                app.set_hidden(&members, !any_hidden);
             }
         });
-        let lock_label = format!("{} group {}", if any_locked { "Unlock" } else { "Lock" }, group.name);
-        ui.scope(|ui| {
-            ui.set_width(LOCK_TOGGLE_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-            if row_hovered || any_locked {
-                if widgets::icon_button(
+        let lock_label = format!(
+            "{} group {}",
+            if any_locked { "Unlock" } else { "Lock" },
+            group.name
+        );
+        fixed_slot(ui, egui::vec2(LOCK_TOGGLE_WIDTH, theme::ROW_HEIGHT), |ui| {
+            if (row_hovered || any_locked)
+                && widgets::icon_button(
                     ui,
-                    if any_locked { icons::LOCKED } else { icons::UNLOCKED },
+                    if any_locked {
+                        icons::LOCKED
+                    } else {
+                        icons::UNLOCKED
+                    },
                     &lock_label,
                     None,
-                    20.0,
+                    LOCK_TOGGLE_WIDTH,
                 )
                 .on_hover_text(if any_locked { "Unlock" } else { "Lock" })
                 .clicked()
-                {
-                    app.set_locked(&members, !any_locked);
-                }
-            } else {
-                ui.allocate_space(egui::vec2(20.0, 20.0));
+            {
+                app.set_locked(&members, !any_locked);
             }
         });
-        ui.scope(|ui| {
-            ui.set_width(ROLE_TOGGLE_WIDTH + DELETE_BUTTON_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-        });
+        // No role toggle or delete button for a group: the space still
+        // sits there, so the move menu lines up with every object row's.
+        fixed_slot(
+            ui,
+            egui::vec2(ROLE_TOGGLE_WIDTH + DELETE_BUTTON_WIDTH, theme::ROW_HEIGHT),
+            |_| {},
+        );
         let group_name = group.name.clone();
-        ui.scope(|ui| {
-            ui.set_width(MOVE_MENU_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
+        fixed_slot(ui, egui::vec2(MOVE_MENU_WIDTH, theme::ROW_HEIGHT), |ui| {
             if row_hovered {
-                ui.menu_button(
-                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
+                reorder_trigger(
+                    ui,
+                    &format!("Reorder group {group_name}"),
+                    MOVE_MENU_WIDTH,
                     |ui| reorder_actions(app, ui, mf_command::Entry::Group(g), reorder),
-                )
-                .response
-                .on_hover_text(format!("Reorder group {group_name}"));
-            } else {
-                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
+                );
             }
         });
     });
@@ -1728,8 +1798,10 @@ const ROLE_TOGGLE_WIDTH: f32 = 26.0;
 const DELETE_BUTTON_WIDTH: f32 = 26.0;
 /// The width it reserves for its colour swatch (project organisation
 /// brief, step 2): always shown, so the viewport's per-object colour has
-/// a legend right on the row.
-const SWATCH_WIDTH: f32 = 18.0;
+/// a legend right on the row. Shared with `widgets::disclosure`'s icon
+/// slot (`theme::ROW_SWATCH_WIDTH`), so a row's icon or swatch starts at
+/// the same x whatever kind of row it is.
+const SWATCH_WIDTH: f32 = theme::ROW_SWATCH_WIDTH;
 /// The width it reserves for its show/hide toggle, left of the lock
 /// toggle: both hover-only, like the role and delete buttons.
 const HIDE_TOGGLE_WIDTH: f32 = 22.0;
@@ -1738,6 +1810,19 @@ const LOCK_TOGGLE_WIDTH: f32 = 22.0;
 /// The width it reserves for its reorder menu (Move up/down/out of
 /// group: project organisation brief, step 2).
 const MOVE_MENU_WIDTH: f32 = 18.0;
+/// The disclosure chevron slot before the swatch (`theme::ROW_CHEVRON_WIDTH`):
+/// empty for a row with no chevron, like an object's or a group's, so
+/// every row's swatch or icon still lines up with a defect category's.
+const CHEVRON_WIDTH: f32 = theme::ROW_CHEVRON_WIDTH;
+/// The total width every row reserves, right of its name, for the hover
+/// actions (hide, lock, Solid/Hole, delete, reorder): always this much,
+/// painted or not, so hovering never changes a row's width (project
+/// organisation brief; fix round 2026-11-12).
+const HOVER_ACTIONS_WIDTH: f32 = HIDE_TOGGLE_WIDTH
+    + LOCK_TOGGLE_WIDTH
+    + ROLE_TOGGLE_WIDTH
+    + DELETE_BUTTON_WIDTH
+    + MOVE_MENU_WIDTH;
 
 /// `id`'s row while it is being renamed (double-click, F2, or Cmd+G's
 /// opposite number): a text field at the row's height, pre-filled with
@@ -1797,9 +1882,12 @@ fn object_row(
     let locked = app.is_locked(id);
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        ui.scope(|ui| {
-            ui.set_width(SWATCH_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
+        // An object has no disclosure chevron of its own (its defects
+        // open with the active object, not a click here): the slot is
+        // still reserved, empty, so its swatch lines up under a group's
+        // or a defect category's icon at the same depth.
+        fixed_slot(ui, egui::vec2(CHEVRON_WIDTH, theme::ROW_HEIGHT), |_| {});
+        fixed_slot(ui, egui::vec2(SWATCH_WIDTH, theme::ROW_HEIGHT), |ui| {
             ui.centered_and_justified(|ui| match app.object_swatch(id) {
                 Some(c) => swatch(ui, c),
                 None => {
@@ -1809,13 +1897,7 @@ fn object_row(
         });
         ui.scope(|ui| {
             ui.set_width(
-                full_width
-                    - SWATCH_WIDTH
-                    - HIDE_TOGGLE_WIDTH
-                    - LOCK_TOGGLE_WIDTH
-                    - ROLE_TOGGLE_WIDTH
-                    - DELETE_BUTTON_WIDTH
-                    - MOVE_MENU_WIDTH,
+                (full_width - CHEVRON_WIDTH - SWATCH_WIDTH - HOVER_ACTIONS_WIDTH).max(0.0),
             );
             if renaming {
                 rename_row(app, ui, id);
@@ -1842,47 +1924,41 @@ fn object_row(
             }
         });
         let hide_label = format!("{} {name}", if hidden { "Show" } else { "Hide" });
-        ui.scope(|ui| {
-            ui.set_width(HIDE_TOGGLE_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
+        fixed_slot(ui, egui::vec2(HIDE_TOGGLE_WIDTH, theme::ROW_HEIGHT), |ui| {
             // Hidden stays visible even when the row isn't hovered, so a
             // hidden object's row still says so at a glance.
-            if row_hovered || hidden {
-                if widgets::icon_button(
+            if (row_hovered || hidden)
+                && widgets::icon_button(
                     ui,
                     if hidden { icons::HIDDEN } else { icons::SHOWN },
                     &hide_label,
                     None,
-                    20.0,
+                    HIDE_TOGGLE_WIDTH,
                 )
                 .on_hover_text(if hidden { "Show" } else { "Hide" })
                 .clicked()
-                {
-                    app.set_hidden(&[id], !hidden);
-                }
-            } else {
-                ui.allocate_space(egui::vec2(20.0, 20.0));
+            {
+                app.set_hidden(&[id], !hidden);
             }
         });
         let lock_label = format!("{} {name}", if locked { "Unlock" } else { "Lock" });
-        ui.scope(|ui| {
-            ui.set_width(LOCK_TOGGLE_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-            if row_hovered || locked {
-                if widgets::icon_button(
+        fixed_slot(ui, egui::vec2(LOCK_TOGGLE_WIDTH, theme::ROW_HEIGHT), |ui| {
+            if (row_hovered || locked)
+                && widgets::icon_button(
                     ui,
-                    if locked { icons::LOCKED } else { icons::UNLOCKED },
+                    if locked {
+                        icons::LOCKED
+                    } else {
+                        icons::UNLOCKED
+                    },
                     &lock_label,
                     None,
-                    20.0,
+                    LOCK_TOGGLE_WIDTH,
                 )
                 .on_hover_text(if locked { "Unlock" } else { "Lock" })
                 .clicked()
-                {
-                    app.set_locked(&[id], !locked);
-                }
-            } else {
-                ui.allocate_space(egui::vec2(20.0, 20.0));
+            {
+                app.set_locked(&[id], !locked);
             }
         });
         let action = if hole {
@@ -1891,11 +1967,9 @@ fn object_row(
             t!("role.make_hole")
         };
         let toggle_label = format!("{name}: {action}");
-        ui.scope(|ui| {
-            ui.set_width(ROLE_TOGGLE_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-            if row_hovered {
-                if widgets::icon_button(
+        fixed_slot(ui, egui::vec2(ROLE_TOGGLE_WIDTH, theme::ROW_HEIGHT), |ui| {
+            if row_hovered
+                && widgets::icon_button(
                     ui,
                     if hole {
                         icons::OBJECT
@@ -1904,46 +1978,39 @@ fn object_row(
                     },
                     &toggle_label,
                     None,
-                    22.0,
+                    ROLE_TOGGLE_WIDTH,
                 )
                 .on_hover_text(format!("{action} (H)"))
                 .clicked()
-                {
-                    app.toggle_role(&[id]);
-                }
-            } else {
-                // Reserve the space even when hidden, so the row's width
-                // (and the name column it truncates to) never shifts.
-                ui.allocate_space(egui::vec2(22.0, 22.0));
+            {
+                app.toggle_role(&[id]);
             }
         });
         let delete_label = format!("Delete {name}");
-        ui.scope(|ui| {
-            ui.set_width(DELETE_BUTTON_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
-            if row_hovered {
-                if widgets::icon_button(ui, icons::TRASH, &delete_label, None, 22.0)
+        fixed_slot(
+            ui,
+            egui::vec2(DELETE_BUTTON_WIDTH, theme::ROW_HEIGHT),
+            |ui| {
+                if row_hovered
+                    && widgets::icon_button(
+                        ui,
+                        icons::TRASH,
+                        &delete_label,
+                        None,
+                        DELETE_BUTTON_WIDTH,
+                    )
                     .on_hover_text("Delete (Backspace)")
                     .clicked()
                 {
                     app.delete_object(id);
                 }
-            } else {
-                ui.allocate_space(egui::vec2(22.0, 22.0));
-            }
-        });
-        ui.scope(|ui| {
-            ui.set_width(MOVE_MENU_WIDTH);
-            ui.set_height(theme::ROW_HEIGHT);
+            },
+        );
+        fixed_slot(ui, egui::vec2(MOVE_MENU_WIDTH, theme::ROW_HEIGHT), |ui| {
             if row_hovered {
-                ui.menu_button(
-                    RichText::new(icons::CARET_DOWN).font(icons::font(14.0)),
-                    |ui| reorder_actions(app, ui, mf_command::Entry::Object(id), reorder),
-                )
-                .response
-                .on_hover_text(format!("Reorder {name}"));
-            } else {
-                ui.allocate_space(egui::vec2(MOVE_MENU_WIDTH, 20.0));
+                reorder_trigger(ui, &format!("Reorder {name}"), MOVE_MENU_WIDTH, |ui| {
+                    reorder_actions(app, ui, mf_command::Entry::Object(id), reorder);
+                });
             }
         });
     });
@@ -1983,21 +2050,28 @@ fn tree_row(
     }
     let mut button = egui::Button::selectable(
         selected,
-        (
-            text.atom_shrink(false),
-            row.text.atom_shrink(row.size.is_none()),
-        ),
+        (text.atom_shrink(false), row.text.atom_shrink(true)),
     )
     .min_size(egui::vec2(width, theme::ROW_HEIGHT));
+    // Always a trailing grow atom, size or not: with none, `right_text`
+    // (which pushes one before its own atoms) never runs, so without this
+    // the button's content centres in the full row width instead of
+    // hugging the left (owner 2026-11-12: object and group rows, which
+    // have no size, showed centred or oddly indented).
     if let Some(size) = row.size {
         // Smaller, muted; cut short ("…") rather than wrapped when the
-        // panel is narrow (the tooltip and the label have it all).
+        // panel is narrow (the tooltip and the label have it all). The
+        // name atom is already the one `shrink` atom (only one is
+        // allowed); the grow atom `right_text` pushes ahead of this one
+        // is what keeps the size pinned right without it needing to
+        // shrink itself.
         button = button.right_text(
             RichText::new(size)
                 .size(theme::TYPE_CAPTION)
-                .color(theme::TEXT_MUTED)
-                .atom_shrink(true),
+                .color(theme::TEXT_MUTED),
         );
+    } else {
+        button = button.right_text(egui::Atom::grow());
     }
     // Its id is its item's, wherever it is in the tree. One line, always.
     let response = ui
@@ -2147,21 +2221,27 @@ fn defects_tree(app: &mut MeshFixerApp, ui: &mut egui::Ui, object: mf_command::O
     };
     let defects = analysis.defects.clone();
     let units = app.session.document().units();
-    tree_row(
-        app,
-        ui,
-        &TreeItem::Model(object),
-        Row {
-            icon: Some((icons::MODEL, theme::TEXT_MUTED)),
-            text: RichText::new("Model"),
-            size: None,
-            label: "Model",
-        },
-        |ui| {
-            ui.label("The whole object: its tools are on the rail");
-            ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
-        },
-    );
+    // Same chevron slot as "Holes (3)" below it (empty: "Model" doesn't
+    // fold away), so its icon starts at the same x.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        fixed_slot(ui, egui::vec2(CHEVRON_WIDTH, theme::ROW_HEIGHT), |_| {});
+        tree_row(
+            app,
+            ui,
+            &TreeItem::Model(object),
+            Row {
+                icon: Some((icons::MODEL, theme::TEXT_MUTED)),
+                text: RichText::new("Model"),
+                size: None,
+                label: "Model",
+            },
+            |ui| {
+                ui.label("The whole object: its tools are on the rail");
+                ui.label(RichText::new("Double-click to frame it").color(theme::TEXT_MUTED));
+            },
+        );
+    });
     holes_tree(app, ui, object, &defects, units);
     // Cracks marked intentional are listed with the openings instead.
     let all_cracks: Vec<usize> = (0..defects.cracks.len()).collect();
@@ -2365,32 +2445,40 @@ fn defect_row(
     } else {
         copy.next_action.clone()
     };
-    tree_row(
-        app,
-        ui,
-        &TreeItem::Defect(object, d.clone()),
-        Row {
-            icon: None,
-            text: RichText::new(&copy.name),
-            size: Some(&copy.size),
-            label: &copy.row,
-        },
-        |ui| {
-            ui.strong(&copy.title);
-            ui.label(&copy.detail);
-            if !marked {
-                ui.label(&copy.verdict);
-                if let Some(limit) = &copy.limit {
-                    ui.label(RichText::new(limit).color(theme::TEXT_MUTED));
+    // The same chevron-then-swatch slots as its disclosure header's row,
+    // empty (a leaf defect has neither), so its name starts at the same
+    // x as "Holes (3)" above it, not 20 pt to the left of it.
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        fixed_slot(ui, egui::vec2(CHEVRON_WIDTH, theme::ROW_HEIGHT), |_| {});
+        fixed_slot(ui, egui::vec2(SWATCH_WIDTH, theme::ROW_HEIGHT), |_| {});
+        tree_row(
+            app,
+            ui,
+            &TreeItem::Defect(object, d.clone()),
+            Row {
+                icon: None,
+                text: RichText::new(&copy.name),
+                size: Some(&copy.size),
+                label: &copy.row,
+            },
+            |ui| {
+                ui.strong(&copy.title);
+                ui.label(&copy.detail);
+                if !marked {
+                    ui.label(&copy.verdict);
+                    if let Some(limit) = &copy.limit {
+                        ui.label(RichText::new(limit).color(theme::TEXT_MUTED));
+                    }
                 }
-            }
-            ui.label(RichText::new(format!("Next: {next}")).color(theme::TEXT_MUTED));
-            ui.label(
-                RichText::new("Double-click to frame it · right-click for actions")
-                    .color(theme::TEXT_MUTED),
-            );
-        },
-    );
+                ui.label(RichText::new(format!("Next: {next}")).color(theme::TEXT_MUTED));
+                ui.label(
+                    RichText::new("Double-click to frame it · right-click for actions")
+                        .color(theme::TEXT_MUTED),
+                );
+            },
+        );
+    });
 }
 
 #[cfg(test)]

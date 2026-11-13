@@ -409,13 +409,26 @@ fn cell_mesh(app: &MeshFixerApp, cell: &Cell) -> Option<mf_geometry::Mesh> {
     }
 }
 
-/// Grid cells' size, in points.
-const CELL: f32 = 84.0;
-const THUMB: f32 = 64.0;
+/// Grid tiles' size, in points (owner 2026-11-12: a fixed tile so every
+/// one is the same size whether or not it's a user part with rename and
+/// delete icons under its name).
+const TILE_WIDTH: f32 = 96.0;
+const TILE_HEIGHT: f32 = 116.0;
+/// The thumbnail's own size, square, centred at the tile's top.
+const THUMB: f32 = 80.0;
+/// The name's own row, under the thumbnail: one line, centred.
+const NAME_HEIGHT: f32 = 18.0;
+/// The rename/delete icons' row, under the name: always reserved (even
+/// for a built-in, which has neither), so every tile is `TILE_HEIGHT`
+/// regardless.
+const ACTIONS_HEIGHT: f32 = TILE_HEIGHT - THUMB - NAME_HEIGHT;
 
-/// One grid cell: its picture (once rendered) and name; a click places
-/// it; hovering shows it larger with its description. A user part gets
-/// rename and delete buttons below.
+/// One grid tile: its picture (once rendered, or just its place before
+/// then) on top, its name centred below on one line (ellipsised if it
+/// doesn't fit; the tooltip and hover preview have it whole); a click
+/// places it. A user part gets rename and delete icons under its name,
+/// in the same reserved row every tile has (empty for a built-in), so
+/// every tile is the same size.
 fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
     let dir = app.settings_dir().map(|d| d.join("thumbnails"));
     let thumb = {
@@ -426,24 +439,75 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
         t
     };
     let idle = app.busy.is_none();
-    ui.vertical(|ui| {
-        ui.set_width(CELL);
-        let button = match &thumb {
-            Some(t) => egui::Button::image_and_text(
-                egui::Image::new((t.id(), egui::vec2(THUMB, THUMB))),
-                &cell.name,
-            ),
-            None => egui::Button::new(&cell.name),
-        };
-        let r = ui
-            .add_enabled_ui(idle, |ui| {
-                ui.add_sized(
-                    [CELL, if thumb.is_some() { THUMB + 22.0 } else { 28.0 }],
-                    button,
-                )
-            })
-            .inner
-            .on_hover_ui(|ui| {
+    let tile = ui.allocate_ui_with_layout(
+        egui::vec2(TILE_WIDTH, TILE_HEIGHT),
+        egui::Layout::top_down(egui::Align::Center),
+        |ui| {
+            ui.set_width(TILE_WIDTH);
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // The whole tile (picture, name and all) is one click target,
+            // its own rect reserved up front so the name row below can't
+            // shift it (the rename/delete row is separate and still
+            // clickable on its own).
+            let (tile_rect, mut response) = ui.allocate_exact_size(
+                egui::vec2(TILE_WIDTH, THUMB + NAME_HEIGHT),
+                if idle {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                },
+            );
+            if ui.is_rect_visible(tile_rect) {
+                let thumb_rect = egui::Rect::from_center_size(
+                    egui::pos2(tile_rect.center().x, tile_rect.top() + THUMB / 2.0),
+                    egui::vec2(THUMB, THUMB),
+                );
+                if response.hovered() {
+                    ui.painter().rect_filled(
+                        thumb_rect.expand(2.0),
+                        theme::RADIUS,
+                        theme::CONTROL_HOVER.gamma_multiply(0.5),
+                    );
+                }
+                if let Some(t) = &thumb {
+                    egui::Image::new((t.id(), thumb_rect.size())).paint_at(ui, thumb_rect);
+                } else {
+                    ui.painter().rect_filled(
+                        thumb_rect,
+                        theme::RADIUS,
+                        theme::CONTROL.gamma_multiply(0.5),
+                    );
+                }
+                let name_rect = egui::Rect::from_min_size(
+                    egui::pos2(tile_rect.left(), thumb_rect.bottom()),
+                    egui::vec2(TILE_WIDTH, NAME_HEIGHT),
+                );
+                // One line, ellipsised if it doesn't fit (never wrapped to
+                // a second line, which `Painter::layout` would do): the
+                // full name is still in the tooltip above, and in the
+                // hover preview.
+                let mut job = egui::text::LayoutJob::simple_singleline(
+                    cell.name.clone(),
+                    egui::FontId::proportional(theme::TYPE_CAPTION),
+                    theme::TEXT,
+                );
+                job.wrap = egui::text::TextWrapping::truncate_at_width(TILE_WIDTH);
+                job.halign = egui::Align::Center;
+                let galley = ui.painter().layout_job(job);
+                let text_pos = egui::pos2(
+                    name_rect.left(),
+                    name_rect.center().y - galley.size().y / 2.0,
+                );
+                ui.painter()
+                    .with_clip_rect(name_rect)
+                    .galley(text_pos, galley, theme::TEXT);
+            }
+            let label = cell.name.clone();
+            response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, idle, &label));
+            if response.hovered() && idle {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+            }
+            response = response.on_hover_ui(|ui| {
                 if let Some(t) = &thumb {
                     let side = crate::part_thumbs::SIZE as f32;
                     ui.image((t.id(), egui::vec2(side, side)));
@@ -462,21 +526,37 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
                     widgets::caption(ui, t!("parts.hole_tip"));
                 }
             });
-        if r.clicked() {
-            if cell.shape {
-                place_shape(app, &cell.id);
-            } else {
-                place_part(app, &cell.id);
+            if response.clicked() {
+                if cell.shape {
+                    place_shape(app, &cell.id);
+                } else {
+                    place_part(app, &cell.id);
+                }
             }
-        }
-        if cell.user {
-            ui.horizontal(|ui| {
+            // Always this row's height, user part or not — reserved by
+            // hand (`allocate_ui_with_layout` would instead shrink an
+            // empty row, a built-in's, down to nothing) so every tile in
+            // the grid is the same size (fix round 2026-11-12: "Tiles
+            // have uneven heights").
+            let (actions_rect, _) = ui
+                .allocate_exact_size(egui::vec2(TILE_WIDTH, ACTIONS_HEIGHT), egui::Sense::hover());
+            // No `is_rect_visible` gate here: `icon_button` already
+            // skips its own painting when off-screen but still reports
+            // its response and accessible label either way, so Rename
+            // and Delete stay reachable (keyboard, screen reader, or a
+            // test's `click_accesskit`) even scrolled out of view.
+            if cell.user {
+                let mut row = ui.new_child(
+                    egui::UiBuilder::new()
+                        .max_rect(actions_rect)
+                        .layout(egui::Layout::left_to_right(egui::Align::Center)),
+                );
                 if widgets::icon_button(
-                    ui,
+                    &mut row,
                     icons::EDIT,
                     &t!("parts.rename_named", name = cell.name.clone()),
                     None,
-                    theme::ICON_SIZE + theme::SPACE_M,
+                    ACTIONS_HEIGHT,
                 )
                 .clicked()
                 {
@@ -488,34 +568,47 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
                     });
                 }
                 if widgets::icon_button(
-                    ui,
+                    &mut row,
                     icons::TRASH,
                     &t!("parts.delete_named", name = cell.name.clone()),
                     None,
-                    theme::ICON_SIZE + theme::SPACE_M,
+                    ACTIONS_HEIGHT,
                 )
                 .clicked()
                 {
                     app.parts.confirm_delete = Some(cell.id.clone());
                 }
+            }
+        },
+    );
+    // The whole tile's own footprint (image, name and the actions row,
+    // whether or not this cell has one): a `GenericContainer`, not a
+    // `Button` (that's the click target above, which doesn't cover the
+    // actions row), so a layout test can find "every tile" without
+    // picking up the rename/delete buttons, or anything else, by role.
+    let label = format!("Part tile: {}", cell.name);
+    tile.response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::GenericContainer, true, &label));
+}
+
+/// `cells` as a grid of fixed-size tiles, as many columns as fit the
+/// available width with a consistent gap between them (and the same gap
+/// left over at the right, never a partial column overflowing the
+/// panel): owner 2026-11-12, "the 4th column overflows and is clipped
+/// at the panel edge."
+fn grid(app: &mut MeshFixerApp, ui: &mut egui::Ui, salt: &str, cells: &[Cell]) {
+    let gap = theme::SPACE_S;
+    let columns = (((ui.available_width() + gap) / (TILE_WIDTH + gap)).floor() as usize).max(1);
+    ui.spacing_mut().item_spacing = egui::vec2(gap, gap);
+    ui.push_id(("parts grid", salt), |ui| {
+        for row in cells.chunks(columns) {
+            ui.horizontal(|ui| {
+                for cell in row {
+                    cell_ui(app, ui, cell);
+                }
             });
         }
     });
-}
-
-/// `cells` as a grid, as many columns as fit.
-fn grid(app: &mut MeshFixerApp, ui: &mut egui::Ui, salt: &str, cells: &[Cell]) {
-    let columns = ((ui.available_width() / (CELL + theme::SPACE_S)).floor() as usize).max(1);
-    egui::Grid::new(("parts grid", salt))
-        .spacing([theme::SPACE_S, theme::SPACE_S])
-        .show(ui, |ui| {
-            for (i, cell) in cells.iter().enumerate() {
-                cell_ui(app, ui, cell);
-                if (i + 1) % columns == 0 {
-                    ui.end_row();
-                }
-            }
-        });
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {

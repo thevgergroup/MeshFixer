@@ -131,6 +131,43 @@ fn opened(mesh: Mesh) -> Harness<'static, MeshFixerApp> {
     h
 }
 
+/// Opens several named objects at once ([`several_objects`]), waiting on
+/// the first one's analysis the way [`opened`] does for its one object.
+fn opened_several(names: &[&str]) -> Harness<'static, MeshFixerApp> {
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(|cc| MeshFixerApp::new(cc, None).unwrap());
+    h.state_mut().import_model(several_objects(names));
+    wait_until(&mut h, "analysis, hole view and picking", |a| {
+        a.current_analysis().is_some()
+            && a.hole_view().is_some()
+            && a.shows_current_revision()
+            && a.picking_ready()
+            && a.camera.is_some()
+    });
+    h.run();
+    h.event(egui::Event::PointerGone);
+    h.run();
+    h
+}
+
+/// Saves the current frame as `<MF_ARTIFACTS>/browser-rows/<name>.png`
+/// (the row-layout fix's before/after evidence), a no-op without
+/// `MF_ARTIFACTS` set.
+fn still(h: &mut Harness<'_, MeshFixerApp>, name: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = std::path::PathBuf::from(dir).join("browser-rows");
+    std::fs::create_dir_all(&dir).unwrap();
+    h.render()
+        .unwrap()
+        .save(dir.join(format!("{name}.png")))
+        .unwrap();
+}
+
 fn press(h: &mut Harness<'_, MeshFixerApp>, pos: egui::Pos2, pressed: bool) {
     h.event(egui::Event::PointerButton {
         pos,
@@ -982,4 +1019,225 @@ fn batch_fill_uses_the_chosen_style() {
     );
     // The 300 holes and the 292-edge rim (under the 500-edge default).
     assert_eq!(record.selection.unwrap().ids.len(), 301);
+}
+
+/// A model of several named objects, each a small cube at its own place
+/// so they don't overlap on screen, with the first's mesh holed so there
+/// are defect rows (a category disclosure and a leaf hole) to check too.
+fn several_objects(names: &[&str]) -> ImportedModel {
+    let mut t = IDENTITY;
+    let objects = names
+        .iter()
+        .enumerate()
+        .map(|(i, &name)| {
+            t[9] = i as f64 * 20.0; // the 12-element 3MF transform's translation x
+            let mesh = if i == 0 {
+                plate(6, 1.0, &[(1, 1, 1)])
+            } else {
+                mf_fixtures::cube(5.0)
+            };
+            ModelObject {
+                metadata: Default::default(),
+                name: name.to_owned(),
+                mesh,
+                transform: t,
+            }
+        })
+        .collect();
+    ImportedModel {
+        metadata: Default::default(),
+        objects,
+        unit: Unit::Millimeter,
+        source: SourceInfo {
+            path: "several.3mf".into(),
+            content_hash: ContentHash([0; 32]),
+            format: Format::ThreeMf,
+            precision: SourcePrecision::F32,
+        },
+        warnings: vec![],
+    }
+}
+
+/// The row node labelled `name`: an object or group row's is a
+/// [`Role::Button`] ([`tree_row`]'s), a defect category's is a
+/// [`Role::DisclosureTriangle`] ([`widgets::disclosure`]'s). Several
+/// nodes can share a label (a row's tooltip text, say), so this picks
+/// whichever of those two is the row's own click target.
+fn row_node<'a>(h: &'a Harness<'_, MeshFixerApp>, name: &'a str) -> egui_kittest::Node<'a> {
+    use egui::accesskit::Role;
+    h.get_all_by_label(name)
+        .find(|n| {
+            matches!(
+                n.accesskit_node().role(),
+                Role::Button | Role::DisclosureTriangle
+            )
+        })
+        .unwrap_or_else(|| panic!("no row labelled {name:?}"))
+}
+
+/// Where `name`'s row starts its name: a [`tree_row`] button's rect
+/// already starts right there (the fixed chevron and swatch columns are
+/// its siblings, consumed before it in the row's `horizontal`); a
+/// [`widgets::disclosure`] row's rect is the *whole* row, chevron and
+/// icon slots included, so its name starts `CHEVRON_WIDTH +
+/// SWATCH_WIDTH` past its own left edge.
+fn name_x(h: &Harness<'_, MeshFixerApp>, name: &str) -> f32 {
+    use egui::accesskit::Role;
+    let node = row_node(h, name);
+    let left = node.rect().left();
+    match node.accesskit_node().role() {
+        Role::DisclosureTriangle => {
+            left + mf_desktop::theme::ROW_CHEVRON_WIDTH + mf_desktop::theme::ROW_SWATCH_WIDTH
+        }
+        _ => left,
+    }
+}
+
+/// Fix round 2026-11-12 (owner screenshot): every Browser row is
+/// left-aligned at its tree depth — not centred, not shifted by its own
+/// hover buttons appearing — and its colour swatch sits inside the
+/// panel. This hovers every row one at a time and checks its rect (the
+/// name button's, which starts right after the fixed chevron-and-swatch
+/// columns) never moves, then checks rows at the same depth start their
+/// name at the same x regardless of how long their own name is.
+#[test]
+fn browser_rows_are_left_aligned_and_dont_shift_on_hover() {
+    require_gpu!("browser_rows_are_left_aligned_and_dont_shift_on_hover");
+    let mut h = opened_several(&["scan", "part", "probe"]);
+
+    // Group "part" and "probe" together: a group row (depth 0) with two
+    // members (depth 1), alongside "scan" (depth 0, ungrouped).
+    {
+        let app = h.state_mut();
+        let part = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "part")
+            .unwrap()
+            .id;
+        let probe = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "probe")
+            .unwrap()
+            .id;
+        app.picked = vec![part, probe];
+        app.group_selection();
+    }
+    h.run_steps(3);
+
+    // "scan" has one 1-cell hole cut into a 6x6 plate (plus its open
+    // rim): its Holes disclosure (depth 1) and the hole's own row
+    // (depth 2) are both laid out once it's active.
+    {
+        let app = h.state_mut();
+        let scan = app
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name == "scan")
+            .unwrap()
+            .id;
+        app.set_active(scan);
+    }
+    wait_until(&mut h, "scan's holes listed", |a| a.hole_view().is_some());
+    h.run_steps(3);
+
+    // The Holes disclosure's own label ("Holes (N)"), N whatever this
+    // plate's cut-and-rim combination lists: a depth-1 row, a sibling
+    // (in a different subtree) of "part" and "probe".
+    let holes_label = format!("Holes ({})", h.state().hole_view().unwrap().listed.len());
+    h.run_steps(2);
+
+    still(&mut h, "before-hover");
+
+    // Every row this test cares about, and the depth its name should
+    // line up at (0: "scan", the group it's a sibling of; 1: the
+    // group's own members "part" and "probe", and "scan"'s own "Holes
+    // (N)" category row, a defect sub-row using the same grid).
+    let rows: [(&str, u8); 5] = [
+        ("scan", 0),
+        ("Group", 0),
+        ("part", 1),
+        ("probe", 1),
+        (holes_label.as_str(), 1),
+    ];
+
+    // Snapshot every row's rect unhovered, then again with the pointer
+    // over that row (one row at a time, pointer moved away between), and
+    // check it didn't move a pixel.
+    let mut unhovered = Vec::new();
+    for &(name, _) in &rows {
+        unhovered.push(row_node(&h, name).rect());
+    }
+    for (i, &(name, _)) in rows.iter().enumerate() {
+        let rect = unhovered[i];
+        h.event(egui::Event::PointerMoved(rect.center()));
+        h.run_steps(3);
+        let hovered_rect = row_node(&h, name).rect();
+        assert_eq!(
+            hovered_rect, rect,
+            "{name} row shifted when hovered: {rect:?} -> {hovered_rect:?}",
+        );
+        h.event(egui::Event::PointerGone);
+        h.run_steps(2);
+    }
+
+    still(&mut h, "after-hover");
+
+    // The name's x depends only on depth: "scan" and the group start at
+    // the same x though their names differ in length, and
+    // "part"/"probe"/"Holes (N)" (one level deeper: two inside the
+    // group, one under "scan"'s own defects) start further right than
+    // either, by the same indent, though "Holes (N)" is a disclosure
+    // row in a different subtree, not a `tree_row` button at all.
+    let depth0_x: Vec<f32> = rows
+        .iter()
+        .filter(|&&(_, d)| d == 0)
+        .map(|&(name, _)| name_x(&h, name))
+        .collect();
+    for &x in &depth0_x {
+        assert!(
+            (x - depth0_x[0]).abs() < 0.5,
+            "depth-0 rows don't share a name x: {depth0_x:?}"
+        );
+    }
+    let depth1_x: Vec<f32> = rows
+        .iter()
+        .filter(|&&(_, d)| d == 1)
+        .map(|&(name, _)| name_x(&h, name))
+        .collect();
+    for &x in &depth1_x {
+        assert!(
+            (x - depth1_x[0]).abs() < 0.5,
+            "depth-1 rows don't share a name x: {depth1_x:?}"
+        );
+    }
+    assert!(
+        depth1_x[0] > depth0_x[0],
+        "a deeper row ({:?}) should start right of a shallower one ({:?})",
+        depth1_x[0],
+        depth0_x[0]
+    );
+
+    // Every swatch (one per object row with a colour) sits fully inside
+    // the Browser panel's own rect, not clipped at its left edge.
+    let panel = h.get_by_label("Browser").rect();
+    for name in ["scan", "part", "probe"] {
+        let row = row_node(&h, name).rect();
+        // The swatch sits in the fixed slot just left of the row's own
+        // (name) rect: chevron width then swatch width, both from
+        // `theme`.
+        let swatch_left = row.left() - mf_desktop::theme::ROW_SWATCH_WIDTH;
+        assert!(
+            swatch_left >= panel.left() - 0.5,
+            "{name}'s swatch (starting at {swatch_left}) is clipped at the panel's left edge {}",
+            panel.left()
+        );
+    }
 }

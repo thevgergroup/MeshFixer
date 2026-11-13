@@ -251,7 +251,11 @@ fn save_as_part_names_what_was_saved() {
     );
     h.get_by_label("Parts").click();
     settle(&mut h);
-    h.get_by_label("Save as part…").click();
+    // The library grid (fixed 96x116 pt tiles: fix round 2026-11-12) can
+    // run well past the window's bottom with this many built-ins, so
+    // "Save as part…" below it isn't necessarily on screen: click it by
+    // accesskit action, as the rename/delete buttons below already do.
+    h.get_by_label("Save as part…").click_accesskit();
     settle(&mut h);
     // The dialog: the name filled in from the object, a category and a
     // description typed.
@@ -402,7 +406,10 @@ fn a_plugin_registered_shape_appears_in_the_library() {
     h.get_by_label("Parts").click();
     settle(&mut h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Plugin wedge").click();
+    // A plugin's shape is appended last, so it's past the built-ins and
+    // likely below the fold with the library grid's fixed, taller tiles
+    // (fix round 2026-11-12): click it by accesskit action.
+    h.get_by_label("Plugin wedge").click_accesskit();
     wait_until(&mut h, "the wedge placed", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
@@ -467,4 +474,122 @@ fn the_library_is_a_thumbnail_grid_cached_by_content_hash() {
 
 fn h_ready(a: &MeshFixerApp) -> usize {
     a.parts.thumbs.ready()
+}
+
+/// The tool rail's own width, left of the tool dock (`tool_panels::RAIL_WIDTH`,
+/// not public outside the crate): the space the dock's resize splitter
+/// measures its fraction against is the window's width minus this.
+const RAIL_WIDTH: f32 = 64.0;
+
+/// Resizes the tool dock (the Parts panel's own container) to `width`
+/// points by driving its resize splitter's accesskit `SetValue`, the
+/// same action assistive technologies use — no pointer-drag geometry to
+/// get right. The splitter reports its position as a fraction of the
+/// space available to the panel (the window's width less the rail's own,
+/// fixed, to its left); egui clamps the result to the panel's own
+/// `size_range` (240..=420), same as a pointer drag would.
+fn resize_tool_dock(h: &mut Harness<'_, MeshFixerApp>, width: f32) {
+    let splitter = h
+        .get_all_by_label("Resize panel")
+        .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+        .expect("the tool dock's resize splitter");
+    let fraction = f64::from(width / (WINDOW.0 - RAIL_WIDTH));
+    splitter.set_value_accesskit(fraction);
+    h.run_steps(3);
+    settle(h);
+}
+
+/// Fix round 2026-11-12 (owner: "the Parts library grid looks
+/// terrible"): every tile is a fixed 96x116 pt (thumbnail on top, name
+/// centred below on one line), the grid never overflows the panel at
+/// any width that fits, and rows are uniform. Checked at two panel
+/// widths (280, the tool dock's default; 360, part way to its max of
+/// 420) so the column count differs between them.
+#[test]
+fn library_tiles_are_uniform_and_never_overflow_the_panel() {
+    require_gpu!("library_tiles_are_uniform_and_never_overflow_the_panel");
+    let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    wait_until(&mut h, "the built-ins listed", |a| h_ready(a) > 10);
+
+    for width in [280.0_f32, 360.0] {
+        resize_tool_dock(&mut h, width);
+        let splitter = h
+            .get_all_by_label("Resize panel")
+            .min_by(|a, b| a.rect().left().total_cmp(&b.rect().left()))
+            .expect("the tool dock's resize splitter");
+        let outer_width = splitter.rect().center().x - RAIL_WIDTH;
+        assert!(
+            (outer_width - width).abs() < 2.0,
+            "the dock didn't settle near {width} pt wide: splitter at {:?} ({outer_width} pt)",
+            splitter.rect()
+        );
+        // The panel's own content rect: the search field spans it full
+        // width, so its rect's x-range is the grid's too.
+        let panel = h.get_by_role(egui::accesskit::Role::TextInput).rect();
+        still(&mut h, &format!("library-{}", width as u32));
+
+        // Every tile is its own `GenericContainer` node ("Part tile: …",
+        // `cell_ui`'s), covering the picture, name and (reserved either
+        // way) actions row as one footprint — distinct from the
+        // click-target `Button` inside it, which only covers the
+        // picture and name.
+        let tiles: Vec<egui::Rect> = h
+            .get_all_by_label_contains("Part tile: ")
+            .map(|n| n.rect())
+            .collect();
+        assert!(
+            tiles.len() > 10,
+            "{} tiles found at {width} pt",
+            tiles.len()
+        );
+        let first = tiles[0];
+        for &t in &tiles {
+            assert!(
+                (t.width() - first.width()).abs() < 0.5
+                    && (t.height() - first.height()).abs() < 0.5,
+                "tiles aren't uniform at {width} pt: {first:?} vs {t:?}"
+            );
+            // The fixed tile size the fix specifies (about 96x116 pt):
+            // not the old cramped "image left of text" button, and not
+            // grown to fit a rename/delete row only some tiles have.
+            assert!(
+                (t.height() - 116.0).abs() < 1.0,
+                "tile isn't the fixed 116 pt tall: {t:?}"
+            );
+            assert!(
+                t.left() >= panel.left() - 0.5 && t.right() <= panel.right() + 0.5,
+                "a tile overflows the panel at {width} pt: {t:?} outside {panel:?}"
+            );
+        }
+        // Names are single-line: every cell's own click-target button
+        // (picture + name, `THUMB + NAME_HEIGHT` tall; the reserved
+        // actions row is outside it) is the same height whatever its
+        // name's length — "Magnet pocket" doesn't wrap to a second line
+        // and grow past "Box"'s.
+        let name_heights: Vec<f32> = h
+            .get_all_by_role(egui::accesskit::Role::Button)
+            .map(|n| n.rect())
+            .filter(|r| {
+                r.top() >= panel.bottom() - 1.0
+                    && r.left() >= panel.left() - 1.0
+                    && r.right() <= panel.right() + 1.0
+                    && r.width() > 50.0
+                    && r.width() < 110.0
+            })
+            .map(|r| r.height())
+            .collect();
+        assert!(
+            name_heights.len() > 10,
+            "{} tile buttons found at {width} pt",
+            name_heights.len()
+        );
+        for &nh in &name_heights {
+            assert!(
+                (nh - name_heights[0]).abs() < 0.5,
+                "a tile's name wrapped to a second line at {width} pt: {name_heights:?}"
+            );
+        }
+    }
 }

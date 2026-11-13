@@ -293,6 +293,17 @@ pub const RADIUS: f32 = 6.0;
 pub const ROW_HEIGHT: f32 = 28.0;
 pub const CONTROL_HEIGHT: f32 = ROW_HEIGHT;
 
+/// The Browser's one column grid, shared by object rows, group rows and
+/// defect sub-rows (owner 2026-11-12: every row left-aligned the same
+/// way, indent per depth, then these two slots, then the icon and name):
+/// a disclosure chevron slot (empty for a row with no chevron, like an
+/// object's), reserved so a deeper row's swatch or icon always starts at
+/// the same x at a given depth.
+pub const ROW_CHEVRON_WIDTH: f32 = 18.0;
+/// The slot after the chevron: a colour swatch (an object row's) or an
+/// icon (a group's or a defect category's), at the same x either way.
+pub const ROW_SWATCH_WIDTH: f32 = 18.0;
+
 // The type scale (ui-plan.md §4), in points. The bundled font has one
 // weight, so a section label's "semibold" is the brightest text colour.
 /// A panel's title (the tool's name, the object's name).

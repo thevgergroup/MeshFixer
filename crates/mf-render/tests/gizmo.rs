@@ -213,6 +213,84 @@ fn uniform_scale_about_pivot() {
     assert!((DVec3::new(p.x, p.y, p.z) - pivot).length() < 1e-9, "{p:?}");
 }
 
+/// D8: dragging a `ScaleAxis` handle used to fall through to the move
+/// logic (its `DragAnchor` was indistinguishable from `Handle::Axis`'s),
+/// so the object translated instead of scaling. A drag on the X scale
+/// handle must scale X only, leave Y and Z at 1.0, keep the object's
+/// translation and pivot fixed (a scale, not a move), and one undo
+/// (replaying `start_px` itself) must restore the original transform.
+#[test]
+fn scale_axis_scales_only_that_axis_and_keeps_translation_and_pivot_fixed() {
+    let cam = test_camera();
+    let pivot = DVec3::new(2.0, -1.0, 0.5);
+    let gizmo = Gizmo {
+        pivot,
+        mode: GizmoMode::Scale,
+        size_pt: 110.0,
+    };
+    // The object starts away from the pivot and away from the origin, so
+    // a move (the bug) and a scale-about-pivot read differently in every
+    // column, not just by coincidence.
+    let start = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 5.0, -3.0, 1.0];
+    let start_px = screen_of(&cam, pivot, pivot + DVec3::X * 0.5);
+    let drag = gizmo.begin(Handle::ScaleAxis(0), start_px, &cam, VIEW, start);
+    let end_px = (start_px.0 + 60.0, start_px.1);
+    let snap = Snap {
+        grid: None,
+        angle_deg: None,
+        scale_step: None,
+        plate: None,
+    };
+    let result = drag.update(end_px, &snap);
+
+    let decomp = decompose(&result);
+    let scale = match decomp {
+        Decomposed::Trs { scale, .. } => scale,
+        Decomposed::Sheared => panic!("expected Trs"),
+    };
+    assert!(
+        scale.x > 1.0,
+        "dragging outward should scale X up: {scale:?}"
+    );
+    assert!((scale.y - 1.0).abs() < 1e-9, "Y must stay 1.0: {scale:?}");
+    assert!((scale.z - 1.0).abs() < 1e-9, "Z must stay 1.0: {scale:?}");
+
+    // Not a move: Y and Z of the linear part are untouched (the X column
+    // alone may have grown), and the pivot (not the object's own origin,
+    // nor the camera) is what stays fixed.
+    for i in 3..9 {
+        assert!((result[i] - start[i]).abs() < 1e-12, "{result:?}");
+    }
+    // The pivot's own *local* point under `start` (here `start`'s
+    // translation isn't zero, so the pivot's local coordinates aren't
+    // just `pivot` itself: find them by inverting `start`, the same as
+    // `ring_drag_rotates_about_pivot_and_snaps_to_15_degrees`'s and
+    // `uniform_scale_about_pivot`'s pivot checks get for free from using
+    // `IDENTITY`, which happens to make the two coincide) must still land
+    // on the world-space pivot under `result` — a scale about the pivot
+    // moves everything else relative to it, not the pivot itself.
+    let m_start = model_matrix(&start);
+    let local_at_pivot = m_start.inverse() * glam::DVec4::new(pivot.x, pivot.y, pivot.z, 1.0);
+    let m = model_matrix(&result);
+    let p = m * local_at_pivot;
+    assert!(
+        (DVec3::new(p.x, p.y, p.z) - pivot).length() < 1e-9,
+        "the pivot must stay fixed under an axis scale: {p:?}"
+    );
+    // The object's translation changed (it moved relative to the world
+    // origin, because it moved relative to the *pivot*, which is off the
+    // object's own origin) but it's a side effect of scaling about the
+    // pivot, not of a move drag: dragging back to `start_px` (factor 1)
+    // is a no-op, same as a real undo.
+    let identity_drag = drag.update(start_px, &snap);
+    for i in 0..12 {
+        assert!(
+            (identity_drag[i] - start[i]).abs() < 1e-9,
+            "dragging back to the start should restore it exactly: {identity_drag:?}"
+        );
+    }
+}
+
 #[test]
 fn grid_snap_rounds_translation_to_1mm() {
     let cam = test_camera();
