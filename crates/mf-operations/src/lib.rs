@@ -11,6 +11,8 @@ use mf_spec::{Params, SpecError};
 
 mod add_part;
 mod affine;
+mod align;
+pub use align::Align;
 pub mod blend;
 mod boolean;
 mod combine;
@@ -344,6 +346,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &transform::ArrangeOnPlate,
     &transform::Delete,
     &transform::Rename,
+    &align::Align,
     &split::SplitPlane,
     &split::region::SplitRegion,
     &split::region::DeleteFaces,

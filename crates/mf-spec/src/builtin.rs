@@ -98,6 +98,10 @@ const SOURCES: &[(&str, &str)] = &[
         include_str!("../../../specs/operations/object.move_group.yaml"),
     ),
     (
+        "object.align.yaml",
+        include_str!("../../../specs/operations/object.align.yaml"),
+    ),
+    (
         "object.set_shape_params.yaml",
         include_str!("../../../specs/operations/object.set_shape_params.yaml"),
     ),
