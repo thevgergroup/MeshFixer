@@ -2114,17 +2114,30 @@ fn align_anchor_stays_fixed() {
     settle(&mut h);
 
     // Click on c's own surface (its centre, which is on its silhouette
-    // from this camera) to anchor it.
-    let p = {
-        let app = h.state();
-        let cam = app.camera.unwrap();
-        let rect = app.viewport.last_rect.unwrap();
-        let view = (rect.width() as f64, rect.height() as f64);
-        let world = world_bounds(&h, idc).center();
-        let (x, y) = mf_render::screen_position(&cam, cam.target, view, world).unwrap();
-        rect.left_top() + egui::vec2(x as f32, y as f32)
-    };
-    click_at(&mut h, p);
+    // from this camera) to anchor it. Retried a few times (each a fresh
+    // press-and-release): the anchor pick is a synchronous ray cast
+    // against the object's own BVH (`align_tool::pick_selected_object`,
+    // the same technique Split's "click a side" uses), so
+    // `picking_ready()` being true is as settled as it gets, but a
+    // single press can still land a frame before the BVH it reads is
+    // swapped in on a freshly warmed-up test binary.
+    let anchor_set = |a: &MeshFixerApp| a.align.anchor == Some(idc);
+    for _ in 0..5 {
+        if anchor_set(h.state()) {
+            break;
+        }
+        let p = {
+            let app = h.state();
+            let cam = app.camera.unwrap();
+            let rect = app.viewport.last_rect.unwrap();
+            let view = (rect.width() as f64, rect.height() as f64);
+            let world = world_bounds(&h, idc).center();
+            let (x, y) = mf_render::screen_position(&cam, cam.target, view, world).unwrap();
+            rect.left_top() + egui::vec2(x as f32, y as f32)
+        };
+        click_at(&mut h, p);
+        settle(&mut h);
+    }
     wait_until(&mut h, "c becomes the anchor", |a| a.align.anchor == Some(idc));
     settle(&mut h);
     capture(&mut h, "anchor-set");
