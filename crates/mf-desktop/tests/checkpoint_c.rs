@@ -299,7 +299,7 @@ fn checkpoint_c_part1_surgical_workflow() {
 
     // 2. Inspect: Objects & Defects (size groups and counts), then the
     //    hole overview zoomed out.
-    h.get_by_label("Objects & Defects");
+    h.get_by_label("Browser");
     let defects = h.state().current_analysis().unwrap().defects.clone();
     println!(
         "checkpoint_c part1: {} triangles; {} holes, {} cracks, {} loose pieces, {} tangled",
