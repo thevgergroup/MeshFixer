@@ -277,17 +277,34 @@ pub fn clip_to_box(
                 }
                 planes = to;
             }
-            Err(ClipError::Degenerate) if nudges < 8 => {
+            Err(ClipError::Degenerate) if nudges < 28 => {
                 // Touching (almost) exactly along an edge or at a point:
                 // move the planes out a little, by different amounts per
                 // plane (a symmetric move keeps a symmetric model's
-                // coincidence), and try again.
+                // coincidence), and try again. The step doubles each
+                // time (not a fixed multiple of the attempt count):
+                // where the crowding is a genuine box/mesh tangency a
+                // few small steps clear it (as they always have), but
+                // where two of the target's own cut points come out a
+                // fraction of an ulp apart regardless of the box's
+                // position (the owner's demo, a half-cube sunk into a
+                // sphere capped on the same plane: a vertex an ulp from
+                // the window's own edge gives two of its edges' cut
+                // points a fraction of an ulp apart, however the box
+                // moves) only a step that grows geometrically reaches
+                // the scale that separates them within a sane number of
+                // attempts — linear growth needed over a thousand. 28
+                // attempts (measured minimum: 21) is comfortably past
+                // that without being unbounded (the step still doubles
+                // from a millionth of the box's own size, so even the
+                // last attempt is a few hundred times the box, not the
+                // tool's whole scene).
                 nudges += 1;
                 let size = (0..3)
                     .map(|a| planes.hi[a] - planes.lo[a])
                     .fold(0.0, f64::max);
                 for (a, f) in [1.0, 1.7, 2.3].into_iter().enumerate() {
-                    let step = size * 1e-6 * f * nudges as f64;
+                    let step = size * 1e-6 * f * 2.0_f64.powi(nudges - 1);
                     planes.lo[a] -= step * 0.737;
                     planes.hi[a] += step;
                 }

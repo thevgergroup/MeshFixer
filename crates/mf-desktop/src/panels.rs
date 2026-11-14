@@ -1181,11 +1181,10 @@ fn history_step_row(
         RichText::new(&shown).color(theme::TEXT_MUTED).italics()
     };
     let w = ui.available_width();
-    let tip = match (checkpoint.is_some(), details.is_empty()) {
-        (true, true) => format!("Named checkpoint · {}", t!("history.tip")),
-        (true, false) => format!("Named checkpoint\n\n{details}"),
-        (false, true) => t!("history.tip"),
-        (false, false) => format!("{}\n\n{details}", t!("history.tip")),
+    let tip = if checkpoint.is_some() {
+        format!("Named checkpoint · {}", t!("history.tip"))
+    } else {
+        t!("history.tip")
     };
     let response = ui.add_enabled(
         idle,
@@ -1209,6 +1208,21 @@ fn history_step_row(
     });
     if response.on_hover_text(tip).clicked() {
         *clicked = Some(id);
+    }
+    // Params are hidden by default, behind this expandable Details
+    // section (owner 2026-11-13): the label alone is the common case, and
+    // a face-id list or a 12-number transform is never shown raw.
+    if !details.is_empty() {
+        ui.indent(("history-details", id), |ui| {
+            egui::CollapsingHeader::new("Details")
+                .id_salt(("history-details-header", id))
+                .default_open(false)
+                .show(ui, |ui| {
+                    for line in details.split('\n') {
+                        widgets::caption(ui, line);
+                    }
+                });
+        });
     }
 }
 

@@ -1,6 +1,7 @@
 id: mesh.inspect
 version: 1
 summary: Report mesh diagnostics (counts, components, boundary loops, manifoldness, area, volume).
+history_label: history.label.mesh.inspect
 geometry_kinds: [mesh]
 target:
   whole_object: true

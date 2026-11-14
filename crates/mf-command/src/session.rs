@@ -55,6 +55,42 @@ pub struct Invocation {
     pub raw_params: BTreeMap<String, String>,
 }
 
+/// The safe, generic history label for a command this layer doesn't have
+/// richer words for: the spec's own title (its id, in plain words: "Hollow"
+/// for `mesh.hollow`, "Remove small components" for
+/// `mesh.remove_small_components`) and the target's name. Never a
+/// parameter value or an id list (D-HIST, the owner's recurring bug: a
+/// history row printing `mesh.hollow (drain_holes=none, ...,
+/// open_through_faces=37048, ...)`). `mf-desktop`'s own `step_label`
+/// renders a far better, catalogue-driven label for almost every
+/// operation (see `history_label`/`catalogue_history_label` there); this
+/// is only what shows if that frontend-only path is somehow unavailable
+/// (a log read by a tool with no i18n catalogue, or before the frontend
+/// renders the row), so it must stand on its own without risking a raw
+/// parameter dump.
+fn generic_label(op_id: &str, target_name: &str) -> String {
+    let title = op_id
+        .rsplit('.')
+        .next()
+        .unwrap_or(op_id)
+        .split('_')
+        .enumerate()
+        .map(|(i, word)| {
+            if i == 0 {
+                let mut chars = word.chars();
+                match chars.next() {
+                    Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                    None => String::new(),
+                }
+            } else {
+                word.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    format!("{title} {target_name}")
+}
+
 /// The operation target a selection describes.
 pub fn target_of(sel: &Selection) -> Target {
     match sel.kind {
@@ -1541,12 +1577,14 @@ impl Session {
         };
         self.next_command += 1;
         self.next_object = next_object;
-        let params: Vec<String> = c.params.0.iter().map(|(k, v)| format!("{k}={v}")).collect();
+        let target_name = document
+            .object(c.target)
+            .map_or("the object", |o| o.name.as_str());
         self.push(RevisionNode {
             id: RevisionId(0),
             parent: None,
             children: Vec::new(),
-            label: format!("{} ({})", c.op_id, params.join(", ")),
+            label: generic_label(c.op_id, target_name),
             record: Some(record),
             import: None,
             document,

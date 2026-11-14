@@ -1,6 +1,7 @@
 id: joint.magnet
 version: 1
 summary: "Magnet pockets across a cut: a round pocket in both pieces at the same place, for a bought disc magnet each."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: see joint.dowel.yaml.
 target:

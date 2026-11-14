@@ -4,7 +4,8 @@
 # solid+solid+hole with Undo, Delete a split part (Backspace and the
 # trash button), Connect (two dowels, Apply), one Sculpt inflate stroke
 # with "stay on surface", a Transform move and its Undo, and a
-# parametric shape param edit and its Undo.
+# parametric shape param edit and its Undo, and Hollow (thin parts, a
+# placed drain hole, one undo) then a vase by Split with Cap off.
 #
 # crates/mf-desktop/tests/core_workflows.rs — kept under 3 minutes at
 # -j 4; run single-threaded (--test-threads=1), same as every other

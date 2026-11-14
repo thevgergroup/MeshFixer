@@ -1,6 +1,7 @@
 id: clasp.snap
 version: 1
 summary: Snap clasp, a cantilever arm with a lip (the lid) snapping onto a ridge (the body).
+history_label: history.label.generator
 geometry_kinds: [mesh]
 target:
   whole_object: true

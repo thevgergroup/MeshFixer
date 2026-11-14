@@ -553,6 +553,9 @@ pub enum Message {
     /// The Alignment panel's hole preview for the latest plane and peg
     /// settings ([`peg_preview`]).
     PegPreview(PegPreview),
+    /// The Hollow tool's preview for the latest settings
+    /// ([`crate::hollow_tool::preview_work`]).
+    HollowPreview(Box<crate::hollow_tool::Preview>),
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,

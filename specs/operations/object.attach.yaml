@@ -1,6 +1,7 @@
 id: object.attach
 version: 1
 summary: Join N parts onto the objects they connect, each to its target slot (solids joined, holes cut), as one command - a linked group's member objects and generators built in place.
+history_label: history.label.object.attach
 geometry_kinds: [mesh]
 # Side A: receives every member marked side 'a'.
 target:

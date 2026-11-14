@@ -26,3 +26,17 @@ Setup: keep both, capped, no gap, plane (0.3, 0.1, 1) through the bbox centre; o
 - `5b2d20b` (custom cut, baseline): custom plane cut at c3e111e, harness 5b2d20b
 - `df500a4` (Manifold, rejected): Split on Manifold (p1b-cut), rejected by the owner 2026-11-13
 - `7ce2700` (custom cut, hardened, current): topological section, split-harden (p1c-split)
+
+## `mesh.hollow`
+
+Setup: UV sphere of radius 50 mm, 2 mm wall, automatic cell (0.5 mm), one auto drain hole; one process per case, optimised; RSS = macOS physical footprint, sampled every 10 ms.
+
+| size | model | triangles | engine | status | time s | peak RSS MB | above loaded MB | commit | date | machine |
+|---|---|---:|---|---|---:|---:|---:|---|---|---|
+| 1M | sphere 1M | 998,284 | sparse band + marching tetrahedra | current | 3.76 | 844 | 733 | `a157b02` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 5M | sphere 5M | 4,995,960 | sparse band + marching tetrahedra | current | 4.37 | 959 | 348 | `a157b02` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 30M | sphere 30M | 29,992,512 | sparse band + marching tetrahedra | current | 8.88 | 2,106 | 348 | `a157b02` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+
+- `a157b02` (sparse band + marching tetrahedra, current): first Hollow (p1d-hollow): 1,067,760 inner faces, 986,323 band points
+- `a157b02` (sparse band + marching tetrahedra, current): first Hollow (p1d-hollow): 1,067,640 inner faces, 986,304 band points
+- `a157b02` (sparse band + marching tetrahedra, current): first Hollow (p1d-hollow): 1,067,640 inner faces, 986,299 band points

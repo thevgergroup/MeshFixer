@@ -43,6 +43,14 @@ pub fn has(id: &str) -> bool {
     CATALOGUE.binary_search_by(|(k, _)| k.cmp(&id)).is_ok()
 }
 
+/// True if `id` is in the catalogue either as a plain message or as a
+/// plural pair (`<id>.one` present; [`tr_plural`] picks `.one` or
+/// `.other` from a count). A spec's `history_label` is one or the other,
+/// depending on whether its history row needs a count.
+pub fn has_message_or_plural(id: &str) -> bool {
+    has(id) || has(&format!("{id}.one"))
+}
+
 /// The English text of message `id`. Panics if `id` isn't in the
 /// catalogue: a missing message is a bug, never shown as a blank.
 pub fn english(id: &str) -> &'static str {
@@ -457,12 +465,205 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("hint.first_use.dismiss", "Dismiss hint"),
     ("history.empty", "No history yet"),
+    ("history.label.connector.join", "Joined connector to {name}"),
+    // A generator's own spec (a shape or connector's parameter schema,
+    // crate mf-parts): never shown by this id. The command recorded is
+    // always object.add_shape, object.set_shape_params or
+    // connector.join, whose own history_label names the row; this
+    // placeholder only satisfies the catalogue-coverage test.
+    ("history.label.generator", "Updated {name}"),
+    ("history.label.mesh.boolean", "{op} on {name}"),
+    ("history.label.mesh.combine", "Combined objects into {name}"),
+    ("history.label.mesh.compact", "Compacted {name}"),
+    (
+        "history.label.mesh.delete_faces.one",
+        "Deleted {n} face of {name}",
+    ),
+    (
+        "history.label.mesh.delete_faces.other",
+        "Deleted {n} faces of {name}",
+    ),
+    (
+        "history.label.mesh.fill_holes.one",
+        "Filled {n} hole in {name}",
+    ),
+    (
+        "history.label.mesh.fill_holes.other",
+        "Filled {n} holes in {name}",
+    ),
+    ("history.label.mesh.hollow", "Hollowed {name}: {wall} walls"),
+    (
+        "history.label.mesh.hollow.open",
+        "Hollowed {name}: {wall} walls, open at the cut face",
+    ),
+    ("history.label.mesh.inspect", "Inspected {name}"),
+    (
+        "history.label.mesh.intersections",
+        "Checked {name} for intersections",
+    ),
+    ("history.label.mesh.make_solid", "Made {name} solid"),
+    (
+        "history.label.mesh.remove_small_components.one",
+        "Removed {n} loose piece from {name}",
+    ),
+    (
+        "history.label.mesh.remove_small_components.other",
+        "Removed {n} loose pieces from {name}",
+    ),
+    (
+        "history.label.mesh.sculpt_stroke",
+        "Sculpted {name} ({brush})",
+    ),
+    (
+        "history.label.mesh.split_box",
+        "Split {name} along the build volume",
+    ),
+    (
+        "history.label.mesh.split_plane",
+        "Split {name} along a plane",
+    ),
+    (
+        "history.label.mesh.split_region",
+        "Split the selected faces off {name}",
+    ),
+    ("history.label.object.add_part", "Added a part to {name}"),
+    (
+        "history.label.object.add_shape.one",
+        "Added a shape to {name}",
+    ),
+    (
+        "history.label.object.add_shape.other",
+        "Added {n} shapes to {name}",
+    ),
+    ("history.label.object.align.one", "Aligned {n} object"),
+    ("history.label.object.align.other", "Aligned {n} objects"),
+    (
+        "history.label.object.arrange_on_plate",
+        "Arranged {name} on the plate",
+    ),
+    (
+        "history.label.object.attach.one",
+        "Attached {n} part to {name}",
+    ),
+    (
+        "history.label.object.attach.other",
+        "Attached {n} parts to {name}",
+    ),
+    ("history.label.object.delete", "Deleted {name}"),
+    (
+        "history.label.object.drop_to_plate",
+        "Dropped {name} to the plate",
+    ),
+    ("history.label.object.move_group", "Moved {name}'s group"),
+    ("history.label.object.rename", "Renamed {name}"),
+    ("history.label.object.set_shape_params", "Rebuilt {name}"),
+    ("history.label.object.set_transform", "Transformed {name}"),
+    (
+        "history.label.split.place_connectors",
+        "Added connectors to {name}'s joint",
+    ),
+    (
+        "history.label.test.consume_tool",
+        "Test: consumed a tool into {name}",
+    ),
+    (
+        "history.label.test.unit_conversion",
+        "Test: unit conversion on {name}",
+    ),
+    (
+        "history.label.test_fixture",
+        "Placeholder: never shown (a unit test's inline spec fixture)",
+    ),
     ("history.tab", "History"),
     ("history.tip", "Click a step to go back to it"),
     ("hole.auto", "Auto"),
     ("hole.flat_top", "Flat-top"),
     ("hole.round", "Round"),
     ("hole.teardrop", "Teardrop"),
+    ("hollow.apply", "Hollow"),
+    ("hollow.detail_auto", "Automatic"),
+    (
+        "hollow.detail_help",
+        "The size of the grid the inside is built on: smaller follows the wall more closely but takes longer. It can be at most half the wall.",
+    ),
+    ("hollow.detail_is", "Built on a {cell} {unit} grid"),
+    (
+        "hollow.done",
+        "Hollowed. Every part was thick enough to hollow.",
+    ),
+    ("hollow.holes.auto", "Auto"),
+    (
+        "hollow.holes.auto_help",
+        "At the lowest points of the inside, as the object sits on the plate.",
+    ),
+    ("hollow.holes.clear", "Clear holes"),
+    ("hollow.holes.count", "How many"),
+    ("hollow.holes.diameter", "Diameter ({unit})"),
+    ("hollow.holes.none", "None"),
+    ("hollow.holes.placed", "Placed"),
+    ("hollow.holes.placed_count", "Holes placed: {n}"),
+    (
+        "hollow.holes.placed_help",
+        "Click the surface where each hole goes.",
+    ),
+    ("hollow.holes.profile", "Shape"),
+    (
+        "hollow.holes_help",
+        "Holes from the hollow inside to the outside, so resin or powder can drain out.",
+    ),
+    (
+        "hollow.holes_hint",
+        "Or place a cylinder from Parts, mark it as a Hole, and Combine for a custom opening.",
+    ),
+    ("hollow.measuring", "Measuring the object…"),
+    ("hollow.open_through", "Open through this surface"),
+    (
+        "hollow.open_through_help",
+        "Opens the cavity out through the picked surface, with a clean rim wall, instead of a closed shell there.",
+    ),
+    (
+        "hollow.open_through_needs_pick",
+        "Click a surface on the object to pick where it opens.",
+    ),
+    ("hollow.open_through_picked", "Opens through: {name}"),
+    (
+        "hollow.preview_ready",
+        "Inner wall: {faces} faces, on a {cell} {unit} grid",
+    ),
+    ("hollow.preview_refused", "This can't be hollowed yet"),
+    ("hollow.previewing", "Working out the walls…"),
+    ("hollow.section.detail", "Detail ({unit})"),
+    ("hollow.section.holes", "Drain holes"),
+    ("hollow.section.open_through", "Open through"),
+    ("hollow.section.preview", "Preview"),
+    ("hollow.section.wall", "Wall thickness ({unit})"),
+    ("hollow.section_view", "Section view"),
+    (
+        "hollow.section_view.tip",
+        "Cut the preview open so you can see the walls",
+    ),
+    ("hollow.status", "Hollowed {name}: {wall} {unit} walls"),
+    (
+        "hollow.status_open",
+        "Hollowed {name}: {wall} {unit} walls, open at the cut face",
+    ),
+    (
+        "hollow.thin",
+        "Parts thinner than {size} {unit} were left solid",
+    ),
+    ("hollow.thin_share", "{percent}% of the surface (outlined)"),
+    (
+        "hollow.tradeoff",
+        "Thinner walls save more material but are weaker.",
+    ),
+    (
+        "hollow.wall_help",
+        "How thick the walls are; parts thinner than twice this stay solid",
+    ),
+    (
+        "hollow.what",
+        "Makes the object a shell: the outside stays exactly as it is, and the inside is hollowed out to walls of the thickness you choose.",
+    ),
     (
         "inspect.help",
         "Everything the analysis measured, in plain numbers",
@@ -937,6 +1138,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("tool.connectors.name", "Connectors"),
     ("tool.export.help", "Write the model to 3MF, STL or OBJ"),
     ("tool.export.name", "Export"),
+    (
+        "tool.hollow.help",
+        "Make a solid a shell with walls of a chosen thickness",
+    ),
+    ("tool.hollow.name", "Hollow"),
     ("tool.inspect.help", "Every number the analysis reports"),
     ("tool.inspect.name", "Inspect"),
     (

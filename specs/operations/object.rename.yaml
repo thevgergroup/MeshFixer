@@ -1,6 +1,7 @@
 id: object.rename
 version: 1
 summary: Give an object a new name (the Browser row, F2, or the selection panel's name field).
+history_label: history.label.object.rename
 geometry_kinds: [mesh]
 target:
   whole_object: true

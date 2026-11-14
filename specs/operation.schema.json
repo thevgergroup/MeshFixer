@@ -4,11 +4,16 @@
   "title": "MeshFixer operation spec (MF-SPEC-001)",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "version", "summary", "geometry_kinds", "target", "parameters", "effects", "runtime"],
+  "required": ["id", "version", "summary", "history_label", "geometry_kinds", "target", "parameters", "effects", "runtime"],
   "properties": {
     "id": { "type": "string", "pattern": "^[a-z]+\\.[a-z_]+$" },
     "version": { "type": "integer", "minimum": 1 },
     "summary": { "type": "string", "minLength": 1 },
+    "history_label": {
+      "type": "string",
+      "minLength": 1,
+      "$comment": "A message id (in mf-desktop's i18n catalogue, under history.label.*) for this operation's History panel row, with {object}/{placeholder} tokens the catalogue string fills from the command's own words (never a raw parameter value or an id list). Enforced by mf-spec's and mf-desktop's test suites: every built-in spec's history_label must resolve to a catalogue entry that renders without leftover raw params or id lists."
+    },
     "geometry_kinds": { "type": "array", "items": { "enum": ["mesh"] }, "minItems": 1 },
     "target": {
       "type": "object",

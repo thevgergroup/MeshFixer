@@ -1,6 +1,7 @@
 id: hinge.pin
 version: 1
 summary: Print-in-place pin hinge, two leaves of knuckles around a captive pin.
+history_label: history.label.generator
 geometry_kinds: [mesh]
 target:
   whole_object: true

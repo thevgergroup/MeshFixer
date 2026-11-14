@@ -1,6 +1,7 @@
 id: joint.dowel
 version: 1
 summary: "A loose dowel across a cut: a hole in both pieces at the same place, and the dowel itself printed as its own object."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame (every joint.* connector): z is the cut's normal, from the
 # piece the connector was placed on (side A) into the other piece (side

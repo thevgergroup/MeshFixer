@@ -1,6 +1,7 @@
 id: joint.insert
 version: 1
 summary: "A threaded insert across a cut: a pocket for a heat-set insert in the piece it was placed on, and a clearance hole for its screw through the other piece."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: see joint.dowel.yaml.
 target:

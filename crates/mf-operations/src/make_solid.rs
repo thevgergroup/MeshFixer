@@ -58,18 +58,20 @@ fn failed(code: &'static str, message: String) -> OpError {
     OpError::Failed { code, message }
 }
 
-struct Grid {
-    origin: [f64; 3],
-    h: f64,
-    n: [usize; 3],
+/// A regular grid of points `h` apart from `origin`, `n` along each axis
+/// (shared with `mesh.hollow`, which keeps only a band of it).
+pub(crate) struct Grid {
+    pub(crate) origin: [f64; 3],
+    pub(crate) h: f64,
+    pub(crate) n: [usize; 3],
 }
 
 impl Grid {
-    fn index(&self, i: [usize; 3]) -> usize {
+    pub(crate) fn index(&self, i: [usize; 3]) -> usize {
         i[0] + self.n[0] * (i[1] + self.n[1] * i[2])
     }
 
-    fn point(&self, i: [usize; 3]) -> [f64; 3] {
+    pub(crate) fn point(&self, i: [usize; 3]) -> [f64; 3] {
         [0, 1, 2].map(|a| self.origin[a] + i[a] as f64 * self.h)
     }
 
@@ -147,7 +149,8 @@ impl Operation for MakeSolid {
         // 2. Building the field.
         ctx.progress.report(STAGES[1], 0.0);
         let band = (3.0 * h + offset.abs()) as f32;
-        let field = field(&grid, &positions, &triangles, band, ctx)?;
+        let tri = |i: usize| Some(triangles[i].map(|v| positions[v as usize]));
+        let field = field(&grid, triangles.len(), &tri, band, ctx)?;
         let field: Vec<f32> = field.into_iter().map(|v| v - offset as f32).collect();
 
         // 3. Extracting the surface.
@@ -238,7 +241,7 @@ impl Operation for MakeSolid {
 
 /// The input face closest to `p` (ties to the lower id), searching boxes
 /// from `start` wide outward.
-fn nearest_face(input: &Mesh, bvh: &Bvh, p: [f64; 3], start: f64) -> Option<FaceId> {
+pub(crate) fn nearest_face(input: &Mesh, bvh: &Bvh, p: [f64; 3], start: f64) -> Option<FaceId> {
     let diag = input.bounding_box().map_or(1.0, |b| b.diagonal());
     let mut r = start.max(diag * 1e-6);
     loop {
@@ -319,86 +322,105 @@ fn geometry(e: mf_geometry::GeometryError) -> OpError {
     )
 }
 
+/// A triangle by index (`None` for an empty slot), for [`crossings`].
+pub(crate) type TriangleAt<'a> = dyn Fn(usize) -> Option<[[f64; 3]; 3]> + Sync + 'a;
+
+/// Rays run a tiny, irregular fraction of a cell off the grid lines, so
+/// they don't pass exactly through the mesh's edges and vertices.
+pub(crate) const JITTER: [f64; 3] = [0.000_123_457, 0.000_271_828, 0.000_314_159];
+
+/// Every crossing of the surface (`count` triangles, by `tri`) with the
+/// grid's rays along axis `a`: (column `ib + nb * ic` over the other two
+/// axes `b = a + 1`, `c = a + 2`, coordinate along `a`, sign of the
+/// crossing), sorted. Deterministic at any thread count.
+pub(crate) fn crossings(
+    grid: &Grid,
+    count: usize,
+    tri: &TriangleAt,
+    a: usize,
+    ctx: &RunContext,
+) -> Result<Vec<(u32, f64, i8)>, Cancelled> {
+    const CHUNK: usize = 1 << 14;
+    let jitter = JITTER;
+    let (b, c) = ((a + 1) % 3, (a + 2) % 3);
+    let (nb, nc) = (grid.n[b], grid.n[c]);
+    let lb = |i: usize| grid.origin[b] + (i as f64 + jitter[b]) * grid.h;
+    let lc = |i: usize| grid.origin[c] + (i as f64 + jitter[c]) * grid.h;
+    let mut hits: Vec<(u32, f64, i8)> = (0..count.div_ceil(CHUNK))
+        .into_par_iter()
+        .map(|k| -> Result<Vec<(u32, f64, i8)>, Cancelled> {
+            ctx.checkpoint()?;
+            let mut out = Vec::new();
+            for i in k * CHUNK..((k + 1) * CHUNK).min(count) {
+                let Some(p) = tri(i) else { continue };
+                let (pb, pc) = (p.map(|q| q[b]), p.map(|q| q[c]));
+                let area = (pb[1] - pb[0]) * (pc[2] - pc[0]) - (pb[2] - pb[0]) * (pc[1] - pc[0]);
+                if area == 0.0 {
+                    continue;
+                }
+                let col = |x: f64, o: f64| ((x - o) / grid.h - 1e-9).floor();
+                let lo_b = col(
+                    pb.iter().copied().fold(f64::INFINITY, f64::min),
+                    grid.origin[b],
+                )
+                .max(0.0) as usize;
+                let hi_b = (col(
+                    pb.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    grid.origin[b],
+                ) + 1.0)
+                    .min(nb as f64 - 1.0) as usize;
+                let lo_c = col(
+                    pc.iter().copied().fold(f64::INFINITY, f64::min),
+                    grid.origin[c],
+                )
+                .max(0.0) as usize;
+                let hi_c = (col(
+                    pc.iter().copied().fold(f64::NEG_INFINITY, f64::max),
+                    grid.origin[c],
+                ) + 1.0)
+                    .min(nc as f64 - 1.0) as usize;
+                for ib in lo_b..=hi_b {
+                    let y = lb(ib);
+                    for ic in lo_c..=hi_c {
+                        let z = lc(ic);
+                        // Barycentric coordinates of (y, z) in the projection.
+                        let w0 = ((pb[1] - y) * (pc[2] - z) - (pb[2] - y) * (pc[1] - z)) / area;
+                        let w1 = ((pb[2] - y) * (pc[0] - z) - (pb[0] - y) * (pc[2] - z)) / area;
+                        let w2 = 1.0 - w0 - w1;
+                        if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
+                            continue;
+                        }
+                        let x = w0 * p[0][a] + w1 * p[1][a] + w2 * p[2][a];
+                        out.push(((ib + nb * ic) as u32, x, if area > 0.0 { 1 } else { -1 }));
+                    }
+                }
+            }
+            Ok(out)
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .flatten()
+        .collect();
+    hits.par_sort_unstable_by(|p, q| p.0.cmp(&q.0).then(p.1.total_cmp(&q.1)).then(p.2.cmp(&q.2)));
+    Ok(hits)
+}
+
 /// The signed field (see the module docs), `band` far at most.
 fn field(
     grid: &Grid,
-    positions: &[[f64; 3]],
-    triangles: &[[u32; 3]],
+    count: usize,
+    tri: &TriangleAt,
     band: f32,
     ctx: &RunContext,
 ) -> Result<Vec<f32>, Cancelled> {
-    let count = grid.count();
-    let mut votes = vec![0u8; count];
-    let mut dist = vec![band; count];
-    // Rays run a tiny, irregular fraction of a cell off the grid lines, so
-    // they don't pass exactly through the mesh's edges and vertices.
-    let jitter = [0.000_123_457, 0.000_271_828, 0.000_314_159];
+    let count_points = grid.count();
+    let mut votes = vec![0u8; count_points];
+    let mut dist = vec![band; count_points];
     for (step, a) in [0usize, 1, 2].into_iter().enumerate() {
         ctx.progress.report(STAGES[1], step as f64 / 3.0);
         let (b, c) = ((a + 1) % 3, (a + 2) % 3);
-        let (nb, nc) = (grid.n[b], grid.n[c]);
-        let lb = |i: usize| grid.origin[b] + (i as f64 + jitter[b]) * grid.h;
-        let lc = |i: usize| grid.origin[c] + (i as f64 + jitter[c]) * grid.h;
-        // (column, coordinate along a, sign) for every crossing.
-        let mut hits: Vec<(u32, f64, i8)> = triangles
-            .par_chunks(1 << 14)
-            .map(|chunk| -> Result<Vec<(u32, f64, i8)>, Cancelled> {
-                ctx.checkpoint()?;
-                let mut out = Vec::new();
-                for t in chunk {
-                    let p = t.map(|v| positions[v as usize]);
-                    let (pb, pc) = (p.map(|q| q[b]), p.map(|q| q[c]));
-                    let area =
-                        (pb[1] - pb[0]) * (pc[2] - pc[0]) - (pb[2] - pb[0]) * (pc[1] - pc[0]);
-                    if area == 0.0 {
-                        continue;
-                    }
-                    let col = |x: f64, o: f64| ((x - o) / grid.h - 1e-9).floor();
-                    let lo_b = col(
-                        pb.iter().copied().fold(f64::INFINITY, f64::min),
-                        grid.origin[b],
-                    )
-                    .max(0.0) as usize;
-                    let hi_b = (col(
-                        pb.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                        grid.origin[b],
-                    ) + 1.0)
-                        .min(nb as f64 - 1.0) as usize;
-                    let lo_c = col(
-                        pc.iter().copied().fold(f64::INFINITY, f64::min),
-                        grid.origin[c],
-                    )
-                    .max(0.0) as usize;
-                    let hi_c = (col(
-                        pc.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-                        grid.origin[c],
-                    ) + 1.0)
-                        .min(nc as f64 - 1.0) as usize;
-                    for ib in lo_b..=hi_b {
-                        let y = lb(ib);
-                        for ic in lo_c..=hi_c {
-                            let z = lc(ic);
-                            // Barycentric coordinates of (y, z) in the projection.
-                            let w0 = ((pb[1] - y) * (pc[2] - z) - (pb[2] - y) * (pc[1] - z)) / area;
-                            let w1 = ((pb[2] - y) * (pc[0] - z) - (pb[0] - y) * (pc[2] - z)) / area;
-                            let w2 = 1.0 - w0 - w1;
-                            if w0 < 0.0 || w1 < 0.0 || w2 < 0.0 {
-                                continue;
-                            }
-                            let x = w0 * p[0][a] + w1 * p[1][a] + w2 * p[2][a];
-                            out.push(((ib + nb * ic) as u32, x, if area > 0.0 { 1 } else { -1 }));
-                        }
-                    }
-                }
-                Ok(out)
-            })
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .flatten()
-            .collect();
-        hits.par_sort_unstable_by(|p, q| {
-            p.0.cmp(&q.0).then(p.1.total_cmp(&q.1)).then(p.2.cmp(&q.2))
-        });
+        let nb = grid.n[b];
+        let hits = crossings(grid, count, tri, a, ctx)?;
         ctx.checkpoint()?;
         let columns: Vec<&[(u32, f64, i8)]> = hits.chunk_by(|p, q| p.0 == q.0).collect();
         // Per column: (column, per point along a: inside, distance).
@@ -459,23 +481,23 @@ const TETS: [[u8; 4]; 6] = [
     [0, 4, 6, 7],
 ];
 
-/// Marching tetrahedra (see the module docs): vertices on grid edges
-/// (shared through their edge), triangles facing outward.
-#[allow(clippy::type_complexity)]
-fn march(
-    grid: &Grid,
-    field: &[f32],
-    ctx: &RunContext,
-) -> Result<(Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>, Vec<[u32; 3]>), Cancelled> {
+/// A surface from [`march_cells`]: its vertices, the grid edge each lies
+/// on, and its triangles.
+pub(crate) type Marched = (Vec<[f64; 3]>, Vec<[[f64; 3]; 2]>, Vec<[u32; 3]>);
+
+/// Corner `c` (bit 0 = +x, bit 1 = +y, bit 2 = +z) of the cell at `i`.
+pub(crate) fn corner(i: [usize; 3], c: u8) -> [usize; 3] {
+    [
+        i[0] + (c & 1) as usize,
+        i[1] + ((c >> 1) & 1) as usize,
+        i[2] + ((c >> 2) & 1) as usize,
+    ]
+}
+
+/// Marching tetrahedra (see the module docs) over the dense field.
+fn march(grid: &Grid, field: &[f32], ctx: &RunContext) -> Result<Marched, Cancelled> {
     let [n0, n1, n2] = grid.n;
     let inside = |g: usize| field[g] < 0.0;
-    let corner = |i: [usize; 3], c: u8| {
-        [
-            i[0] + (c & 1) as usize,
-            i[1] + ((c >> 1) & 1) as usize,
-            i[2] + ((c >> 2) & 1) as usize,
-        ]
-    };
     // Cells with corners on both sides, in order, found per z-slab in
     // parallel.
     let cells: Vec<[usize; 3]> = (0..n2 - 1)
@@ -498,12 +520,28 @@ fn march(
         .into_iter()
         .flatten()
         .collect();
+    march_cells(grid, &cells, &|g| field[g], ctx)
+}
+
+/// Marching tetrahedra over `cells` (each a cell's lowest corner, in the
+/// order to visit them) of the field `value` (by grid index; below zero
+/// is inside): vertices on grid edges (shared through their edge),
+/// triangles facing from inside to outside. Every cell with corners on
+/// both sides must be listed, so the surface closes.
+pub(crate) fn march_cells(
+    grid: &Grid,
+    cells: &[[usize; 3]],
+    value: &(dyn Fn(usize) -> f32 + Sync),
+    ctx: &RunContext,
+) -> Result<Marched, Cancelled> {
+    let field = value;
+    let inside = |g: usize| field(g) < 0.0;
     let mut verts: Vec<[f64; 3]> = Vec::new();
     let mut edges: Vec<[[f64; 3]; 2]> = Vec::new();
     let mut tris: Vec<[u32; 3]> = Vec::new();
     let mut on_edge: HashMap<(usize, usize), u32> = HashMap::new();
     let mut ticker = ctx.ticker();
-    for &cell in &cells {
+    for &cell in cells {
         ticker.tick()?;
         for tet in TETS {
             let g = tet.map(|c| grid.index(corner(cell, c)));
@@ -519,7 +557,7 @@ fn march(
                     // From the lower grid index, so both cells sharing the
                     // edge compute the same point.
                     let (i, j) = if g[a] < g[b] { (a, b) } else { (b, a) };
-                    let (fi, fj) = (f64::from(field[g[i]]), f64::from(field[g[j]]));
+                    let (fi, fj) = (f64::from(field(g[i])), f64::from(field(g[j])));
                     let t = (fi / (fi - fj)).clamp(1e-3, 1.0 - 1e-3);
                     verts.push([0, 1, 2].map(|k| p[i][k] + t * (p[j][k] - p[i][k])));
                     edges.push([p[i], p[j]]);
@@ -578,7 +616,7 @@ fn march(
 /// One Taubin pass (λ = 0.5, μ = -0.53): smooths without shrinking. Each
 /// vertex moves only along its grid edge `edges[v]` (projected, kept off
 /// the edge's ends).
-fn taubin(
+pub(crate) fn taubin(
     verts: &mut [[f64; 3]],
     edges: &[[[f64; 3]; 2]],
     tris: &[[u32; 3]],

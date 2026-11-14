@@ -128,6 +128,18 @@ fn run_all_ops(threads: usize) -> Vec<(String, String)> {
                         mf_operations::shapes::transforms_param(&[mf_io::threemf::IDENTITY]),
                     )]),
                 )
+            } else if op.id() == "mesh.hollow" {
+                // Hollow needs a closed solid thick enough for its wall
+                // (a unit sphere), with a drain hole cut.
+                (
+                    uv_sphere(24, 48),
+                    BTreeMap::from([
+                        ("wall_thickness".to_string(), "0.15".to_string()),
+                        ("inner_detail".to_string(), "0.05".to_string()),
+                        ("drain_holes".to_string(), "auto".to_string()),
+                        ("hole_diameter".to_string(), "0.2".to_string()),
+                    ]),
+                )
             } else if op.id() == "mesh.combine" {
                 (uv_sphere(24, 48), BTreeMap::new())
             } else if op.id() == "object.align" {

@@ -1,6 +1,7 @@
 id: object.delete
 version: 1
 summary: Remove an object from the document (undo brings it back unchanged).
+history_label: history.label.object.delete
 geometry_kinds: [mesh]
 target:
   whole_object: true

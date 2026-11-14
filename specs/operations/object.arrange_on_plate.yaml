@@ -1,6 +1,7 @@
 id: object.arrange_on_plate
 version: 1
 summary: Move an object to free space on the build plate, clear of every other object, resting on the plate.
+history_label: history.label.object.arrange_on_plate
 geometry_kinds: [mesh]
 target:
   whole_object: true

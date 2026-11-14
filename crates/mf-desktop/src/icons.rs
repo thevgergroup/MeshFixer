@@ -53,6 +53,7 @@ pub const SPLIT: &str = "\u{EAE0}"; // scissors
 pub const CONNECT: &str = "\u{EB5A}"; // plugs-connected
 pub const COMBINE: &str = "\u{E87E}"; // unite
 pub const MAKE_SOLID: &str = "\u{E1DA}"; // cube
+pub const HOLLOW: &str = "\u{E3EE}"; // record: a ring, a wall around a hollow, in section
 pub const SCULPT: &str = "\u{E6F0}"; // paint-brush
 pub const PARTS: &str = "\u{E596}"; // puzzle-piece
 pub const CONNECTORS: &str = "\u{EB56}"; // plugs

@@ -1,6 +1,7 @@
 id: thread
 version: 1
 summary: "Metric coarse threaded fasteners, \"what's on the packet\" presets (M1-M12)."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 target:
   whole_object: true

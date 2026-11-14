@@ -561,8 +561,12 @@ fn next_action(code: &str) -> Option<Next> {
         "operand_not_closed"
         | "tool_not_closed"
         | "opening_not_covered"
-        | "opening_too_large_for_join" => Some(Next::Repair),
+        | "opening_too_large_for_join"
+        | "open_input" => Some(Next::Repair),
         "operand_overlaps_itself"
+        | "non_manifold_input"
+        | "inconsistent_input"
+        | "inside_out_input"
         | "section_self_intersects"
         | "split_section_self_intersects"
         | "result_self_intersects" => Some(Next::MakeSolid),
@@ -669,7 +673,8 @@ pub fn split_gizmo(app: &MeshFixerApp) -> Option<(Gizmo, Option<Handle>)> {
 /// How the view is shaded: the section view while Split shows it, else
 /// the View menu's choice.
 pub fn shading(app: &MeshFixerApp) -> mf_render::Shading {
-    if split_preview(app).is_some() && app.split.section {
+    let hollow_section = crate::hollow_tool::section_plane(app).is_some();
+    if (split_preview(app).is_some() && app.split.section) || hollow_section {
         mf_render::Shading {
             preset: mf_render::ShadingPreset::XRay,
             ..app.shading
@@ -680,7 +685,11 @@ pub fn shading(app: &MeshFixerApp) -> mf_render::Shading {
 }
 
 /// The plane as the renderer's split preview: (point, normal) in world.
+/// Hollow's section view uses the same preview (its walls cut open).
 pub fn split_preview(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
+    if let Some(plane) = crate::hollow_tool::section_plane(app) {
+        return Some(plane);
+    }
     (app.active_tool == SPLIT
         && app.active_mesh().is_some()
         && app.split_flow.mode == crate::split_flow::CutMode::Slice)
@@ -1418,6 +1427,7 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
         }
     }
     crate::split_flow::overlay(app, &painter, rect);
+    crate::hollow_tool::overlay(app, &painter, rect);
     crate::connect_tool::overlay(app, &painter, rect);
     crate::hinge_tool::overlay(app, &painter, rect);
 }

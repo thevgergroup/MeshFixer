@@ -1,6 +1,7 @@
 id: mesh.sculpt_stroke
 version: 1
 summary: One sculpt stroke (press to release) of a brush along a sampled path.
+history_label: history.label.mesh.sculpt_stroke
 geometry_kinds: [mesh]
 target:
   whole_object: true

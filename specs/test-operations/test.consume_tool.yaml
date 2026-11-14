@@ -6,6 +6,7 @@
 id: test.consume_tool
 version: 1
 summary: "Test-only operation: removes its tool and creates an object from both operands' faces."
+history_label: history.label.test.consume_tool
 geometry_kinds: [mesh]
 target:
   whole_object: true

@@ -5,6 +5,7 @@ id: mesh.split_plane
 # replay with every region cut and no bound, as they ran).
 version: 4
 summary: Cut a closed object in two along a plane and close each part with a flat cap.
+history_label: history.label.mesh.split_plane
 geometry_kinds: [mesh]
 # Every selected object (many): each one the plane crosses becomes its
 # "(top)" part (keeping its id) and a created "(bottom)" part; one the

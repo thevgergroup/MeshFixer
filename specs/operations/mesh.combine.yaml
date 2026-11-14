@@ -1,6 +1,7 @@
 id: mesh.combine
 version: 1
 summary: Join every solid and cut every hole (Tinkercad-style grouping), as one command with an exact check of each step.
+history_label: history.label.mesh.combine
 geometry_kinds: [mesh]
 # The first solid: it keeps its id, name and transform, and receives the
 # result. The other solids and the holes are brought into its frame (D10).

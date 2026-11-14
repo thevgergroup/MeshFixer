@@ -1,6 +1,7 @@
 id: object.add_part
 version: 1
 summary: Add a part from the parts library as a new object, placed on the target.
+history_label: history.label.object.add_part
 geometry_kinds: [mesh]
 target:
   whole_object: true

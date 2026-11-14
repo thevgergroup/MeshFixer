@@ -405,6 +405,14 @@ pub fn rail(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .show(ui, |ui| {
             ui.spacing_mut().item_spacing.y = 2.0;
             let tools: Vec<crate::shell::Tool> = app.shell.tools().to_vec();
+            // Tiles shrink (to a floor) so every tool fits a short window.
+            let rules = tools
+                .windows(2)
+                .filter(|w| w[0].category != w[1].category)
+                .count() as f32;
+            let full = if compact { 40.0 } else { 50.0 };
+            let fit = (ui.available_height() - rules * 9.0) / tools.len().max(1) as f32 - 2.0;
+            let tile = fit.clamp(full - 10.0, full);
             let mut last = None;
             for tool in tools {
                 if last.is_some_and(|c| c != tool.category) {
@@ -423,21 +431,23 @@ pub fn rail(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     ui.add_space(4.0);
                 }
                 last = Some(tool.category);
-                rail_item(app, ui, &tool, compact);
+                rail_item(app, ui, &tool, compact, tile);
             }
         });
 }
 
-fn rail_item(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &crate::shell::Tool, compact: bool) {
+fn rail_item(
+    app: &mut MeshFixerApp,
+    ui: &mut egui::Ui,
+    tool: &crate::shell::Tool,
+    compact: bool,
+    tile: f32,
+) {
     let active = app.active_tool == tool.id;
     let available = (tool.availability)(app);
     let enabled = available == Availability::Available;
     let name = crate::i18n::tr(tool.name, &[]);
-    let size = if compact {
-        egui::vec2(ui.available_width(), 40.0)
-    } else {
-        egui::vec2(ui.available_width(), 50.0)
-    };
+    let size = egui::vec2(ui.available_width(), tile);
     let sense = if enabled {
         egui::Sense::click()
     } else {
@@ -474,7 +484,7 @@ fn rail_item(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &crate::shell::Too
         let icon_at = if compact {
             rect.center()
         } else {
-            egui::pos2(rect.center().x, rect.top() + 18.0)
+            egui::pos2(rect.center().x, rect.top() + 18.0 - (50.0 - tile) * 0.5)
         };
         p.text(
             icon_at,
@@ -493,7 +503,7 @@ fn rail_item(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &crate::shell::Too
             let clip = rect.shrink2(egui::vec2(2.0, 0.0));
             let at = egui::pos2(
                 (rect.center().x - galley.size().x / 2.0).max(clip.left()),
-                rect.bottom() - 6.0 - galley.size().y,
+                rect.bottom() - 6.0 + (50.0 - tile) * 0.3 - galley.size().y,
             );
             p.with_clip_rect(clip).galley(at, galley, fg);
         }

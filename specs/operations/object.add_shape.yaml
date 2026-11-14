@@ -1,6 +1,7 @@
 id: object.add_shape
 version: 1
 summary: Add parametric shapes (library shapes, or a connector's linked parts) as new objects that keep their recipe, placed on the target.
+history_label: history.label.object.add_shape
 geometry_kinds: [mesh]
 target:
   whole_object: true

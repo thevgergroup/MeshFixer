@@ -26,7 +26,7 @@ use crate::viewport::ToolPointer;
 pub enum Category {
     /// Select, Transform.
     Arrange,
-    /// Split, Combine, Make solid, Sculpt.
+    /// Split, Combine, Make solid, Hollow, Sculpt.
     Shape,
     /// Parts, Connectors.
     Add,
@@ -444,6 +444,7 @@ pub fn builtin() -> Shell {
     crate::tool_panels::register(&mut shell).expect("the built-in tools register");
     crate::align_tool::register(&mut shell).expect("the Align tool registers");
     crate::shape_tools::register(&mut shell).expect("the Shape tools register");
+    crate::hollow_tool::register(&mut shell).expect("the Hollow tool registers");
     crate::connect_tool::register(&mut shell).expect("the Connect tool registers");
     crate::sculpt_tool::register(&mut shell).expect("the Sculpt tool registers");
     crate::parts_tool::register(&mut shell).expect("the Parts tool registers");
@@ -627,6 +628,7 @@ mod tests {
                 "connect",
                 "combine",
                 "make_solid",
+                "hollow",
                 "sculpt",
                 "parts",
                 "connectors",

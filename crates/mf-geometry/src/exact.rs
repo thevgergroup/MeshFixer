@@ -62,11 +62,33 @@ pub(crate) fn degenerate(idx: [u32; 3], c: [[f64; 3]; 3]) -> bool {
 /// vertex index. Touching at a point or along a segment they don't share
 /// counts.
 pub(crate) fn faces_meet(ia: [u32; 3], ca: [[f64; 3]; 3], ib: [u32; 3], cb: [[f64; 3]; 3]) -> bool {
-    let shared: Vec<(usize, usize)> = (0..3)
-        .flat_map(|i| (0..3).filter(move |&j| ia[i] == ib[j]).map(move |j| (i, j)))
-        .collect();
+    // The corners they share by index, without allocating (this runs for
+    // every pair of nearby faces a check meets).
+    let mut shared = [(0usize, 0usize); 9];
+    let mut count = 0;
+    for (i, a) in ia.iter().enumerate() {
+        for (j, b) in ib.iter().enumerate() {
+            if a == b {
+                shared[count] = (i, j);
+                count += 1;
+            }
+        }
+    }
+    let shared = &shared[..count];
     match shared.len() {
-        0 => tri_tri(ca, cb),
+        0 => {
+            // Every corner of one strictly on one side of the other's
+            // plane: they can't meet (exact, so the same answer tri_tri
+            // would give).
+            let side = |t: [[f64; 3]; 3], u: [[f64; 3]; 3]| {
+                let s = u.map(|p| o3(t[0], t[1], t[2], p));
+                s.iter().all(|&x| x > 0.0) || s.iter().all(|&x| x < 0.0)
+            };
+            if side(ca, cb) || side(cb, ca) {
+                return false;
+            }
+            tri_tri(ca, cb)
+        }
         1 => {
             let (i, j) = shared[0];
             shared_vertex(rot(ca, i), rot(cb, j))

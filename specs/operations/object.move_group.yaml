@@ -1,6 +1,7 @@
 id: object.move_group
 version: 1
 summary: Place several objects at once (a linked group moved together), one absolute transform each.
+history_label: history.label.object.move_group
 geometry_kinds: [mesh]
 target:
   whole_object: true

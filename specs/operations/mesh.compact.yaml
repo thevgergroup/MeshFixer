@@ -1,6 +1,7 @@
 id: mesh.compact
 version: 1
 summary: Reclaim the space left by earlier edits, renumbering faces and vertices densely.
+history_label: history.label.mesh.compact
 geometry_kinds: [mesh]
 target:
   whole_object: true

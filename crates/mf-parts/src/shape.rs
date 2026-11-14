@@ -239,6 +239,14 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
         id: id.into(),
         version: 1,
         summary: summary.into(),
+        // Never shown in the History panel by this id: a shape's `spec()`
+        // only supplies its parameter schema (validation, the library
+        // panel); the command recorded is always `object.add_shape` or
+        // `object.set_shape_params`, whose own `history_label` names the
+        // row (crates/mf-desktop/src/app.rs's `catalogue_history_label`).
+        // `OperationSpec` requires the field; this id is a placeholder
+        // that's never looked up.
+        history_label: "history.label.generator".into(),
         geometry_kinds: vec!["mesh".into()],
         target: TargetSpec {
             whole_object: true,

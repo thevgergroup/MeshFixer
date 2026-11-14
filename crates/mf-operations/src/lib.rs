@@ -29,6 +29,7 @@ pub use fill_holes::{CURVATURE_ACCURATE_EDGES, curvature_limit_warning};
 /// holes are triangulated in parallel only while their summed O(n²)
 /// tables fit (one hole bigger than this runs alone).
 pub const TRIANGULATION_BUDGET_BYTES: u64 = 64 << 20;
+pub mod hollow;
 mod inspect;
 mod intersections;
 mod make_solid;
@@ -49,10 +50,10 @@ mod transform;
 
 pub use split::joints::{
     ADD_SECOND, ANCHOR, CapRegion, CapTargets, Check, CheckSettings, HOLE_PROFILES, JointCheck,
-    JointFix, JointFrame, JointSide, Piece, PlacedPart, Placement, SINGLE_ROUND_PIN, cap_middle,
-    cap_region, check_id, check_placement, fix, fix_joint, footprint_2d, generator_checks,
-    joint_checks, oriented_params, patched, placed_parts, placement_generator, placement_params,
-    placement_to_world, wanted_clearance,
+    JointFix, JointFrame, JointSide, Piece, PlacedPart, Placement, SINGLE_ROUND_PIN, cap_faces,
+    cap_middle, cap_region, check_id, check_placement, fix, fix_joint, footprint_2d,
+    generator_checks, joint_checks, oriented_params, patched, placed_parts, placement_generator,
+    placement_params, placement_to_world, wanted_clearance,
 };
 pub use split::pegs::{
     HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
@@ -340,6 +341,7 @@ static REGISTRY: &[&dyn Operation] = &[
     &inspect::Inspect,
     &intersections::Intersections,
     &make_solid::MakeSolid,
+    &hollow::Hollow,
     &remove_small::RemoveSmallComponents,
     &transform::SetTransform,
     &transform::DropToPlate,

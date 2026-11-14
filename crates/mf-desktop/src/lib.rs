@@ -11,6 +11,7 @@ pub mod dovetail_tool;
 pub mod framing;
 pub mod gpu;
 pub mod hinge_tool;
+pub mod hollow_tool;
 pub mod i18n;
 pub mod icons;
 pub mod import_dialog;

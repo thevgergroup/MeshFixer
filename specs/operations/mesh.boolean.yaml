@@ -1,6 +1,7 @@
 id: mesh.boolean
 version: 1
 summary: Combine the target with a tool object (union, subtract or intersect), locally around the tool, with an exact check of the result.
+history_label: history.label.mesh.boolean
 geometry_kinds: [mesh]
 target:
   whole_object: true

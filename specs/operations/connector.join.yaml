@@ -1,6 +1,7 @@
 id: connector.join
 version: 1
 summary: Fold a connector's parts into the two objects it joins, in one command, and remove the connector object.
+history_label: history.label.connector.join
 geometry_kinds: [mesh]
 target:
   whole_object: true

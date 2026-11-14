@@ -1,6 +1,7 @@
 id: joint.dovetail
 version: 1
 summary: "A dovetail across a cut: a tail on the piece it was placed on, sliding into a groove in the other piece, flanks at 15 degrees."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: see joint.dowel.yaml; the tail runs along x.
 target:
