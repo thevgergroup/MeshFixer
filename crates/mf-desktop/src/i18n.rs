@@ -421,6 +421,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("export.section.file", "File"),
     ("export.section.log", "Command log"),
+    ("gizmo.snap", "Snap: {step}"),
+    (
+        "gizmo.snap.tip",
+        "To a step sized to stay visible at this zoom (15° steps and 10% scale steps too, in Transform). Hold Cmd/Ctrl while dragging to invert.",
+    ),
     ("hinge.axis", "Hinge axis"),
     ("hinge.edge", "{face} edge, along {along}"),
     (
@@ -1199,11 +1204,6 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("transform.section.position", "Position ({unit})"),
     ("transform.section.rotation", "Rotation (°)"),
     ("transform.section.scale", "Scale (%)"),
-    ("transform.snap", "Snap"),
-    (
-        "transform.snap.tip",
-        "To the 1 mm grid, 15° steps, 10% steps and the plate. Hold Cmd/Ctrl while dragging to invert.",
-    ),
     ("transform.uniform", "Uniform scale"),
     ("transform.uniform.tip", "Scale fields change together"),
     ("view.clay", "Clay"),

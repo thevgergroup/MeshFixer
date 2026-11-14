@@ -82,11 +82,16 @@ pub struct SplitState {
     /// "both", "above" or "below".
     pub keep: String,
     pub gap: f64,
-    /// The targets ([`MeshFixerApp::selected_objects`]) the plane was last
-    /// placed for (owner 2026-11-11: centred on the whole selection, not
-    /// just the active object — `mesh.split_plane` cuts every selected
-    /// object in one command). A different selection places it again.
-    pub placed_for: Option<Vec<ObjectId>>,
+    /// The targets ([`MeshFixerApp::selected_objects`]), each with its own
+    /// transform at the time, the plane was last placed for (owner
+    /// 2026-11-11: centred on the whole selection, not just the active
+    /// object — `mesh.split_plane` cuts every selected object in one
+    /// command). A different selection, or the same selection moved since
+    /// (owner 2026-11-14: rotate, drop to plate, *then* open Split — the
+    /// selection hadn't changed since an earlier Split session, so the
+    /// stale cache left the plane where the object used to be, off to one
+    /// side of its new placement), places it again.
+    pub placed_for: Option<Vec<(ObjectId, [f64; 12])>>,
     /// The section view (on by default): the part above the plane
     /// ghosted, the part below shaded, the cut drawn at the plane.
     pub section: bool,
@@ -618,20 +623,44 @@ fn run_on(
 /// Place the plane through the world bounding-box centre of every target
 /// `mesh.split_plane` would cut ([`MeshFixerApp::selected_objects`]:
 /// usually just the active object, but every object picked together when
-/// there's more than one), horizontal (when the selection differs from
-/// last time, or `force`).
+/// there's more than one), horizontal (when the selection or any target's
+/// own transform differs from last time, or `force`).
 ///
 /// Owner (2026-11-11): the plane used to default through the world
 /// origin, so an object placed away from it (the common case: an
 /// imported scan) was missed or grazed by the default cut — "Split
 /// looked broken". Centring it on the selection's own bounds instead
 /// means Apply with the defaults always crosses the model.
+///
+/// Owner (2026-11-14): rotating a target and dropping it to the plate,
+/// *then* opening Split (which had already run once earlier, for the
+/// same selection), left the plane at its old centre — the plane's own
+/// Point field showed (0, 0, 0), off to the side of the rotated model,
+/// and the move handle read as broken because the handle was there, on
+/// the gizmo's own small arm, just nowhere near the model any more.
+/// `placed_for`'s cache key is each target's own transform as well as
+/// its id, so a transform change re-centres the plane exactly like a
+/// changed selection does, on open and every frame after (`slice_controls`
+/// calls this every frame; the cache is what keeps it from fighting a
+/// live drag, not the targets' identity alone).
 pub(crate) fn place_plane(app: &mut MeshFixerApp, force: bool) {
     let selected = app.selected_objects();
     if selected.is_empty() {
         return;
     }
-    if !force && app.split.placed_for.as_deref() == Some(selected.as_slice()) {
+    let key: Vec<(ObjectId, [f64; 12])> = selected
+        .iter()
+        .map(|&id| {
+            let t = app
+                .session
+                .document()
+                .object(id)
+                .map(|o| o.transform)
+                .unwrap_or_default();
+            (id, app.shown_transform(id).unwrap_or(t))
+        })
+        .collect();
+    if !force && app.split.placed_for.as_deref() == Some(key.as_slice()) {
         return;
     }
     let mut bounds: Option<(DVec3, DVec3)> = None;
@@ -646,8 +675,36 @@ pub(crate) fn place_plane(app: &mut MeshFixerApp, force: bool) {
     }
     if let Some((lo, hi)) = bounds {
         app.split.set((lo + hi) * 0.5, (0.0, 0.0));
-        app.split.placed_for = Some(selected);
+        app.split.placed_for = Some(key);
     }
+}
+
+/// The shared "Snap" checkbox every gizmo tool shows (owner, 2026-11-14:
+/// "can't we disable snap?"): one preference (`MeshFixerApp::gizmo_snap`),
+/// the same state and the same live step label ("Snap: 1 mm") wherever
+/// it appears — Transform's panel, and here, Split's (both the plane and
+/// the print-volume box read the one switch). `pivot` is the gizmo's own
+/// pivot (world), to compute the step that's actually in effect right
+/// now; `None` shows the checkbox unchecked-and-disabled rather than a
+/// stale or made-up step when there's no camera/viewport yet (nothing
+/// open to drag).
+pub(crate) fn snap_checkbox(app: &mut MeshFixerApp, ui: &mut egui::Ui, pivot: Option<DVec3>) {
+    let live = pivot.and_then(|p| {
+        let cam = app.camera?;
+        let rect = app.viewport.last_rect?;
+        let view = (rect.width() as f64, rect.height() as f64);
+        let (_, step_mm) =
+            crate::transform_tool::snap_step(&cam, p, view, app.session.document().units());
+        Some(step_mm)
+    });
+    let step = live.map_or_else(|| "–".to_owned(), crate::transform_tool::field_text);
+    ui.add_enabled_ui(live.is_some(), |ui| {
+        ui.checkbox(
+            &mut app.gizmo_snap,
+            t!("gizmo.snap", step = format!("{step} mm")),
+        )
+        .on_hover_text(t!("gizmo.snap.tip"));
+    });
 }
 
 /// The plane's gizmo (move or tilt), at the plane's point, while Split is
@@ -707,7 +764,11 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
         return Input::Pass;
     };
     let view = (rect.width() as f64, rect.height() as f64);
-    let snap = if input.modifiers.command {
+    // The shared Snap preference (owner, 2026-11-14: "can't we disable
+    // snap?"), inverted while Cmd/Ctrl is held — the same switch and
+    // inversion Transform's own gizmo honours
+    // ([`crate::app::MeshFixerApp::gizmo_snap_on`]).
+    let snap = if !app.gizmo_snap_on(input.modifiers.command) {
         Snap {
             grid: None,
             angle_deg: None,
@@ -715,7 +776,13 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
             plate: None,
         }
     } else {
+        // A zoom-adaptive, unit-aware grid (MF-OBJ-002): `Snap::default`'s
+        // fixed 1-document-unit step snapped every drag on the owner's
+        // metre-scale bunny to zero (1 document unit there is 1000 mm).
+        let units = app.session.document().units();
+        let (grid, _) = crate::transform_tool::snap_step(&cam, g.pivot, view, units);
         Snap {
+            grid: Some(grid),
             plate: None,
             ..Snap::default()
         }

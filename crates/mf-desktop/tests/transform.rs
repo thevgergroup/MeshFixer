@@ -593,7 +593,7 @@ fn a_move_keeps_the_analysis_and_hover_working() {
     let rows = defect_rows(&h);
     open_transform(&mut h);
     // Off the 1 mm grid, so any drag moves it.
-    h.state_mut().transform_tool_mut().unwrap().snap = false;
+    h.state_mut().gizmo_snap = false;
     h.run_steps(3);
     let history = steps(&h);
     let (at, dir_x) = x_arrow(&h);
@@ -747,8 +747,10 @@ fn drag_x(h: &mut Harness<'_, MeshFixerApp>, px: f32, modifiers: egui::Modifiers
     transform(h)[9]
 }
 
-/// Snapping is on by default (a 1 mm grid); Cmd/Ctrl while dragging
-/// turns it off for that drag.
+/// Snapping is on by default (a zoom-adaptive 1-2-5-mm grid,
+/// MF-OBJ-002, `transform_tool::snap_step` — not necessarily a whole 1
+/// mm on a small, close-up object like this 10 mm cube); Cmd/Ctrl while
+/// dragging turns it off for that drag.
 #[test]
 fn moves_snap_to_the_grid_unless_cmd_is_held() {
     require_gpu!("moves_snap_to_the_grid_unless_cmd_is_held");
@@ -756,14 +758,24 @@ fn moves_snap_to_the_grid_unless_cmd_is_held() {
     let mut h = open(cube_file(dir.path()));
     open_transform(&mut h);
     h.run_steps(3);
+    let step = {
+        let app = h.state();
+        let g = app.transform_gizmo().unwrap();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        mf_desktop::transform_tool::snap_step(&cam, g.pivot, view, Unit::Millimeter).0
+    };
     let snapped = drag_x(&mut h, 73.0, egui::Modifiers::NONE);
+    let on_grid = (snapped / step).round() * step;
     assert!(
-        snapped > 0.5 && snapped.fract() == 0.0,
-        "on the 1 mm grid: {snapped}"
+        snapped > step * 0.5 && (snapped - on_grid).abs() < 1e-9,
+        "on the {step} mm grid: {snapped}"
     );
     let free = drag_x(&mut h, 41.0, egui::Modifiers::COMMAND);
+    let free_on_grid = (free / step).round() * step;
     assert!(
-        free > snapped && free.fract() != 0.0,
+        free > snapped && (free - free_on_grid).abs() > 1e-9,
         "off the grid with Cmd: {free}"
     );
 }
@@ -1052,7 +1064,7 @@ fn analysis_stays_available_after_moving_a_30m_object() {
     open_transform(&mut h);
     // Off the 1 mm grid: a short drag on a big sphere could round to no
     // move at all, and nothing would commit.
-    h.state_mut().transform_tool_mut().unwrap().snap = false;
+    h.state_mut().gizmo_snap = false;
     eprintln!("open Transform: {:.2} s", t.elapsed().as_secs_f64());
     let history = steps(&h);
     let (at, dir_x) = x_arrow(&h);

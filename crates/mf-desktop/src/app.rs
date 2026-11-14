@@ -389,6 +389,14 @@ pub struct MeshFixerApp {
     /// material or colour always overrides this (`mf_render::DrawItem`'s
     /// `object_color` is only used where the mesh has none of its own).
     pub object_colors: bool,
+    /// Every gizmo tool's snap switch (owner, 2026-11-14: "can't we
+    /// disable snap?") — one shared preference for the Transform gizmo
+    /// and Split's plane and print-volume box, each showing it as its
+    /// own "Snap: 1 mm"-style checkbox (`transform_tool::snap_step` for
+    /// the live step shown). On by default; Cmd/Ctrl while dragging
+    /// inverts it for that drag, in every tool
+    /// ([`MeshFixerApp::gizmo_snap_on`]).
+    pub gizmo_snap: bool,
     /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
@@ -876,6 +884,7 @@ impl MeshFixerApp {
             first_use_hint: true,
             shading: mf_render::Shading::default(),
             object_colors: true,
+            gizmo_snap: true,
             split: Default::default(),
             split_flow: Default::default(),
             alignment: Default::default(),
@@ -5149,10 +5158,51 @@ impl MeshFixerApp {
         ))
     }
 
-    /// The line at the view's top-left while Transform is open.
-    fn transform_hint(&self) -> Option<&'static str> {
-        self.transform_tool()?;
-        Some("Transform · W move · E rotate · R scale · Cmd/Ctrl: snap off · Esc: done")
+    /// Whether a gizmo drag snaps right now: [`Self::gizmo_snap`] (the
+    /// one shared preference every gizmo tool's own "Snap" checkbox
+    /// shows and edits), inverted while Cmd/Ctrl is held (`invert`),
+    /// exactly like [`Self::transform_snap`] always has — Split's plane
+    /// and print-volume box, and any future gizmo tool, read this too
+    /// instead of keeping their own switch (owner, 2026-11-14: "can't we
+    /// disable snap?").
+    pub(crate) fn gizmo_snap_on(&self, invert: bool) -> bool {
+        self.gizmo_snap != invert
+    }
+
+    /// The line at the view's top-left while Transform or Split's gizmo
+    /// is open, with the live grid step (MF-OBJ-002, "snap 1 mm") when
+    /// snapping is on: the same zoom-adaptive, unit-aware step every
+    /// gizmo drag now snaps to ([`transform_tool::snap_step`]).
+    fn tool_hint(&self) -> Option<String> {
+        let snap = self.gizmo_snap_on(false);
+        if self.transform_tool().is_some() {
+            let clause = self.snap_hint_clause(snap, self.transform_gizmo().map(|g| g.pivot));
+            return Some(format!(
+                "Transform · W move · E rotate · R scale{clause} · Cmd/Ctrl: snap off · Esc: done"
+            ));
+        }
+        if self.active_tool == crate::shape_tools::SPLIT {
+            let (gizmo, _) = crate::shape_tools::split_gizmo(self)?;
+            let clause = self.snap_hint_clause(snap, Some(gizmo.pivot));
+            return Some(format!("Split · drag the plane to move or tilt it{clause}"));
+        }
+        None
+    }
+
+    /// " · snap 1 mm", or "" when snapping is off or the step can't be
+    /// worked out (no camera/viewport yet).
+    fn snap_hint_clause(&self, snap_on: bool, pivot: Option<glam::DVec3>) -> String {
+        if !snap_on {
+            return String::new();
+        }
+        let (Some(cam), Some(rect), Some(pivot)) = (self.camera, self.viewport.last_rect, pivot)
+        else {
+            return String::new();
+        };
+        let view = (rect.width() as f64, rect.height() as f64);
+        let (_, step_mm) =
+            transform_tool::snap_step(&cam, pivot, view, self.session.document().units());
+        format!(" · {}", transform_tool::snap_hint(step_mm))
     }
 
     /// The build plate, sized in the document's units.
@@ -5166,11 +5216,15 @@ impl MeshFixerApp {
         }
     }
 
-    /// The snapping a drag uses now: the tool's switch, inverted while
-    /// Cmd/Ctrl is held. The grid is 1 mm in document units; the plate
-    /// snap needs the object's lowest point, found on a worker.
+    /// The snapping a drag uses now: the shared [`Self::gizmo_snap`]
+    /// switch, inverted while Cmd/Ctrl is held. The grid is a 1-2-5-mm
+    /// step picked so it reads on screen at the current zoom
+    /// (MF-OBJ-002, [`transform_tool::snap_step`] — a fixed
+    /// 1-document-unit grid snapped every drag on a metre-scale document
+    /// to zero); the plate snap needs the object's lowest point, found
+    /// on a worker.
     fn transform_snap(&self, invert: bool, object: ObjectId, start: &[f64; 12]) -> Snap {
-        let on = self.transform_tool().is_some_and(|t| t.snap) != invert;
+        let on = self.gizmo_snap_on(invert);
         if !on {
             return Snap {
                 grid: None,
@@ -5179,7 +5233,6 @@ impl MeshFixerApp {
                 plate: None,
             };
         }
-        let mm = transform_tool::mm_per(self.session.document().units());
         let mesh = self
             .session
             .document()
@@ -5192,8 +5245,11 @@ impl MeshFixerApp {
                 *o == object && mesh.is_some_and(|c| Mesh::ptr_eq(c, m)) && t == start
             })
             .and_then(|(.., z)| *z);
+        let grid = self.transform_grab().map(|(g, cam, view)| {
+            transform_tool::snap_step(&cam, g.pivot, view, self.session.document().units()).0
+        });
         Snap {
-            grid: Some(1.0 / mm),
+            grid,
             plate: lowest.map(|world_min_z| PlateSnap {
                 world_min_z,
                 within_pt: 8.0,
@@ -5955,7 +6011,7 @@ impl MeshFixerApp {
                 }
                 let gizmo = self.tool_gizmo();
                 let plate = self.tool_hides_defects().then(|| self.plate());
-                let hint = self.transform_hint();
+                let hint = self.tool_hint();
                 let split_preview = crate::shape_tools::split_preview(self);
                 let shading = crate::shape_tools::shading(self);
                 let intersections = self.intersection_views();

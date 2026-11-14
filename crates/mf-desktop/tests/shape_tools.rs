@@ -185,7 +185,7 @@ fn split_cuts_a_closed_object_in_two_and_refuses_an_open_one() {
     settle(&mut h);
     still(&mut h, "split-preview");
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut").click();
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
@@ -592,7 +592,7 @@ fn after_a_split_delete_removes_only_the_picked_part() {
     h.state_mut().split.plane[11] += 1.3;
     settle(&mut h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut").click();
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
@@ -700,7 +700,7 @@ fn delete_after_a_view_click_targets_the_clicked_part_not_a_stale_one() {
     h.state_mut().split.plane[11] += 1.3;
     settle(&mut h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut").click();
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
@@ -776,7 +776,7 @@ fn clicking_an_objects_own_row_clears_a_leftover_sub_selection_so_delete_works()
     h.state_mut().split.plane[11] += 1.3;
     settle(&mut h);
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut").click();
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && a.session.history_labels().len() > history
     });
@@ -1110,7 +1110,7 @@ fn split_defaults_cross_an_object_far_from_the_origin() {
 
     // And applying the (re-centred) default actually splits it.
     let history = h.state().session.history_labels().len();
-    h.get_by_label("Cut").click();
+    scroll_and_click(&mut h, "Cut");
     wait_until(&mut h, "the split", |a| {
         a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
     });
