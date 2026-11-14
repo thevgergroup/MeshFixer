@@ -1323,6 +1323,90 @@ fn owner_combine_scan_and_part_then_split_keep_top_is_never_refused() {
     assert!(world_bounds(&h, id_of(&h, "scan (top)")).min[2] >= 20.0 - 1e-9);
 }
 
+/// Owner 2026-11-13, the full report: Split 'scan' and 'part' together at
+/// the default plane with Keep Bottom (a hemisphere and a half cube sunk
+/// into its side), Combine them, Make solid on the result, then Hollow
+/// (2 mm wall). "it can't hollow it" — never refused.
+#[test]
+fn owner_hollow_the_combined_hemisphere_and_half_cube_is_never_refused() {
+    require_gpu!("owner_hollow_the_combined_hemisphere_and_half_cube_is_never_refused");
+    let mut h = opened_owner_demo();
+    select_together(&mut h, &["scan", "part"]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_default_horizontal_plane_at(&h, [2.5, 0.0, 20.0]);
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert_eq!(
+        names,
+        ["scan (bottom)", "part (bottom)", "crossed scan", "probe"],
+        "{names:?}"
+    );
+
+    select_together(&mut h, &["scan (bottom)", "part (bottom)"]);
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "combine");
+    let history = history_len(&h);
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(
+        objects(&h),
+        ["scan (bottom)", "crossed scan", "probe"],
+        "{:?}",
+        objects(&h)
+    );
+
+    row(&h, "scan (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Make solid").click();
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label("Make it solid").click();
+    wait_until(&mut h, "make solid", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+
+    let solid_id = id_of(&h, "scan (bottom)");
+    let mesh = h
+        .state()
+        .session
+        .document()
+        .object(solid_id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    let (p, t) = mesh.to_arrays();
+    mf_boolean::validate_solid(&p, &t, &mf_runtime::RunContext::none())
+        .unwrap_or_else(|e| panic!("Make solid's own output isn't a valid solid: {e}"));
+
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "hollow");
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, solid_id).is_some()
+    });
+    settle(&mut h);
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(
+        h.state().refusal.is_none(),
+        "Hollow refused a Make-solid-produced closed solid: {:?}",
+        h.state().refusal
+    );
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+}
+
 // ---------------------------------------------------------------------
 // Split: cross-section picking and the bounded cut plane (Phase 1b).
 // ---------------------------------------------------------------------
