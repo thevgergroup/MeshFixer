@@ -773,27 +773,33 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     let mut h = opened(vec![("ball", ball(20.0), at([0.0, 0.0, 20.0]))]);
     let id = id_of(&h, "ball");
 
-    // Split the ball at world z = 30 (10 above its centre), Keep: Top,
-    // Cap on: a dome with a flat cap, well short of the pole (gentle
-    // curvature under the cap, the common case `open_through` is for).
+    // Split the ball near its own centre (world z = 21.3, off the seam
+    // of vertex rings), Keep: Bottom, Cap on: a hemisphere, its flat
+    // cap near the equator facing up (visible from the default
+    // camera) — gentle curvature under the whole cap, the common case
+    // `open_through` is for (a cap close to the pole tapers too fast
+    // for a straight-sided opening to stay inside the solid, refused
+    // by name rather than silently cutting the rim's own wall away;
+    // owner 2026-11-14).
     h.get_by_label("Split").click();
     settle(&mut h);
-    h.state_mut().split.plane[11] = 30.0;
+    h.state_mut().split.plane[11] = 21.3;
     settle(&mut h);
-    let names = cut_with_keep(&mut h, "Top");
-    assert_eq!(names, ["ball (top)"], "{names:?}");
-    let dome = mesh_of(&h, "ball (top)");
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert_eq!(names, ["ball (bottom)"], "{names:?}");
+    let dome = mesh_of(&h, "ball (bottom)");
     let dome_topo = dome.topology_with(&mf_runtime::RunContext::none()).unwrap();
     assert_eq!(dome_topo.boundary_edges, 0, "capped, so still closed");
 
-    // Open Hollow and click the cap: the whole region is picked.
+    // Open Hollow and click the cap (from above, where it faces): the
+    // whole region is picked.
     h.get_by_label("Hollow").click();
     settle(&mut h);
     wait_until(&mut h, "the dome's preview", |a| {
         mf_desktop::hollow_tool::preview_render(a, id).is_some()
     });
     settle(&mut h);
-    let p = facing_point(&h, [0.0, 0.0, 30.0], 1.0);
+    let p = facing_point(&h, [0.0, 0.0, 21.3], 1.0);
     click_at(&mut h, p);
     settle(&mut h);
     assert!(
@@ -812,7 +818,7 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
     assert_eq!(history_len(&h), history + 1, "one undo step");
-    let shell = mesh_of(&h, "ball (top)");
+    let shell = mesh_of(&h, "ball (bottom)");
     let topo = shell
         .topology_with(&mf_runtime::RunContext::none())
         .unwrap();
@@ -825,6 +831,34 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
         topo.components.len(),
         1,
         "the rim joins the outer and inner walls into one surface"
+    );
+
+    // The owner's own report (2026-11-14 follow-up): the rim stays at
+    // the cut height, with the full wall thickness, not with the
+    // whole cap region's radius cut away along with it.
+    let wall = 2.0;
+    let cell = 0.5;
+    let cut_z = 1.3; // the cap's own local height (world 21.3, the ball at local z=0, placed at world z=20).
+    let rim: Vec<[f64; 3]> = shell
+        .vertices()
+        .map(|(_, p)| p)
+        .filter(|p| (p[2] - cut_z).abs() < cell * 2.0)
+        .collect();
+    assert!(!rim.is_empty(), "there should be a rim near the cut plane");
+    let radii: Vec<f64> = rim
+        .iter()
+        .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+        .collect();
+    let outer_radius = radii.iter().cloned().fold(0.0_f64, f64::max);
+    let inner_radius = radii.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        (outer_radius - 20.0).abs() <= cell,
+        "outer rim radius {outer_radius}, expected near 20"
+    );
+    let measured_wall = outer_radius - inner_radius;
+    assert!(
+        (measured_wall - wall).abs() <= cell,
+        "rim wall thickness {measured_wall}, expected near {wall}"
     );
 }
 

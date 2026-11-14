@@ -235,6 +235,14 @@ pub struct Flow {
     pub mode: CutMode,
     pub volume: VolumeBox,
     pub joints: Vec<Joint>,
+    /// Every object's own cap from the most recent cut that made one,
+    /// whatever `keep` was asked for (a `Joint` only ever exists for
+    /// `keep: both`'s pair; picking a surface that's a recorded cap
+    /// needs this for a single-piece keep too, owner 2026-11-14
+    /// follow-up). The frame's own side (`A`, by this list's own
+    /// convention: there's only ever one side meaningful for a single
+    /// object) is the object's own cap, outward from its kept material.
+    pub cut_caps: Vec<(ObjectId, JointFrame)>,
     /// The joint open in Connect.
     pub joint: Option<usize>,
     /// The connector kind a click places (a `joint.*` id).
@@ -659,6 +667,32 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
                     placements: Vec::new(),
                     applied: None,
                 });
+            }
+            // Every target's own cap, whatever `keep` was asked for (not
+            // just `keep: both`'s joint pair): the plane, in the
+            // target's own object space, converted to world with its
+            // (unchanged — the cut keeps the target's own id) transform.
+            app.split_flow.cut_caps.clear();
+            for (k, &object) in operands.iter().enumerate() {
+                let Some(point_obj) = vec3(&report["objects"][k]["plane_point_object"]) else {
+                    continue;
+                };
+                let Some(normal_obj) = vec3(&report["objects"][k]["plane_normal_object"]) else {
+                    continue;
+                };
+                let Some(doc) = app.session.document().object(object) else {
+                    continue;
+                };
+                let t = mf_render::model_matrix(&doc.transform);
+                let point = t.transform_point3(point_obj);
+                let normal = (glam::DMat3::from_mat4(t).transpose().inverse() * normal_obj)
+                    .normalize_or(DVec3::Z);
+                let Some(frame) =
+                    JointFrame::new(point, normal, JointFrame::default_u(normal), 0.0)
+                else {
+                    continue;
+                };
+                app.split_flow.cut_caps.push((object, frame));
             }
             // The box stays where the cut was made (not re-placed on the
             // piece the cut made active).

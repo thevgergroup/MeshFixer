@@ -554,6 +554,50 @@ fn recorded_cap_region(
         };
         return Some((ids, name));
     }
+    // A single-piece keep (Above/Below/Top/Bottom) records no joint
+    // (one needs both pieces), but the cut's own cap is still known
+    // exactly: every object's own cap from the most recent cut that
+    // made one (owner 2026-11-14 follow-up).
+    for &(cap_id, ref frame) in &app.split_flow.cut_caps {
+        if cap_id != id {
+            continue;
+        }
+        // Which side of the plane this object's own kept material is
+        // on isn't recorded here (only the plane itself is, the same
+        // for either `keep`): tried both, whichever one's own cap
+        // contains the clicked face is this object's.
+        for side in [mf_operations::JointSide::A, mf_operations::JointSide::B] {
+            let Ok(faces) = mf_operations::cap_faces(
+                mesh,
+                Some(bvh),
+                transform,
+                frame,
+                side,
+                &RunContext::none(),
+            ) else {
+                continue;
+            };
+            if !faces.iter().any(|&(f, _)| f == face) {
+                continue;
+            }
+            let ids: Vec<FaceId> = faces.iter().map(|&(f, _)| f).collect();
+            let base = app
+                .session
+                .document()
+                .object(id)
+                .map(|o| o.name.clone())
+                // allow-swallow: id is the active object, checked live by the caller; a vanished one reads as an empty name for this frame.
+                .unwrap_or_default();
+            let outward = match side {
+                mf_operations::JointSide::A => frame.normal.to_array(),
+                mf_operations::JointSide::B => (-frame.normal).to_array(),
+            };
+            // `split_names`'s own first element is always "the side the
+            // normal points to" — exactly `outward` here.
+            let (name, _) = mf_operations::split_names(&format!("Cut face of {base}"), outward);
+            return Some((ids, name));
+        }
+    }
     None
 }
 
