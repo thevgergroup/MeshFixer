@@ -5570,6 +5570,25 @@ impl MeshFixerApp {
                     unit = crate::defects::unit_symbol(doc.units())
                 ))
             }
+            "mesh.hollow" => {
+                let wall = r["wall_thickness"].as_f64()?;
+                let unit = crate::defects::unit_symbol(doc.units());
+                Some(if r["open_through"].is_null() {
+                    crate::t!(
+                        "hollow.status",
+                        name = name,
+                        wall = measure(wall),
+                        unit = unit
+                    )
+                } else {
+                    crate::t!(
+                        "hollow.status_open",
+                        name = name,
+                        wall = measure(wall),
+                        unit = unit
+                    )
+                })
+            }
             "mesh.sculpt_stroke" => {
                 let moved = r["moved_vertices"].as_u64()?;
                 let brush = rec

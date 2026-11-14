@@ -760,6 +760,17 @@ fn hollow_shows_thin_parts_and_cuts_a_placed_drain_hole() {
         1,
         "the hole joins the inside to the outside"
     );
+    // The status line is plain words, not the operation's raw report
+    // JSON (owner 2026-11-14 follow-up).
+    let status = h.state().status.clone().unwrap_or_default();
+    assert!(
+        !status.contains('{'),
+        "raw report leaked into the status: {status}"
+    );
+    assert!(
+        status.contains("ball") && status.contains("mm walls"),
+        "{status}"
+    );
 }
 
 /// `open_through` (owner 2026-11-13): Split cuts a ball into a dome
@@ -859,6 +870,18 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     assert!(
         (measured_wall - wall).abs() <= cell,
         "rim wall thickness {measured_wall}, expected near {wall}"
+    );
+
+    // The status line is plain words naming the opening, not raw JSON
+    // (owner 2026-11-14 follow-up).
+    let status = h.state().status.clone().unwrap_or_default();
+    assert!(
+        !status.contains('{'),
+        "raw report leaked into the status: {status}"
+    );
+    assert!(
+        status.contains("ball (bottom)") && status.contains("open at the cut face"),
+        "{status}"
     );
 }
 

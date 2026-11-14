@@ -525,6 +525,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "hollow.section_view.tip",
         "Cut the preview open so you can see the walls",
     ),
+    ("hollow.status", "Hollowed {name}: {wall} {unit} walls"),
+    (
+        "hollow.status_open",
+        "Hollowed {name}: {wall} {unit} walls, open at the cut face",
+    ),
     (
         "hollow.thin",
         "Parts thinner than {size} {unit} were left solid",
