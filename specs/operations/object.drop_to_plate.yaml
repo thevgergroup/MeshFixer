@@ -1,6 +1,7 @@
 id: object.drop_to_plate
 version: 1
 summary: Move an object straight down (or up) so its lowest point rests on the build plate.
+history_label: history.label.object.drop_to_plate
 geometry_kinds: [mesh]
 target:
   whole_object: true

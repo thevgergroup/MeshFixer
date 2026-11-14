@@ -43,6 +43,14 @@ pub fn has(id: &str) -> bool {
     CATALOGUE.binary_search_by(|(k, _)| k.cmp(&id)).is_ok()
 }
 
+/// True if `id` is in the catalogue either as a plain message or as a
+/// plural pair (`<id>.one` present; [`tr_plural`] picks `.one` or
+/// `.other` from a count). A spec's `history_label` is one or the other,
+/// depending on whether its history row needs a count.
+pub fn has_message_or_plural(id: &str) -> bool {
+    has(id) || has(&format!("{id}.one"))
+}
+
 /// The English text of message `id`. Panics if `id` isn't in the
 /// catalogue: a missing message is a bug, never shown as a blank.
 pub fn english(id: &str) -> &'static str {
@@ -457,6 +465,115 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("hint.first_use.dismiss", "Dismiss hint"),
     ("history.empty", "No history yet"),
+    ("history.label.connector.join", "Joined connector to {name}"),
+    // A generator's own spec (a shape or connector's parameter schema,
+    // crate mf-parts): never shown by this id. The command recorded is
+    // always object.add_shape, object.set_shape_params or
+    // connector.join, whose own history_label names the row; this
+    // placeholder only satisfies the catalogue-coverage test.
+    ("history.label.generator", "Updated {name}"),
+    ("history.label.mesh.boolean", "{op} on {name}"),
+    ("history.label.mesh.combine", "Combined objects into {name}"),
+    ("history.label.mesh.compact", "Compacted {name}"),
+    (
+        "history.label.mesh.delete_faces.one",
+        "Deleted {n} face of {name}",
+    ),
+    (
+        "history.label.mesh.delete_faces.other",
+        "Deleted {n} faces of {name}",
+    ),
+    (
+        "history.label.mesh.fill_holes.one",
+        "Filled {n} hole in {name}",
+    ),
+    (
+        "history.label.mesh.fill_holes.other",
+        "Filled {n} holes in {name}",
+    ),
+    ("history.label.mesh.hollow", "Hollowed {name}: {wall} walls"),
+    (
+        "history.label.mesh.hollow.open",
+        "Hollowed {name}: {wall} walls, open at the cut face",
+    ),
+    ("history.label.mesh.inspect", "Inspected {name}"),
+    (
+        "history.label.mesh.intersections",
+        "Checked {name} for intersections",
+    ),
+    ("history.label.mesh.make_solid", "Made {name} solid"),
+    (
+        "history.label.mesh.remove_small_components.one",
+        "Removed {n} loose piece from {name}",
+    ),
+    (
+        "history.label.mesh.remove_small_components.other",
+        "Removed {n} loose pieces from {name}",
+    ),
+    (
+        "history.label.mesh.sculpt_stroke",
+        "Sculpted {name} ({brush})",
+    ),
+    (
+        "history.label.mesh.split_box",
+        "Split {name} along the build volume",
+    ),
+    (
+        "history.label.mesh.split_plane",
+        "Split {name} along a plane",
+    ),
+    (
+        "history.label.mesh.split_region",
+        "Split the selected faces off {name}",
+    ),
+    ("history.label.object.add_part", "Added a part to {name}"),
+    (
+        "history.label.object.add_shape.one",
+        "Added a shape to {name}",
+    ),
+    (
+        "history.label.object.add_shape.other",
+        "Added {n} shapes to {name}",
+    ),
+    ("history.label.object.align.one", "Aligned {n} object"),
+    ("history.label.object.align.other", "Aligned {n} objects"),
+    (
+        "history.label.object.arrange_on_plate",
+        "Arranged {name} on the plate",
+    ),
+    (
+        "history.label.object.attach.one",
+        "Attached {n} part to {name}",
+    ),
+    (
+        "history.label.object.attach.other",
+        "Attached {n} parts to {name}",
+    ),
+    ("history.label.object.delete", "Deleted {name}"),
+    (
+        "history.label.object.drop_to_plate",
+        "Dropped {name} to the plate",
+    ),
+    ("history.label.object.move_group", "Moved {name}'s group"),
+    ("history.label.object.rename", "Renamed {name}"),
+    ("history.label.object.set_shape_params", "Rebuilt {name}"),
+    ("history.label.object.set_transform", "Transformed {name}"),
+    (
+        "history.label.split.place_connectors",
+        "Added connectors to {name}'s joint",
+    ),
+    (
+        "history.label.test.consume_tool",
+        "Test: consumed a tool into {name}",
+    ),
+    (
+        "history.label.test.unit_conversion",
+        "Test: unit conversion on {name}",
+    ),
+    (
+        "history.label.test_fixture",
+        "Placeholder: never shown (a unit test's inline spec fixture)",
+    ),
     ("history.tab", "History"),
     ("history.tip", "Click a step to go back to it"),
     ("hole.auto", "Auto"),

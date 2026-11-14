@@ -1,6 +1,7 @@
 id: mesh.split_box
 version: 2
 summary: Cut every selected object along the faces of a box (a printer's build volume) and close each cut with a flat cap.
+history_label: history.label.mesh.split_box
 geometry_kinds: [mesh]
 # The Split workflow's Print-volume mode (owner 2026-11-11). The box is
 # world axis-aligned; its faces are cut in the order -X, +X, -Y, +Y, -Z,

@@ -27,6 +27,28 @@ fn builtin_specs_validate_against_schema() {
     assert!(builtin::specs().len() >= 2);
 }
 
+/// Every registered operation spec declares a History panel label (owner
+/// 2026-11-13: the History panel showed `mesh.hollow (drain_holes=none,
+/// ..., open_through_faces=37048, ...)` — a raw parameter dump — for the
+/// third time; this is the structural fix, not a one-off patch). The
+/// schema already requires `history_label` with `minLength: 1`
+/// (`builtin_specs_validate_against_schema`); this iterates the parsed
+/// specs directly so a future field that bypasses the schema (a
+/// Rust-constructed spec, `mf_parts::shape::spec_of`) is still caught.
+/// Whether the id actually resolves in mf-desktop's i18n catalogue is
+/// checked there (`mf-spec` has no i18n dependency):
+/// `crates/mf-desktop/src/app.rs`'s `every_built_in_spec_has_a_catalogued_history_label`.
+#[test]
+fn every_built_in_spec_has_a_history_label() {
+    for spec in builtin::specs() {
+        assert!(
+            !spec.history_label.trim().is_empty(),
+            "{} has no history_label",
+            spec.id
+        );
+    }
+}
+
 #[test]
 fn defaults_filled() {
     let spec = builtin::get("mesh.remove_small_components").unwrap();

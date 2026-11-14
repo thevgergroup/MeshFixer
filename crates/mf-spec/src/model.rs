@@ -11,6 +11,16 @@ pub struct OperationSpec {
     pub id: String,
     pub version: u32,
     pub summary: String,
+    /// A message id in mf-desktop's i18n catalogue (under `history.label.`)
+    /// for this operation's History panel row, such as
+    /// `"history.label.mesh.hollow"`. Its catalogue text has `{object}`
+    /// and other placeholders the frontend fills from the command's own
+    /// words (the object's name, a count) — never a raw parameter value
+    /// or an id list (the owner's recurring bug: a history row printing
+    /// `mesh.hollow (drain_holes=none, ..., open_through_faces=37048,
+    /// ...)`). Required on every spec, enforced by a test that iterates
+    /// every built-in spec and fails if the id isn't in the catalogue.
+    pub history_label: String,
     pub geometry_kinds: Vec<String>,
     pub target: TargetSpec,
     /// Other objects or selections the operation reads, consumes or keeps

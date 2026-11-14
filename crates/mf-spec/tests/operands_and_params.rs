@@ -16,6 +16,7 @@ fn vec3_and_affine_params_validate_and_round_trip() {
 id: mesh.test_vec3_affine
 version: 1
 summary: Test fixture for vec3 and affine parameters.
+history_label: history.label.test_fixture
 geometry_kinds: [mesh]
 target:
   whole_object: true
@@ -105,6 +106,7 @@ fn operands_section_validates_against_schema() {
 id: mesh.test_with_operands
 version: 1
 summary: Test fixture with an operands section.
+history_label: history.label.test_fixture
 geometry_kinds: [mesh]
 target:
   whole_object: true
@@ -169,6 +171,7 @@ fn lengths_convert_to_document_units() {
 id: mesh.test_lengths
 version: 1
 summary: Test fixture with length parameters.
+history_label: history.label.test_fixture
 geometry_kinds: [mesh]
 target:
   whole_object: true
@@ -236,6 +239,7 @@ fn many_operands_parse_and_validate() {
 id: mesh.test_many
 version: 1
 summary: Test fixture with list operands.
+history_label: history.label.test_fixture
 geometry_kinds: [mesh]
 target:
   whole_object: true

@@ -1,6 +1,7 @@
 id: mesh.delete_faces
 version: 1
 summary: Delete the selected faces (Meshmixer's Discard), leaving an opening.
+history_label: history.label.mesh.delete_faces
 geometry_kinds: [mesh]
 target:
   whole_object: false

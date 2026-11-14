@@ -1,6 +1,7 @@
 id: hinge.flap
 version: 1
 summary: Flap hinge, two flat leaves of knuckles around a pin, printed in place or separately.
+history_label: history.label.generator
 geometry_kinds: [mesh]
 target:
   whole_object: true

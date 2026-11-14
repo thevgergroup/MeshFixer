@@ -1,6 +1,7 @@
 id: mesh.split_region
 version: 1
 summary: Split the selected faces off as a new object and close both parts where they were joined.
+history_label: history.label.mesh.split_region
 geometry_kinds: [mesh]
 target:
   whole_object: false

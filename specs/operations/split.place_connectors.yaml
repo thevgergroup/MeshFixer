@@ -1,6 +1,7 @@
 id: split.place_connectors
 version: 1
 summary: Add every connector placed on a cut's joint in one command - holes, pockets, pegs, tails and loose dowels - from the connector registry.
+history_label: history.label.split.place_connectors
 geometry_kinds: [mesh]
 # The Split workflow's step 3 (owner 2026-11-11). The target is the
 # joint's piece a, side_b its piece b (the pieces a cut recorded as a

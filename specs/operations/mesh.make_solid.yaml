@@ -1,6 +1,7 @@
 id: mesh.make_solid
 version: 1
 summary: "Make solid: rebuilds the surface as one closed solid; fine detail smaller than the cell size is lost."
+history_label: history.label.mesh.make_solid
 geometry_kinds: [mesh]
 target:
   whole_object: true

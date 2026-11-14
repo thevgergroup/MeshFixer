@@ -6371,13 +6371,119 @@ fn step_label(session: &Session, node: &mf_command::RevisionNode) -> String {
     node.record
         .as_ref()
         .and_then(|rec| {
-            history_label(session, node, rec).or_else(|| {
-                let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
-                operation_label(&rec.op_id, target).or_else(|| object_step_label(&rec.op_id))
-            })
+            history_label(session, node, rec)
+                .or_else(|| {
+                    let target = rec.selection.as_ref().map(|s| (s.kind, s.ids.len()));
+                    operation_label(&rec.op_id, target).or_else(|| object_step_label(&rec.op_id))
+                })
+                .or_else(|| catalogue_history_label(node, rec))
         })
-        // allow-swallow: a step with no plain words keeps the session's own label
+        // allow-swallow: a step with no plain words keeps the spec's own
+        // title and the object's name (never raw parameters: see
+        // Session::commit's `label`, which is this same safe fallback).
         .unwrap_or_else(|| node.label.clone())
+}
+
+/// The history row for every operation that has neither a bespoke
+/// [`history_label`] branch nor a plain name from [`operation_label`] /
+/// [`object_step_label`] (most whole-object and object-graph operations):
+/// looks up the spec's `history_label` message id and fills it from the
+/// command's own words — the object's name, counts, choices — never a
+/// raw parameter value or an id list (the owner's recurring bug).
+/// `None` if the spec or its message id is missing (a build defect,
+/// caught by `every_built_in_spec_has_a_history_label`), so the caller
+/// falls through to the safe generic fallback instead of panicking here.
+fn catalogue_history_label(
+    node: &mf_command::RevisionNode,
+    rec: &mf_command::CommandRecord,
+) -> Option<String> {
+    let spec = mf_spec::builtin::get(&rec.op_id)?;
+    if !crate::i18n::has_message_or_plural(&spec.history_label) {
+        return None;
+    }
+    let name = result_name(node, rec.target);
+    Some(match rec.op_id.as_str() {
+        "mesh.delete_faces" => {
+            let n = rec.selection.as_ref().map_or(0, |s| s.ids.len());
+            crate::tp!("history.label.mesh.delete_faces", n, name = name)
+        }
+        "mesh.fill_holes" => {
+            let n = rec.selection.as_ref().map_or(1, |s| s.ids.len().max(1));
+            crate::tp!("history.label.mesh.fill_holes", n, name = name)
+        }
+        "mesh.remove_small_components" => {
+            let n = rec.selection.as_ref().map_or(1, |s| s.ids.len().max(1));
+            crate::tp!("history.label.mesh.remove_small_components", n, name = name)
+        }
+        "mesh.compact" => crate::t!("history.label.mesh.compact", name = name),
+        "mesh.inspect" => crate::t!("history.label.mesh.inspect", name = name),
+        "mesh.intersections" => crate::t!("history.label.mesh.intersections", name = name),
+        "mesh.split_region" => crate::t!("history.label.mesh.split_region", name = name),
+        "mesh.boolean" => {
+            // allow-swallow: a label only: an unreadable operation choice shows as a generic Combine
+            let op = match rec.params.get_choice("operation").ok() {
+                Some("union") => "Combine",
+                Some("subtract") => "Subtract",
+                Some("intersect") => "Intersect",
+                _ => "Combine",
+            };
+            crate::t!("history.label.mesh.boolean", op = op, name = name)
+        }
+        "mesh.hollow" => {
+            // allow-swallow: a label only: an unreadable wall value falls back to the spec default
+            let wall = rec.params.get_float("wall_thickness").unwrap_or(2.0);
+            let open = rec.params.get_bool("open_through").unwrap_or(false);
+            let wall_text = format!("{} mm", crate::defects::measure(wall));
+            if open {
+                crate::t!(
+                    "history.label.mesh.hollow.open",
+                    name = name,
+                    wall = wall_text
+                )
+            } else {
+                crate::t!("history.label.mesh.hollow", name = name, wall = wall_text)
+            }
+        }
+        "mesh.sculpt_stroke" => {
+            let brush = rec
+                .params
+                .get_choice("brush")
+                // allow-swallow: a label only: an unreadable brush choice shows as a generic stroke
+                .ok()
+                .and_then(mf_operations::sculpt::BrushKind::parse)
+                .map(|b| crate::i18n::tr(&format!("sculpt.brush.{}", b.word()), &[]))
+                .unwrap_or_else(|| "Sculpt".to_owned());
+            crate::t!(
+                "history.label.mesh.sculpt_stroke",
+                name = name,
+                brush = brush
+            )
+        }
+        "connector.join" => crate::t!("history.label.connector.join", name = name),
+        "object.add_part" => crate::t!("history.label.object.add_part", name = name),
+        "object.add_shape" => {
+            let n = rec.outputs.iter().filter(|o| o.created).count().max(1);
+            crate::tp!("history.label.object.add_shape", n, name = name)
+        }
+        "object.align" => {
+            let n = rec.operand_slot("target").count().max(1);
+            crate::tp!("history.label.object.align", n)
+        }
+        "object.arrange_on_plate" => {
+            crate::t!("history.label.object.arrange_on_plate", name = name)
+        }
+        "object.attach" => {
+            let n = rec.operand_slot("members").count().max(1);
+            crate::tp!("history.label.object.attach", n, name = name)
+        }
+        "object.delete" => crate::t!("history.label.object.delete", name = name),
+        "object.drop_to_plate" => crate::t!("history.label.object.drop_to_plate", name = name),
+        "object.move_group" => crate::t!("history.label.object.move_group", name = name),
+        "object.set_shape_params" => {
+            crate::t!("history.label.object.set_shape_params", name = name)
+        }
+        _ => return None,
+    })
 }
 
 /// The object a command's output names, as the history row should: its
@@ -6536,12 +6642,81 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
         .filter(|p| !hidden_params.contains(&p.name.as_str()))
         .filter_map(|p| {
             let value = params.0.get(&p.name)?;
-            (*value != p.kind.default_value())
-                .then(|| format!("{}: {value}", param_label(op_id, &p.name)))
+            (*value != p.kind.default_value()).then(|| {
+                format!(
+                    "{}: {}",
+                    param_label(op_id, &p.name),
+                    summarize_value(value, p.unit.as_deref())
+                )
+            })
         })
         .collect();
     lines.sort();
     lines.join("\n")
+}
+
+/// A parameter's value in one line of plain words, for the history row's
+/// Details section (I5, owner 2026-11-13: a raw dump — a `faces` list of
+/// hundreds of ids, an `affine`'s 12 numbers, a bare float with no unit —
+/// is not for people). Never longer than one line.
+fn summarize_value(value: &ParamValue, unit: Option<&str>) -> String {
+    match value {
+        ParamValue::Faces(l) => crate::defects::count(l.faces.len(), "face"),
+        ParamValue::Samples(s) => crate::defects::count(s.len(), "dab"),
+        ParamValue::Affine(m) => summarize_affine(m),
+        ParamValue::Float(f) if unit == Some("mm") => {
+            format!("{} mm", crate::defects::measure(*f))
+        }
+        ParamValue::Float(f) if unit == Some("%") => {
+            format!("{}%", crate::defects::measure(*f))
+        }
+        ParamValue::Vec3(v) if unit == Some("mm") => format!(
+            "{}, {}, {} mm",
+            crate::defects::measure(v[0]),
+            crate::defects::measure(v[1]),
+            crate::defects::measure(v[2])
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// An absolute transform in plain words: its move, rotation and scale,
+/// each left out when it's the identity (a mesh.combine's default
+/// placement, say "moved 10, 0, 0 mm" with no rotation or scale said).
+/// A sheared transform (no clean rotate/scale split) just says so.
+fn summarize_affine(m: &[f64; 12]) -> String {
+    let fmt3 = |v: glam::DVec3| {
+        format!(
+            "{}, {}, {}",
+            crate::defects::measure(v.x),
+            crate::defects::measure(v.y),
+            crate::defects::measure(v.z)
+        )
+    };
+    match mf_render::decompose(m) {
+        mf_render::Decomposed::Trs {
+            translate,
+            rotate_deg_xyz,
+            scale,
+        } => {
+            let mut parts = Vec::new();
+            if translate.length() > 1e-9 {
+                parts.push(format!("moved {} mm", fmt3(translate)));
+            }
+            if rotate_deg_xyz.length() > 1e-9 {
+                parts.push(format!("rotated {}°", fmt3(rotate_deg_xyz)));
+            }
+            if (scale - glam::DVec3::ONE).length() > 1e-9 {
+                parts.push(format!("scaled {}", fmt3(scale)));
+            }
+            if parts.is_empty() {
+                "unchanged placement".to_owned()
+            } else {
+                parts.join(", ")
+            }
+        }
+        mf_render::Decomposed::Sheared => "a sheared placement".to_owned(),
+    }
 }
 
 fn union_bounds(a: &Aabb, b: &Aabb) -> Aabb {
@@ -6789,5 +6964,171 @@ mod tests {
             .collect();
         let params = spec.validate(&raw).unwrap();
         assert!(!history_details_of("split.place_connectors", &params).contains("connectors"));
+    }
+
+    /// Every registered operation spec's `history_label` resolves in the
+    /// English catalogue (owner 2026-11-13: the History panel showed a
+    /// raw parameter dump for the third time; a spec whose label typos
+    /// its message id, or whose id was never added to the catalogue,
+    /// must fail a test, not ship silently to `step_label`'s safe
+    /// fallback). `mf_spec::builtin::specs()` already requires a
+    /// non-empty `history_label` (schema `minLength: 1`,
+    /// `every_built_in_spec_has_a_history_label` in mf-spec); this is
+    /// the half only mf-desktop can check, since the catalogue lives
+    /// here.
+    #[test]
+    fn every_built_in_spec_has_a_catalogued_history_label() {
+        for spec in mf_spec::builtin::specs() {
+            assert!(
+                crate::i18n::has_message_or_plural(&spec.history_label),
+                "{}'s history_label {:?} isn't in the i18n catalogue",
+                spec.id,
+                spec.history_label
+            );
+        }
+    }
+
+    /// No history label's catalogue text, rendered with representative
+    /// words for every placeholder it declares, ever shows a raw
+    /// `key=value` pair or a numeric id list — the owner's recurring bug
+    /// (`mesh.hollow (drain_holes=none, ..., open_through_faces=37048,
+    /// 37049, ...)`). Placeholders are filled with plain words (never a
+    /// number or a list), so a template that still prints a parameter
+    /// name or an id list fails here rather than in the shipped app.
+    #[test]
+    fn every_history_label_renders_without_raw_params_or_id_lists() {
+        let sample_args: &[(&str, String)] = &[
+            ("name", "widget".to_owned()),
+            ("n", "3".to_owned()),
+            ("wall", "2 mm".to_owned()),
+            ("op", "Combined".to_owned()),
+            ("brush", "Inflate".to_owned()),
+        ];
+        let never_raw = |id: &str, text: &str| {
+            assert!(
+                !text.contains('{') && !text.contains('}'),
+                "{id}: unfilled placeholder: {text:?}"
+            );
+            assert!(
+                !text.contains('='),
+                "{id}: looks like a raw key=value: {text:?}"
+            );
+            // A numeric id list (hundreds of face ids) reads as several
+            // digit groups joined by ", " or ",": two or more comma- or
+            // space-separated runs of digits in a row.
+            let digit_groups = text
+                .split([',', ' '])
+                .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
+                .count();
+            assert!(digit_groups < 2, "{id}: looks like an id list: {text:?}");
+        };
+        for spec in mf_spec::builtin::specs() {
+            let id = spec.history_label.as_str();
+            if crate::i18n::has(id) {
+                never_raw(id, &crate::i18n::tr(id, sample_args));
+            } else {
+                // A plural pair: both forms render cleanly, for n = 1 and
+                // n > 1 (English picks .other for the latter).
+                never_raw(id, &crate::i18n::tr_plural(id, 1, sample_args));
+                never_raw(id, &crate::i18n::tr_plural(id, 3, sample_args));
+            }
+        }
+    }
+
+    /// The owner's literal report: a sphere split near its equator, then
+    /// Hollow with `open_through` opening through the cap — hundreds of
+    /// input-face seeds — must render as "Hollowed ... walls, open at
+    /// the cut face", never with `drain_holes=`/`open_through_faces=` or
+    /// the raw id list, through the real command layer (not a synthetic
+    /// `Params`), reproducing the History panel row exactly as shipped.
+    #[test]
+    fn hollow_with_hundreds_of_open_through_faces_renders_a_plain_label() {
+        let dir = tempfile::tempdir().unwrap();
+        let model = mf_io::threemf::Model {
+            metadata: Default::default(),
+            unit: mf_io::threemf::Unit::Millimeter,
+            objects: vec![mf_io::threemf::ModelObject {
+                metadata: Default::default(),
+                name: "widget".into(),
+                mesh: mf_fixtures::scaled(&mf_fixtures::uv_sphere(48, 96), 20.0),
+                transform: mf_io::threemf::IDENTITY,
+            }],
+        };
+        let path = dir.path().join("doc.3mf");
+        mf_io::write_model_path(&model, &path).unwrap();
+        let mut session = Session::new();
+        let (ids, _) = session.import_model(mf_io::read_model(&path).unwrap());
+        let id = ids[0];
+
+        let cut = session
+            .execute(mf_command::Invocation {
+                op_id: "mesh.split_plane".into(),
+                target: id,
+                selection: None,
+                operands: Vec::new(),
+                raw_params: [
+                    ("plane_point", "0,0,2.0"),
+                    ("plane_normal", "0,0,1"),
+                    ("keep", "above"),
+                    ("cap", "true"),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            })
+            .unwrap();
+        let mf_command::CommitOutcome::NewRevision { report } = cut else {
+            panic!("expected a new revision");
+        };
+        let cap_faces: Vec<String> = report["parts"][0]["cap_faces"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_u64().unwrap().to_string())
+            .collect();
+        assert!(
+            cap_faces.len() > 100,
+            "expected hundreds of cap faces, got {}",
+            cap_faces.len()
+        );
+        let faces_param = cap_faces.join(",");
+
+        session
+            .execute(mf_command::Invocation {
+                op_id: "mesh.hollow".into(),
+                target: id,
+                selection: None,
+                operands: Vec::new(),
+                raw_params: [
+                    ("wall_thickness", "2"),
+                    ("inner_detail", "0.5"),
+                    ("open_through", "true"),
+                    ("open_through_faces", faces_param.as_str()),
+                ]
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            })
+            .unwrap();
+
+        let node = session.node(session.current()).unwrap();
+        let label = step_label(&session, node);
+        // `keep: above` renames the kept object "widget (top)" (D5): the
+        // label correctly names the object as it is now, not its
+        // pre-split name.
+        assert!(label.starts_with("Hollowed widget (top): "), "{label:?}");
+        assert!(label.contains("open at the cut face"), "{label:?}");
+        assert!(!label.contains("drain_holes"), "{label:?}");
+        assert!(!label.contains("open_through_faces"), "{label:?}");
+        assert!(!label.contains("mesh.hollow"), "{label:?}");
+        assert!(!label.contains('='), "{label:?}");
+        // The cap's face ids never leak into the label: no run of 3+
+        // comma/space-separated digit groups (a lone "2" from "2 mm" is
+        // fine).
+        let digit_groups = label
+            .split([',', ' '])
+            .filter(|w| !w.is_empty() && w.chars().all(|c| c.is_ascii_digit()))
+            .count();
+        assert!(digit_groups < 2, "{label:?}");
     }
 }

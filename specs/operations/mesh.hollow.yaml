@@ -1,6 +1,7 @@
 id: mesh.hollow
 version: 1
 summary: "Hollow: makes a closed solid a shell with walls of a chosen thickness, keeping its outside exactly as it was."
+history_label: history.label.mesh.hollow
 geometry_kinds: [mesh]
 target:
   whole_object: true

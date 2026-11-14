@@ -3,6 +3,7 @@ id: mesh.fill_holes
 # fill_style flat: triangulate and refine only, exactly as they ran.
 version: 2
 summary: Close holes with a minimum-weight triangulation, refined to the surrounding triangle density.
+history_label: history.label.mesh.fill_holes
 geometry_kinds: [mesh]
 target:
   whole_object: true

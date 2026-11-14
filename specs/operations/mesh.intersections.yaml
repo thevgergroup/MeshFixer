@@ -1,6 +1,7 @@
 id: mesh.intersections
 version: 1
 summary: Find where the object crosses another object, or itself (exact), grouped into regions.
+history_label: history.label.mesh.intersections
 geometry_kinds: [mesh]
 target:
   whole_object: true

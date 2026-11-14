@@ -1,6 +1,7 @@
 id: joint.peg
 version: 1
 summary: "A peg across a cut: attached to the piece it was placed on, fitting a hole in the other piece."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: see joint.dowel.yaml.
 target:

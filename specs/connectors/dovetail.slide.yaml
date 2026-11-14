@@ -1,6 +1,7 @@
 id: dovetail.slide
 version: 1
 summary: "A dovetail slide joint as a linked parametric pair: a tail (Solid) on the piece it's placed on, a groove (Hole) in the other piece, offset by the fit class's clearance plus the machine tolerance."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: z is the cut's normal, from side A (the tail's piece) into
 # side B (the groove's piece); side A's cap at z = -gap/2, side B's at

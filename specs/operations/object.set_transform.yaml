@@ -1,6 +1,7 @@
 id: object.set_transform
 version: 1
 summary: Place an object by setting its whole transform (move, rotate and scale in one step).
+history_label: history.label.object.set_transform
 geometry_kinds: [mesh]
 target:
   whole_object: true

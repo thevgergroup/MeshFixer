@@ -3,6 +3,7 @@ id: mesh.remove_small_components
 # with max_relative_size 100: no relative limit, exactly as they ran.
 version: 2
 summary: Delete disconnected islands smaller than a triangle-count threshold and a share of the largest piece.
+history_label: history.label.mesh.remove_small_components
 geometry_kinds: [mesh]
 target:
   whole_object: true

@@ -1,6 +1,7 @@
 id: hinge.leaf
 version: 1
 summary: "Print-in-place pin hinge as three separate pieces: leaf A (the odd knuckles), leaf B (the even knuckles) and the pin, each attached to its own object."
+history_label: history.label.generator
 geometry_kinds: [mesh]
 # Local frame: x runs along the hinge axis (0 to length); the two objects
 # meet across y = 0 (side A at -y, side B at +y); z = 0 is the face the
