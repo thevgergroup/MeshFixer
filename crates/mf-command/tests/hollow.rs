@@ -107,7 +107,7 @@ fn hollow_open_through_undoes_in_one_step_and_replays_exact() {
         .execute(split(
             id,
             &[
-                ("plane_point", "0,0,10"),
+                ("plane_point", "0,0,2.0"),
                 ("plane_normal", "0,0,1"),
                 ("keep", "above"),
                 ("cap", "true"),

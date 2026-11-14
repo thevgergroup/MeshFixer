@@ -1160,38 +1160,36 @@ fn geometry(e: mf_geometry::GeometryError) -> OpError {
 /// clears the whole wall under the picked region with room to spare,
 /// however the inner surface curves there.
 fn plug_margin(wall: f64, cell: f64) -> f64 {
-    wall + 4.0 * cell
+    wall + 8.0 * cell
 }
 
-/// A closed solid that covers `faces` (a region of `input`'s surface)
-/// from `margin` outside it to `depth` inside it, each boundary vertex
-/// moved along its own area-weighted vertex normal (not one shared
-/// direction, which would carry a curved region's rim outside the
-/// material wherever the surface tapers): the region's own triangles
-/// pushed out by `margin` as the top cap (clear of the surface itself,
-/// so the boolean kernel never sees an exactly coincident face), a flat
-/// cap over each boundary loop's inward copy as the bottom (ear-clipped
-/// in the plane the loop's area-weighted average normal projects to),
-/// and a ruled wall between the two along each boundary loop — never
-/// the curved interior, which a straight offset could fold against
-/// itself. Subtracting this from the hollowed shell (`apply_parts`,
-/// Hole role) opens the cavity out through the region, leaving a rim
-/// wall where the plug's own side sliced the shell. `None` if `faces`
-/// names no live face, or they enclose no boundary (the whole closed
-/// surface was picked).
+/// A closed solid over the cavity's own footprint at `faces` (a region
+/// of `input`'s surface): each boundary loop's outline, projected to
+/// 2D and shrunk inward by `wall` (the cavity's own outline at the cap
+/// plane, since the hollow shell's inner wall is uniformly `wall` in
+/// from the outer surface everywhere) — never the picked region's own,
+/// unshrunk boundary, which would plug the whole wall ring under it,
+/// not just the cavity (owner 2026-11-14 follow-up: a hemisphere's rim
+/// came out with its own wall thickness gone, 2.94 mm below the cut
+/// plane, because the previous plug's top cap was the full cut face).
+/// The shrunk outline, ear-clipped, is the top cap (pushed out by
+/// `margin`, clear of the surface itself so the boolean kernel never
+/// sees an exactly coincident face) and — the same 2D shape, rigidly
+/// translated `depth` further along the region's own average normal,
+/// never per-vertex (so it can't fold) — the bottom cap; a ruled wall
+/// joins the two rings. `None` if `faces` names no live face, or they
+/// enclose no boundary (the whole closed surface was picked).
 fn through_plug(
     input: &Mesh,
     faces: &[FaceId],
+    wall: f64,
     margin: f64,
     depth: f64,
 ) -> Result<Option<Mesh>, OpError> {
     let mut positions: Vec<[f64; 3]> = Vec::new();
-    let mut vertex_normals: Vec<[f64; 3]> = Vec::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     let mut remap: HashMap<u32, u32> = HashMap::new();
     let mut normal_sum = [0.0; 3];
-    let mut area_sum = 0.0;
-    let mut area_count = 0usize;
     for &f in faces {
         let Some(t) = input.face(f) else { continue };
         let p = t.map(|v| input.corner_position(v));
@@ -1201,19 +1199,12 @@ fn through_plug(
             normal_sum[1] + n[1],
             normal_sum[2] + n[2],
         ];
-        area_sum += norm(n);
-        area_count += 1;
         let tri = t.map(|v| {
             *remap.entry(v).or_insert_with(|| {
                 positions.push(input.corner_position(v));
-                vertex_normals.push([0.0; 3]);
                 positions.len() as u32 - 1
             })
         });
-        for &vid in &tri {
-            let a = &mut vertex_normals[vid as usize];
-            *a = [a[0] + n[0], a[1] + n[1], a[2] + n[2]];
-        }
         triangles.push(tri);
     }
     if triangles.is_empty() {
@@ -1225,156 +1216,105 @@ fn through_plug(
             "The picked surface has no well-defined outward direction (its faces cancel out). Pick a different region.".into(),
         ));
     };
-    let region = Mesh::new(positions.clone(), triangles.clone()).map_err(geometry)?;
+    let region = Mesh::new(positions.clone(), triangles).map_err(geometry)?;
     let topo = region.topology();
     if topo.boundary_loops.is_empty() {
         // The picked region is the whole closed surface: nothing left
         // outside it to keep bit-identical, so there's no rim to cut.
         return Ok(None);
     }
-    // Each vertex's own outward normal, trusted only when its own
-    // triangles agree well enough to sum to a normal of real size (not
-    // a sliver's near-zero cross product, nor a few slivers pointing in
-    // conflicting directions): below a tenth of the region's own mean
-    // face area, the region's single average normal is used instead,
-    // exactly right for the common case of a flat (or near-flat) picked
-    // region, where every vertex's own normal would equal it anyway.
-    let mean_area = if area_count > 0 {
-        area_sum / area_count as f64
-    } else {
-        0.0
-    };
-    let threshold = (mean_area * 0.1).max(1e-12);
-    let vertex_normal = |i: usize| {
-        let s = vertex_normals[i];
-        if norm(s) >= threshold {
-            unit(s).unwrap_or(normal)
-        } else {
-            normal
-        }
-    };
-    // Pushed outward by `margin` along the region's single average
-    // normal (a rigid translation, so the top cap — the picked
-    // region's own triangles — can never fold against itself however
-    // its vertices are shared or how thin some of its triangles are;
-    // per-vertex normals are only for the boundary loop below, which
-    // needs to taper with the surface as it goes inward).
-    for p in &mut positions {
-        *p = std::array::from_fn(|k| p[k] + normal[k] * margin);
-    }
-    let mut out_positions = positions;
-    let mut out_triangles = triangles;
     let (u, v) = orthonormal_basis(normal);
-    let span = margin + depth;
+    let mut out_positions: Vec<[f64; 3]> = Vec::new();
+    let mut out_triangles: Vec<[u32; 3]> = Vec::new();
     for loop_ in &topo.boundary_loops {
         // Consecutive boundary vertices this close together are merged
-        // into one: a plane cut's own near-plane vertex, now snapped
-        // exactly onto its plane, and a freshly cut point an edge away
-        // from it can end up a single ulp apart (never farther) rather
-        // than exactly coincident — close enough to make this loop's own
-        // side wall and ear-clipped cap degenerate without ever being a
-        // real second point the picked region's own outline needs
-        // (owner 2026-11-13 follow-up). Every dropped vertex is remapped
-        // to the one it merged into — including in the top cap's own
-        // triangles, which may still reference it — so the wall joins
-        // the whole boundary with no gap. The loop stays closed (every
-        // kept vertex still cycles to the next kept one); fewer than 3
-        // left means the loop was only ever these near-duplicates.
-        let scale = loop_
+        // into one before the inset: a plane cut's own near-plane
+        // vertex, now snapped exactly onto its plane, and a freshly cut
+        // point an edge away from it can end up a single ulp apart
+        // (never farther) rather than exactly coincident, which would
+        // otherwise give the inset a zero-length edge to turn at
+        // (owner 2026-11-13 follow-up).
+        let loop_positions: Vec<[f64; 3]> = loop_
             .vertices
             .iter()
-            .map(|&vid| norm(out_positions[vid as usize]))
-            .fold(1.0_f64, f64::max);
+            .map(|&vid| positions[vid as usize])
+            .collect();
+        let scale = loop_positions
+            .iter()
+            .copied()
+            .fold(1.0_f64, |m, p| m.max(norm(p)));
         let merge_tol = scale * 1e-9;
-        let mut kept: Vec<u32> = Vec::with_capacity(loop_.vertices.len());
-        let mut remap: HashMap<u32, u32> = HashMap::new();
-        for &vid in &loop_.vertices {
-            let p = out_positions[vid as usize];
-            let last = kept.last().copied();
-            let dup =
-                last.is_some_and(|last| norm(sub(p, out_positions[last as usize])) <= merge_tol);
-            match last {
-                Some(last) if dup => {
-                    remap.insert(vid, last);
-                }
-                _ => kept.push(vid),
+        let mut loop_3d: Vec<[f64; 3]> = Vec::with_capacity(loop_positions.len());
+        for &p in &loop_positions {
+            let dup = loop_3d
+                .last()
+                .is_some_and(|&last| norm(sub(p, last)) <= merge_tol);
+            if !dup {
+                loop_3d.push(p);
             }
         }
-        if let (Some(&first), Some(&last)) = (kept.first(), kept.last())
-            && kept.len() > 1
-            && norm(sub(
-                out_positions[first as usize],
-                out_positions[last as usize],
-            )) <= merge_tol
+        if let (Some(&first), Some(&last)) = (loop_3d.first(), loop_3d.last())
+            && loop_3d.len() > 1
+            && norm(sub(first, last)) <= merge_tol
         {
-            remap.insert(last, first);
-            kept.pop();
+            loop_3d.pop();
         }
-        if !remap.is_empty() {
-            for t in &mut out_triangles {
-                for v in t.iter_mut() {
-                    if let Some(&r) = remap.get(v) {
-                        *v = r;
-                    }
-                }
-            }
-            // A top-cap triangle degenerate after the remap (two of its
-            // corners merged into the same vertex) contributes no area
-            // and would make the plug non-manifold at that corner;
-            // dropped, same as any other degenerate triangle.
-            out_triangles.retain(|t| t[0] != t[1] && t[1] != t[2] && t[2] != t[0]);
-        }
-        if kept.len() < 3 {
+        if loop_3d.len() < 3 {
             continue;
         }
-        let outer: Vec<[f64; 3]> = kept
+        // Projected to 2D (the loop's own direction runs opposite to
+        // how it bounds the patch it closes off —
+        // `fill_holes::triangulate`'s own convention — so reversed
+        // here to wind the same way the region's triangles do, CCW
+        // seen from `normal`).
+        let polygon: Vec<[f64; 2]> = loop_3d
             .iter()
-            .map(|&vid| out_positions[vid as usize])
+            .rev()
+            .map(|p| [dot(*p, u), dot(*p, v)])
             .collect();
-        let inner: Vec<[f64; 3]> = kept
-            .iter()
-            .map(|&vid| {
-                let n = vertex_normal(vid as usize);
-                let p = out_positions[vid as usize];
-                std::array::from_fn(|k| p[k] - n[k] * span)
-            })
-            .collect();
+        let mean_z = loop_3d.iter().map(|p| dot(*p, normal)).sum::<f64>() / loop_3d.len() as f64;
+        let inset = inset_polygon(&polygon, wall);
+        let ears = ear_clip(&inset).ok_or_else(|| {
+            failed(
+                "open_through_region_too_curved",
+                "The picked surface curves too much, relative to the wall thickness, for a straight opening: shrinking it inward by the wall crossed itself. Pick a flatter or larger region, or use a thinner wall.".into(),
+            )
+        })?;
+        let to_3d = |p: [f64; 2], along_normal: f64| -> [f64; 3] {
+            std::array::from_fn(|k| u[k] * p[0] + v[k] * p[1] + normal[k] * along_normal)
+        };
         let base = out_positions.len() as u32;
-        out_positions.extend(inner.iter().copied());
-        let m = outer.len() as u32;
-        let outer_ids: Vec<u32> = kept.clone();
-        let inner_ids: Vec<u32> = (0..m).map(|i| base + i).collect();
-        // The side wall: a ruled strip between the loop and its inward
-        // copy. The loop's own direction runs opposite to how it
-        // bounds the patch it closes off (`fill_holes::triangulate`'s
-        // own convention), so each edge is walked backwards here to
-        // face the wall outward.
-        for i in 0..m as usize {
-            let j = (i + 1) % m as usize;
-            let (a, b) = (outer_ids[j], outer_ids[i]);
-            let (a2, b2) = (inner_ids[j], inner_ids[i]);
+        let n = inset.len() as u32;
+        let top_z = mean_z + margin;
+        let bottom_z = mean_z - depth;
+        out_positions.extend(inset.iter().map(|&p| to_3d(p, top_z)));
+        out_positions.extend(inset.iter().map(|&p| to_3d(p, bottom_z)));
+        let (top_ids, bottom_ids): (Vec<u32>, Vec<u32>) = (
+            (base..base + n).collect(),
+            (base + n..base + 2 * n).collect(),
+        );
+        // The top cap, facing outward (+normal): the ears as found (the
+        // inset polygon is CCW seen from `normal`, same as the region).
+        for &[a, b, c] in &ears {
+            out_triangles.push([top_ids[a], top_ids[b], top_ids[c]]);
+        }
+        // The bottom cap, facing inward (-normal): the same ears,
+        // reversed.
+        for &[a, b, c] in &ears {
+            out_triangles.push([bottom_ids[a], bottom_ids[c], bottom_ids[b]]);
+        }
+        // The side wall: a ruled strip between the two rings, facing
+        // outward.
+        for i in 0..n as usize {
+            let j = (i + 1) % n as usize;
+            let (a, b) = (top_ids[i], top_ids[j]);
+            let (a2, b2) = (bottom_ids[i], bottom_ids[j]);
             out_triangles.push([a, b, b2]);
             out_triangles.push([a, b2, a2]);
         }
-        // The bottom cap: the loop's own 2D projection along the
-        // region's average normal, ear-clipped once and reused for the
-        // inner copy, facing inward. The projection only has to be a
-        // simple (non-self-crossing) polygon, which holds as long as
-        // the picked region doesn't double back on itself more than the
-        // average normal can resolve.
-        // The inner copy's own projection: each vertex moved along its
-        // own normal, not one shared direction, so it isn't simply the
-        // outer loop's projection translated — it needs its own ears.
-        let polygon: Vec<[f64; 2]> = inner.iter().map(|p| [dot(*p, u), dot(*p, v)]).collect();
-        let ears = ear_clip(&polygon).ok_or_else(|| {
-            failed(
-                "open_through_region_degenerate",
-                "The picked surface's outline can't be closed into a flat cap (it may cross itself). Pick a different region.".into(),
-            )
-        })?;
-        for [a, b, c] in ears {
-            out_triangles.push([inner_ids[a], inner_ids[c], inner_ids[b]]);
-        }
+    }
+    if out_triangles.is_empty() {
+        return Ok(None);
     }
     let plug = Mesh::new(out_positions, out_triangles).map_err(geometry)?;
     Ok(Some(plug))
@@ -1386,6 +1326,61 @@ fn orthonormal_basis(normal: [f64; 3]) -> ([f64; 3], [f64; 3]) {
     let x = z.any_orthonormal_vector();
     let y = z.cross(x);
     (x.to_array(), y.to_array())
+}
+
+/// `polygon` (2D, simple, CCW or CW, `n >= 3`) moved inward by `dist`
+/// (perpendicular to each edge): at vertex `i`, the mitered offset of
+/// its two adjacent edges' own inward normals — `offset / sin(half the
+/// turn angle)` along their bisector, which is exactly `dist`
+/// perpendicular to each edge meeting there (standard polygon-offset
+/// construction; a vertex sharper than about 1 degree, where the
+/// miter would run away to a spike, is pinned to its own inward normal
+/// bisector direction scaled to `dist` instead, never materially wrong
+/// for a cap boundary this is ever run on). The cavity's own outline
+/// at the cap plane is exactly this, `dist = wall_thickness`, in from
+/// the picked region's own boundary (owner 2026-11-14 follow-up: the
+/// previous plug used the picked region's own, unshrunk boundary,
+/// removing the whole wall ring under it, not just the cavity).
+fn inset_polygon(polygon: &[[f64; 2]], dist: f64) -> Vec<[f64; 2]> {
+    let n = polygon.len();
+    let signed_area: f64 = (0..n)
+        .map(|i| {
+            let (a, b) = (polygon[i], polygon[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f64>()
+        * 0.5;
+    // Inward is to the left of each directed edge for a CCW polygon
+    // (rotating the edge direction 90 degrees CCW: (dx,dy) -> (-dy,dx)),
+    // to the right for a CW one.
+    let sign = if signed_area >= 0.0 { 1.0 } else { -1.0 };
+    let edge_inward_normal = |a: [f64; 2], b: [f64; 2]| -> [f64; 2] {
+        let e = [b[0] - a[0], b[1] - a[1]];
+        let len = (e[0] * e[0] + e[1] * e[1]).sqrt().max(1e-300);
+        [-sign * e[1] / len, sign * e[0] / len]
+    };
+    (0..n)
+        .map(|i| {
+            let (prev, cur, next) = (polygon[(i + n - 1) % n], polygon[i], polygon[(i + 1) % n]);
+            let n0 = edge_inward_normal(prev, cur);
+            let n1 = edge_inward_normal(cur, next);
+            let bisector = [n0[0] + n1[0], n0[1] + n1[1]];
+            let blen = (bisector[0] * bisector[0] + bisector[1] * bisector[1]).sqrt();
+            // sin(half the turn angle) = blen / 2 for two unit normals'
+            // sum (half-angle formula); below about 1 degree's worth
+            // the miter is pinned, not let run to a spike.
+            let half_sin = (blen / 2.0).max(0.0087);
+            let scale = dist / half_sin;
+            if blen < 1e-12 {
+                // Normals cancel (a 180 degree fold back): offset along
+                // either one, both the same distance either way.
+                [cur[0] + n0[0] * dist, cur[1] + n0[1] * dist]
+            } else {
+                let u = [bisector[0] / blen, bisector[1] / blen];
+                [cur[0] + u[0] * scale, cur[1] + u[1] * scale]
+            }
+        })
+        .collect()
 }
 
 /// A simple polygon's ears (index triples into `p`, winding the same way
@@ -1470,9 +1465,9 @@ fn open_through(
     // Clear of the surface itself (never exactly coincident with the
     // boolean tool), and deep enough past the inner surface to clear
     // the whole wall under the region with room to spare.
-    let outward_margin = 2.0 * cell;
+    let outward_margin = 4.0 * cell;
     let depth = plug_margin(wall, cell);
-    let Some(plug) = through_plug(input, faces, outward_margin, depth)? else {
+    let Some(plug) = through_plug(input, faces, wall, outward_margin, depth)? else {
         return Err(failed(
             "open_through_region_invalid",
             "The picked surface region isn't a patch with a boundary on this object (or no listed face is still live). Pick the surface again.".into(),
@@ -1531,6 +1526,24 @@ fn open_through(
         return Err(failed(
             "open_through_region_too_curved",
             "The picked surface curves too much, relative to the wall thickness, for a straight opening: it would move part of the surface outside the picked region. Pick a flatter or smaller region, or use a thinner wall.".into(),
+        ));
+    }
+    // The whole result must be one connected surface: the opening's
+    // whole point is to join the hollow inside to the outside (a bowl,
+    // not a solid with a sealed cavity sitting inside it). A plug whose
+    // depth outruns the surface's own curvature can slice clean
+    // through the shell at a smaller cross-section elsewhere, cutting
+    // the inner wall off from the rim without moving or removing any
+    // single face by itself — D4-valid as two separate closed shells,
+    // the cavity never actually opened (a hemisphere's rim losing its
+    // own wall thickness was exactly this; owner 2026-11-14 follow-up).
+    let components = a.mesh.topology_with(ctx)?.components.len();
+    if components > 1 {
+        return Err(failed(
+            "open_through_region_too_curved",
+            format!(
+                "The picked surface curves too much, relative to the wall thickness, for a straight opening: the result would be {components} separate shells, not one open bowl. Pick a flatter or smaller region, or use a thinner wall."
+            ),
         ));
     }
     let row = serde_json::json!({
@@ -2078,7 +2091,7 @@ mod through_plug_tests {
     #[test]
     fn a_flat_disk_s_plug_is_a_valid_solid() {
         let (disk, faces) = flat_cap(17.3, 96);
-        let plug = through_plug(&disk, &faces, 1.0, 4.0).unwrap().unwrap();
+        let plug = through_plug(&disk, &faces, 2.0, 1.0, 4.0).unwrap().unwrap();
         let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
         let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
         mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
@@ -2143,7 +2156,7 @@ mod through_plug_tests {
             .map(|(f, _)| f)
             .collect();
         assert!(!top.is_empty());
-        let plug = through_plug(&solid, &top, 0.0, 4.0).unwrap().unwrap();
+        let plug = through_plug(&solid, &top, 2.0, 0.0, 4.0).unwrap().unwrap();
         let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
         let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
         mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
@@ -2236,7 +2249,7 @@ mod through_plug_tests {
         let nudged = p.map(|c| c + f64::EPSILON.max(c.abs() * f64::EPSILON));
         edit.move_vertex(mf_geometry::VertexId(1), nudged).unwrap();
         disk = edit.finish().unwrap().0;
-        let plug = through_plug(&disk, &faces, 1.0, 4.0).unwrap().unwrap();
+        let plug = through_plug(&disk, &faces, 2.0, 1.0, 4.0).unwrap().unwrap();
         let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
         let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
         mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
@@ -2255,7 +2268,7 @@ mod through_plug_tests {
         let sphere = mf_fixtures::scaled(&mf_fixtures::uv_sphere(48, 96), 20.0);
         let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
         let raw: std::collections::BTreeMap<String, String> = [
-            ("plane_point", "0,0,10".to_string()),
+            ("plane_point", "0,0,1.3".to_string()),
             ("plane_normal", "0,0,1".to_string()),
             ("keep", "above".to_string()),
             ("cap", "true".to_string()),

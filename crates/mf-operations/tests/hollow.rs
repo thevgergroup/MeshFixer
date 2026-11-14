@@ -474,6 +474,10 @@ fn hollow_settings_are_in_document_units_under_a_scaled_placement() {
 /// is for. Returns the dome and its cap's input-face seeds (the faces
 /// `mesh.split_plane` created to close it).
 fn split_sphere_cap(radius: f64, at: f64) -> (Mesh, Vec<FaceId>) {
+    split_sphere_cap_at(radius, at, 48, 96)
+}
+
+fn split_sphere_cap_at(radius: f64, at: f64, rings: u32, segments: u32) -> (Mesh, Vec<FaceId>) {
     let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
     let raw: BTreeMap<String, String> = [
         ("plane_point", format!("0,0,{at}")),
@@ -485,7 +489,7 @@ fn split_sphere_cap(radius: f64, at: f64) -> (Mesh, Vec<FaceId>) {
     .map(|(k, v)| (k.to_string(), v))
     .collect();
     let params = spec.validate(&raw).unwrap();
-    let sphere = scaled(&uv_sphere(48, 96), radius);
+    let sphere = scaled(&uv_sphere(rings, segments), radius);
     let out = find("mesh.split_plane")
         .unwrap()
         .execute_doc(
@@ -533,7 +537,7 @@ fn faces_param(faces: &[FaceId]) -> String {
 /// "planar split cap" case this feature is for).
 #[test]
 fn hollow_open_through_a_split_cap_gives_an_open_topped_shell() {
-    let (dome, cap) = split_sphere_cap(20.0, 10.0);
+    let (dome, cap) = split_sphere_cap(20.0, 0.0);
     let (out, report) = run(
         &dome,
         &[
@@ -581,6 +585,127 @@ fn hollow_open_through_a_split_cap_gives_an_open_topped_shell() {
     assert_eq!(topo.boundary_loops.len(), 0, "{report}");
 }
 
+/// The owner's own case (2026-11-14 follow-up): Hollow with
+/// `open_through` on the bottom half of a split sphere (a hemisphere)
+/// must leave its rim at the cut height, with the full wall thickness
+/// — not with the whole cap region's radius cut away, which took the
+/// rim's own wall down with it (the bug: the plug was the full cap
+/// extruded inward, so it cut the outer wall ring too; the fix: the
+/// plug is the cap shrunk inward by the wall thickness, the cavity's
+/// own outline at the cap plane).
+#[test]
+fn hollow_open_through_a_hemisphere_keeps_the_rim_at_the_cut_height_and_full_thickness() {
+    let radius = 20.0;
+    let wall = 2.0;
+    let cell = 0.5;
+    let (dome, cap) = split_sphere_cap(radius, 0.0);
+    let (out, report) = run(
+        &dome,
+        &[
+            ("wall_thickness", &wall.to_string()),
+            ("inner_detail", &cell.to_string()),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&cap)),
+        ],
+    )
+    .unwrap();
+    assert_solid(&out);
+    let topo = inspect(&out);
+    assert_eq!(topo.components, 1, "{report}");
+    assert_eq!(topo.boundary_loops.len(), 0, "{report}");
+
+    // The rim: vertices near the cap's own plane (z = 0) whose radius
+    // sits between the inner wall (radius ~ wall in from the outer
+    // surface) and the outer surface itself — the ring the plug's own
+    // side wall cut, where the outer and inner surfaces now meet.
+    let rim: Vec<[f64; 3]> = out
+        .vertices()
+        .map(|(_, p)| p)
+        .filter(|p| p[2].abs() < cell * 2.0)
+        .collect();
+    assert!(!rim.is_empty(), "there should be a rim near z = 0");
+
+    // The rim height equals the cut plane height (z = 0) within one
+    // cell: every rim vertex is already filtered to within 2 cells of
+    // it above, so this restates the bound tightly on the filtered set
+    // itself (the outer ones, at the true cut height exactly, since
+    // the outer surface is bit-identical there).
+    let outer_rim_z: Vec<f64> = rim
+        .iter()
+        .filter(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt() > radius - cell)
+        .map(|p| p[2])
+        .collect();
+    assert!(!outer_rim_z.is_empty(), "no outer rim vertex found");
+    for &z in &outer_rim_z {
+        assert!(
+            z.abs() <= cell,
+            "outer rim at z={z}, expected within {cell} of 0"
+        );
+    }
+
+    // The rim wall thickness: the gap between the outer rim's radius
+    // (the original sphere's own radius, unchanged) and the inner
+    // rim's radius (the plug's own inset boundary, nominally
+    // radius - wall) equals wall_thickness within one cell.
+    let radii: Vec<f64> = rim
+        .iter()
+        .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+        .collect();
+    let outer_radius = radii.iter().cloned().fold(0.0_f64, f64::max);
+    let inner_radius = radii.iter().cloned().fold(f64::INFINITY, f64::min);
+    assert!(
+        (outer_radius - radius).abs() <= cell,
+        "outer rim radius {outer_radius}, expected near {radius}"
+    );
+    let measured_wall = outer_radius - inner_radius;
+    assert!(
+        (measured_wall - wall).abs() <= cell,
+        "rim wall thickness {measured_wall}, expected near {wall} (report: {report})"
+    );
+
+    // The outer surface is bit-identical everywhere except the cap: a
+    // face outside the picked region may get a new id if the boolean
+    // kernel's own local window around the opening touched it (same as
+    // any other cut), but one that's still live at its original id
+    // never moves, and most of the outer surface (far from the cut)
+    // keeps its id outright.
+    let mut unchanged = 0;
+    for (f, t) in dome.faces() {
+        if cap.contains(&f) || !out.is_face_live(f) {
+            continue;
+        }
+        let before: Vec<[f64; 3]> = t.iter().map(|&v| dome.corner_position(v)).collect();
+        let after: Vec<[f64; 3]> = out
+            .face(f)
+            .unwrap()
+            .iter()
+            .map(|&v| out.corner_position(v))
+            .collect();
+        assert_eq!(before, after, "face {f:?} outside the cap moved");
+        unchanged += 1;
+    }
+    assert!(unchanged > 0);
+    // Far from the cap (well outside the kernel's own local window),
+    // every face keeps its id outright.
+    let far_unchanged = dome
+        .faces()
+        .filter(|(f, t)| {
+            !cap.contains(f)
+                && t.iter().all(|&v| {
+                    let p = dome.corner_position(v);
+                    p[2] > wall * 4.0
+                })
+        })
+        .count();
+    assert!(far_unchanged > 0);
+    for (f, t) in dome.faces() {
+        if cap.contains(&f) || !t.iter().all(|&v| dome.corner_position(v)[2] > wall * 4.0) {
+            continue;
+        }
+        assert_eq!(out.face(f), Some(t), "far face {f:?} should keep its id");
+    }
+}
+
 /// `open_through` needs a picked region; refused by name when it's on
 /// with no faces given.
 #[test]
@@ -595,6 +720,48 @@ fn hollow_open_through_without_faces_is_refused() {
     )
     .unwrap_err();
     assert_eq!(code_of(&err), "open_through_needs_faces");
+}
+
+/// A cap close enough to a sphere's pole that the dome's own radius
+/// shrinks below the plug's (inset) footprint before its depth clears
+/// the wall is refused by name, not silently cut — severing the outer
+/// surface in two rather than opening a rim (owner 2026-11-14's own
+/// hemisphere bug, caught here one step short of ever reaching D4).
+#[test]
+fn hollow_open_through_too_close_to_the_pole_is_refused_not_corrupted() {
+    let (dome, cap) = split_sphere_cap(20.0, 10.0);
+    let err = run(
+        &dome,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&cap)),
+        ],
+    )
+    .unwrap_err();
+    assert_eq!(code_of(&err), "open_through_region_too_curved");
+}
+
+/// Automatic detail (a finer cell than a fixed 0.5 for this object's
+/// size) still clears through to the inner wall cleanly: the margin
+/// and depth scale with the cell either way (owner 2026-11-14's own
+/// GUI repro, which used the panel's automatic default).
+#[test]
+fn hollow_open_through_works_with_automatic_detail_too() {
+    let (dome, cap) = split_sphere_cap_at(20.0, 1.3, 32, 48);
+    let (out, report) = run(
+        &dome,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&cap)),
+        ],
+    )
+    .unwrap();
+    assert_solid(&out);
+    assert_eq!(inspect(&out).components, 1, "{report}");
 }
 
 // ---------------------------------------------------------------------
