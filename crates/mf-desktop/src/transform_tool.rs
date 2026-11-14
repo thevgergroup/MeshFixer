@@ -62,9 +62,6 @@ pub struct Dragging {
 #[derive(Debug)]
 pub struct TransformTool {
     pub mode: GizmoMode,
-    /// Snapping (grid, 15°, steps of 10%, the plate) is on; Cmd/Ctrl
-    /// while dragging inverts it.
-    pub snap: bool,
     /// Scale fields move together.
     pub uniform: bool,
     /// The handle under the pointer.
@@ -78,7 +75,6 @@ impl Default for TransformTool {
     fn default() -> Self {
         TransformTool {
             mode: GizmoMode::Move,
-            snap: true,
             uniform: true,
             hover: None,
             dragging: None,
@@ -287,6 +283,43 @@ pub fn mm_per(unit: Unit) -> f64 {
         Unit::Foot => 304.8,
         Unit::Meter => 1000.0,
     }
+}
+
+/// The smallest a zoom-adaptive grid step's on-screen size is let fall
+/// (screen points): below this a step reads as "not really a grid"
+/// (ADR-0006 rule 3: "at least about 8 pt"). Matches the plate snap's
+/// own 8pt catch distance ([`mf_render::PlateSnap::within_pt`]), a
+/// separate, pre-existing feature this isn't replacing.
+const MIN_SNAP_PX: f64 = 8.0;
+
+/// The one shared snap step every gizmo tool calls (ADR-0006 rule 3: "no
+/// tool should have its own snap constant") — the Transform gizmo, Split's
+/// plane and print-volume box, and any future gizmo tool, all call this
+/// instead of keeping their own grid number. A 1-2-5-mm step, picked so
+/// it is at least [`MIN_SNAP_PX`] on screen at `cam`'s current zoom
+/// (measured at `pivot`), returned in document units alongside the mm
+/// value itself (for the tool hint, "snap 1 mm"). Replaces a fixed step
+/// in document units (`mf_render::Snap::default`'s old `grid: Some(1.0)`),
+/// which snapped every drag on a metre-scale document to zero, because
+/// "1 document unit" was 1000 mm there (the owner's stanford-bunny
+/// report, MF-OBJ-002) — "a literal length constant in document units is
+/// a bug" (ADR-0006 rule 3).
+pub fn snap_step(
+    cam: &mf_render::OrbitCamera,
+    pivot: DVec3,
+    view: (f64, f64),
+    unit: Unit,
+) -> (f64, f64) {
+    let mm = mm_per(unit);
+    let step_mm = mf_render::adaptive_grid_mm(cam, pivot, view, mm, MIN_SNAP_PX);
+    (step_mm / mm, step_mm)
+}
+
+/// The tool hint's snap clause ("snap 1 mm", "snap 0.5 mm"): `step_mm` as
+/// [`field_text`] gives it, so a sub-mm step (a micron-scale document)
+/// reads with no trailing zeros either.
+pub fn snap_hint(step_mm: f64) -> String {
+    format!("snap {} mm", field_text(step_mm))
 }
 
 /// `transform`'s linear part scaled by `factor` (its translation is

@@ -4524,3 +4524,536 @@ mod unit_parity {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// Gizmo snapping is zoom-adaptive and unit-aware (owner bug, MF-OBJ-002):
+// the gizmo's grid used to be a fixed 1 *document unit* step
+// (`mf_render::Snap::default`), which on the owner's metre-scale
+// stanford-bunny document was 1000 mm — every drag on the 0.15 m model
+// snapped to zero, reading as "the move handle wasn't working". The fix
+// (`transform_tool::snap_step`) picks a 1-2-5-mm step sized to stay
+// visible on screen at the current zoom, in document units, applied to
+// both the Transform gizmo and Split's plane gizmo.
+mod gizmo_snap {
+    use super::*;
+
+    /// `id`'s world-space bounding box, correct under rotation (unlike
+    /// the file-level `world_bounds`, which only adds translation —
+    /// fine for every other test here, none of which rotate the
+    /// object, but wrong once a test does): all 8 corners of the local
+    /// bounding box, carried through the transform's full linear part,
+    /// not just its translation column.
+    fn world_bounds_rotated(h: &Harness<'_, MeshFixerApp>, id: mf_command::ObjectId) -> Aabb {
+        let doc = h.state().session.document();
+        let o = doc.object(id).unwrap();
+        let bb = o.mesh().unwrap().bounding_box().unwrap();
+        let t = o.transform;
+        let m = glam::DMat3::from_cols(
+            DVec3::new(t[0], t[1], t[2]),
+            DVec3::new(t[3], t[4], t[5]),
+            DVec3::new(t[6], t[7], t[8]),
+        );
+        let translation = DVec3::new(t[9], t[10], t[11]);
+        let corners = [bb.min, bb.max].into_iter().flat_map(|p0| {
+            [bb.min, bb.max].into_iter().flat_map(move |p1| {
+                [bb.min, bb.max]
+                    .into_iter()
+                    .map(move |p2| DVec3::new(p0[0], p1[1], p2[2]))
+            })
+        });
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for c in corners {
+            let world = m * c + translation;
+            lo = lo.min(world);
+            hi = hi.max(world);
+        }
+        Aabb {
+            min: lo.to_array(),
+            max: hi.to_array(),
+        }
+    }
+
+    /// Opens the raw Stanford bunny scan (metre-scale, y-up, exactly as
+    /// the owner's file reads: 0.156 x 0.154 x 0.121 m — see
+    /// `hollow_acceptance::the_stanford_bunny_opened_in_metres`) as a
+    /// metre document, the owner's own exact first step. `None` (and a
+    /// recorded skip) if the fixture hasn't been fetched.
+    fn opened_bunny_in_metres(test: &str) -> Option<Harness<'static, MeshFixerApp>> {
+        let path = mf_fixtures::real::path("stanford-bunny.obj", test)?;
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = model.objects.into_iter().next().unwrap().mesh;
+        Some(opened_with_units(
+            vec![("bunny", bunny, at([0.0, 0.0, 0.0]))],
+            Unit::Meter,
+        ))
+    }
+
+    /// A point to grab (and the outward drag direction) on gizmo `g`'s
+    /// `handle`, read from its own drawn geometry — the same way
+    /// `x_arrow`/`handle_point` do for the Transform gizmo, generalised
+    /// to any gizmo (here, Split's).
+    fn axis_handle_point(
+        h: &Harness<'_, MeshFixerApp>,
+        g: &mf_render::Gizmo,
+        handle: mf_render::Handle,
+    ) -> (egui::Pos2, egui::Vec2) {
+        let app = h.state();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        let shape = g
+            .handles(&cam, view)
+            .into_iter()
+            .find(|s| s.handle == handle)
+            .unwrap_or_else(|| panic!("{handle:?} is drawn"));
+        let mf_render::HandleGeometry::Arrow {
+            shaft_start,
+            shaft_end,
+            ..
+        } = shape.geometry
+        else {
+            panic!("{handle:?}'s geometry isn't an arrow");
+        };
+        let mid = (
+            (shaft_start.0 + shaft_end.0) / 2.0,
+            (shaft_start.1 + shaft_end.1) / 2.0,
+        );
+        let dir = egui::vec2(
+            (shaft_end.0 - shaft_start.0) as f32,
+            (shaft_end.1 - shaft_start.1) as f32,
+        )
+        .normalized();
+        (
+            rect.left_top() + egui::vec2(mid.0 as f32, mid.1 as f32),
+            dir,
+        )
+    }
+
+    /// The owner's exact steps: open the bunny (metres), open Split,
+    /// choose Vertical Y, then drag the plane's move handle. Before the
+    /// fix, the gizmo's grid was a fixed 1 document unit (1000 mm on
+    /// this document), so every drag snapped to zero and the handle
+    /// read as broken; the plane must actually move and follow the
+    /// cursor along its own normal (+Y).
+    #[test]
+    fn split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny() {
+        require_gpu!(
+            "gizmo_snap::split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny"
+        );
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny",
+        ) else {
+            return;
+        };
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.get_by_label("Vertical Y").click();
+        settle(&mut h);
+        assert_eq!(h.state().split.mode, mf_render::GizmoMode::Move);
+        let n = h.state().split.normal();
+        assert!((n.y - 1.0).abs() < 1e-9, "{n:?}");
+        let before = h.state().split.point();
+
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_y) = axis_handle_point(&h, &g, mf_render::Handle::Axis(1));
+        // A real screen drag, well short of the gizmo's own 110pt arm,
+        // so it only ever tests the grid step, never the arm's length.
+        let to = p + dir_y * 40.0;
+        drag(&mut h, p, to, 10);
+        settle(&mut h);
+
+        let after = h.state().split.point();
+        assert!(
+            (after - before).length() > 1e-6,
+            "the plane's move handle didn't move it: before {before:?}, after {after:?}"
+        );
+        // Follows the cursor: the point moved along +Y (the dragged
+        // axis), clearly more than off-axis noise — the ray-plane drag
+        // math moves a little off the pure axis near the screen edge of
+        // the arm, on the order of a couple of grid steps, not a sign
+        // the drag went somewhere else entirely — and nowhere near 0,
+        // which an oversized (pre-fix) snap step would have clamped it
+        // to.
+        let moved = after - before;
+        assert!(moved.y > 0.01, "{moved:?}");
+        assert!(moved.x.abs() < moved.y * 0.2, "{moved:?}");
+        assert!(moved.z.abs() < moved.y * 0.2, "{moved:?}");
+    }
+
+    /// The shared Snap checkbox (owner, 2026-11-14: "can't we disable
+    /// snap?"), unchecked: dragging Split's plane on the metre bunny
+    /// moves smoothly — continuously tracking the cursor one pixel step
+    /// at a time, not jumping between quantised grid positions — the
+    /// same way Transform's own "Snap" checkbox has always let a drag
+    /// move freely when unchecked.
+    #[test]
+    fn split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny() {
+        require_gpu!(
+            "gizmo_snap::split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny"
+        );
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny",
+        ) else {
+            return;
+        };
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.get_by_label("Vertical Y").click();
+        settle(&mut h);
+        assert!(h.state().gizmo_snap, "snap is on by default");
+        h.state_mut().gizmo_snap = false;
+        settle(&mut h);
+
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_y) = axis_handle_point(&h, &g, mf_render::Handle::Axis(1));
+
+        // Drag one pixel at a time over a longer run than egui's own
+        // click-vs-drag deadzone (the first handful of pixel steps
+        // move nothing yet, while the pointer is still inside that
+        // deadzone — real UI behaviour, not a snap defect): once past
+        // it, every further pixel step should move the plane a little
+        // with no snap on, not sit on a handful of quantised
+        // positions. The back half of the run (steps 31-60, well clear
+        // of any deadzone) is what's checked.
+        let mut ys = Vec::new();
+        h.event(egui::Event::PointerMoved(p));
+        h.event(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        const STEPS: i32 = 60;
+        for i in 1..=STEPS {
+            let at = p + dir_y * i as f32;
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            ys.push(h.state().split.point().y);
+        }
+        h.event(egui::Event::PointerButton {
+            pos: p + dir_y * STEPS as f32,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        settle(&mut h);
+
+        let back_half = &ys[(STEPS as usize / 2)..];
+        let distinct = {
+            let mut sorted = back_half.to_vec();
+            sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+            sorted.len()
+        };
+        assert!(
+            distinct >= back_half.len() - 1,
+            "a smooth (unsnapped) drag should move on almost every pixel step, \
+             only {distinct} distinct positions out of {} steps: {ys:?}",
+            back_half.len()
+        );
+        assert!(
+            back_half.windows(2).all(|w| w[1] >= w[0] - 1e-9),
+            "a smooth drag along +Y should move monotonically: {ys:?}"
+        );
+    }
+
+    /// Transform move on the metre-scale bunny actually moves it: the
+    /// same fixed-1-document-unit grid bug affected the Transform
+    /// gizmo too (`app::transform_snap`), not just Split's.
+    #[test]
+    fn transform_move_on_the_metre_bunny_moves_it() {
+        require_gpu!("gizmo_snap::transform_move_on_the_metre_bunny_moves_it");
+        let Some(mut h) =
+            opened_bunny_in_metres("gizmo_snap::transform_move_on_the_metre_bunny_moves_it")
+        else {
+            return;
+        };
+        let id = id_of(&h, "bunny");
+        open_transform(&mut h);
+        settle(&mut h);
+        let before = transform_of(&h, id);
+        let history = history_len(&h);
+
+        let (p, dir_x) = x_arrow(&h);
+        let to = p + dir_x * 40.0;
+        drag(&mut h, p, to, 10);
+        wait_until(&mut h, "the move commits", |a| {
+            a.busy.is_none() && a.session.history_labels().len() == history + 1
+        });
+        settle(&mut h);
+
+        let after = transform_of(&h, id);
+        assert!(
+            after[9] > before[9] + 1e-6,
+            "the bunny didn't move: before {before:?}, after {after:?}"
+        );
+        assert_eq!(after[..9], before[..9], "only the translation changes");
+    }
+
+    /// Drags the Z-axis move handle so the plane's point lands on
+    /// `target_z` (document units), the same gizmo interaction the
+    /// owner used: each pass measures how much world Z the last screen
+    /// drag covered (and its sign, since whether the arm's on-screen
+    /// direction is +Z or -Z depends on the view), to work out the next
+    /// pixel delta — a perspective camera's screen-to-world ratio isn't
+    /// quite constant, so a few passes converge where one guess
+    /// wouldn't.
+    /// Drags the Z-axis move handle so the plane's point lands within
+    /// `tolerance` (document units) of `target_z`: a first calibration
+    /// drag measures how much world Z a screen point of drag covers
+    /// (and its sign, since whether the arm's on-screen direction is +Z
+    /// or -Z depends on the view), then a few passes correct for a
+    /// perspective camera's screen-to-world ratio not being quite
+    /// constant. Panics (with where it got stuck) if it never lands
+    /// within tolerance.
+    fn drag_split_plane_z_to(h: &mut Harness<'_, MeshFixerApp>, target_z: f64, tolerance: f64) {
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_z) = axis_handle_point(h, &g, mf_render::Handle::Axis(2));
+        const CALIBRATE_PX: f32 = 30.0;
+        let mut world_per_px = {
+            let before = h.state().split.point().z;
+            drag(h, p, p + dir_z * CALIBRATE_PX, 6);
+            settle(h);
+            let after = h.state().split.point().z;
+            assert!(
+                (after - before).abs() > 1e-9,
+                "the Z handle moved nothing on a {CALIBRATE_PX}pt drag (world {after} vs {before})"
+            );
+            (after - before) / CALIBRATE_PX as f64
+        };
+        for _ in 0..10 {
+            let z = h.state().split.point().z;
+            let remaining = target_z - z;
+            if remaining.abs() < tolerance {
+                return;
+            }
+            // Never a wild, possibly off-screen guess: capped to a
+            // screen-reasonable step even if `world_per_px` came out
+            // tiny (e.g. a snap step landed exactly on the calibration
+            // probe's end, moving it by ~0).
+            let px = (remaining / world_per_px).clamp(-500.0, 500.0) as f32;
+            drag(h, p, p + dir_z * px, 10);
+            settle(h);
+            let moved = h.state().split.point().z - z;
+            if moved.abs() > 1e-9 && px.abs() > 1e-6 {
+                world_per_px = moved / px as f64;
+            }
+        }
+        let z = h.state().split.point().z;
+        assert!(
+            (z - target_z).abs() < tolerance,
+            "dragging the Z handle never converged on {target_z}, stuck at {z}"
+        );
+    }
+
+    /// Splitting the bunny with a horizontal plane near its feet (its
+    /// bounding box's low Z), placed by *dragging the move handle*
+    /// (not a typed field) — the owner's own way of placing a plane —
+    /// succeeds, and the kept bottom part's own floor is flat and
+    /// capped: a zoom-adaptive grid step must still let a dragged plane
+    /// land close to a real surface, not snap it somewhere coarse.
+    #[test]
+    fn split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom() {
+        require_gpu!("gizmo_snap::split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom");
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom",
+        ) else {
+            return;
+        };
+        // Repair first (Split refuses an open mesh), same as
+        // `hollow_acceptance::the_stanford_bunny_opened_in_metres`.
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+
+        let id = id_of(&h, "bunny");
+        let bb0 = world_bounds(&h, id);
+        let low_z = bb0.min[2];
+        let height = bb0.max[2] - low_z;
+        // Near enough the feet that most of the bunny stays in the
+        // kept "Bottom" part's complement (document units: metres):
+        // within the bottom tenth of its own height, with a tolerance
+        // comfortably inside that band — loose enough for the
+        // zoom-adaptive grid's own step (a few mm here) and a
+        // perspective camera's screen-to-world ratio not being quite
+        // constant, but still nowhere near the bunny's middle.
+        let target_z = low_z + height * 0.05;
+        let tolerance = (height * 0.08).max(0.01);
+
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        let n = h.state().split.normal();
+        assert!(
+            (n.z - 1.0).abs() < 1e-9,
+            "a default plane's normal is +Z: {n:?}"
+        );
+        drag_split_plane_z_to(&mut h, target_z, tolerance);
+        let cut_z = h.state().split.point().z;
+        assert!(
+            cut_z < low_z + height * 0.2,
+            "the dragged plane should have landed near the feet, not the middle: {cut_z} (feet {low_z}, height {height})"
+        );
+
+        let names = cut_with_keep(&mut h, "Bottom");
+        assert_eq!(names, ["bunny (bottom)"], "{names:?}");
+        let kept = h
+            .state()
+            .session
+            .document()
+            .object(id_of(&h, "bunny (bottom)"))
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .clone();
+        let topo = kept.topology_with(&mf_runtime::RunContext::none()).unwrap();
+        assert_eq!(topo.boundary_edges, 0, "the cut's cap left the bottom open");
+        let bb = world_bounds(&h, id_of(&h, "bunny (bottom)"));
+        assert!(
+            bb.max[2] <= cut_z + 1e-6,
+            "the kept bottom part reaches above the cut: {bb:?}"
+        );
+        assert!(
+            (bb.min[2] - low_z).abs() < 1e-6,
+            "the kept bottom part should still reach down to the original feet: {bb:?}"
+        );
+    }
+
+    /// An mm-scale model still snaps to a plain 1 mm step at a normal
+    /// zoom (the fix is zoom-*adaptive*, not merely "always finer"): the
+    /// zoom-adaptive grid must not regress the common case every other
+    /// test in this file already relies on implicitly.
+    #[test]
+    fn mm_model_snaps_to_one_millimetre_at_normal_zoom() {
+        require_gpu!("gizmo_snap::mm_model_snaps_to_one_millimetre_at_normal_zoom");
+        let mut h = opened(vec![("cube", mf_fixtures::cube(40.0), at([0.0; 3]))]);
+        open_transform(&mut h);
+        settle(&mut h);
+        let app = h.state();
+        let g = app.transform_gizmo().unwrap();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        let (grid, step_mm) =
+            mf_desktop::transform_tool::snap_step(&cam, g.pivot, view, Unit::Millimeter);
+        assert!(
+            (step_mm - 1.0).abs() < 1e-9,
+            "a normal-zoom mm document should still pick a 1 mm step, got {step_mm} mm"
+        );
+        assert!(
+            (grid - 1.0).abs() < 1e-9,
+            "{grid} document units != 1 mm here"
+        );
+    }
+
+    /// The owner's follow-up report (2026-11-14): import the bunny
+    /// (metres), rotate it 90 degrees about X, drop it to the plate, fill
+    /// its holes, *then* open Split. Before this fix, Split's plane
+    /// (`SplitState::placed_for`) cached the *selection* it was last
+    /// centred for, not that selection's transform — so once Split had
+    /// placed the plane for "bunny" at all (even in an earlier, unrelated
+    /// open of the tool), a later open with the same selection but a
+    /// moved bunny left the plane exactly where it used to be: Point
+    /// showed (0, 0, 0), off to the side of the rotated, dropped model,
+    /// and the move handle read as broken because it was there on the
+    /// gizmo's own small on-screen arm, just nowhere near the bunny.
+    /// Opening Split must re-centre the plane on the selection's CURRENT
+    /// world bounding box, on open and after any transform change.
+    #[test]
+    fn split_recentres_the_plane_after_a_rotate_and_drop_to_plate() {
+        require_gpu!("gizmo_snap::split_recentres_the_plane_after_a_rotate_and_drop_to_plate");
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_recentres_the_plane_after_a_rotate_and_drop_to_plate",
+        ) else {
+            return;
+        };
+        let id = id_of(&h, "bunny");
+
+        // Open Split once already (so `placed_for` caches "bunny" at its
+        // *original* placement) before the rotate and drop — reproducing
+        // the owner's own session shape, where Split wasn't necessarily
+        // opened for the first time afterwards.
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        open_transform(&mut h);
+        settle(&mut h);
+
+        // Rotate 90 degrees about X, about the bounding-box centre.
+        let before = h.state().session.document().object(id).unwrap().transform;
+        let centre = {
+            let doc = h.state().session.document();
+            let mesh = doc.object(id).unwrap().mesh().unwrap();
+            DVec3::from(mesh.bounding_box().unwrap().center())
+        };
+        let rotated = mf_desktop::transform_tool::with_rotation_scale(
+            &before,
+            centre,
+            DVec3::new(90.0, 0.0, 0.0),
+            DVec3::ONE,
+        )
+        .unwrap();
+        h.state_mut().active = Some(id);
+        h.state_mut()
+            .commit_transform(id, rotated, "Rotated bunny 90 about X".into());
+        wait_until(&mut h, "the rotate commits", |a| {
+            a.busy.is_none() && a.session.document().object(id).unwrap().transform != before
+        });
+        settle(&mut h);
+
+        // Drop to plate.
+        let before_drop = h.state().session.document().object(id).unwrap().transform;
+        h.state_mut().drop_to_plate();
+        wait_until(&mut h, "drop to plate commits", |a| {
+            a.busy.is_none() && a.session.document().object(id).unwrap().transform != before_drop
+        });
+        settle(&mut h);
+
+        // Fill holes (Repair).
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+
+        // The bunny's own current world bounds, after rotate and drop
+        // (rotation-aware — the bunny is no longer axis-aligned with its
+        // local box after a 90-degree turn).
+        let bb = world_bounds_rotated(&h, id);
+        let expected_centre = (DVec3::from(bb.min) + DVec3::from(bb.max)) * 0.5;
+
+        // Now open Split: the plane must be centred on the CURRENT
+        // bounds, not wherever it was left before the rotate.
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        let point = h.state().split.point();
+        assert!(
+            (point - expected_centre).length() < 1e-6,
+            "the plane didn't re-centre on the rotated, dropped bunny: \
+             point {point:?}, expected near {expected_centre:?} (bounds {bb:?})"
+        );
+
+        // And the move handle actually moves it from there (not stuck,
+        // the owner's literal complaint).
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_z) = axis_handle_point(&h, &g, mf_render::Handle::Axis(2));
+        drag(&mut h, p, p + dir_z * 40.0, 10);
+        settle(&mut h);
+        let after = h.state().split.point();
+        assert!(
+            (after - point).length() > 1e-6,
+            "the plane's move handle still didn't move it: {point:?} -> {after:?}"
+        );
+    }
+}

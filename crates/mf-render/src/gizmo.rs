@@ -1341,6 +1341,70 @@ pub struct PlateSnap {
     pub within_pt: f64,
 }
 
+/// The 1-2-5 sequence a zoom-adaptive grid step is chosen from (millimetres),
+/// spanning a 0.001 mm micron-model floor to a 5 m whole-building ceiling —
+/// wide enough that [`adaptive_grid_mm`] always finds a step whose on-screen
+/// size clears `min_px`, however far zoomed in or out the camera is.
+const STEP_SEQUENCE_MM: [f64; 20] = [
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
+    200.0, 500.0, 1000.0, 5000.0,
+];
+
+/// A grid step (millimetres, from the 1-2-5 sequence) sized so it is at
+/// least `min_px` screen points at `cam`'s current zoom, measured at
+/// `pivot` (MF-OBJ-002: a fixed 1-document-unit grid snapped every drag on
+/// a metre-scale model to zero, because a whole document unit was 1000 mm).
+/// `mm_per_unit` is [`crate::camera`]-independent document-to-mm scale
+/// (`mm_per` in the desktop crate); the step is picked in mm (not document
+/// units) so the same screen-size rule gives the same on-screen step
+/// regardless of the document's own units, then the caller converts it
+/// back to document units for [`Snap::grid`].
+///
+/// Falls back to the sequence's own largest step if even that still
+/// projects under `min_px` (an extreme zoom-out, or a degenerate camera):
+/// snapping then does less than asked rather than silently vanishing.
+pub fn adaptive_grid_mm(
+    cam: &OrbitCamera,
+    pivot: DVec3,
+    view: (f64, f64),
+    mm_per_unit: f64,
+    min_px: f64,
+) -> f64 {
+    // Pixels per mm at the pivot, probed along a screen-facing axis of the
+    // camera (never end-on, unlike a world axis under some views) so the
+    // probe's own projection never degenerates.
+    let right = {
+        let fwd = (cam.target - cam.eye()).normalize_or_zero();
+        let fallback = DVec3::X;
+        let dir = fwd.cross(DVec3::Z);
+        if dir.length_squared() < 1e-9 {
+            fallback
+        } else {
+            dir.normalize()
+        }
+    };
+    // `one_mm_in_units`: exactly 1 mm of real distance, in document
+    // units (`mm_per_unit` document units make 1 mm, so 1 mm is
+    // `1/mm_per_unit` document units) — so the probe's own projected
+    // length *is* pixels-per-mm directly, with no further division by
+    // a quantity that's already "one" by construction (that was the
+    // bug: dividing by the document-unit probe length again double
+    // counts `mm_per_unit`, so an inch or metre document picked a step
+    // many times too fine to ever clear `min_px`).
+    let one_mm_in_units = 1.0 / mm_per_unit.max(1e-12);
+    let px_per_mm = projected_length_px(cam, pivot, view, pivot, right, one_mm_in_units)
+        .filter(|px| *px > 1e-9)
+        .unwrap_or(0.0);
+    if px_per_mm <= 0.0 {
+        return STEP_SEQUENCE_MM[STEP_SEQUENCE_MM.len() - 1];
+    }
+    STEP_SEQUENCE_MM
+        .iter()
+        .copied()
+        .find(|&mm| mm * px_per_mm >= min_px)
+        .unwrap_or(STEP_SEQUENCE_MM[STEP_SEQUENCE_MM.len() - 1])
+}
+
 fn round_to_step(value: f64, step: f64) -> f64 {
     if step <= 0.0 {
         value

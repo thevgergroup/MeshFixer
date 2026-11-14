@@ -7,8 +7,8 @@
 use glam::DVec3;
 use mf_render::OrbitCamera;
 use mf_render::{
-    Decomposed, Gizmo, GizmoMode, Handle, HandleGeometry, PlateSnap, Snap, compose, decompose,
-    model_matrix,
+    Decomposed, Gizmo, GizmoMode, Handle, HandleGeometry, PlateSnap, Snap, adaptive_grid_mm,
+    compose, decompose, model_matrix,
 };
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -312,6 +312,127 @@ fn grid_snap_rounds_translation_to_1mm() {
     let result = drag.update(end_px, &snap);
     let rounded = (result[9] / 1.0).round() * 1.0;
     assert!((result[9] - rounded).abs() < 1e-9, "{result:?}");
+}
+
+// ---------------------------------------------------------------------
+// `adaptive_grid_mm` (ADR-0006 rule 3): the one shared, zoom- and
+// unit-adaptive snap step every gizmo tool is meant to call through
+// (`mf_desktop::transform_tool::snap_step`), instead of each tool
+// keeping its own fixed grid constant (MF-OBJ-002's bug: a fixed 1
+// *document unit* step was 1000 mm on a metre-scale document, snapping
+// every drag on a 0.15 m model to zero).
+// ---------------------------------------------------------------------
+
+/// A step's own projected screen size, probed the same way
+/// `adaptive_grid_mm` does internally (a right-facing direction from
+/// the pivot, so it's never end-on under any view).
+fn step_px(cam: &OrbitCamera, pivot: DVec3, mm_per_unit: f64, step_mm: f64) -> f64 {
+    let right = {
+        let fwd = (cam.target - cam.eye()).normalize_or_zero();
+        let dir = fwd.cross(DVec3::Z);
+        if dir.length_squared() < 1e-9 {
+            DVec3::X
+        } else {
+            dir.normalize()
+        }
+    };
+    let a = screen_of(cam, pivot, pivot);
+    let b = screen_of(cam, pivot, pivot + right * (step_mm / mm_per_unit));
+    (a.0 - b.0).hypot(a.1 - b.1)
+}
+
+/// On an mm document (1 document unit = 1 mm) at a normal zoom — a
+/// camera distance comparable to the size of an ordinary desktop part,
+/// unlike [`test_camera`]'s own distance 10 (an extreme close-up on an
+/// mm scale, which correctly earns a sub-mm step) — the step is a
+/// plain 1 mm: the common case every other test in the desktop crate
+/// already assumes.
+#[test]
+fn adaptive_grid_mm_is_one_millimetre_at_normal_zoom_on_an_mm_document() {
+    let cam = OrbitCamera {
+        distance: 80.0, // framing a ~50 mm part, comfortably
+        ..test_camera()
+    };
+    let step = adaptive_grid_mm(&cam, DVec3::ZERO, VIEW, 1.0, 8.0);
+    assert_eq!(step, 1.0, "expected the sequence's first, finest step");
+}
+
+/// Zooming out (a larger camera distance, so the same world length
+/// covers fewer screen points) picks a coarser step from the 1-2-5
+/// sequence; zooming back in picks a finer one — the step tracks the
+/// zoom, not a fixed document-unit number.
+#[test]
+fn adaptive_grid_mm_coarsens_when_zoomed_out_and_refines_when_zoomed_in() {
+    let near = OrbitCamera {
+        distance: 1.0,
+        ..test_camera()
+    };
+    let far = OrbitCamera {
+        distance: 1000.0,
+        ..test_camera()
+    };
+    let near_step = adaptive_grid_mm(&near, DVec3::ZERO, VIEW, 1.0, 8.0);
+    let far_step = adaptive_grid_mm(&far, DVec3::ZERO, VIEW, 1.0, 8.0);
+    assert!(
+        far_step > near_step,
+        "zoomed far out should pick a coarser step: near {near_step} mm, far {far_step} mm"
+    );
+}
+
+/// On a metre-scale document (1 document unit = 1000 mm, the owner's
+/// stanford-bunny report, MF-OBJ-002), the step is still chosen in mm
+/// and converted — nothing here is a document-units constant, so it
+/// never degenerates to "1 document unit" (1000 mm, unusable on a 0.15
+/// m model).
+#[test]
+fn adaptive_grid_mm_is_mm_scaled_not_a_document_unit_constant() {
+    let cam = OrbitCamera {
+        distance: 0.3, // close, as if framing a 0.15 m bunny
+        ..test_camera()
+    };
+    let step_mm = adaptive_grid_mm(&cam, DVec3::ZERO, VIEW, 1000.0, 8.0);
+    assert!(
+        step_mm < 1000.0,
+        "a metre document must not fall back to a whole 1000 mm step: got {step_mm} mm"
+    );
+    assert!(step_mm > 0.0);
+}
+
+/// The chosen step's own on-screen size clears `min_px` (ADR-0006: "at
+/// least about 8 pt") — the rule the whole function exists to satisfy —
+/// across a spread of zoom levels and document scales, except where
+/// even the sequence's own largest step (5 m) can't (an extreme
+/// zoom-out so wide a 5 m grid still reads under 8pt): there, the
+/// documented fallback applies — the largest step, not a crash or a
+/// silently vanishing one.
+#[test]
+fn adaptive_grid_mm_always_clears_the_minimum_screen_size() {
+    let cam = test_camera();
+    for distance in [0.5, 1.0, 10.0, 100.0] {
+        for mm_per_unit in [0.001, 1.0, 25.4, 1000.0] {
+            let cam = OrbitCamera { distance, ..cam };
+            let step_mm = adaptive_grid_mm(&cam, DVec3::ZERO, VIEW, mm_per_unit, 8.0);
+            let px = step_px(&cam, DVec3::ZERO, mm_per_unit, step_mm);
+            assert!(
+                px >= 8.0 - 1e-6,
+                "distance {distance}, {mm_per_unit} mm/unit: step {step_mm} mm only projects to {px}pt"
+            );
+        }
+    }
+}
+
+/// The documented fallback: at a zoom so far out that even the
+/// sequence's own largest step (5 m) still can't clear `min_px`, the
+/// function returns that largest step anyway (not a panic, an infinite
+/// loop, or a step so fine it would round every drag to zero again).
+#[test]
+fn adaptive_grid_mm_falls_back_to_the_largest_step_when_even_that_is_too_small_on_screen() {
+    let cam = OrbitCamera {
+        distance: 5_000_000.0,
+        ..test_camera()
+    };
+    let step_mm = adaptive_grid_mm(&cam, DVec3::ZERO, VIEW, 1000.0, 8.0);
+    assert_eq!(step_mm, 5000.0, "expected the sequence's own largest step");
 }
 
 #[test]

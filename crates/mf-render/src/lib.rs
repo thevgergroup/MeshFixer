@@ -20,7 +20,8 @@ pub use camera::{CameraMove, OrbitCamera, clip_radius, ease_out};
 pub use gizmo::{
     Decomposed, Drag, GRIP_HALF_ARC_PX, GRIP_HEAD_HALF_WIDTH_PX, GRIP_HEAD_LENGTH_PX,
     GRIP_SEPARATION_PX, Gizmo, GizmoMode, Handle, HandleGeometry, HandleShape,
-    POINT_HANDLE_RADIUS_PX, PlateSnap, RING_SEGMENTS, Snap, VIEW_RING_SCALE, compose, decompose,
+    POINT_HANDLE_RADIUS_PX, PlateSnap, RING_SEGMENTS, Snap, VIEW_RING_SCALE, adaptive_grid_mm,
+    compose, decompose,
 };
 pub use gpu_mesh::{
     ChunkVertices, FaceStates, GpuLines, GpuMesh, LineVertex, MeshVertices, ORIGIN_REACH,
