@@ -830,6 +830,7 @@ fn big_model(transform: [f64; 12]) -> mf_io::ImportedModel {
             content_hash: mf_geometry::ContentHash([0; 32]),
             format: mf_io::Format::StlBinary,
             precision: mf_io::SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

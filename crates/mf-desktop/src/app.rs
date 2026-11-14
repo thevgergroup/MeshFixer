@@ -453,6 +453,14 @@ pub struct MeshFixerApp {
     /// Editable holes whose profile a move left stale, to re-resolve once
     /// idle (`shape_panel::after_commit`).
     pub pending_reorient: Option<Vec<(ObjectId, mf_parts::GeneratorRecord)>>,
+    /// Set right after importing at "Scale to fit plate" (MF-ISSUE-045):
+    /// the newly imported object and the uniform factor to scale it by,
+    /// applied on the next idle frame as its own undoable
+    /// `object.set_transform` step (import itself is a separate step,
+    /// so Undo first restores the file's own size, then removes the
+    /// import, matching the brief's "Record the scaling as its own
+    /// undoable step").
+    pub pending_scale_to_fit: Option<(ObjectId, f64)>,
     /// Set by Parts/Connectors right before placing (`object.add_part`):
     /// once that command's `Message::Completed` has run (so `active` is
     /// already the newly created object, D6's own `after_object_changes`
@@ -898,6 +906,7 @@ impl MeshFixerApp {
             shape_edit: None,
             hinge: Default::default(),
             pending_reorient: None,
+            pending_scale_to_fit: None,
             pending_open_transform: None,
             last_invocation_op: None,
             in_flight_invocation: None,
@@ -1048,7 +1057,18 @@ impl MeshFixerApp {
                     .path
                     .file_name()
                     .map_or_else(|| "the file".into(), |n| n.to_string_lossy().into_owned());
-                self.unit_prompt = Some(UnitPrompt::new(name, extent, model));
+                // "Active Machine profile" means one the user picked: the
+                // built-in Uncalibrated profile (always active until they
+                // choose otherwise) counts as "no profile", so an
+                // unconfigured install checks against the plain 250 mm
+                // default plate rather than Uncalibrated's own volume.
+                let (profiles, profile_err) = crate::connector_tool::machine_profiles(self);
+                let active = (profile_err.is_none()
+                    && profiles.active != mf_parts::UNCALIBRATED_NAME)
+                    .then(|| profiles.active_profile());
+                let plate = crate::import_dialog::Plate::from_profile(active);
+                let hint = model.source.exporter_hint.clone();
+                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint));
             }
             _ => {
                 model.warnings.push(format!(
@@ -1073,18 +1093,42 @@ impl MeshFixerApp {
         };
         match crate::import_dialog::show(prompt, ctx) {
             None => {}
-            Some(true) => {
+            Some((true, scale_to_fit)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
+                    let factor = scale_to_fit.then(|| prompt.scale_to_fit_factor());
                     self.import_model(prompt.into_model());
+                    if let (Some(factor), Some(id)) = (factor, self.active) {
+                        self.pending_scale_to_fit = Some((id, factor));
+                    }
                 }
             }
-            Some(false) => {
+            Some((false, _)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
                     self.workers.discard(prompt);
                 }
                 self.status = Some("Import cancelled: nothing opened".into());
             }
         }
+    }
+
+    /// Applies a "Scale to fit plate" import's scaling, once the import
+    /// itself has committed and nothing else is busy: a uniform scale
+    /// of the newly imported object's transform, as its own undoable
+    /// step (`commit_transform`), so Undo first restores the file's own
+    /// size, then removes the import.
+    fn run_pending_scale_to_fit(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some((id, factor)) = self.pending_scale_to_fit.take() else {
+            return;
+        };
+        let Some(current) = self.session.document().object(id).map(|o| o.transform) else {
+            return; // the object was removed (e.g. the import was undone)
+        };
+        let scaled = transform_tool::scale_linear(&current, factor);
+        self.active = Some(id);
+        self.commit_transform(id, scaled, "Scale to fit plate".into());
     }
 
     /// Mark a job as running (`label` in the status bar) and return the
@@ -5652,6 +5696,7 @@ impl MeshFixerApp {
         // when some later command finishes (final review I2).
         self.drain_pending_invocation();
         crate::shape_panel::run_pending_reorient(self);
+        self.run_pending_scale_to_fit();
         if self.busy.is_none()
             && let Some(pending) = self.pending_open_transform.take()
         {

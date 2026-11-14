@@ -175,6 +175,7 @@ fn model_of(name: &str, mesh: Mesh) -> ImportedModel {
             content_hash: ContentHash([0; 32]),
             format: Format::Obj,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

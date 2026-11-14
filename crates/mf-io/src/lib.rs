@@ -48,6 +48,12 @@ pub struct SourceInfo {
     pub content_hash: ContentHash,
     pub format: Format,
     pub precision: SourcePrecision,
+    /// Text the file itself offers about its exporter or units
+    /// (MF-ISSUE-045): an STL header ([`stl::header_text`]) or an OBJ
+    /// `# unit` comment ([`obj::unit_comment`]). `None` for 3MF (units
+    /// are in the file, never a guess) and when the source has nothing
+    /// to show.
+    pub exporter_hint: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -172,12 +178,13 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             transform: threemf::IDENTITY,
         }]
     };
-    let (objects, unit, precision, format, warnings, metadata) = match format {
+    let (objects, unit, precision, format, warnings, metadata, exporter_hint) = match format {
         Format::Obj => {
             let text = std::str::from_utf8(&bytes).map_err(|e| IoError::Parse {
                 line: 0,
                 message: format!("not valid UTF-8: {e}"),
             })?;
+            let hint = obj::unit_comment(text);
             let (mesh, precision, warnings) = obj::read_with(text, ctx)?;
             (
                 single(mesh),
@@ -186,9 +193,11 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 Format::Obj,
                 warnings,
                 Default::default(),
+                hint,
             )
         }
         Format::StlBinary | Format::StlAscii => {
+            let hint = stl::header_text(&bytes);
             let (mesh, precision, warnings) = stl::read_with(&bytes, ctx)?;
             let format = match precision {
                 SourcePrecision::F32 => Format::StlBinary,
@@ -201,6 +210,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 format,
                 warnings,
                 Default::default(),
+                hint,
             )
         }
         Format::ThreeMf => {
@@ -215,6 +225,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
                 Format::ThreeMf,
                 warnings,
                 model.metadata,
+                None,
             )
         }
     };
@@ -227,6 +238,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             content_hash,
             format,
             precision,
+            exporter_hint,
         },
         warnings,
     })

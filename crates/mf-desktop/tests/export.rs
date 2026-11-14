@@ -59,6 +59,7 @@ fn opened(mesh: Mesh, transform: [f64; 12]) -> Harness<'static, MeshFixerApp> {
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     });

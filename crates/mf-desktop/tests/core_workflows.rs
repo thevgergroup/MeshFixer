@@ -130,6 +130,7 @@ fn opened_with_units(
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });
@@ -3850,6 +3851,63 @@ fn uc3_hinged_box_through_the_gui() {
         gap >= 0.3 - 1e-6,
         "body and lid stay apart by the gap: {gap}"
     );
+}
+
+/// The import flow end to end (MF-ISSUE-045, owner 2026-11-14 "smarter
+/// import units"): opening a unitless STL asks for its unit, defaulting
+/// to whichever "fits the plate" best — here, with no Machine profile
+/// configured, the plain 250 mm default plate. An 8×6×4-unit box reads
+/// as 8×6×4 mm (fits, tiny), 80×60×40 mm (fits, cm), 8000 mm (too big,
+/// metres) or 203×152×102 mm (fits, inches): inches gives the largest
+/// reading that still fits, so it's preselected over millimetres and
+/// centimetres.
+#[test]
+fn import_flow_asks_for_units_and_preselects_the_one_that_fits_the_plate() {
+    require_gpu!("import_flow_asks_for_units_and_preselects_the_one_that_fits_the_plate");
+    let settings_dir = tempfile::tempdir().expect("a temp settings dir");
+    let import_dir = tempfile::tempdir().expect("a temp import dir");
+    let path = import_dir.path().join("part.stl");
+    let mesh = mf_fixtures::cube(1.0);
+    // 8 x 6 x 4 "units": unscaled numbers, but non-cubic so the
+    // dialog's rows are distinguishable per axis.
+    let positions: Vec<[f64; 3]> = mesh
+        .vertices()
+        .map(|(_, p)| [p[0] * 8.0, p[1] * 6.0, p[2] * 4.0])
+        .collect();
+    let (_, triangles) = mesh.to_arrays();
+    let scaled = Mesh::new(positions, triangles).unwrap();
+    mf_io::write_path(&scaled, &path, Format::StlBinary, Unit::Millimeter).unwrap();
+
+    let settings = Settings {
+        unit_prompt: true,
+        config_dir: Some(settings_dir.path().to_owned()),
+        ..Settings::default()
+    };
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(move |cc| {
+            MeshFixerApp::with_settings(cc, Some(path.clone()), settings).unwrap()
+        });
+    wait_until(&mut h, "the unit dialog", |a| a.unit_prompt().is_some());
+    h.run();
+    let prompt = h.state().unit_prompt().unwrap();
+    assert_eq!(prompt.extent, [8.0, 6.0, 4.0], "{prompt:?}");
+    assert_eq!(prompt.choice, Unit::Inch, "{prompt:?}");
+    assert!(
+        !prompt.needs_scale,
+        "203 x 152 x 102 mm fits a 250 mm plate"
+    );
+    h.get_by_label(
+        "Inches · 8.00 × 6.00 × 4.00 in (203 × 152 × 102 mm) — Fits a 250 mm plate \
+         (203 × 152 × 102 mm)",
+    );
+    h.get_by_label("Import").click();
+    wait_until(&mut h, "import + analysis", |a| {
+        a.unit_prompt().is_none() && a.current_analysis().is_some()
+    });
+    assert_eq!(h.state().session.document().units(), Unit::Inch);
 }
 
 // ---------------------------------------------------------------------

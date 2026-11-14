@@ -98,6 +98,7 @@ fn model(name: &str, mesh: Mesh, warnings: Vec<String>) -> ImportedModel {
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings,
     }

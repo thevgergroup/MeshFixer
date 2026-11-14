@@ -41,6 +41,7 @@ fn big_model() -> ImportedModel {
             content_hash: ContentHash([0; 32]),
             format: Format::StlBinary,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

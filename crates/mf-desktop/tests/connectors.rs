@@ -105,6 +105,7 @@ fn opened(
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });

@@ -106,6 +106,7 @@ fn model(mesh: Mesh) -> ImportedModel {
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }
@@ -1053,6 +1054,7 @@ fn several_objects(names: &[&str]) -> ImportedModel {
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

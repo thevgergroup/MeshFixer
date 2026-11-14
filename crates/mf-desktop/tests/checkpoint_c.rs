@@ -177,20 +177,47 @@ fn key(h: &mut Harness<'_, MeshFixerApp>, key: egui::Key) {
     h.step();
 }
 
+/// A settings directory with a large-plate Machine profile active
+/// (MF-ISSUE-045, owner 2026-11-14 "smarter import units"), so the
+/// Archaeopteryx scan's metre-scale reading fits and is preselected
+/// (this checkpoint is about the surgical workflow, not plate-fit
+/// preselection, which has its own tests in `units.rs`).
+fn big_plate_settings_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut profiles = mf_parts::MachineProfiles::load(dir.path()).unwrap();
+    profiles
+        .duplicate(mf_parts::UNCALIBRATED_NAME, "Big plate")
+        .unwrap();
+    profiles
+        .update(mf_parts::MachineProfile {
+            name: "Big plate".into(),
+            print_volume_mm: [600.0, 600.0, 600.0],
+            ..mf_parts::MachineProfile::uncalibrated()
+        })
+        .unwrap();
+    profiles.set_active("Big plate").unwrap();
+    profiles.save(dir.path()).unwrap();
+    dir
+}
+
 /// The app as a person launches it (it asks for the units of a unitless
 /// file), opening `path` right away.
-fn opening(path: PathBuf) -> Harness<'static, MeshFixerApp> {
-    Harness::builder()
+fn opening(path: PathBuf) -> (Harness<'static, MeshFixerApp>, tempfile::TempDir) {
+    let settings_dir = big_plate_settings_dir();
+    let dir_path = settings_dir.path().to_owned();
+    let h = Harness::builder()
         .with_size(WINDOW)
         .with_max_steps(16)
         .wgpu()
         .build_eframe(move |cc| {
             let settings = Settings {
                 unit_prompt: true,
+                config_dir: Some(dir_path.clone()),
                 ..Settings::default()
             };
             MeshFixerApp::with_settings(cc, Some(path.clone()), settings).unwrap()
-        })
+        });
+    (h, settings_dir)
 }
 
 /// The midpoint of a hole's (or over-cap opening's) first boundary edge, in
@@ -275,8 +302,9 @@ fn checkpoint_c_part1_surgical_workflow() {
     let mut rec = Recorder::new();
 
     // 1. Open: the units prompt appears, preselecting metres (the scan's
-    //    numbers are 0.495 x ... x 0.410, which fall in the metre bracket).
-    let mut h = opening(path);
+    //    numbers are 0.495 x ... x 0.410, which fits the Big plate
+    //    profile's 600 mm plate and gives the largest reading).
+    let (mut h, _settings_dir) = opening(path);
     wait_until(&mut h, "units prompt", LONG, |a| a.unit_prompt().is_some());
     let prompt = h.state().unit_prompt().unwrap();
     assert_eq!(prompt.choice, Unit::Meter, "metres preselected");
@@ -544,6 +572,7 @@ fn model_of(name: &str, mesh: Mesh) -> mf_io::ImportedModel {
             content_hash: mf_geometry::ContentHash([0; 32]),
             format: mf_io::Format::Obj,
             precision: mf_io::SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

@@ -75,6 +75,7 @@ fn the_pseudo_locale_brackets_catalogued_strings() {
                 content_hash: ContentHash([0; 32]),
                 format: Format::ThreeMf,
                 precision: SourcePrecision::F32,
+                exporter_hint: None,
             },
             warnings: Vec::new(),
         });
