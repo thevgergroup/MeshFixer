@@ -591,8 +591,7 @@ fn hollow_open_through_a_split_cap_gives_an_open_topped_shell() {
 /// — not with the whole cap region's radius cut away, which took the
 /// rim's own wall down with it (the bug: the plug was the full cap
 /// extruded inward, so it cut the outer wall ring too; the fix: the
-/// plug is the cap shrunk inward by the wall thickness, the cavity's
-/// own outline at the cap plane).
+/// plug is the cavity's own section just under the cap, extruded out).
 #[test]
 fn hollow_open_through_a_hemisphere_keeps_the_rim_at_the_cut_height_and_full_thickness() {
     let radius = 20.0;
@@ -645,8 +644,8 @@ fn hollow_open_through_a_hemisphere_keeps_the_rim_at_the_cut_height_and_full_thi
 
     // The rim wall thickness: the gap between the outer rim's radius
     // (the original sphere's own radius, unchanged) and the inner
-    // rim's radius (the plug's own inset boundary, nominally
-    // radius - wall) equals wall_thickness within one cell.
+    // rim's radius (the cavity's own section, nominally radius - wall)
+    // equals wall_thickness within one cell.
     let radii: Vec<f64> = rim
         .iter()
         .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
@@ -722,15 +721,15 @@ fn hollow_open_through_without_faces_is_refused() {
     assert_eq!(code_of(&err), "open_through_needs_faces");
 }
 
-/// A cap close enough to a sphere's pole that the dome's own radius
-/// shrinks below the plug's (inset) footprint before its depth clears
-/// the wall is refused by name, not silently cut — severing the outer
-/// surface in two rather than opening a rim (owner 2026-11-14's own
-/// hemisphere bug, caught here one step short of ever reaching D4).
+/// A cap close to a sphere's pole (a dome cut at z = 10, Keep Top): the
+/// opening follows the cavity's own section a wall in from the cap, so
+/// however fast the dome tapers above it, the opening stays inside the
+/// solid. Used to be refused as "too curved"; now one open shell, the
+/// dome's own surface untouched.
 #[test]
-fn hollow_open_through_too_close_to_the_pole_is_refused_not_corrupted() {
+fn hollow_open_through_a_cap_near_the_pole_follows_the_cavity() {
     let (dome, cap) = split_sphere_cap(20.0, 10.0);
-    let err = run(
+    let (out, report) = run(
         &dome,
         &[
             ("wall_thickness", "2"),
@@ -739,8 +738,237 @@ fn hollow_open_through_too_close_to_the_pole_is_refused_not_corrupted() {
             ("open_through_faces", &faces_param(&cap)),
         ],
     )
+    .unwrap();
+    assert_solid(&out);
+    assert_eq!(inspect(&out).components, 1, "{report}");
+    assert_untouched_outside(&dome, &out, &cap);
+    assert_eq!(
+        out.bounding_box().unwrap().min[2],
+        10.0,
+        "the rim stays at the cut"
+    );
+}
+
+/// Every face of `before` outside `picked` still live in `after` is
+/// exactly where it was.
+fn assert_untouched_outside(before: &Mesh, after: &Mesh, picked: &[FaceId]) {
+    for (f, t) in before.faces() {
+        if picked.contains(&f) {
+            continue;
+        }
+        if let Some(t2) = after.face(f) {
+            let a = t.map(|v| before.corner_position(v));
+            let b = t2.map(|v| after.corner_position(v));
+            assert_eq!(a, b, "face {f:?} outside the pick moved");
+        }
+    }
+}
+
+/// `outline` (2D, counter-clockwise) extruded from z = 0 to `height`.
+fn extruded(outline: &[[f64; 2]], height: f64) -> Mesh {
+    let tris = mf_boolean::triangulate_section(&[outline.to_vec()]).unwrap();
+    let n = outline.len() as u32;
+    let mut positions: Vec<[f64; 3]> = outline.iter().map(|p| [p[0], p[1], 0.0]).collect();
+    positions.extend(outline.iter().map(|p| [p[0], p[1], height]));
+    let mut triangles = Vec::new();
+    for &[a, b, c] in &tris {
+        triangles.push([a, c, b]);
+        triangles.push([a + n, b + n, c + n]);
+    }
+    for i in 0..n {
+        let j = (i + 1) % n;
+        triangles.push([i, j, j + n]);
+        triangles.push([i, j + n, i + n]);
+    }
+    Mesh::new(positions, triangles).unwrap()
+}
+
+/// The faces of `m` lying flat at `z`, facing up.
+fn top_faces(m: &Mesh, z: f64) -> Vec<FaceId> {
+    m.faces()
+        .filter(|(_, t)| {
+            let p = t.map(|v| m.corner_position(v));
+            let up = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
+            up > 0.0 && p.iter().all(|q| q[2] == z)
+        })
+        .map(|(f, _)| f)
+        .collect()
+}
+
+/// A disc 30 across with a tab joined on through a neck as narrow as
+/// twice the wall (the owner's cut face in miniature, 2026-11-14 take
+/// 3: a disc with the cube's tab joined on), 12 tall.
+fn disc_with_a_tab() -> Mesh {
+    let mut outline = Vec::new();
+    let neck = 2.0_f64;
+    let a0 = (neck / 15.0).asin();
+    let segments = 72;
+    for k in 0..=segments {
+        let a = a0 + (std::f64::consts::TAU - 2.0 * a0) * f64::from(k) / f64::from(segments);
+        outline.push([15.0 * a.cos(), 15.0 * a.sin()]);
+    }
+    let x0 = 15.0 * a0.cos();
+    outline.extend([
+        [22.0, -neck],
+        [22.0, -7.0],
+        [36.0, -7.0],
+        [36.0, 7.0],
+        [22.0, 7.0],
+        [22.0, neck],
+    ]);
+    // The circle's own first point closes the outline at (x0, neck).
+    assert!((outline[0][0] - x0).abs() < 1e-9);
+    extruded(&outline, 12.0)
+}
+
+/// The owner's report (2026-11-14, take 3): Open through on a flat face
+/// whose outline has a narrow neck was refused as "too curved"
+/// (shrinking the outline inward by the wall crossed itself at the
+/// neck). The opening now follows the cavity: the disc's and the tab's
+/// cavities (the neck is too thin to hollow, so they're separate) are
+/// both opened through the one flat face, the neck stays solid, the rim
+/// stays at the top, and nothing outside the pick moves.
+#[test]
+fn hollow_open_through_a_flat_face_with_a_narrow_neck_follows_the_cavity() {
+    let solid = disc_with_a_tab();
+    assert_solid(&solid);
+    let top = top_faces(&solid, 12.0);
+    let (out, report) = run(
+        &solid,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&top)),
+        ],
+    )
+    .unwrap_or_else(|e| panic!("refused: {e}"));
+    assert_solid(&out);
+    let topo = inspect(&out);
+    assert_eq!(topo.components, 1, "both cavities opened: {report}");
+    assert_eq!(
+        out.bounding_box().unwrap().max[2],
+        12.0,
+        "the rim at the top"
+    );
+    assert_untouched_outside(&solid, &out, &top);
+    // The rim: what's left of the top face is the wall ring (and the
+    // solid neck), never the cavity's own footprint: the disc's middle
+    // and the tab's middle are open.
+    let left = top_faces(&out, 12.0);
+    assert!(!left.is_empty(), "the rim is still at the top");
+    let covers = |x: f64, y: f64| {
+        left.iter().any(|&f| {
+            let p = out.face(f).unwrap().map(|v| out.corner_position(v));
+            let s =
+                |a: [f64; 3], b: [f64; 3]| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+            let (d0, d1, d2) = (s(p[0], p[1]), s(p[1], p[2]), s(p[2], p[0]));
+            d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0
+        })
+    };
+    assert!(!covers(0.0, 0.0), "the disc is open");
+    assert!(!covers(29.0, 0.0), "the tab is open");
+    assert!(covers(18.5, 0.0), "the neck stays solid");
+    assert!(covers(-14.0, 0.0), "the disc's rim keeps its wall");
+    assert!(
+        !covers(-12.5, 0.0),
+        "the disc's rim is no thicker than its wall"
+    );
+}
+
+/// A block standing in the xz plane (`profile`, counter-clockwise in
+/// (x, z)), 20 deep along y.
+fn standing(profile: &[[f64; 2]]) -> Mesh {
+    let flat = extruded(profile, 20.0);
+    // Turned so the profile stands in xz and the extrusion runs along y.
+    let positions: Vec<[f64; 3]> = flat.vertices().map(|(_, p)| [p[0], -p[2], p[1]]).collect();
+    let triangles: Vec<[u32; 3]> = flat.faces().map(|(_, t)| t).collect();
+    Mesh::new(positions, triangles).unwrap()
+}
+
+/// A step beside a taller block, one cavity under both: opening the
+/// step's top follows the cavity only as far as the step's own
+/// footprint, never cutting into the taller block's wall beside it.
+#[test]
+fn hollow_open_through_a_step_beside_a_taller_block_stays_under_the_step() {
+    let solid = standing(&[
+        [0.0, 0.0],
+        [40.0, 0.0],
+        [40.0, 12.0],
+        [20.0, 12.0],
+        [20.0, 30.0],
+        [0.0, 30.0],
+    ]);
+    assert_solid(&solid);
+    let step = top_faces(&solid, 12.0);
+    assert!(!step.is_empty());
+    let (out, report) = run(
+        &solid,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&step)),
+        ],
+    )
+    .unwrap_or_else(|e| panic!("refused: {e}"));
+    assert_solid(&out);
+    assert_eq!(inspect(&out).components, 1, "{report}");
+    assert_untouched_outside(&solid, &out, &step);
+    // The taller block's own wall facing the step (x from 18 to 20,
+    // above the step) is still whole: nothing of the result lies inside
+    // it, so the opening never cut into it (its edge runs along the
+    // wall's own face there, where the picked face ends).
+    let inside_wall = out.vertices().find(|(_, p)| {
+        p[0] > 18.6
+            && p[0] < 20.0 - 1e-9
+            && p[1] > -19.9
+            && p[1] < -0.1
+            && p[2] > 12.1
+            && p[2] < 29.9
+    });
+    assert!(
+        inside_wall.is_none(),
+        "the taller block's wall was cut: {inside_wall:?}"
+    );
+}
+
+/// Only refused when nothing under the picked face is thick enough to
+/// hollow: a flange too thin for the wall, beside a thick block whose
+/// own cavity reaches sideways nowhere under it, says so plainly.
+#[test]
+fn hollow_open_through_a_face_with_no_cavity_under_it_says_so() {
+    // In the xz plane: a block 20 x 20 with a flange 20 out and 3 thick.
+    let profile = [
+        [0.0, 0.0],
+        [40.0, 0.0],
+        [40.0, 3.0],
+        [20.0, 3.0],
+        [20.0, 20.0],
+        [0.0, 20.0],
+    ];
+    let solid = standing(&profile);
+    assert_solid(&solid);
+    let flange: Vec<FaceId> = top_faces(&solid, 3.0);
+    assert!(!flange.is_empty());
+    let err = run(
+        &solid,
+        &[
+            ("wall_thickness", "2"),
+            ("inner_detail", "0.5"),
+            ("open_through", "true"),
+            ("open_through_faces", &faces_param(&flange)),
+        ],
+    )
     .unwrap_err();
-    assert_eq!(code_of(&err), "open_through_region_too_curved");
+    assert_eq!(code_of(&err), "open_through_nothing_under", "{err}");
+    assert!(
+        err.to_string().contains(
+            "Nothing under this surface is thick enough to open into; use a thinner wall"
+        ),
+        "{err}"
+    );
 }
 
 /// Automatic detail (a finer cell than a fixed 0.5 for this object's

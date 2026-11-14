@@ -2,6 +2,7 @@
 
 use mf_geometry::Mesh;
 
+pub mod hollow_check;
 pub mod scenario;
 
 /// Axis-aligned cube from the origin to `size`, outward CCW winding.

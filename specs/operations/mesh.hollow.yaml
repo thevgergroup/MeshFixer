@@ -68,12 +68,14 @@ preconditions:
   - some part of the object is at least twice the wall thick (too_thin otherwise)
   - "no fit clearance: drain holes are cut at their nominal diameter"
   - open_through needs open_through_faces non-empty, and every id a live face of the input (open_through_needs_faces otherwise)
+  - "open_through needs a cavity under the picked surface: refused by name only when none of the object under it is thick enough to hollow (open_through_nothing_under: \"Nothing under this surface is thick enough to open into; use a thinner wall\"), never because of the picked outline's shape"
 postconditions:
   - the outer surface is bit-identical (same faces, vertices and ids); only an inner surface is added, facing into the hollow inside
   - the inner surface is within a cell of wall_thickness from the outer one, wherever the object is at least twice the wall thick; thinner parts stay solid and are reported (thin)
   - the result is closed, manifold, consistently oriented, has no degenerate faces and doesn't intersect itself (so the inner and outer surfaces don't touch), checked exactly (D4); its volume is positive; otherwise refused by name
   - each drain hole connects the hollow inside to the outside, cut by the boolean kernel and checked like any other cut; one that would miss the inside is refused by name (hole_misses_cavity)
   - open_through leaves the rest of the outer surface bit-identical and gives a clean rim wall connecting the inner and outer boundaries where it opens
+  - "open_through follows the cavity: the opening is the cavity's own section (Split's exact plane cut) a wall and a cell under the picked surface, extruded straight out through it along its average normal; the rim stays at its height with the full wall, and parts too thin to hollow under the pick stay solid"
   - the same input and parameters give the same result at any thread count
 effects: [geometry_changes, topology_changes]
 runtime:

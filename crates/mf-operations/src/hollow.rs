@@ -48,6 +48,17 @@
 //!    orientation, straight down; `placed` at points on the surface,
 //!    straight in. A hole whose axis is within 45 degrees of horizontal
 //!    gets the teardrop profile when its profile is `auto`.
+//! 7. **Opening through a picked surface** (optional, `open_through`):
+//!    the opening follows the cavity, never an offset of the picked
+//!    outline. Each cavity shell under the pick is cut by Split's exact
+//!    plane cut a wall and a cell under the picked face; that section,
+//!    extruded straight out past the face (clipped to the pick's own
+//!    footprint where the cavity runs on sideways under something else),
+//!    is subtracted like any other cut. The rim keeps its height and its
+//!    full wall; parts too thin to hollow have no cavity under them, so
+//!    they stay solid. Refused only when no cavity lies under the pick
+//!    (`open_through_nothing_under`), or when a straight opening would
+//!    cut into the surface around it.
 //!
 //! Deterministic at any thread count (parallel work is merged in a fixed
 //! order), so replay is Exact; cancellable at every stage.
@@ -523,10 +534,18 @@ fn measure(
         band.dist.push(d);
         frontier.push((k, c));
     }
+    let exact = near.len();
     drop(near);
     // Inward, one layer of neighbours at a time: each new point takes the
     // nearest of its neighbours' nearest surface points. Points deeper
-    // than the wall plus two cells don't spread further.
+    // than the wall plus two cells don't spread further. A point already
+    // reached is reached again whenever a later layer brings a nearer
+    // surface point (and spreads it on): the first wave to arrive isn't
+    // always the nearest surface's, counting neighbours diagonally (a
+    // wall at 45 degrees arrives in fewer layers than a floor nearer in
+    // fact; owner 2026-11-14, a cylinder's floor came out 0.37 mm thin
+    // where it meets the side). The points measured exactly, next to the
+    // surface, are never revisited.
     let reach = (wall + 2.0 * h) as f32;
     let steps = neighbours();
     let layers = ((wall / h).ceil() as usize + 4).max(1);
@@ -552,7 +571,7 @@ fn measure(
                     for s in &steps {
                         if let Some(q) = Band::step(grid, p, *s) {
                             let qk = Band::key(grid, q);
-                            if !band.index.contains_key(&qk) {
+                            if band.index.get(&qk).is_none_or(|&j| j as usize >= exact) {
                                 out.push(qk);
                             }
                         }
@@ -566,10 +585,14 @@ fn measure(
             .collect();
         candidates.par_sort_unstable();
         candidates.dedup();
-        if band.index.len() + candidates.len() > MAX_POINTS {
+        let fresh = candidates
+            .iter()
+            .filter(|k| !band.index.contains_key(k))
+            .count();
+        if band.index.len() + fresh > MAX_POINTS {
             return Err(too_large(
                 h,
-                (band.index.len() + candidates.len()) as u64,
+                (band.index.len() + fresh) as u64,
                 wall,
                 needed(),
             ));
@@ -588,7 +611,8 @@ fn measure(
                     .iter()
                     .map(|&k| {
                         let p = Band::unkey(grid, k);
-                        if !rays.inside(grid, p) {
+                        let known = band.index.get(&k).map(|&j| band.dist[j as usize]);
+                        if known.is_none() && !rays.inside(grid, p) {
                             return None;
                         }
                         let q = [0, 1, 2].map(|a| (p[a] as f64 * h) as f32);
@@ -606,7 +630,10 @@ fn measure(
                                 best = Some((d, c));
                             }
                         }
-                        best.map(|(d, c)| (k, d, c))
+                        // A point already reached only takes a
+                        // clearly nearer surface point.
+                        best.filter(|&(d, _)| known.is_none_or(|was| d < was - 1e-4 * h as f32))
+                            .map(|(d, c)| (k, d, c))
                     })
                     .collect())
             })
@@ -616,9 +643,14 @@ fn measure(
             .collect();
         frontier = Vec::with_capacity(next.len());
         for (k, d, c) in next.into_iter().flatten() {
-            band.index.insert(k, band.dist.len() as u32);
-            band.dist.push(d);
-            band.inside.push(true);
+            match band.index.get(&k) {
+                Some(&j) => band.dist[j as usize] = d,
+                None => {
+                    band.index.insert(k, band.dist.len() as u32);
+                    band.dist.push(d);
+                    band.inside.push(true);
+                }
+            }
             frontier.push((k, c));
         }
     }
@@ -1344,332 +1376,736 @@ fn geometry(e: mf_geometry::GeometryError) -> OpError {
 // ---------------------------------------------------------------------
 // Opening through the picked surface.
 // ---------------------------------------------------------------------
+//
+// The opening follows the cavity itself, never the picked outline
+// (owner 2026-11-14, take 3: shrinking a disc-with-a-tab outline inward
+// by the wall crossed itself at the tab's neck, refused as "too
+// curved" on a perfectly flat face). Each cavity shell under the picked
+// region is cut by a plane parallel to it, just inside the cavity (the
+// wall plus a cell under it), with Split's own exact plane cut; that
+// section, extruded straight out past the picked face, clipped to the
+// picked region's own footprint, is subtracted. The section is the
+// cavity's own outline there, so the rim keeps the full wall, narrow
+// parts too thin to hollow (no cavity under them) are left out by
+// construction, and nothing is ever offset in 2D.
 
-/// How far past the inner surface the plug reaches, so the subtraction
-/// clears the whole wall under the picked region with room to spare,
-/// however the inner surface curves there.
-fn plug_margin(wall: f64, cell: f64) -> f64 {
-    wall + 8.0 * cell
+/// The picked region, gathered: the part of it facing its own average
+/// outward normal (a compact mesh), that normal, and that part's extent
+/// along it.
+struct Picked {
+    /// The picked faces, with any small gap in them filled
+    /// ([`fill_small_gaps`]), and every other face of the surface at the
+    /// pick's own level lying within its footprint (a notch the
+    /// footprint closes over): what the opening may replace.
+    faces: Vec<FaceId>,
+    normal: [f64; 3],
+    lo: f64,
+    hi: f64,
+    frame: mf_boolean::PlaneFrame,
+    footprint: Footprint,
 }
 
-/// A closed solid over the cavity's own footprint at `faces` (a region
-/// of `input`'s surface): each boundary loop's outline, projected to
-/// 2D and shrunk inward by `wall` (the cavity's own outline at the cap
-/// plane, since the hollow shell's inner wall is uniformly `wall` in
-/// from the outer surface everywhere) — never the picked region's own,
-/// unshrunk boundary, which would plug the whole wall ring under it,
-/// not just the cavity (owner 2026-11-14 follow-up: a hemisphere's rim
-/// came out with its own wall thickness gone, 2.94 mm below the cut
-/// plane, because the previous plug's top cap was the full cut face).
-/// The shrunk outline, ear-clipped, is the top cap (pushed out by
-/// `margin`, clear of the surface itself so the boolean kernel never
-/// sees an exactly coincident face) and — the same 2D shape, rigidly
-/// translated `depth` further along the region's own average normal,
-/// never per-vertex (so it can't fold) — the bottom cap; a ruled wall
-/// joins the two rings. `None` if `faces` names no live face, or they
-/// enclose no boundary (the whole closed surface was picked).
-fn through_plug(
-    input: &Mesh,
-    faces: &[FaceId],
-    wall: f64,
-    margin: f64,
-    depth: f64,
-) -> Result<Option<Mesh>, OpError> {
-    let mut positions: Vec<[f64; 3]> = Vec::new();
-    let mut triangles: Vec<[u32; 3]> = Vec::new();
-    let mut remap: HashMap<u32, u32> = HashMap::new();
-    let mut normal_sum = [0.0; 3];
-    for &f in faces {
-        let Some(t) = input.face(f) else { continue };
-        let p = t.map(|v| input.corner_position(v));
-        let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
-        normal_sum = [
-            normal_sum[0] + n[0],
-            normal_sum[1] + n[1],
-            normal_sum[2] + n[2],
-        ];
-        let tri = t.map(|v| {
-            *remap.entry(v).or_insert_with(|| {
-                positions.push(input.corner_position(v));
-                positions.len() as u32 - 1
-            })
-        });
-        triangles.push(tri);
+/// `faces` (of `input`) with every gap in them no larger than
+/// `max_area` filled: each patch of unpicked faces enclosed by picked
+/// ones (a few faces a crease-limited pick skipped on a rough,
+/// rebuilt surface, as small as a cell or two), and each unpicked face
+/// whose corners are all the pick's own. The opening goes straight
+/// through such a gap, as the user meant, rather than around it.
+fn fill_small_gaps(input: &Mesh, faces: &[FaceId], max_area: f64) -> Vec<FaceId> {
+    let mut picked: std::collections::HashSet<FaceId> = faces
+        .iter()
+        .copied()
+        .filter(|&f| input.is_face_live(f))
+        .collect();
+    let mut by_edge: HashMap<(u32, u32), Vec<FaceId>> = HashMap::new();
+    for (f, t) in input.faces() {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            by_edge.entry((a.min(b), a.max(b))).or_default().push(f);
+        }
     }
-    if triangles.is_empty() {
+    let neighbours = |f: FaceId| -> Vec<FaceId> {
+        let Some(t) = input.face(f) else {
+            return Vec::new();
+        };
+        (0..3)
+            .flat_map(|k| {
+                let (a, b) = (t[k], t[(k + 1) % 3]);
+                by_edge
+                    .get(&(a.min(b), a.max(b)))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .filter(|&g| g != f)
+            .collect()
+    };
+    let area = |f: FaceId| {
+        input.face(f).map_or(0.0, |t| {
+            let p = t.map(|v| input.corner_position(v));
+            0.5 * norm(cross(sub(p[1], p[0]), sub(p[2], p[0])))
+        })
+    };
+    let mut outside: std::collections::HashSet<FaceId> = std::collections::HashSet::new();
+    let mut seeds: Vec<FaceId> = picked.iter().flat_map(|&f| neighbours(f)).collect();
+    seeds.sort_unstable_by_key(|f| f.0);
+    seeds.dedup();
+    for seed in seeds {
+        if picked.contains(&seed) || outside.contains(&seed) {
+            continue;
+        }
+        let mut gap = vec![seed];
+        let mut seen: std::collections::HashSet<FaceId> = [seed].into_iter().collect();
+        let mut total = area(seed);
+        let mut i = 0;
+        let mut enclosed = true;
+        while i < gap.len() {
+            for g in neighbours(gap[i]) {
+                if picked.contains(&g) || seen.contains(&g) {
+                    continue;
+                }
+                if outside.contains(&g) {
+                    enclosed = false;
+                    break;
+                }
+                seen.insert(g);
+                total += area(g);
+                gap.push(g);
+            }
+            if !enclosed || total > max_area {
+                enclosed = false;
+                break;
+            }
+            i += 1;
+        }
+        if enclosed {
+            picked.extend(gap);
+        } else {
+            outside.extend(seen);
+        }
+    }
+    // A face every corner of which is a corner of the pick lies within
+    // it too (a riser between two picked treads of a rebuilt, stepped
+    // surface).
+    let corners: std::collections::HashSet<u32> = picked
+        .iter()
+        .filter_map(|&f| input.face(f))
+        .flatten()
+        .collect();
+    let within: Vec<FaceId> = input
+        .faces()
+        .filter(|(f, t)| !picked.contains(f) && t.iter().all(|v| corners.contains(v)))
+        .map(|(f, _)| f)
+        .collect();
+    picked.extend(within);
+    let mut out: Vec<FaceId> = picked.into_iter().collect();
+    out.sort_unstable_by_key(|f| f.0);
+    out
+}
+
+/// `faces` of `input` as a [`Picked`]. Faces turned more than 60
+/// degrees away from the region's average normal (a split cap's own
+/// slivers of side wall, cut where the plane crossed them) are left out
+/// of its footprint: seen straight along the normal they fold back over
+/// the rest. `None` if `faces` names no live face, or they enclose no
+/// boundary (the whole closed surface was picked: there is no rim to
+/// keep).
+fn picked(input: &Mesh, faces: &[FaceId], cell: f64) -> Result<Option<Picked>, OpError> {
+    let faces = fill_small_gaps(input, faces, 16.0 * cell * cell);
+    let faces = faces.as_slice();
+    let live: Vec<[[f64; 3]; 3]> = faces
+        .iter()
+        .filter_map(|&f| input.face(f))
+        .map(|t| t.map(|v| input.corner_position(v)))
+        .collect();
+    if live.is_empty() {
         return Ok(None);
     }
+    let normal_sum = live.iter().fold([0.0; 3], |s, p| {
+        let n = cross(sub(p[1], p[0]), sub(p[2], p[0]));
+        std::array::from_fn(|k| s[k] + n[k])
+    });
     let Some(normal) = unit(normal_sum) else {
         return Err(failed(
             "open_through_region_degenerate",
             "The picked surface has no well-defined outward direction (its faces cancel out). Pick a different region.".into(),
         ));
     };
-    let region = Mesh::new(positions.clone(), triangles).map_err(geometry)?;
-    let topo = region.topology();
-    if topo.boundary_loops.is_empty() {
-        // The picked region is the whole closed surface: nothing left
-        // outside it to keep bit-identical, so there's no rim to cut.
+    let facing = faces.iter().copied().filter(|&f| {
+        input.face(f).is_some_and(|t| {
+            let p = t.map(|v| input.corner_position(v));
+            unit(cross(sub(p[1], p[0]), sub(p[2], p[0]))).is_some_and(|n| dot(n, normal) >= 0.5)
+        })
+    });
+    let region = submesh(input, facing, false)?;
+    if region.face_count() == 0 || region.topology().boundary_loops.is_empty() {
         return Ok(None);
     }
-    let (u, v) = orthonormal_basis(normal);
-    let mut out_positions: Vec<[f64; 3]> = Vec::new();
-    let mut out_triangles: Vec<[u32; 3]> = Vec::new();
-    for loop_ in &topo.boundary_loops {
-        // Consecutive boundary vertices this close together are merged
-        // into one before the inset: a plane cut's own near-plane
-        // vertex, now snapped exactly onto its plane, and a freshly cut
-        // point an edge away from it can end up a single ulp apart
-        // (never farther) rather than exactly coincident, which would
-        // otherwise give the inset a zero-length edge to turn at
-        // (owner 2026-11-13 follow-up).
-        let loop_positions: Vec<[f64; 3]> = loop_
-            .vertices
-            .iter()
-            .map(|&vid| positions[vid as usize])
-            .collect();
-        let scale = loop_positions
-            .iter()
-            .copied()
-            .fold(1.0_f64, |m, p| m.max(norm(p)));
-        let merge_tol = scale * 1e-9;
-        let mut loop_3d: Vec<[f64; 3]> = Vec::with_capacity(loop_positions.len());
-        for &p in &loop_positions {
-            let dup = loop_3d
-                .last()
-                .is_some_and(|&last| norm(sub(p, last)) <= merge_tol);
-            if !dup {
-                loop_3d.push(p);
+    let (lo, hi) =
+        region
+            .vertices()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, p)| {
+                let t = dot(p, normal);
+                (lo.min(t), hi.max(t))
+            });
+    let frame = mf_boolean::PlaneFrame::new(&mf_boolean::Plane {
+        point: normal.map(|c| c * hi),
+        normal,
+    })
+    .ok_or_else(|| {
+        failed(
+            "open_through_region_degenerate",
+            "The picked surface has no well-defined outward direction. Pick a different region."
+                .into(),
+        )
+    })?;
+    let footprint = Footprint::new(&region, &frame, cell);
+    let mut all: std::collections::HashSet<FaceId> = faces.iter().copied().collect();
+    all.extend(input.faces().filter_map(|(f, t)| {
+        let p = t.map(|v| input.corner_position(v));
+        let level = p.iter().all(|q| {
+            let t = dot(*q, normal);
+            t >= lo - cell && t <= hi + cell
+        });
+        let c: [f64; 3] = std::array::from_fn(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0);
+        (level && footprint.covers(frame.to_2d(c))).then_some(f)
+    }));
+    let mut faces: Vec<FaceId> = all.into_iter().collect();
+    faces.sort_unstable_by_key(|f| f.0);
+    Ok(Some(Picked {
+        faces,
+        normal,
+        lo,
+        hi,
+        frame,
+        footprint,
+    }))
+}
+
+/// `faces` of `mesh` as their own mesh (only the vertices they use),
+/// every triangle reversed when `flip`.
+fn submesh(
+    mesh: &Mesh,
+    faces: impl IntoIterator<Item = FaceId>,
+    flip: bool,
+) -> Result<Mesh, OpError> {
+    let mut positions: Vec<[f64; 3]> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let mut remap: HashMap<u32, u32> = HashMap::new();
+    for f in faces {
+        let Some(t) = mesh.face(f) else { continue };
+        let [a, b, c] = t.map(|v| {
+            *remap.entry(v).or_insert_with(|| {
+                positions.push(mesh.corner_position(v));
+                positions.len() as u32 - 1
+            })
+        });
+        triangles.push(if flip { [a, c, b] } else { [a, b, c] });
+    }
+    Mesh::new(positions, triangles).map_err(geometry)
+}
+
+/// A closed solid swept from `patch` (an open, consistently oriented
+/// surface) along unit `dir`: `patch` itself moved `from` along `dir`
+/// and again moved `to` (`to > from`), joined by a ruled wall along
+/// every boundary edge. Outward-facing (flipped if the patch faced the
+/// other way). Every point is moved by the same vector, never per
+/// vertex, so the two copies never fold.
+fn sweep(patch: &Mesh, dir: [f64; 3], from: f64, to: f64) -> Result<Mesh, OpError> {
+    let mut ids: HashMap<u32, u32> = HashMap::new();
+    let mut base: Vec<[f64; 3]> = Vec::new();
+    let mut tris: Vec<[u32; 3]> = Vec::new();
+    for (_, t) in patch.faces() {
+        tris.push(t.map(|v| {
+            *ids.entry(v).or_insert_with(|| {
+                base.push(patch.corner_position(v));
+                base.len() as u32 - 1
+            })
+        }));
+    }
+    let n = base.len() as u32;
+    let mut positions: Vec<[f64; 3]> = base
+        .iter()
+        .map(|p| std::array::from_fn(|k| p[k] + dir[k] * from))
+        .collect();
+    positions.extend(
+        base.iter()
+            .map(|p| -> [f64; 3] { std::array::from_fn(|k| p[k] + dir[k] * to) }),
+    );
+    let directed: std::collections::HashSet<(u32, u32)> = tris
+        .iter()
+        .flat_map(|&[a, b, c]| [(a, b), (b, c), (c, a)])
+        .collect();
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(tris.len() * 2);
+    // The `from` copy as the patch winds; the `to` copy reversed.
+    for &[a, b, c] in &tris {
+        triangles.push([a, b, c]);
+        triangles.push([a + n, c + n, b + n]);
+    }
+    // Each boundary edge a→b of the `from` copy: its reverse b→a on the
+    // wall, meeting the `to` copy's own b'→a' as a'→b'.
+    for &[a, b, c] in &tris {
+        for (x, y) in [(a, b), (b, c), (c, a)] {
+            if !directed.contains(&(y, x)) {
+                triangles.push([y, x, x + n]);
+                triangles.push([y, x + n, y + n]);
             }
         }
-        if let (Some(&first), Some(&last)) = (loop_3d.first(), loop_3d.last())
-            && loop_3d.len() > 1
-            && norm(sub(first, last)) <= merge_tol
-        {
-            loop_3d.pop();
+    }
+    let mut solid = Mesh::new(positions.clone(), triangles.clone()).map_err(geometry)?;
+    if mf_geometry::signed_volume(&solid) < 0.0 {
+        for t in &mut triangles {
+            t.swap(1, 2);
         }
-        if loop_3d.len() < 3 {
-            continue;
-        }
-        // Projected to 2D (the loop's own direction runs opposite to
-        // how it bounds the patch it closes off —
-        // `fill_holes::triangulate`'s own convention — so reversed
-        // here to wind the same way the region's triangles do, CCW
-        // seen from `normal`).
-        let polygon: Vec<[f64; 2]> = loop_3d
-            .iter()
-            .rev()
-            .map(|p| [dot(*p, u), dot(*p, v)])
+        solid = Mesh::new(positions, triangles).map_err(geometry)?;
+    }
+    Ok(solid)
+}
+
+/// Where the cavity shell `cavity` (a closed, outward-facing solid) is
+/// cut for the opening, along the picked region's normal: a cell under
+/// the cavity's own top under a flat pick (the wall plus a cell under
+/// the picked face), or through its middle where the whole shell is
+/// thinner than that. `None` for a shell not under the picked region
+/// at all (entirely deeper, or reaching above it).
+fn section_height(cavity: &Mesh, p: &Picked, wall: f64, cell: f64) -> Option<f64> {
+    let (lo, hi) =
+        cavity
+            .vertices()
+            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), (_, q)| {
+                let t = dot(q, p.normal);
+                (lo.min(t), hi.max(t))
+            });
+    let at = p.lo - wall - cell;
+    if hi <= at {
+        None
+    } else if lo < at {
+        Some(at)
+    } else if hi <= p.hi {
+        Some(0.5 * (lo + hi))
+    } else {
+        None
+    }
+}
+
+/// The picked region's own footprint seen straight along its normal, as
+/// a raster in the plane's 2D frame: every pixel (half a cell across)
+/// lying within the region's facing triangles (all four corners
+/// covered, so the footprint never reaches past the region itself),
+/// gaps up to two cells across closed.
+/// However the picked surface folds or frays seen straight on (a
+/// rebuilt, stepped surface), its footprint is one clean set of
+/// outlines ([`Footprint::solid`]).
+struct Footprint {
+    lo: [f64; 2],
+    h: f64,
+    n: [usize; 2],
+    on: Vec<bool>,
+}
+
+/// The most pixels a footprint raster has (its pixel grows past half a
+/// cell for a pick larger than this many half-cells across).
+const FOOTPRINT_PIXELS: usize = 16_000_000;
+
+impl Footprint {
+    fn new(region: &Mesh, frame: &mf_boolean::PlaneFrame, cell: f64) -> Footprint {
+        let tris: Vec<[[f64; 2]; 3]> = region
+            .faces()
+            .map(|(_, t)| t.map(|v| frame.to_2d(region.corner_position(v))))
             .collect();
-        let mean_z = loop_3d.iter().map(|p| dot(*p, normal)).sum::<f64>() / loop_3d.len() as f64;
-        let inset = inset_polygon(&polygon, wall);
-        let ears = ear_clip(&inset).ok_or_else(|| {
+        let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+        for q in tris.iter().flatten() {
+            for k in 0..2 {
+                lo[k] = lo[k].min(q[k]);
+                hi[k] = hi[k].max(q[k]);
+            }
+        }
+        let close = 4usize;
+        let pad = close + 2;
+        let span = [hi[0] - lo[0], hi[1] - lo[1]];
+        let mut h = 0.5 * cell;
+        let pixels = |h: f64| {
+            ((span[0] / h).ceil() as usize + 2 * pad) * ((span[1] / h).ceil() as usize + 2 * pad)
+        };
+        if pixels(h) > FOOTPRINT_PIXELS {
+            h = (span[0] * span[1] / FOOTPRINT_PIXELS as f64).sqrt().max(h) * 1.1;
+        }
+        let n = [
+            (span[0] / h).ceil() as usize + 2 * pad,
+            (span[1] / h).ceil() as usize + 2 * pad,
+        ];
+        let lo = [lo[0] - pad as f64 * h, lo[1] - pad as f64 * h];
+        // Which pixel corners the region covers; a pixel is on when all
+        // four of its corners are (so it lies within the region).
+        let (cx, cy) = (n[0] + 1, n[1] + 1);
+        let mut corner = vec![false; cx * cy];
+        let side = |a: [f64; 2], b: [f64; 2], q: [f64; 2]| {
+            (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])
+        };
+        for t in &tris {
+            let range = |k: usize| {
+                let lo_t = t.iter().map(|q| q[k]).fold(f64::INFINITY, f64::min);
+                let hi_t = t.iter().map(|q| q[k]).fold(f64::NEG_INFINITY, f64::max);
+                let a = ((lo_t - lo[k]) / h).ceil().max(0.0) as usize;
+                let b = (((hi_t - lo[k]) / h).floor().max(0.0) as usize).min(n[k]);
+                (a, b)
+            };
+            let ((x0, x1), (y0, y1)) = (range(0), range(1));
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let q = [lo[0] + x as f64 * h, lo[1] + y as f64 * h];
+                    let (d0, d1, d2) = (
+                        side(t[0], t[1], q),
+                        side(t[1], t[2], q),
+                        side(t[2], t[0], q),
+                    );
+                    if (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0)
+                        || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+                    {
+                        corner[y * cx + x] = true;
+                    }
+                }
+            }
+        }
+        let on = (0..n[0] * n[1])
+            .map(|i| {
+                let (x, y) = (i % n[0], i / n[0]);
+                corner[y * cx + x]
+                    && corner[y * cx + x + 1]
+                    && corner[(y + 1) * cx + x]
+                    && corner[(y + 1) * cx + x + 1]
+            })
+            .collect();
+        let mut f = Footprint { lo, h, n, on };
+        f.morph(close, true);
+        f.morph(close, false);
+        f.unpinch();
+        f
+    }
+
+    /// Grows (`grow`) or shrinks the set by `r` pixels (a square
+    /// neighbourhood, one axis at a time).
+    fn morph(&mut self, r: usize, grow: bool) {
+        let [nx, ny] = self.n;
+        for axis in 0..2 {
+            let prev = self.on.clone();
+            for y in 0..ny {
+                for x in 0..nx {
+                    let (c, len) = if axis == 0 { (x, nx) } else { (y, ny) };
+                    let (a, b) = (c.saturating_sub(r), (c + r).min(len - 1));
+                    let at = |k: usize| {
+                        if axis == 0 {
+                            prev[y * nx + k]
+                        } else {
+                            prev[k * nx + x]
+                        }
+                    };
+                    // Past the raster's edge counts as off.
+                    let edge = c < r || c + r >= len;
+                    self.on[y * nx + x] = if grow {
+                        (a..=b).any(at)
+                    } else {
+                        !edge && (a..=b).all(at)
+                    };
+                }
+            }
+        }
+    }
+
+    /// Clears one pixel of every pair meeting only at a corner (a 2 x 2
+    /// block on along one diagonal only), so every outline is simple.
+    fn unpinch(&mut self) {
+        let [nx, ny] = self.n;
+        loop {
+            let mut changed = false;
+            for y in 0..ny.saturating_sub(1) {
+                for x in 0..nx.saturating_sub(1) {
+                    let i = y * nx + x;
+                    let (a, b, c, d) = (
+                        self.on[i],
+                        self.on[i + 1],
+                        self.on[i + nx],
+                        self.on[i + nx + 1],
+                    );
+                    if a && d && !b && !c {
+                        self.on[i] = false;
+                        changed = true;
+                    } else if b && c && !a && !d {
+                        self.on[i + 1] = false;
+                        changed = true;
+                    }
+                }
+            }
+            if !changed {
+                return;
+            }
+        }
+    }
+
+    fn at(&self, x: i64, y: i64) -> bool {
+        x >= 0
+            && y >= 0
+            && (x as usize) < self.n[0]
+            && (y as usize) < self.n[1]
+            && self.on[y as usize * self.n[0] + x as usize]
+    }
+
+    /// Whether `q` (2D, the same frame) lies on the footprint.
+    fn covers(&self, q: [f64; 2]) -> bool {
+        let x = ((q[0] - self.lo[0]) / self.h).floor();
+        let y = ((q[1] - self.lo[1]) / self.h).floor();
+        x.is_finite() && y.is_finite() && self.at(x as i64, y as i64)
+    }
+
+    /// The footprint's outlines (outer ones counter-clockwise, holes
+    /// clockwise), in the frame's 2D coordinates: each pixel side
+    /// between on and off, on to its left, straight runs merged.
+    fn outlines(&self) -> Vec<Vec<[f64; 2]>> {
+        let [nx, ny] = self.n;
+        // Directed edges between pixel corners, keyed by their start.
+        let mut next: HashMap<(i64, i64), (i64, i64)> = HashMap::new();
+        for y in 0..ny as i64 {
+            for x in 0..nx as i64 {
+                if !self.at(x, y) {
+                    continue;
+                }
+                if !self.at(x, y - 1) {
+                    next.insert((x, y), (x + 1, y));
+                }
+                if !self.at(x + 1, y) {
+                    next.insert((x + 1, y), (x + 1, y + 1));
+                }
+                if !self.at(x, y + 1) {
+                    next.insert((x + 1, y + 1), (x, y + 1));
+                }
+                if !self.at(x - 1, y) {
+                    next.insert((x, y + 1), (x, y));
+                }
+            }
+        }
+        let mut starts: Vec<(i64, i64)> = next.keys().copied().collect();
+        starts.sort_unstable();
+        let mut used: std::collections::HashSet<(i64, i64)> = std::collections::HashSet::new();
+        let mut loops = Vec::new();
+        for s in starts {
+            if used.contains(&s) {
+                continue;
+            }
+            let mut ring = vec![s];
+            used.insert(s);
+            let mut c = next[&s];
+            while c != s {
+                used.insert(c);
+                ring.push(c);
+                c = next[&c];
+            }
+            // Only the corners where the outline turns.
+            let m = ring.len();
+            let corners: Vec<[f64; 2]> = (0..m)
+                .filter(|&i| {
+                    let (a, b, c) = (ring[(i + m - 1) % m], ring[i], ring[(i + 1) % m]);
+                    (b.0 - a.0, b.1 - a.1) != (c.0 - b.0, c.1 - b.1)
+                })
+                .map(|i| {
+                    [
+                        self.lo[0] + ring[i].0 as f64 * self.h,
+                        self.lo[1] + ring[i].1 as f64 * self.h,
+                    ]
+                })
+                .collect();
+            if corners.len() >= 4 {
+                loops.push(corners);
+            }
+        }
+        loops
+    }
+
+    /// The footprint as a closed solid: its outlines, triangulated on
+    /// `frame`'s plane, swept along the normal from `from` to `to`.
+    /// `None` if nothing of it is left.
+    fn solid(
+        &self,
+        frame: &mf_boolean::PlaneFrame,
+        from: f64,
+        to: f64,
+    ) -> Result<Option<Mesh>, OpError> {
+        let loops = self.outlines();
+        if loops.is_empty() {
+            return Ok(None);
+        }
+        let tris = mf_boolean::triangulate_section(&loops).map_err(|e| {
             failed(
-                "open_through_region_too_curved",
-                "The picked surface curves too much, relative to the wall thickness, for a straight opening: shrinking it inward by the wall crossed itself. Pick a flatter or larger region, or use a thinner wall.".into(),
+                "result_not_valid",
+                format!("Outlining the picked surface failed ({e})."),
             )
         })?;
-        let to_3d = |p: [f64; 2], along_normal: f64| -> [f64; 3] {
-            std::array::from_fn(|k| u[k] * p[0] + v[k] * p[1] + normal[k] * along_normal)
-        };
-        let base = out_positions.len() as u32;
-        let n = inset.len() as u32;
-        let top_z = mean_z + margin;
-        let bottom_z = mean_z - depth;
-        out_positions.extend(inset.iter().map(|&p| to_3d(p, top_z)));
-        out_positions.extend(inset.iter().map(|&p| to_3d(p, bottom_z)));
-        let (top_ids, bottom_ids): (Vec<u32>, Vec<u32>) = (
-            (base..base + n).collect(),
-            (base + n..base + 2 * n).collect(),
-        );
-        // The top cap, facing outward (+normal): the ears as found (the
-        // inset polygon is CCW seen from `normal`, same as the region).
-        for &[a, b, c] in &ears {
-            out_triangles.push([top_ids[a], top_ids[b], top_ids[c]]);
-        }
-        // The bottom cap, facing inward (-normal): the same ears,
-        // reversed.
-        for &[a, b, c] in &ears {
-            out_triangles.push([bottom_ids[a], bottom_ids[c], bottom_ids[b]]);
-        }
-        // The side wall: a ruled strip between the two rings, facing
-        // outward.
-        for i in 0..n as usize {
-            let j = (i + 1) % n as usize;
-            let (a, b) = (top_ids[i], top_ids[j]);
-            let (a2, b2) = (bottom_ids[i], bottom_ids[j]);
-            out_triangles.push([a, b, b2]);
-            out_triangles.push([a, b2, a2]);
-        }
+        let positions: Vec<[f64; 3]> = loops.iter().flatten().map(|&q| frame.to_3d(q)).collect();
+        let patch = Mesh::new(positions, tris).map_err(geometry)?;
+        sweep(&patch, frame.normal, from, to).map(Some)
     }
-    if out_triangles.is_empty() {
-        return Ok(None);
-    }
-    let plug = Mesh::new(out_positions, out_triangles).map_err(geometry)?;
-    Ok(Some(plug))
 }
 
-/// Any unit `x`, `y` with `x`, `y`, `normal` an orthonormal basis.
-fn orthonormal_basis(normal: [f64; 3]) -> ([f64; 3], [f64; 3]) {
-    let z = glam::DVec3::from(normal);
-    let x = z.any_orthonormal_vector();
-    let y = z.cross(x);
-    (x.to_array(), y.to_array())
-}
-
-/// `polygon` (2D, simple, CCW or CW, `n >= 3`) moved inward by `dist`
-/// (perpendicular to each edge): at vertex `i`, the mitered offset of
-/// its two adjacent edges' own inward normals — `offset / sin(half the
-/// turn angle)` along their bisector, which is exactly `dist`
-/// perpendicular to each edge meeting there (standard polygon-offset
-/// construction; a vertex sharper than about 1 degree, where the
-/// miter would run away to a spike, is pinned to its own inward normal
-/// bisector direction scaled to `dist` instead, never materially wrong
-/// for a cap boundary this is ever run on). The cavity's own outline
-/// at the cap plane is exactly this, `dist = wall_thickness`, in from
-/// the picked region's own boundary (owner 2026-11-14 follow-up: the
-/// previous plug used the picked region's own, unshrunk boundary,
-/// removing the whole wall ring under it, not just the cavity).
-fn inset_polygon(polygon: &[[f64; 2]], dist: f64) -> Vec<[f64; 2]> {
-    let n = polygon.len();
-    let signed_area: f64 = (0..n)
-        .map(|i| {
-            let (a, b) = (polygon[i], polygon[(i + 1) % n]);
-            a[0] * b[1] - b[0] * a[1]
-        })
-        .sum::<f64>()
-        * 0.5;
-    // Inward is to the left of each directed edge for a CCW polygon
-    // (rotating the edge direction 90 degrees CCW: (dx,dy) -> (-dy,dx)),
-    // to the right for a CW one.
-    let sign = if signed_area >= 0.0 { 1.0 } else { -1.0 };
-    let edge_inward_normal = |a: [f64; 2], b: [f64; 2]| -> [f64; 2] {
-        let e = [b[0] - a[0], b[1] - a[1]];
-        let len = (e[0] * e[0] + e[1] * e[1]).sqrt().max(1e-300);
-        [-sign * e[1] / len, sign * e[0] / len]
-    };
-    (0..n)
-        .map(|i| {
-            let (prev, cur, next) = (polygon[(i + n - 1) % n], polygon[i], polygon[(i + 1) % n]);
-            let n0 = edge_inward_normal(prev, cur);
-            let n1 = edge_inward_normal(cur, next);
-            let bisector = [n0[0] + n1[0], n0[1] + n1[1]];
-            let blen = (bisector[0] * bisector[0] + bisector[1] * bisector[1]).sqrt();
-            // sin(half the turn angle) = blen / 2 for two unit normals'
-            // sum (half-angle formula); below about 1 degree's worth
-            // the miter is pinned, not let run to a spike.
-            let half_sin = (blen / 2.0).max(0.0087);
-            let scale = dist / half_sin;
-            if blen < 1e-12 {
-                // Normals cancel (a 180 degree fold back): offset along
-                // either one, both the same distance either way.
-                [cur[0] + n0[0] * dist, cur[1] + n0[1] * dist]
-            } else {
-                let u = [bisector[0] / blen, bisector[1] / blen];
-                [cur[0] + u[0] * scale, cur[1] + u[1] * scale]
-            }
-        })
-        .collect()
-}
-
-/// A simple polygon's ears (index triples into `p`, winding the same way
-/// as `p`), by repeatedly clipping a convex vertex whose ear contains no
-/// other vertex (O(n²), fine for a picked region's own boundary). `None`
-/// if `p` has fewer than 3 vertices or no valid ear is ever found (a
-/// self-crossing outline).
-fn ear_clip(p: &[[f64; 2]]) -> Option<Vec<[usize; 3]>> {
-    let n = p.len();
-    if n < 3 {
-        return None;
-    }
-    let cross2 = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
-        (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-    };
-    let signed_area: f64 = (0..n)
-        .map(|i| {
-            let (a, b) = (p[i], p[(i + 1) % n]);
-            a[0] * b[1] - b[0] * a[1]
-        })
-        .sum::<f64>()
-        * 0.5;
-    if signed_area.abs() < 1e-300 {
-        return None;
-    }
-    let ccw = signed_area > 0.0;
-    let inside = |a: [f64; 2], b: [f64; 2], c: [f64; 2], p: [f64; 2]| {
-        let (d1, d2, d3) = (cross2(a, b, p), cross2(b, c, p), cross2(c, a, p));
-        (d1 >= 0.0 && d2 >= 0.0 && d3 >= 0.0) || (d1 <= 0.0 && d2 <= 0.0 && d3 <= 0.0)
-    };
-    let mut ring: Vec<usize> = (0..n).collect();
-    let mut out = Vec::with_capacity(n - 2);
-    let mut guard = 0usize;
-    while ring.len() > 3 {
-        guard += 1;
-        if guard > n * n + 8 {
-            return None;
-        }
-        let m = ring.len();
-        let mut clipped = false;
-        for k in 0..m {
-            let (ia, ib, ic) = (ring[(k + m - 1) % m], ring[k], ring[(k + 1) % m]);
-            let (a, b, c) = (p[ia], p[ib], p[ic]);
-            let turn = cross2(a, b, c);
-            let convex = if ccw { turn > 0.0 } else { turn < 0.0 };
-            if !convex {
-                continue;
-            }
-            if ring
-                .iter()
-                .any(|&iv| iv != ia && iv != ib && iv != ic && inside(a, b, c, p[iv]))
-            {
-                continue;
-            }
-            out.push(if ccw { [ia, ib, ic] } else { [ic, ib, ia] });
-            ring.remove(k);
-            clipped = true;
-            break;
-        }
-        if !clipped {
-            return None;
-        }
-    }
-    let [ia, ib, ic] = [ring[0], ring[1], ring[2]];
-    out.push(if ccw { [ia, ib, ic] } else { [ic, ib, ia] });
-    Some(out)
-}
-
-/// Cuts the shell open through `faces` (input-face seeds, `open_through`):
-/// extrudes the picked region inward by the wall plus a margin and
-/// subtracts that plug through [`crate::apply_parts`], the same boolean
-/// kernel and D4 check every other cut goes through. `None` faces (an
-/// empty list) is a configuration error the caller already refused.
-fn open_through(
-    cell: f64,
-    target: &OperandInput,
-    input: &Mesh,
-    faces: &[FaceId],
+/// The solids to subtract to open `shell`'s cavity out through the
+/// picked region `p`: one per cavity shell under it, each that shell's
+/// own section ([`section_height`], Split's exact plane cut) extruded
+/// straight out past the picked face. A section reaching outside the
+/// picked region's own footprint (a cavity running on sideways under a
+/// taller part beside the picked face) is clipped to that footprint
+/// first, so the opening never cuts the taller part's wall. Where the
+/// cavity only reaches under the footprint deeper down (a narrow pick
+/// along the wall, over the cavity's own sloping side), the section is
+/// taken again half a wall deeper at a time, down to [`SEARCH_STEPS`]
+/// steps. Empty when no cavity lies under the picked surface. Also
+/// returns how deep the deepest section is under the picked face.
+fn through_plugs(
+    shell: &HollowShell,
+    p: &Picked,
     wall: f64,
     ctx: &RunContext,
-) -> Result<(Mesh, Provenance, serde_json::Value), OpError> {
-    // Clear of the surface itself (never exactly coincident with the
-    // boolean tool), and deep enough past the inner surface to clear
-    // the whole wall under the region with room to spare.
-    let outward_margin = 4.0 * cell;
-    let depth = plug_margin(wall, cell);
-    let Some(plug) = through_plug(input, faces, wall, outward_margin, depth)? else {
+) -> Result<(Vec<Mesh>, f64), OpError> {
+    let cell = shell.cell;
+    let margin = 4.0 * cell;
+    let step = 0.5 * wall;
+    let (frame, footprint) = (&p.frame, &p.footprint);
+    // The footprint as a solid, for clipping: from below the deepest
+    // section ever tried up to `margin` past the picked face. Built
+    // only if some section needs it.
+    let mut clip: Option<Mesh> = None;
+    let clip_depth = (p.hi - p.lo) + wall + cell + SEARCH_STEPS as f64 * step + margin;
+    let cavity = submesh(&shell.mesh, shell.inner.iter().copied(), true)?;
+    let components = cavity.topology_with(ctx)?.components.clone();
+    let mut plugs = Vec::new();
+    let mut deepest = 0.0_f64;
+    let mut found = false;
+    for comp in &components {
+        ctx.checkpoint()?;
+        let shell_k = submesh(&cavity, comp.iter().map(|&f| FaceId(f)), false)?;
+        let Some(first) = section_height(&shell_k, p, wall, cell) else {
+            continue;
+        };
+        for k in 0..=SEARCH_STEPS {
+            let at = first - k as f64 * step;
+            let plane = mf_boolean::Plane {
+                point: p.normal.map(|c| c * at),
+                normal: p.normal,
+            };
+            let half = match mf_boolean::cut_half(&shell_k, &plane, mf_boolean::Side::Above, ctx) {
+                Ok(h) => h,
+                // Past the cavity's own bottom: nothing deeper to try.
+                Err(mf_boolean::CutError::MissesObject { .. }) => break,
+                Err(mf_boolean::CutError::Cancelled) => return Err(OpError::Cancelled),
+                Err(e) => {
+                    return Err(failed(
+                        "result_not_valid",
+                        format!("Finding the cavity under the picked surface failed: {e}."),
+                    ));
+                }
+            };
+            if half.cap_faces.is_empty() {
+                break;
+            }
+            found = true;
+            let section = submesh(&half.mesh, half.cap_faces.iter().copied(), false)?;
+            let outside = section
+                .vertices()
+                .any(|(_, q)| !footprint.covers(frame.to_2d(q)));
+            // Wholly under the footprint, nothing above the picked
+            // face's own margin is ever reached; otherwise the
+            // footprint clip below sets the real top.
+            let rise = p.hi + if outside { 2.0 } else { 1.0 } * margin - at;
+            let prism = sweep(&section, p.normal, 0.0, rise)?;
+            if !outside {
+                plugs.push(prism);
+                deepest = deepest.max(p.hi - at);
+                break;
+            }
+            if clip.is_none() {
+                clip = footprint.solid(frame, -clip_depth, margin)?;
+            }
+            let Some(footprint_solid) = clip.as_ref() else {
+                break;
+            };
+            let clipped = match mf_boolean::boolean(
+                &prism,
+                footprint_solid,
+                mf_boolean::BoolOp::Intersect,
+                crate::boolean::kernel(),
+                ctx,
+            ) {
+                Ok(out) => out.mesh,
+                Err(mf_boolean::BooleanError::NoOverlap) => continue,
+                Err(mf_boolean::BooleanError::Cancelled) => return Err(OpError::Cancelled),
+                Err(_) if p.hi - p.lo > 0.1 * cell => return Err(too_curved()),
+                Err(e) => {
+                    return Err(failed(
+                        e.code(),
+                        format!("Shaping the opening under the picked surface failed: {e}."),
+                    ));
+                }
+            };
+            if clipped.face_count() > 0 {
+                plugs.push(clipped.compacted().0);
+                deepest = deepest.max(p.hi - at);
+                break;
+            }
+        }
+    }
+    if plugs.is_empty() && found && !footprint.on.iter().any(|&b| b) {
         return Err(failed(
-            "open_through_region_invalid",
-            "The picked surface region isn't a patch with a boundary on this object (or no listed face is still live). Pick the surface again.".into(),
+            "open_through_region_too_small",
+            "The picked surface is too small to open through (under a cell across). Pick a larger region.".into(),
         ));
-    };
-    let part = crate::PartIn {
-        name: "Open through picked surface".into(),
-        mesh: std::borrow::Cow::Owned(plug),
-        transform: target.transform,
-        role: mf_parts::ShapeRole::Hole,
-        host: 0,
-        operand: None,
-    };
+    }
+    Ok((plugs, deepest))
+}
+
+/// How many times [`through_plugs`] takes a cavity's section again,
+/// half a wall deeper each time, looking for where it reaches under the
+/// picked footprint.
+const SEARCH_STEPS: usize = 8;
+
+/// The one refusal left for a genuinely curved pick: a straight opening
+/// along its average direction can't stay inside the solid, or the
+/// surface, seen along that direction, folds over itself.
+fn too_curved() -> OpError {
+    failed(
+        "open_through_region_too_curved",
+        "The picked surface isn't flat enough for a straight opening through it (seen straight on, it curves or folds over itself). Pick a flatter region, or use a thinner wall.".into(),
+    )
+}
+
+fn nothing_under() -> OpError {
+    failed(
+        "open_through_nothing_under",
+        "Nothing under this surface is thick enough to open into; use a thinner wall.".into(),
+    )
+}
+
+/// Cuts `target` (the hollowed object, with any drain holes) open
+/// through `faces` (input-face seeds, `open_through`) by subtracting
+/// `plugs` ([`through_plugs`]) through [`crate::apply_parts`], the same
+/// boolean kernel and D4 check every other cut goes through.
+fn open_through(
+    target: &OperandInput,
+    input: &Mesh,
+    p: &Picked,
+    plugs: Vec<Mesh>,
+    cell: f64,
+    ctx: &RunContext,
+) -> Result<(Mesh, Provenance), OpError> {
+    let faces = p.faces.as_slice();
+    let parts: Vec<crate::PartIn> = plugs
+        .into_iter()
+        .map(|plug| crate::PartIn {
+            name: "Open through picked surface".into(),
+            mesh: std::borrow::Cow::Owned(plug),
+            transform: target.transform,
+            role: mf_parts::ShapeRole::Hole,
+            host: 0,
+            operand: None,
+        })
+        .collect();
     let host = OperandInput {
         slot: target.slot,
         object: target.object,
@@ -1680,7 +2116,7 @@ fn open_through(
     };
     let mut applied = crate::apply_parts(
         [Some((0, &host)), None],
-        &[part],
+        &parts,
         crate::ApplyOrder::Sequential,
         ctx,
     )?;
@@ -1690,56 +2126,230 @@ fn open_through(
             "Opening the picked surface through produced nothing.".into(),
         )
     })?;
-    // A live original (pre-hollow) face outside the picked region may
-    // legitimately gain a new id (the boolean kernel's own local window
-    // around the cut, same as any other cut), but its geometry must
-    // never move. A picked region curved too much, relative to the wall
-    // plus margin, for a straight-sided opening to stay inside the
-    // solid would move one; caught here rather than returned as a
-    // silently wrong outer surface.
+    let cut_outside = cuts_outside_the_pick(
+        target.mesh,
+        input,
+        faces,
+        &a.mesh,
+        &a.provenance,
+        0.25 * cell * cell,
+    );
+    let (mesh, provenance) = drop_freed_specks(a.mesh, a.provenance, input, cell, ctx)?;
+    // The outer surface outside the picked region never moves (a face
+    // there may get a new id inside the boolean kernel's own local
+    // window, never a new position), and each of its pieces stays one
+    // piece: the opening only ever removes the wall between the cavity
+    // and the picked face. A sealed cavity elsewhere (not under the
+    // pick) is left as it is, as plain Hollow leaves it.
     let picked: std::collections::HashSet<FaceId> = faces.iter().copied().collect();
-    let moved = input.faces().any(|(f, t)| {
-        if picked.contains(&f) || !a.mesh.is_face_live(f) {
-            return false;
+    let topo = mesh.topology_with(ctx)?;
+    let mut component_of: HashMap<u32, usize> = HashMap::new();
+    for (k, c) in topo.components.iter().enumerate() {
+        for &f in c {
+            component_of.insert(f, k);
         }
-        let before: [[f64; 3]; 3] = t.map(|v| input.corner_position(v));
-        match a.mesh.face(f) {
-            Some(after_t) => {
-                let after: [[f64; 3]; 3] = after_t.map(|v| a.mesh.corner_position(v));
-                before != after
+    }
+    let mut moved = false;
+    let mut severed = false;
+    for piece in &input.topology_with(ctx)?.components {
+        let mut now_in: Option<usize> = None;
+        for &f in piece {
+            let f = FaceId(f);
+            if picked.contains(&f) {
+                continue;
             }
-            None => false,
+            let (Some(t), Some(after_t)) = (input.face(f), mesh.face(f)) else {
+                continue;
+            };
+            let before: [[f64; 3]; 3] = t.map(|v| input.corner_position(v));
+            let after: [[f64; 3]; 3] = after_t.map(|v| mesh.corner_position(v));
+            moved |= before != after;
+            if let Some(&k) = component_of.get(&f.0) {
+                severed |= now_in.is_some_and(|was| was != k);
+                now_in = Some(k);
+            }
         }
-    });
-    if moved {
+    }
+    if moved || severed || cut_outside {
+        if p.hi - p.lo > 0.1 * cell {
+            return Err(too_curved());
+        }
         return Err(failed(
-            "open_through_region_too_curved",
-            "The picked surface curves too much, relative to the wall thickness, for a straight opening: it would move part of the surface outside the picked region. Pick a flatter or smaller region, or use a thinner wall.".into(),
+            "open_through_cuts_around",
+            "A straight opening through this surface would cut into the surface around it (its sides lean inward just under it). Use a thinner wall.".into(),
         ));
     }
-    // The whole result must be one connected surface: the opening's
-    // whole point is to join the hollow inside to the outside (a bowl,
-    // not a solid with a sealed cavity sitting inside it). A plug whose
-    // depth outruns the surface's own curvature can slice clean
-    // through the shell at a smaller cross-section elsewhere, cutting
-    // the inner wall off from the rim without moving or removing any
-    // single face by itself — D4-valid as two separate closed shells,
-    // the cavity never actually opened (a hemisphere's rim losing its
-    // own wall thickness was exactly this; owner 2026-11-14 follow-up).
-    let components = a.mesh.topology_with(ctx)?.components.len();
-    if components > 1 {
-        return Err(failed(
-            "open_through_region_too_curved",
-            format!(
-                "The picked surface curves too much, relative to the wall thickness, for a straight opening: the result would be {components} separate shells, not one open bowl. Pick a flatter or smaller region, or use a thinner wall."
-            ),
-        ));
+    Ok((mesh, provenance))
+}
+
+/// Whether subtracting the opening (`before` to `after`, `provenance`
+/// between them) cut into the outer surface outside the picked `faces`
+/// (of `input`): the boolean kernel may re-triangulate an outer face
+/// near the opening (removed, then rebuilt from new faces on its own
+/// plane, facing the same way), but never takes area away from one.
+/// Each such face removed must still be covered by the new faces on its
+/// plane, all but `max_uncovered` of their area in all: slivers well
+/// under a cell, where a ragged pick's straight side runs past a
+/// rebuilt surface's own sub-cell steps, are within Hollow's own
+/// accuracy (a fraction of a cell); a real cut into the surface around
+/// the pick is far larger.
+fn cuts_outside_the_pick(
+    before: &Mesh,
+    input: &Mesh,
+    faces: &[FaceId],
+    after: &Mesh,
+    provenance: &Provenance,
+    max_uncovered: f64,
+) -> bool {
+    let picked: std::collections::HashSet<FaceId> = faces.iter().copied().collect();
+    let created: Vec<[[f64; 3]; 3]> = provenance
+        .created_faces
+        .iter()
+        .filter_map(|(f, _)| after.face(*f).map(|t| t.map(|v| after.corner_position(v))))
+        .collect();
+    provenance
+        .removed_faces
+        .iter()
+        .filter(|f| !picked.contains(f))
+        .filter_map(|&f| {
+            let p = input.face(f)?.map(|v| input.corner_position(v));
+            let q = before.face(f)?.map(|v| before.corner_position(v));
+            (p == q).then_some(p)
+        })
+        .map(|g| uncovered(&g, &created))
+        .sum::<f64>()
+        > max_uncovered
+}
+
+/// How much of `g`'s area the triangles `by` lying on its plane and
+/// facing its way leave uncovered (their overlaps with it, each clipped
+/// to it, against its own area).
+fn uncovered(g: &[[f64; 3]; 3], by: &[[[f64; 3]; 3]]) -> f64 {
+    let n_raw = cross(sub(g[1], g[0]), sub(g[2], g[0]));
+    let (Some(n), Some(u)) = (unit(n_raw), unit(sub(g[1], g[0]))) else {
+        return 0.0;
+    };
+    let v = cross(n, u);
+    let flat = |x: [f64; 3]| -> [f64; 2] {
+        let d = sub(x, g[0]);
+        [dot(d, u), dot(d, v)]
+    };
+    let scale = g.iter().fold(1.0_f64, |m, y| m.max(norm(*y)));
+    let tol = 1e-9 * scale;
+    let (lo, hi) = g.iter().fold(
+        ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]),
+        |(lo, hi), x| {
+            (
+                std::array::from_fn(|k| lo[k].min(x[k] - tol)),
+                std::array::from_fn(|k| hi[k].max(x[k] + tol)),
+            )
+        },
+    );
+    let g2 = g.map(flat);
+    let area2 = |poly: &[[f64; 2]]| -> f64 {
+        (0..poly.len())
+            .map(|i| {
+                let (a, b) = (poly[i], poly[(i + 1) % poly.len()]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f64>()
+            * 0.5
+    };
+    let whole = area2(&g2);
+    let mut sum = 0.0;
+    for t in by {
+        let outside_box =
+            (0..3).any(|k| t.iter().all(|x| x[k] < lo[k]) || t.iter().all(|x| x[k] > hi[k]));
+        if outside_box
+            || t.iter().any(|x| dot(sub(*x, g[0]), n).abs() > tol)
+            || dot(cross(sub(t[1], t[0]), sub(t[2], t[0])), n) <= 0.0
+        {
+            continue;
+        }
+        // `t` clipped to `g` (both counter-clockwise in g's own frame):
+        // Sutherland–Hodgman against g's three edges.
+        let mut poly: Vec<[f64; 2]> = t.map(flat).to_vec();
+        for k in 0..3 {
+            let (a, b) = (g2[k], g2[(k + 1) % 3]);
+            let side = |p: [f64; 2]| (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0]);
+            let mut next = Vec::with_capacity(poly.len() + 1);
+            for i in 0..poly.len() {
+                let (p, q) = (poly[i], poly[(i + 1) % poly.len()]);
+                let (sp, sq) = (side(p), side(q));
+                if sp >= 0.0 {
+                    next.push(p);
+                }
+                if (sp >= 0.0) != (sq >= 0.0) {
+                    let t = sp / (sp - sq);
+                    next.push([p[0] + t * (q[0] - p[0]), p[1] + t * (q[1] - p[1])]);
+                }
+            }
+            poly = next;
+            if poly.len() < 3 {
+                break;
+            }
+        }
+        if poly.len() >= 3 {
+            sum += area2(&poly);
+        }
     }
-    let row = serde_json::json!({
-        "faces": faces.len(),
-        "depth": depth,
-    });
-    Ok((a.mesh, a.provenance, row))
+    (whole - sum).max(0.0)
+}
+
+/// Removes the specks of cavity wall an opening leaves floating free:
+/// closed pieces with none of `input`'s own faces, each smaller than
+/// the shell's own speck limit (`drop_specks`, 8 cells³). The
+/// opening's straight side runs along the cavity's own wall there, so
+/// where the voxel surface ripples across it, a sliver of wall a
+/// fraction of a cell across can end up cut loose; anything larger is
+/// left for the checks after this to judge.
+fn drop_freed_specks(
+    mesh: Mesh,
+    provenance: Provenance,
+    input: &Mesh,
+    cell: f64,
+    ctx: &RunContext,
+) -> Result<(Mesh, Provenance), OpError> {
+    let topo = mesh.topology_with(ctx)?;
+    let speck = 8.0 * cell * cell * cell;
+    let loose: Vec<&Vec<u32>> = topo
+        .components
+        .iter()
+        .filter(|c| {
+            let volume: f64 = c
+                .iter()
+                .filter_map(|&f| mesh.face(FaceId(f)))
+                .map(|t| {
+                    let [p, q, r] = t.map(|v| mesh.corner_position(v));
+                    dot(p, cross(q, r)) / 6.0
+                })
+                .sum();
+            volume.abs() < speck
+                && !c.iter().any(|&f| {
+                    input
+                        .face(FaceId(f))
+                        .is_some_and(|t| mesh.face(FaceId(f)) == Some(t))
+                })
+        })
+        .collect();
+    if loose.is_empty() {
+        return Ok((mesh, provenance));
+    }
+    let mut edit = mesh.edit();
+    let mut vertices = std::collections::BTreeSet::new();
+    for c in loose {
+        for &f in c {
+            if let Some(t) = mesh.face(FaceId(f)) {
+                vertices.extend(t);
+            }
+            edit.remove_face(FaceId(f)).map_err(geometry)?;
+        }
+    }
+    for v in vertices {
+        edit.remove_vertex(VertexId(v)).map_err(geometry)?;
+    }
+    let (out, step) = edit.finish().map_err(geometry)?;
+    Ok((out, crate::blend::compose(&provenance, &step)))
 }
 
 // ---------------------------------------------------------------------
@@ -2160,6 +2770,23 @@ impl Operation for Hollow {
         }
         let shell = hollow_shell(target.mesh, wall / scale, detail / scale, ctx)?;
         let diameter = diameter / scale;
+        // The opening's plugs come from the shell's own cavity, before
+        // any drain hole joins it to the outside.
+        let through = if open_through_on {
+            let Some(p) = picked(target.mesh, &open_through_faces, shell.cell)? else {
+                return Err(failed(
+                    "open_through_region_invalid",
+                    "The picked surface region isn't a patch with a boundary on this object (or no listed face is still live). Pick the surface again.".into(),
+                ));
+            };
+            let (plugs, depth) = through_plugs(&shell, &p, wall / scale, ctx)?;
+            if plugs.is_empty() {
+                return Err(nothing_under());
+            }
+            Some((p, plugs, depth))
+        } else {
+            None
+        };
 
         ctx.progress.report(STAGES[5], 0.0);
         let holes = match mode {
@@ -2193,10 +2820,7 @@ impl Operation for Hollow {
             let provenance = crate::blend::compose(&shell.provenance, &step);
             (mesh, provenance, rows)
         };
-        let (mesh, provenance, open_through_row) = if open_through_on {
-            // A fresh shell to open through: the plug is built from the
-            // input's own picked faces, whose ids and positions it keeps
-            // whole across both the hollow and any drain holes.
+        let (mesh, provenance, open_through_row) = if let Some((p, plugs, depth)) = through {
             let through_target = OperandInput {
                 slot: target.slot,
                 object: target.object,
@@ -2205,17 +2829,12 @@ impl Operation for Hollow {
                 transform: target.transform,
                 target: target.target.clone(),
             };
-            let (mesh, step, mut row) = open_through(
-                object_cell,
-                &through_target,
-                target.mesh,
-                &open_through_faces,
-                wall / scale,
-                ctx,
-            )?;
-            if let Some(v) = row["depth"].as_f64() {
-                row["depth"] = (v * scale).into();
-            }
+            let (mesh, step) =
+                open_through(&through_target, target.mesh, &p, plugs, object_cell, ctx)?;
+            let row = serde_json::json!({
+                "faces": open_through_faces.len(),
+                "depth": depth * scale,
+            });
             let provenance = crate::blend::compose(&provenance, &step);
             (mesh, provenance, Some(row))
         } else {
@@ -2262,258 +2881,60 @@ mod through_plug_tests {
 
     /// A flat disk of `faces`, radius `r`, centred at the origin, facing
     /// +Z (`segments` wedges).
-    fn flat_cap(r: f64, segments: u32) -> (Mesh, Vec<FaceId>) {
+    fn flat_cap(r: f64, segments: u32) -> Mesh {
         let mut positions = vec![[0.0, 0.0, 0.0]];
         for s in 0..segments {
             let a = std::f64::consts::TAU * f64::from(s) / f64::from(segments);
             positions.push([r * a.cos(), r * a.sin(), 0.0]);
         }
-        let mut triangles = Vec::new();
-        for s in 0..segments {
-            triangles.push([0, 1 + s, 1 + (s + 1) % segments]);
-        }
-        let mesh = Mesh::new(positions, triangles).unwrap();
-        let faces: Vec<FaceId> = mesh.faces().map(|(f, _)| f).collect();
-        (mesh, faces)
-    }
-
-    #[test]
-    fn a_flat_disk_s_plug_is_a_valid_solid() {
-        let (disk, faces) = flat_cap(17.3, 96);
-        let plug = through_plug(&disk, &faces, 2.0, 1.0, 4.0).unwrap().unwrap();
-        let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
-        let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
-        mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
-            .unwrap()
-            .unwrap_or_else(|e| panic!("not a valid solid: {e}"));
-        let d = mf_geometry::inspect(&plug);
-        assert!(d.is_closed && d.is_manifold, "{d:?}");
-    }
-
-    /// A flat-topped cylinder (zero curvature anywhere near the cap):
-    /// isolates whether `through_plug` can ever go wrong with no
-    /// curvature at all to contend with, before blaming curvature for
-    /// a sphere's own result.
-    /// A flat-topped cylinder of outer radius `r`, its top a disk of
-    /// radius `r2` (< `r`) at the centre surrounded by an annulus out to
-    /// `r`: a cap region (the fan from vertex 1) whose boundary sits
-    /// inside the top's own silhouette, not coincident with the side
-    /// wall — like a cap on a sphere, not the cylinder's whole top.
-    fn cylinder(r: f64, r2: f64, h: f64, segments: u32) -> Mesh {
-        // 0: bottom centre, 1: top centre; per segment: bottom rim,
-        // top inner ring, top outer rim.
-        let mut positions = vec![[0.0, 0.0, 0.0], [0.0, 0.0, h]];
-        for s in 0..segments {
-            let a = std::f64::consts::TAU * f64::from(s) / f64::from(segments);
-            positions.push([r * a.cos(), r * a.sin(), 0.0]);
-            positions.push([r2 * a.cos(), r2 * a.sin(), h]);
-            positions.push([r * a.cos(), r * a.sin(), h]);
-        }
-        let at = |s: u32, k: u32| 2 + 3 * (s % segments) + k;
-        let mut triangles = Vec::new();
-        for s in 0..segments {
-            let (bo0, bo1) = (at(s, 0), at(s + 1, 0));
-            let (ti0, ti1) = (at(s, 1), at(s + 1, 1));
-            let (to0, to1) = (at(s, 2), at(s + 1, 2));
-            triangles.push([0, bo1, bo0]);
-            triangles.push([1, ti0, ti1]);
-            triangles.push([ti0, to0, to1]);
-            triangles.push([ti0, to1, ti1]);
-            triangles.push([bo0, bo1, to1]);
-            triangles.push([bo0, to1, to0]);
-        }
+        let triangles = (0..segments)
+            .map(|s| [0, 1 + s, 1 + (s + 1) % segments])
+            .collect();
         Mesh::new(positions, triangles).unwrap()
     }
 
-    #[test]
-    fn a_cylinder_s_flat_top_plug_only_removes_the_top() {
-        let solid = cylinder(30.0, 17.3, 40.0, 96);
-        {
-            let bvh = Bvh::build(&solid, &RunContext::none()).unwrap();
-            let all: Vec<FaceId> = solid.faces().map(|(f, _)| f).collect();
-            mf_geometry::validate_solid(&solid, &all, &bvh, &RunContext::none())
-                .unwrap()
-                .unwrap_or_else(|e| panic!("cylinder itself is not valid: {e}"));
-        }
-        // A patch of the flat top smaller than the cylinder's own radius
-        // (its boundary loop strictly inside the top's own silhouette,
-        // like a cap on a sphere, not coincident with the side wall):
-        // the fan of triangles around the centre point.
-        let top: Vec<FaceId> = solid
-            .faces()
-            .filter(|(_, t)| t.contains(&1))
-            .map(|(f, _)| f)
-            .collect();
-        assert!(!top.is_empty());
-        let plug = through_plug(&solid, &top, 2.0, 0.0, 4.0).unwrap().unwrap();
-        let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
-        let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
-        mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
-            .unwrap()
-            .unwrap_or_else(|e| panic!("plug is not a valid solid: {e}"));
-        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-        let host = crate::OperandInput {
-            slot: "target",
-            object: mf_document::ObjectId(1),
-            name: "scan",
-            mesh: &solid,
-            transform: identity,
-            target: Target::WholeObject,
-        };
-        let part = crate::PartIn {
-            name: "Open through picked surface".into(),
-            mesh: std::borrow::Cow::Owned(plug),
-            transform: identity,
-            role: mf_parts::ShapeRole::Hole,
-            host: 0,
-            operand: None,
-        };
-        let applied = crate::apply_parts(
-            [Some((0, &host)), None],
-            &[part],
-            crate::ApplyOrder::Sequential,
-            &RunContext::none(),
-        )
-        .unwrap_or_else(|e| panic!("subtracting the plug failed: {e:?}"));
-        let a = &applied[0];
-        // Far from the cut (outside the boolean window around the
-        // plug), the surface is bit-identical, same ids. Right at the
-        // cut's own boundary a boolean kernel re-triangulates its local
-        // window, same as any other cut (split, a drain hole): a face
-        // there may get a new id, but never moves (checked below by
-        // position, not id).
-        let far: Vec<(FaceId, [u32; 3])> = solid
-            .faces()
-            .filter(|(f, _)| !top.contains(f))
-            .filter(|(_, t)| {
-                t.iter().all(|&v| {
-                    let p = solid.corner_position(v);
-                    (p[0] * p[0] + p[1] * p[1]).sqrt() > 20.0
-                })
-            })
-            .collect();
-        assert!(!far.is_empty());
-        for (f, t) in far {
-            assert_eq!(a.mesh.face(f), Some(t), "face {f:?} far from the cut moved");
-        }
-        // No face anywhere outside the picked region actually moved
-        // (only the bit-identical outer surface matters, whatever id a
-        // face near the cut's own boundary ends up with).
-        let mut moved = 0;
-        for (f, t) in solid.faces() {
-            if top.contains(&f) || !a.mesh.is_face_live(f) {
-                continue;
-            }
-            let before: Vec<[f64; 3]> = t.iter().map(|&v| solid.corner_position(v)).collect();
-            let after: Vec<[f64; 3]> = a
-                .mesh
-                .face(f)
-                .unwrap()
-                .iter()
-                .map(|&v| a.mesh.corner_position(v))
-                .collect();
-            if before != after {
-                moved += 1;
-            }
-        }
-        assert_eq!(moved, 0, "no face outside the picked region should move");
-    }
-
-    /// A flat disk whose boundary has a deliberate near-duplicate pair
-    /// (two consecutive loop vertices a single ulp apart, never farther
-    /// — the shape a plane cut's own near-plane vertex and a freshly
-    /// cut point next to it can leave after the vertex is snapped onto
-    /// the cut plane exactly, owner 2026-11-13 follow-up): the plug is
-    /// still a valid, watertight solid (the near-duplicate is merged,
-    /// and the top cap's own triangles that referenced it are
-    /// remapped, not left dangling).
-    #[test]
-    fn a_boundary_with_a_near_duplicate_vertex_still_gives_a_watertight_plug() {
-        let (mut disk, faces) = flat_cap(17.3, 96);
-        // Nudge one boundary vertex's neighbour a single ulp away from
-        // it (never farther), as if it were two independently computed
-        // near-coincident cut points.
-        let mut edit = disk.edit();
-        let p = disk.position(mf_geometry::VertexId(1)).unwrap();
-        let nudged = p.map(|c| c + f64::EPSILON.max(c.abs() * f64::EPSILON));
-        edit.move_vertex(mf_geometry::VertexId(1), nudged).unwrap();
-        disk = edit.finish().unwrap().0;
-        let plug = through_plug(&disk, &faces, 2.0, 1.0, 4.0).unwrap().unwrap();
-        let bvh = Bvh::build(&plug, &RunContext::none()).unwrap();
-        let all: Vec<FaceId> = plug.faces().map(|(f, _)| f).collect();
-        mf_geometry::validate_solid(&plug, &all, &bvh, &RunContext::none())
+    fn assert_valid_solid(m: &Mesh) {
+        let bvh = Bvh::build(m, &RunContext::none()).unwrap();
+        let all: Vec<FaceId> = m.faces().map(|(f, _)| f).collect();
+        mf_geometry::validate_solid(m, &all, &bvh, &RunContext::none())
             .unwrap()
             .unwrap_or_else(|e| panic!("not a valid solid: {e}"));
-        let topo = plug.topology();
-        assert_eq!(topo.boundary_edges, 0, "the plug must be watertight");
+        let d = mf_geometry::inspect(m);
+        assert!(d.is_closed && d.is_manifold, "{d:?}");
+        assert!(mf_geometry::signed_volume(m) > 0.0);
     }
 
-    /// A real split-sphere cap (`mesh.split_plane`, `keep: above`),
-    /// through `open_through` itself (not just `through_plug`): the
-    /// plug is a valid solid, and the dome's own surface away from the
-    /// cap never moves (the safety check this function makes).
+    /// A patch swept along its normal either way round (facing the sweep
+    /// or away from it) is a valid, outward-facing solid.
     #[test]
-    fn open_through_a_real_split_cap_moves_nothing_outside_it() {
-        let sphere = mf_fixtures::scaled(&mf_fixtures::uv_sphere(48, 96), 20.0);
-        let spec = mf_spec::builtin::get("mesh.split_plane").unwrap();
-        let raw: std::collections::BTreeMap<String, String> = [
-            ("plane_point", "0,0,1.3".to_string()),
-            ("plane_normal", "0,0,1".to_string()),
-            ("keep", "above".to_string()),
-            ("cap", "true".to_string()),
-        ]
-        .into_iter()
-        .map(|(k, v)| (k.to_string(), v))
-        .collect();
-        let params = spec.validate(&raw).unwrap();
-        let identity = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
-        let out = crate::find("mesh.split_plane")
-            .unwrap()
-            .execute_doc(
-                &[crate::OperandInput {
-                    slot: "target",
-                    object: mf_document::ObjectId(1),
-                    name: "scan",
-                    mesh: &sphere,
-                    transform: identity,
-                    target: Target::WholeObject,
-                }],
-                &params,
-                &RunContext::none(),
-            )
-            .unwrap();
-        let crate::ObjectChange::Geometry {
-            mesh: dome,
-            provenance,
-            ..
-        } = out.changes.into_iter().next().unwrap()
-        else {
-            panic!("expected geometry");
-        };
-        let cap: Vec<FaceId> = provenance.created_faces.iter().map(|(f, _)| *f).collect();
-        assert!(!cap.is_empty());
-        let target = crate::OperandInput {
-            slot: "target",
-            object: mf_document::ObjectId(1),
-            name: "scan",
-            mesh: &dome,
-            transform: identity,
-            target: Target::WholeObject,
-        };
-        let (result, _, _) =
-            open_through(0.5, &target, &dome, &cap, 2.0, &RunContext::none()).unwrap();
-        let moved = dome
-            .faces()
-            .filter(|(f, _)| !cap.contains(f))
-            .filter(|(f, _)| result.is_face_live(*f))
-            .filter(|(f, t)| {
-                let before: [[f64; 3]; 3] = t.map(|v| dome.corner_position(v));
-                let after: [[f64; 3]; 3] =
-                    result.face(*f).unwrap().map(|v| result.corner_position(v));
-                before != after
-            })
-            .count();
-        assert_eq!(moved, 0, "the dome's own surface must not move");
+    fn a_swept_disk_is_a_valid_solid_either_way_round() {
+        let disk = flat_cap(17.3, 96);
+        assert_valid_solid(&sweep(&disk, [0.0, 0.0, 1.0], -4.0, 1.0).unwrap());
+        assert_valid_solid(&sweep(&disk, [0.0, 0.0, -1.0], 0.5, 3.0).unwrap());
+    }
+
+    /// A patch with a hole (an annulus) sweeps to a valid solid too: every
+    /// boundary loop gets its wall.
+    #[test]
+    fn a_swept_annulus_is_a_valid_solid() {
+        let segments = 64u32;
+        let mut positions = Vec::new();
+        for s in 0..segments {
+            let a = std::f64::consts::TAU * f64::from(s) / f64::from(segments);
+            positions.push([10.0 * a.cos(), 10.0 * a.sin(), 0.0]);
+            positions.push([4.0 * a.cos(), 4.0 * a.sin(), 0.0]);
+        }
+        let mut triangles = Vec::new();
+        for s in 0..segments {
+            let (o0, i0) = (2 * s, 2 * s + 1);
+            let (o1, i1) = (2 * ((s + 1) % segments), 2 * ((s + 1) % segments) + 1);
+            triangles.push([o0, o1, i1]);
+            triangles.push([o0, i1, i0]);
+        }
+        let annulus = Mesh::new(positions, triangles).unwrap();
+        let solid = sweep(&annulus, [0.0, 0.0, 1.0], 0.0, 5.0).unwrap();
+        assert_valid_solid(&solid);
+        assert_eq!(solid.topology().components.len(), 1);
     }
 }
 

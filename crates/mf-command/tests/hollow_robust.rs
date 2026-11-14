@@ -261,18 +261,20 @@ fn random_unions_make_solid_then_hollow_are_never_refused() {
                 Err(CommandError::Operation(e)) if e.to_string().contains("too_thin") => {
                     too_thin += 1;
                 }
-                // `open_through`'s own region-quality refusals
+                // `open_through`'s own region refusals
                 // (`open_through_region_too_curved`, `_degenerate`,
-                // `_invalid`): this test's seed is just the lowest
-                // live face, not a deliberate pick of a flat region a
-                // real user would make for a bowl — a single sliver
-                // triangle on a curved Make-solid surface can
-                // genuinely be too curved to open straight through.
-                // The property is about Hollow and Make solid never
-                // refusing a *valid solid*; it was never about this
-                // test's own crude choice of region being a good one.
+                // `_invalid`, `open_through_nothing_under`): this
+                // test's seed is just the lowest live face, not a
+                // deliberate pick of a flat region a real user would
+                // make for a bowl — a single sliver triangle on a
+                // curved Make-solid surface can genuinely have no
+                // cavity under it, or be too curved to open straight
+                // through. The property is about Hollow and Make solid
+                // never refusing a *valid solid*; the open-through
+                // property on a real cut face is
+                // `random_unions_split_make_solid_then_open_through_a_cut_face`.
                 Err(CommandError::Operation(e))
-                    if label == "open_through" && e.to_string().contains("open_through_region") =>
+                    if label == "open_through" && e.to_string().contains("open_through_") =>
                 {
                     too_thin += 1;
                 }
@@ -295,4 +297,261 @@ fn random_unions_make_solid_then_hollow_are_never_refused() {
         hollowed + too_thin >= scenes,
         "{scenes} scenes, only {hollowed} hollowed + {too_thin} too_thin"
     );
+}
+
+// ---------------------------------------------------------------------
+// Open through a cut face (owner 2026-11-14, take 3).
+// ---------------------------------------------------------------------
+
+/// `t` (object to world) applied to `p`.
+fn to_world(t: &[f64; 12], p: [f64; 3]) -> [f64; 3] {
+    [
+        t[0] * p[0] + t[3] * p[1] + t[6] * p[2] + t[9],
+        t[1] * p[0] + t[4] * p[1] + t[7] * p[2] + t[10],
+        t[2] * p[0] + t[5] * p[1] + t[8] * p[2] + t[11],
+    ]
+}
+
+/// The faces of `mesh` (placed by `t`) lying flat on the world plane
+/// `z = at` (within `tol`), facing `side` (+1 up, -1 down, within 25
+/// degrees): a cut face. Their ids and their world triangles.
+fn flat_faces(
+    mesh: &Mesh,
+    t: &[f64; 12],
+    at: f64,
+    side: f64,
+    tol: f64,
+) -> (Vec<u32>, Vec<[[f64; 3]; 3]>) {
+    mesh.faces()
+        .filter_map(|(f, tri)| {
+            let p = tri.map(|v| to_world(t, mesh.corner_position(v)));
+            let (a, b) = (
+                [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]],
+                [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]],
+            );
+            let n = [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            let facing = len > 0.0 && n[2] * side >= 25f64.to_radians().cos() * len;
+            (facing && p.iter().all(|q| (q[2] - at).abs() < tol)).then_some((f.0, p))
+        })
+        .unzip()
+}
+
+fn covers(tris: &[[[f64; 3]; 3]], q: [f64; 3]) -> bool {
+    tris.iter().any(|p| {
+        let s = |a: [f64; 3], b: [f64; 3]| {
+            (b[0] - a[0]) * (q[1] - a[1]) - (b[1] - a[1]) * (q[0] - a[0])
+        };
+        let (d0, d1, d2) = (s(p[0], p[1]), s(p[1], p[2]), s(p[2], p[0]));
+        (d0 >= 0.0 && d1 >= 0.0 && d2 >= 0.0) || (d0 <= 0.0 && d1 <= 0.0 && d2 <= 0.0)
+    })
+}
+
+/// Random unions of spheres and boxes (as above), optionally Split by a
+/// horizontal plane (Keep Bottom or Top, Cap on), then Make solid, then
+/// Hollow (2 mm wall) with Open through on the cut face (or, unsplit,
+/// on the top face of whichever box is highest, when that's flat): never
+/// refused while a cavity lies under the face (plain Hollow's own inner
+/// surface, under the face's footprint, within a few cells of a wall
+/// under it), and the result is closed and manifold with the rim at the
+/// cut's own height. `MF_OPEN_PROPERTY_CASES` scenes (default 6),
+/// `MF_OPEN_PROPERTY_SEED` to start elsewhere.
+#[test]
+fn random_unions_split_make_solid_then_open_through_a_cut_face() {
+    let cases = env_u64("MF_OPEN_PROPERTY_CASES", 6);
+    let seed0 = env_u64("MF_OPEN_PROPERTY_SEED", 0x5EED_0003);
+    let wall = 2.0;
+    let dir = tempfile::tempdir().unwrap();
+    let (mut opened, mut nothing_under, mut skipped) = (0, 0, 0);
+    for case in 0..cases {
+        let seed = seed0.wrapping_add(case).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
+        let mut r = Rng(seed);
+        let prims: Vec<(Mesh, [f64; 12])> =
+            (0..2 + r.below(3)).map(|_| primitive(&mut r)).collect();
+        let (mut s, ids) = session_of(dir.path(), &prims);
+        if ids.len() > 1 && s.execute(combine(ids[0], &ids[1..])).is_err() {
+            eprintln!("seed {seed:#x}: combine refused (shapes apart), skipped");
+            skipped += 1;
+            continue;
+        }
+        let mut target = ids[0];
+        let world_box = |s: &Session, id: ObjectId| {
+            let o = s.document().object(id).unwrap();
+            let m = o.mesh().unwrap();
+            let (mut lo, mut hi) = ([f64::INFINITY; 3], [f64::NEG_INFINITY; 3]);
+            for (_, p) in m.vertices() {
+                let w = to_world(&o.transform, p);
+                for k in 0..3 {
+                    lo[k] = lo[k].min(w[k]);
+                    hi[k] = hi[k].max(w[k]);
+                }
+            }
+            (lo, hi)
+        };
+        let (lo, hi) = world_box(&s, target);
+        // Split (3 in 4) at a height a quarter to three quarters up,
+        // off the primitives' own half-unit grid; otherwise the top.
+        let (cut, side) = if r.below(4) != 0 {
+            let f = 0.25 + 0.5 * r.below(1000) as f64 / 1000.0;
+            let at = lo[2] + (hi[2] - lo[2]) * f + 0.0137;
+            let keep_below = r.below(2) == 0;
+            let before: Vec<ObjectId> = s.document().objects().iter().map(|o| o.id).collect();
+            s.execute(invoke(
+                "mesh.split_plane",
+                target,
+                &[
+                    ("plane_point".into(), format!("0,0,{at}")),
+                    ("plane_normal".into(), "0,0,1".into()),
+                    (
+                        "keep".into(),
+                        if keep_below { "below" } else { "above" }.into(),
+                    ),
+                    ("cap".into(), "true".into()),
+                ],
+            ))
+            .unwrap_or_else(|e| panic!("seed {seed:#x}: split at z = {at}: {e}"));
+            if s.document().object(target).is_none() {
+                target = s
+                    .document()
+                    .objects()
+                    .iter()
+                    .map(|o| o.id)
+                    .find(|id| !before.contains(id))
+                    .unwrap();
+            }
+            (at, if keep_below { 1.0 } else { -1.0 })
+        } else {
+            (hi[2], 1.0)
+        };
+        if let Err(e) = s.execute(invoke("mesh.make_solid", target, &[])) {
+            panic!("seed {seed:#x}: make_solid: {e}");
+        }
+        let o = s.document().object(target).unwrap();
+        let (solid, t) = (o.mesh().unwrap().clone(), o.transform);
+        // Make solid may rebuild the surface (a voxel remesh), leaving the
+        // cut face flat only to within a small fraction of a cell, at the
+        // part's own extreme: the face is found there, and the rim is
+        // checked against that extreme exactly (the outer surface is
+        // kept bit for bit).
+        let extreme = solid
+            .vertices()
+            .map(|(_, p)| side * to_world(&t, p)[2])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            (extreme - side * cut).abs() < 0.25,
+            "seed {seed:#x}: Make solid moved the cut from {cut} to {}",
+            side * extreme
+        );
+        let cut = side * extreme;
+        let (faces, footprint) = flat_faces(&solid, &t, cut, side, 0.25);
+        if faces.is_empty() {
+            // Unsplit, with no box flat on top: no flat face to open.
+            eprintln!("seed {seed:#x}: no flat face at z = {cut}, skipped");
+            skipped += 1;
+            continue;
+        }
+        // A face to open through is at least a few walls across: the
+        // highest point of an unsplit tilted box, rebuilt, is a sliver
+        // along its top edge, nothing a user would pick for a bowl.
+        let face_area: f64 = footprint
+            .iter()
+            .map(|p| {
+                0.5 * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                    - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]))
+                    .abs()
+            })
+            .sum();
+        if face_area < 4.0 * wall * wall {
+            eprintln!(
+                "seed {seed:#x}: the face at z = {cut} is a sliver ({face_area} mm²), skipped"
+            );
+            skipped += 1;
+            continue;
+        }
+        let plain = vec![
+            ("wall_thickness".to_string(), wall.to_string()),
+            ("inner_detail".to_string(), "0.5".to_string()),
+        ];
+        // Plain Hollow first: its inner surface is the oracle for
+        // "a cavity lies under the face".
+        let cell = match s.execute(invoke("mesh.hollow", target, &plain)) {
+            Ok(mf_command::CommitOutcome::NewRevision { report }) => {
+                report["cell_size"].as_f64().unwrap()
+            }
+            Ok(_) => panic!("seed {seed:#x}: plain hollow changed nothing"),
+            Err(e) if e.to_string().contains("too_thin") => {
+                eprintln!("seed {seed:#x}: too thin to hollow, skipped");
+                skipped += 1;
+                continue;
+            }
+            Err(e) => panic!("seed {seed:#x}: plain hollow: {e}"),
+        };
+        let shell = s.document().object(target).unwrap().mesh().unwrap().clone();
+        assert!(s.undo(), "seed {seed:#x}: undo");
+        let outer: std::collections::HashSet<[u64; 3]> =
+            solid.vertices().map(|(_, p)| p.map(f64::to_bits)).collect();
+        let cavity_under = shell.vertices().any(|(_, p)| {
+            if outer.contains(&p.map(f64::to_bits)) {
+                return false;
+            }
+            let w = to_world(&t, p);
+            let depth = side * (cut - w[2]);
+            depth > 0.0 && depth < wall + 3.0 * cell && covers(&footprint, w)
+        });
+        let list = faces
+            .iter()
+            .map(|f| f.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let mut params = plain.clone();
+        params.push(("open_through".into(), "true".into()));
+        params.push(("open_through_faces".into(), list));
+        let what = format!("seed {seed:#x}: open through the face at z = {cut}");
+        match s.execute(invoke("mesh.hollow", target, &params)) {
+            Ok(_) => {
+                opened += 1;
+                let o = s.document().object(target).unwrap();
+                let out = o.mesh().unwrap().clone();
+                assert_solid(&out, &what);
+                // The rim: the cut face's own ring around the opening,
+                // never lowered below the picked face itself (which is
+                // the cut, flat, or flat to within Make solid's own
+                // rebuild of it).
+                let rim = out
+                    .vertices()
+                    .map(|(_, p)| side * to_world(&o.transform, p)[2])
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let face_low = footprint
+                    .iter()
+                    .flatten()
+                    .map(|q| side * q[2])
+                    .fold(f64::INFINITY, f64::min);
+                assert!(
+                    rim >= face_low && rim <= side * cut,
+                    "{what}: the rim is at {}, below the picked face (down to {})",
+                    side * rim,
+                    side * face_low
+                );
+            }
+            Err(CommandError::Operation(e))
+                if e.to_string().contains("open_through_nothing_under") =>
+            {
+                if cavity_under {
+                    dump(&format!("open-{seed:x}"), &solid, t);
+                    panic!("{what}: refused with a cavity under it: {e}");
+                }
+                nothing_under += 1;
+            }
+            Err(e) => {
+                dump(&format!("open-{seed:x}"), &solid, t);
+                panic!("{what}: refused: {e}");
+            }
+        }
+    }
+    eprintln!("{opened} opened, {nothing_under} with nothing under the face, {skipped} skipped");
+    assert!(opened * 2 >= cases, "too few opened: {opened} of {cases}");
 }

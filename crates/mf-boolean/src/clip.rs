@@ -533,7 +533,16 @@ fn clip_once(
         for i in 0..q.len() {
             edges.push((index(q[i].0, &local), index(q[(i + 1) % q.len()].0, &local)));
         }
-        for (tri, w) in winding_faces(&coords, &edges).map_err(|(e, _)| e)? {
+        // One face's own pieces never genuinely cross (it's a single
+        // flat triangle): a crossing here is the box's cut points on a
+        // sliver face (a split cap's own, a few ulps across) rounding
+        // onto each other's edges. Degenerate, so the box moves and
+        // tries again, as for any other near-coincidence with the box.
+        let pieces = winding_faces(&coords, &edges).map_err(|(e, _)| match e {
+            SectionError::SelfIntersects => ClipError::Degenerate,
+            e => ClipError::Section(e),
+        })?;
+        for (tri, w) in pieces {
             let tri = tri.map(|i| local[i]);
             match w {
                 2 => inside_tris.push((tri, f)),

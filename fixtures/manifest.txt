@@ -22,3 +22,9 @@ messy-puritan-91945.stl  ff2395999055153f302c6b90964837c0b930b1f2666e471d7257561
 messy-sullivan-1716279.stl  3b52bf71521e5d139499de33deba916ed05967307caf014fb67258963b488595  -  3b52bf71521e5d139499de33deba916ed05967307caf014fb67258963b488595  https://huggingface.co/datasets/Thingi10K/Thingi10K/resolve/2d5d3b2f3cd3711028ad75b12788c13b25559ec6/raw_meshes/1716279.stl
 messy-openrc-differential-100727.stl  4f1451e20de0ee9f0a4d86b81d080afd7f0cd36e46ba07d308a4110d4d2955ee  -  4f1451e20de0ee9f0a4d86b81d080afd7f0cd36e46ba07d308a4110d4d2955ee  https://huggingface.co/datasets/Thingi10K/Thingi10K/resolve/2d5d3b2f3cd3711028ad75b12788c13b25559ec6/raw_meshes/100727.stl
 messy-winged-victory-376253.obj  f831cf74044a956a844714b671bd5f81832bb2a45cdd7dd653278c3e5fc34ae1  -  f831cf74044a956a844714b671bd5f81832bb2a45cdd7dd653278c3e5fc34ae1  https://huggingface.co/datasets/Thingi10K/Thingi10K/resolve/2d5d3b2f3cd3711028ad75b12788c13b25559ec6/raw_meshes/376253.obj
+
+# The Stanford bunny (canonical Hollow acceptance test, Meshmixer's own
+# classic): the original 69,451-triangle scan reconstruction, with the
+# holes in its base, from Alec Jacobson's common-3d-test-models mirror,
+# pinned to commit 8a4f8642acaf43f9cd7b67858a1502e1055ef202.
+stanford-bunny.obj  1eb35d1e21ce99e5ce911353b6be278990713448dd9e8f5c9387f9de39b32205  -  1eb35d1e21ce99e5ce911353b6be278990713448dd9e8f5c9387f9de39b32205  https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/8a4f8642acaf43f9cd7b67858a1502e1055ef202/data/stanford-bunny.obj

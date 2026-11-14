@@ -787,11 +787,7 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     // Split the ball near its own centre (world z = 21.3, off the seam
     // of vertex rings), Keep: Bottom, Cap on: a hemisphere, its flat
     // cap near the equator facing up (visible from the default
-    // camera) — gentle curvature under the whole cap, the common case
-    // `open_through` is for (a cap close to the pole tapers too fast
-    // for a straight-sided opening to stay inside the solid, refused
-    // by name rather than silently cutting the rim's own wall away;
-    // owner 2026-11-14).
+    // camera) — the common case `open_through` is for.
     h.get_by_label("Split").click();
     settle(&mut h);
     h.state_mut().split.plane[11] = 21.3;
@@ -1405,6 +1401,127 @@ fn owner_hollow_the_combined_hemisphere_and_half_cube_is_never_refused() {
         h.state().refusal
     );
     assert_eq!(history_len(&h), history + 1, "one undo step");
+}
+
+/// Owner 2026-11-14, take 3, clicked exactly as the owner did: Split
+/// 'scan' alone (Keep Bottom), Make solid on 'scan (bottom)', Split
+/// 'part' the same way, Combine the two into 'part (bottom)', open
+/// Hollow (2 mm wall), click the flat cut face (a disc with the cube's
+/// tab joined on), turn on "Open through this surface", Hollow. It was
+/// refused (`open_through_region_too_curved`: shrinking the picked
+/// outline by the wall crossed itself at the tab's neck); the opening
+/// now follows the cavity itself, so it is never refused here, and the
+/// result is one closed, manifold, open shell with the rim at the cut.
+#[test]
+fn owner_hollow_open_through_the_cut_face_of_scan_and_part_split_separately() {
+    require_gpu!("owner_hollow_open_through_the_cut_face_of_scan_and_part_split_separately");
+    let mut h = opened_owner_demo();
+
+    row(&h, "scan").click();
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    let cut_z = h.state().split.point().z;
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert!(names.contains(&"scan (bottom)".to_string()), "{names:?}");
+
+    row(&h, "scan (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Make solid").click();
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label("Make it solid").click();
+    wait_until(&mut h, "make solid", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+
+    row(&h, "part").click();
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().split.point().z, cut_z, "the same cut height");
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert!(names.contains(&"part (bottom)".to_string()), "{names:?}");
+
+    select_together(&mut h, &["part (bottom)", "scan (bottom)"]);
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "combine");
+    let history = history_len(&h);
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert!(
+        names.contains(&"part (bottom)".to_string())
+            && !names.contains(&"scan (bottom)".to_string()),
+        "{names:?}"
+    );
+
+    let id = id_of(&h, "part (bottom)");
+    row(&h, "part (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "hollow");
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    // The disc's own middle, on the cut face.
+    let bb = world_bounds(&h, id);
+    let disc = [
+        (bb.min[0] + bb.max[0]) / 2.0,
+        (bb.min[1] + bb.max[1]) / 2.0,
+        cut_z,
+    ];
+    let p = h.state().screen_point(disc).unwrap();
+    click_at(&mut h, p);
+    settle(&mut h);
+    let picked = h
+        .state()
+        .hollow
+        .picked_region
+        .as_ref()
+        .map(|r| r.faces.len())
+        .unwrap_or(0);
+    assert!(
+        picked > 2,
+        "the click should pick the cut face: {picked} faces"
+    );
+    h.get_by_label("Open through this surface").click();
+    settle(&mut h);
+    assert!(h.state().hollow.open_through, "the checkbox should be on");
+
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none()
+            && (a.session.history_labels().len() > history
+                || a.refusal.is_some()
+                || a.error.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert!(h.state().error.is_none(), "{:?}", h.state().error);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let shell = mesh_of(&h, "part (bottom)");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed");
+    assert!(
+        topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0,
+        "{topo:?}"
+    );
+    assert_eq!(topo.components.len(), 1, "one open shell");
+    let top = world_bounds(&h, id).max[2];
+    assert!((top - cut_z).abs() < 1e-9, "rim at {top}, cut at {cut_z}");
 }
 
 // ---------------------------------------------------------------------
@@ -3721,4 +3838,334 @@ fn uc3_hinged_box_through_the_gui() {
         gap >= 0.3 - 1e-6,
         "body and lid stay apart by the gap: {gap}"
     );
+}
+
+// ---------------------------------------------------------------------
+// Hollow acceptance (owner 2026-11-14): the four canonical shapes, each
+// hollowed plain, with Auto drain holes, and opened through a flat cut
+// face, clicked through the app. Their own group (`hollow_acceptance::`),
+// skipped by scripts/core-workflows.sh (which stays fast) and run by
+// scripts/hollow-acceptance.sh; the same checks as the command layer's
+// crates/mf-command/tests/hollow_acceptance.rs.
+// ---------------------------------------------------------------------
+
+mod hollow_acceptance {
+    use super::*;
+    use mf_fixtures::hollow_check::{Opening, check, flat_at, holes_found, stood_bunny};
+
+    const WALL: f64 = 2.0;
+
+    /// A Parts-library shape's mesh, generated by the shape itself.
+    fn generated(id: &str, params: &[(&str, &str)]) -> Mesh {
+        let g = mf_parts::find_generator(id).unwrap();
+        let raw: std::collections::BTreeMap<String, String> = params
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let params = g.spec().validate(&raw).unwrap();
+        let ctx = mf_runtime::RunContext::none();
+        let mut parts = g
+            .generate(&params, &mf_parts::GenContext::new(&ctx))
+            .unwrap();
+        parts.remove(0).mesh
+    }
+
+    /// The object's mesh (object space) and its translation.
+    fn object(h: &Harness<'_, MeshFixerApp>, name: &str) -> (Mesh, [f64; 3]) {
+        let o = h.state().session.document().object(id_of(h, name)).unwrap();
+        (
+            o.mesh().unwrap().clone(),
+            [o.transform[9], o.transform[10], o.transform[11]],
+        )
+    }
+
+    /// Hollow's own automatic cell size for `mesh` at the default wall.
+    fn cell_of(mesh: &Mesh) -> f64 {
+        mf_operations::hollow::cell_size(0.0, WALL, mesh.bounding_box().unwrap().diagonal())
+    }
+
+    /// Opens Hollow on `name`, sets the drain mode by its label, and runs
+    /// it; then the result, which must not have been refused.
+    fn run_hollow(h: &mut Harness<'_, MeshFixerApp>, name: &str, drain: &str) -> Mesh {
+        row(h, name).click();
+        settle(h);
+        if h.state().active_tool != "hollow" {
+            h.get_by_label("Hollow").click();
+            settle(h);
+        }
+        let id = id_of(h, name);
+        h.get_by_label(drain).click();
+        settle(h);
+        wait_until(h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(h);
+        hollow_now(h, name)
+    }
+
+    /// Presses the panel's Hollow button and waits for it.
+    fn hollow_now(h: &mut Harness<'_, MeshFixerApp>, name: &str) -> Mesh {
+        let rev = h.state().session.current();
+        panel_button(h, "Hollow").click();
+        wait_until(h, &format!("the hollow of {name}"), |a| {
+            a.busy.is_none()
+                && (a.session.current() != rev || a.refusal.is_some() || a.error.is_some())
+        });
+        settle(h);
+        assert!(
+            h.state().refusal.is_none(),
+            "{name}: {:?}",
+            h.state().refusal
+        );
+        assert!(h.state().error.is_none(), "{name}: {:?}", h.state().error);
+        let parent = h
+            .state()
+            .session
+            .node(h.state().session.current())
+            .unwrap()
+            .parent;
+        assert_eq!(parent, Some(rev), "{name}: one undo step");
+        object(h, name).0
+    }
+
+    fn undo_to(h: &mut Harness<'_, MeshFixerApp>, name: &str, mesh: &Mesh) {
+        let id = id_of(h, name);
+        let want = mesh.content_hash();
+        h.get_by_label("Undo").click();
+        wait_until(h, "the undo", |a| {
+            a.busy.is_none()
+                && a.session
+                    .document()
+                    .object(id)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|m| m.content_hash() == want)
+        });
+        settle(h);
+    }
+
+    /// `name` hollowed three ways through the app: plain, Auto drain
+    /// holes, and (after Split at world `cut_z`, Keep Bottom) opened
+    /// through the clicked cut face; each checked, each undone after.
+    fn three_ways(h: &mut Harness<'_, MeshFixerApp>, name: &str, cut_z: f64) {
+        let (before, t) = object(h, name);
+        let cell = cell_of(&before);
+
+        let out = run_hollow(h, name, "None");
+        check(
+            &format!("{name}, plain"),
+            &before,
+            &out,
+            WALL,
+            cell,
+            &Opening::None,
+        );
+        undo_to(h, name, &before);
+
+        let out = run_hollow(h, name, "Auto");
+        let holes = holes_found(&before, &out, [0.0, 0.0, -1.0]);
+        assert!(!holes.is_empty(), "{name}: Auto cut no drain hole");
+        let diameter = h.state().hollow.diameter;
+        check(
+            &format!("{name}, auto drain holes"),
+            &before,
+            &out,
+            WALL,
+            cell,
+            &Opening::Holes(holes, diameter),
+        );
+        undo_to(h, name, &before);
+        h.get_by_label("None").click();
+        settle(h);
+
+        // Split, Keep Bottom, at `cut_z`.
+        row(h, name).click();
+        settle(h);
+        h.get_by_label("Split").click();
+        settle(h);
+        h.state_mut().split.plane[11] = cut_z;
+        settle(h);
+        h.get_by_label("Bottom").click();
+        settle(h);
+        let rev = h.state().session.current();
+        scroll_and_click(h, "Cut");
+        wait_until(h, "the cut", |a| {
+            a.busy.is_none() && (a.session.current() != rev || a.refusal.is_some())
+        });
+        settle(h);
+        assert!(
+            h.state().refusal.is_none(),
+            "{name}: {:?}",
+            h.state().refusal
+        );
+        let bottom = format!("{name} (bottom)");
+        let (cut, _) = object(h, &bottom);
+        let z = cut_z - t[2];
+        let faces = flat_at(&cut, z, 1.0);
+
+        // Hollow, click the cut face, Open through, Hollow.
+        row(h, &bottom).click();
+        settle(h);
+        h.get_by_label("Hollow").click();
+        settle(h);
+        let id = id_of(h, &bottom);
+        wait_until(h, "the cut part's preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(h);
+        // A point on the cut face itself, well inside it.
+        let f = *faces.first().expect("a cut face");
+        let p = cut.face(FaceId(f)).unwrap().map(|v| cut.corner_position(v));
+        let seed: [f64; 3] = std::array::from_fn(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0 + t[k]);
+        let p = h.state().screen_point(seed).unwrap();
+        click_at(h, p);
+        settle(h);
+        let picked: Vec<u32> = h
+            .state()
+            .hollow
+            .picked_region
+            .as_ref()
+            .map(|r| r.faces.iter().map(|f| f.0).collect())
+            .unwrap_or_default();
+        assert!(!picked.is_empty(), "{name}: the click picked no surface");
+        if !h.state().hollow.open_through {
+            h.get_by_label("Open through this surface").click();
+            settle(h);
+        }
+        assert!(h.state().hollow.open_through);
+        let out = hollow_now(h, &bottom);
+        check(
+            &format!("{name}, open through the cut face"),
+            &cut,
+            &out,
+            WALL,
+            cell_of(&cut),
+            &Opening::Through {
+                z,
+                side: 1.0,
+                faces: &picked,
+            },
+        );
+    }
+
+    use mf_geometry::FaceId;
+
+    /// Case 1: A single parametric shape: a Box, and a Cylinder.
+    #[test]
+    fn a_single_parametric_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::a_single_parametric_box_and_cylinder");
+        let mut h = opened(vec![
+            (
+                "box",
+                generated(
+                    "shape.box",
+                    &[("width", "30"), ("depth", "24"), ("height", "20")],
+                ),
+                at([0.0, 0.0, 0.0]),
+            ),
+            (
+                "cylinder",
+                generated("shape.cylinder", &[("diameter", "26"), ("height", "20")]),
+                at([60.0, 0.0, 0.0]),
+            ),
+        ]);
+        three_ways(&mut h, "box", 12.25);
+        three_ways(&mut h, "cylinder", 12.25);
+    }
+
+    /// Opens a box with a cylinder standing up out of its top, then
+    /// Combines them (selecting both, Combine) into "box".
+    fn combined() -> Harness<'static, MeshFixerApp> {
+        let boxed = generated(
+            "shape.box",
+            &[("width", "40"), ("depth", "40"), ("height", "20")],
+        );
+        let bb = boxed.bounding_box().unwrap();
+        let centre = [
+            (bb.min[0] + bb.max[0]) / 2.0,
+            (bb.min[1] + bb.max[1]) / 2.0,
+            0.0,
+        ];
+        let mut h = opened(vec![
+            ("box", boxed, at([0.0, 0.0, 0.0])),
+            (
+                "cylinder",
+                generated("shape.cylinder", &[("diameter", "24"), ("height", "40")]),
+                at(centre),
+            ),
+        ]);
+        select_together(&mut h, &["box", "cylinder"]);
+        h.get_by_label("Combine").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        panel_button(&h, "Combine").click();
+        wait_until(&mut h, "the combine", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        assert_eq!(objects(&h), ["box"]);
+        h
+    }
+
+    /// Case 2: Combined parametric shapes: Box ∪ Cylinder.
+    #[test]
+    fn combined_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::combined_box_and_cylinder");
+        let mut h = combined();
+        three_ways(&mut h, "box", 30.25);
+    }
+
+    /// Case 3: Make solid on Box ∪ Cylinder, then Hollow.
+    #[test]
+    fn make_solid_of_combined_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::make_solid_of_combined_box_and_cylinder");
+        let mut h = combined();
+        row(&h, "box").click();
+        settle(&mut h);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        three_ways(&mut h, "box", 30.25);
+    }
+
+    /// Case 4: The Stanford bunny: Repair (Fill all holes, its base's), then
+    /// Hollow three ways, the open-through one on a cut taken across its
+    /// middle (Keep Bottom). Skipped (recorded) if it hasn't been
+    /// fetched (scripts/fetch-fixtures.sh).
+    #[test]
+    fn the_stanford_bunny() {
+        require_gpu!("hollow_acceptance::the_stanford_bunny");
+        let Some(path) = mf_fixtures::real::path(
+            "stanford-bunny.obj",
+            "hollow_acceptance::the_stanford_bunny",
+        ) else {
+            return;
+        };
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = stood_bunny(&model.objects.into_iter().next().unwrap().mesh);
+        let low = bunny.bounding_box().unwrap().min[2];
+        let mut h = opened(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))]);
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+        let (repaired, _) = object(&h, "bunny");
+        let topo = repaired
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert_eq!(topo.boundary_edges, 0, "Repair left the bunny open");
+        three_ways(&mut h, "bunny", low + 50.25);
+    }
 }
