@@ -39,6 +39,13 @@ pub struct HingeState {
     pub b: Option<ObjectId>,
     /// Which of [`edges`] the axis snaps to (0: the shared edge).
     pub edge: usize,
+    /// Where along the edge the hinge is centred, 0 (one end) to the
+    /// edge's own length (the other end); `None` is the edge's own
+    /// middle (the default before anyone touches the slider). Placing
+    /// a second hinge on the same edge needs this to land it somewhere
+    /// else, clear of the first (owner 2026-11-13: "no way to place
+    /// hinges along the lid seam" without them overlapping).
+    pub position: Option<f64>,
     pub swing: Option<Swing>,
 }
 
@@ -164,11 +171,19 @@ pub fn hinge_fit(app: &MeshFixerApp) -> Result<(f64, f64, String, String), Strin
     ))
 }
 
-/// Places a hinge between `a` and `b` on `edge`: its three pieces as a
-/// linked group (`object.add_shape`, one undo step), leaf A marked to
-/// join `a` and leaf B `b`. Its length is the edge's, up to 30 mm,
-/// centred on it.
-pub fn place_hinge(app: &mut MeshFixerApp, a: ObjectId, b: ObjectId, edge: &HingeEdge) {
+/// Places a hinge between `a` and `b` on `edge`, centred `position` mm
+/// from the edge's own middle (0: the middle, the default; a second
+/// hinge on the same edge gives a different position so it doesn't
+/// overlap the first). Its three pieces become a linked group
+/// (`object.add_shape`, one undo step), leaf A marked to join `a` and
+/// leaf B `b`. Its length is the edge's, up to 30 mm.
+pub fn place_hinge(
+    app: &mut MeshFixerApp,
+    a: ObjectId,
+    b: ObjectId,
+    edge: &HingeEdge,
+    position: f64,
+) {
     let (gap, clearance, class, machine) = match hinge_fit(app) {
         Ok(f) => f,
         Err(e) => {
@@ -190,11 +205,14 @@ pub fn place_hinge(app: &mut MeshFixerApp, a: ObjectId, b: ObjectId, edge: &Hing
         Ok(p) => p,
         Err(e) => return refuse(app, "invalid_parameter", e.to_string()),
     };
-    // The frame's origin is the edge's middle: the hinge runs from x = 0,
-    // so start it half its length back.
+    // The frame's origin is the edge's middle: the hinge runs from
+    // x = 0, so start it half its length back, then slide it along the
+    // edge by `position` (clamped so it still fits on the edge).
+    let half = edge.length / 2.0;
+    let centre = position.clamp(-half + length / 2.0, half - length / 2.0);
     let mut frame = edge.frame;
     for c in 0..3 {
-        frame[9 + c] -= frame[c] * length / 2.0;
+        frame[9 + c] += frame[c] * (centre - length / 2.0);
     }
     let json = serde_json::to_string(&params).unwrap_or_default(); // allow-swallow: Params is plain data; serializing it can't fail
     let members = match crate::connector_tool::group_members(
@@ -263,6 +281,7 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 if ui.selectable_label(*slot == Some(*id), name).clicked() {
                     *slot = Some(*id);
                     app.hinge.edge = 0;
+                    app.hinge.position = None;
                 }
             }
         });
@@ -289,10 +308,20 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             };
             if ui.selectable_label(app.hinge.edge == i, label).clicked() {
                 app.hinge.edge = i;
+                app.hinge.position = None;
             }
         }
     });
     let edge = edges[app.hinge.edge.min(edges.len() - 1)].clone();
+    let half = edge.length / 2.0;
+    let position = app.hinge.position.get_or_insert(0.0);
+    ui.add(
+        egui::Slider::new(position, -half..=half)
+            .suffix(" mm")
+            .text(t!("hinge.position")),
+    );
+    widgets::caption(ui, t!("hinge.position.help"));
+    let position = *position;
     let fit = hinge_fit(app);
     let fused = match &fit {
         Ok((gap, clearance, class, _)) if *gap <= 0.0 || *clearance <= 0.0 => {
@@ -339,7 +368,7 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
-        place_hinge(app, a, b, &edge);
+        place_hinge(app, a, b, &edge, position);
     }
 }
 

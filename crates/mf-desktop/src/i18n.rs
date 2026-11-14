@@ -439,6 +439,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hinge.object_a", "Object A (stays put)"),
     ("hinge.object_b", "Object B (swings open)"),
     ("hinge.place", "Place hinge"),
+    ("hinge.position", "Position along the edge"),
+    (
+        "hinge.position.help",
+        "Centred on the edge's own middle by default; move it to place a second hinge clear of the first.",
+    ),
     ("hinge.same_object", "Pick two different objects."),
     ("hinge.section", "Hinge between two objects"),
     ("hinge.shared_edge", "Shared edge ({edge})"),

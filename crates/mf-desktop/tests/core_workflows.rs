@@ -3356,3 +3356,369 @@ fn align_dots_sit_on_their_axis_rail() {
         }
     }
 }
+
+// ---------------------------------------------------------------------
+// UC3 "The hinged box" (Phase 1 Task 30): Hollow a box, Split it into a
+// lid and a body with a gap, place two hinges and a clasp from the
+// Connectors library, resize a hinge with its Size field, Merge each,
+// then a view-only swing of the lid.
+// ---------------------------------------------------------------------
+
+/// With `MF_ARTIFACTS` set, saves a frame to
+/// `<dir>/uc3/<step>-<w>x<h>.png`.
+fn uc3_capture(h: &mut Harness<'_, MeshFixerApp>, step: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = PathBuf::from(dir).join("uc3");
+    std::fs::create_dir_all(&dir).unwrap();
+    let size = h.ctx.content_rect().size();
+    let name = format!("{step}-{}x{}.png", size.x as u32, size.y as u32);
+    h.render().unwrap().save(dir.join(name)).unwrap();
+}
+
+/// A closed box, outer corner at the origin, size `[sx, sy, sz]` mm
+/// (`mf_fixtures::cube`, non-uniformly scaled).
+fn hinge_box(sx: f64, sy: f64, sz: f64) -> Mesh {
+    let (p, t) = mf_fixtures::cube(1.0).to_arrays();
+    let p = p
+        .into_iter()
+        .map(|[x, y, z]| [x * sx, y * sy, z * sz])
+        .collect();
+    Mesh::new(p, t).unwrap()
+}
+
+/// Clicks the Connectors tool's "Attach to A and B" button on the
+/// selection panel (`shape_panel::editor`'s own button, shown once a
+/// linked group's members know which two objects they join) and waits
+/// for the merge to commit, one undo step.
+fn attach_selected_group(h: &mut Harness<'_, MeshFixerApp>, label_contains: &str) {
+    let history = history_len(h);
+    h.get_by_label_contains(label_contains).click();
+    wait_until(h, "the attach", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(h), history + 1, "one undo step");
+}
+
+/// The hinged box, end to end through the real UI: a hollow box with
+/// thick walls, split into a lid and a body with a gap, two hinges and
+/// a clasp placed from the Connectors library and snapped to the seam,
+/// one hinge resized with its Size field, each connector merged, and a
+/// view-only swing of the lid.
+#[test]
+fn uc3_hinged_box_through_the_gui() {
+    require_gpu!("uc3_hinged_box_through_the_gui");
+    let mut h = opened(vec![(
+        "box",
+        hinge_box(80.0, 60.0, 40.0),
+        at([0.0, 0.0, 0.0]),
+    )]);
+    uc3_capture(&mut h, "0-opened");
+
+    // Step 1: Hollow, 3 mm walls (a coarse cell so the GUI test stays
+    // fast; matches the command-layer scenario's own `inner_detail`).
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    let box_id = id_of(&h, "box");
+    h.state_mut().hollow.wall = Some(3.0);
+    h.state_mut().hollow.detail = Some(1.0);
+    settle(&mut h);
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, box_id).is_some()
+    });
+    settle(&mut h);
+    uc3_capture(&mut h, "1-hollow-preview");
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "2-hollowed");
+
+    // Step 2: Split 8 mm below the top (z = 32), with a 0.4 mm gap at
+    // the cut ("Print-in-place lid": the cut's own gap, non-zero, so
+    // the two halves separate cleanly) — "box (top)" is the lid, "box
+    // (bottom)" the body.
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 32.0;
+    h.state_mut().split.gap = 0.4;
+    settle(&mut h);
+    let history = history_len(&h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["box (top)", "box (bottom)"], "{names:?}");
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "3-split");
+    let (lid_id, body_id) = (id_of(&h, "box (top)"), id_of(&h, "box (bottom)"));
+
+    // Step 3: two hinges on the back wall (y = 60), from the
+    // Connectors tool, placed 25 mm either side of the shared edge's
+    // own middle (the 80 mm wall's middle sits at x = 40, so this
+    // lands them 15 mm from each end, same as the brief): the
+    // "Position along the edge" slider this task adds (there was no
+    // way to place a second hinge clear of the first before).
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    h.state_mut().connectors.fit_class = "Free running".into(); // Snug would print it fused.
+    h.state_mut().hinge.a = Some(body_id);
+    h.state_mut().hinge.b = Some(lid_id);
+    settle(&mut h);
+    uc3_capture(&mut h, "4-hinge-section");
+
+    let place_hinge_at = |h: &mut Harness<'_, MeshFixerApp>, position: f64, step: &str| {
+        h.state_mut().hinge.position = Some(position);
+        settle(h);
+        let history = history_len(h);
+        scroll_and_click(h, "Place hinge");
+        wait_until(h, "the hinge placed", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        assert_eq!(history_len(h), history + 1, "one undo step");
+        uc3_capture(h, step);
+    };
+    place_hinge_at(&mut h, -25.0, "5-hinge-1-placed");
+    let hinge1_leaf_a = id_of(&h, "Pin hinge (leaf a)");
+    place_hinge_at(&mut h, 25.0, "6-hinge-2-placed");
+    // The second hinge's own leaf a: the first's is found by name
+    // before the second is placed (both pieces share the same name,
+    // "Pin hinge (leaf a)" — `connector_tool::new_group_id` numbers the
+    // *groups*, not each piece's own name) — so collect every leaf a
+    // by group instead, once both are down.
+    let leaf_as: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .filter(|o| o.name == "Pin hinge (leaf a)")
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(leaf_as.len(), 2, "two separate hinges: {leaf_as:?}");
+    assert!(leaf_as.contains(&hinge1_leaf_a));
+    let hinge2_leaf_a = *leaf_as.iter().find(|&&id| id != hinge1_leaf_a).unwrap();
+
+    // The two hinges don't overlap (placed at x = 15 and x = 65 on the
+    // 80 mm wall, each up to 24 mm long: well clear of each other).
+    assert!(
+        !mf_desktop::shape_panel::members(h.state(), hinge1_leaf_a)
+            .iter()
+            .any(|(m, _)| *m == hinge2_leaf_a),
+        "the two hinges are separate groups"
+    );
+
+    // Step 3b: one clasp on the front wall (y = 0), from the library,
+    // then dragged into place with Transform — the same "drop, then
+    // place exactly" flow Connect's own dovetail/clasp tests use
+    // (`connectors.rs::merge_folds_the_connector_into_its_two_sides`):
+    // the library always drops a connector on the active object's own
+    // highest point, never where a second connector on a different
+    // wall actually belongs, so it's moved after. Its own frame here
+    // mirrors the command-layer scenario's `clasp_frame` exactly (a
+    // narrower width than the spec default so its footprint fits the
+    // hollow box's 3 mm wall rim, and its height chosen so the catch
+    // stays on the body's own side of the cut gap and the hook on the
+    // lid's).
+    h.state_mut().set_active(body_id);
+    settle(&mut h);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Snap clasp");
+    wait_until(&mut h, "the clasp placed", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let clasp_id = h.state().active.unwrap();
+    // Narrow its width to fit the hollow box's 3 mm wall rim (the
+    // spec's own default, 12 mm, is sized for a thick block, not a
+    // thin shell): the selection panel's own "Width" field,
+    // `shape_panel::set_param`.
+    let clasp_width = 2.4_f64;
+    h.get_by_label("Width");
+    let history = history_len(&h);
+    mf_desktop::shape_panel::set_param(
+        h.state_mut(),
+        "width",
+        mf_spec::ParamValue::Float(clasp_width),
+    );
+    wait_until(&mut h, "the width change", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let arm_length = 10.0_f64; // clasp.snap's own spec default.
+    let ridge_height = 2.0 * 1.6_f64.max(0.3); // 2 * max(arm_thickness, lip_depth).
+    let clasp_frame: [f64; 12] = [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        40.0 - arm_length / 2.0,
+        0.0,
+        32.0 - 0.2 - ridge_height,
+    ];
+    h.state_mut()
+        .commit_transform(clasp_id, clasp_frame, "test place clasp".into());
+    wait_until(&mut h, "the clasp's move", |a| a.busy.is_none());
+    settle(&mut h);
+    uc3_capture(&mut h, "7-clasp-placed");
+
+    // Step 4: resize hinge 1 to 24 mm with its Size field (the
+    // selection panel's schema-driven "Length" field,
+    // `shape_panel::set_param` — the same code path typing into the
+    // field itself would commit through).
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(hinge1_leaf_a);
+    settle(&mut h);
+    h.get_by_label("Length");
+    let history = history_len(&h);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "length", mf_spec::ParamValue::Float(24.0));
+    wait_until(&mut h, "the resize", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let resized_length = h
+        .state()
+        .session
+        .document()
+        .object(hinge1_leaf_a)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .bounding_box()
+        .unwrap()
+        .max[0];
+    assert!((resized_length - 24.0).abs() < 1e-6, "{resized_length}");
+    uc3_capture(&mut h, "8-hinge-1-resized");
+
+    // A view-only rotation of the lid (the swing preview), before any
+    // merge: `hinge_tool::swing_setup` reads the group through its own
+    // live member objects (`attach_to`), which the merge below removes
+    // for the hinges' leaves — so the preview is checked here, while
+    // the connector is still its own linked group, the same point
+    // `connectors.rs::a_hinge_between_two_objects_swings_and_attaches`
+    // checks it, just before its own Attach.
+    h.state_mut().set_active(hinge1_leaf_a);
+    settle(&mut h);
+    wait_until(&mut h, "the swing check", |a| {
+        mf_desktop::hinge_tool::swing_report(a).is_some()
+    });
+    settle(&mut h);
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 90.0;
+    }
+    settle(&mut h);
+    let lid_shown = h.state().shown_transform(lid_id).expect("the lid turns");
+    uc3_capture(&mut h, "8b-swing-90");
+    let report = mf_desktop::hinge_tool::swing_report(h.state())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report.first_contact_deg,
+        None,
+        "the lid swings clear on hinge 1's own axis: {:?}",
+        report.contacts.first()
+    );
+    let _ = lid_shown;
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 0.0;
+    }
+    settle(&mut h);
+
+    // Step 5: Merge each connector.
+    //
+    // The hinges know their own two sides already (picked in the
+    // Connectors panel's A/B pickers before placing, `hinge_tool`'s own
+    // flow), so their merge is the selection panel's "Attach to A and
+    // B" button, which only shows while the Select tool is active
+    // (`tool_panels::inspector_card`).
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    for leaf_a in [hinge1_leaf_a, hinge2_leaf_a] {
+        h.state_mut().set_active(leaf_a);
+        settle(&mut h);
+        attach_selected_group(&mut h, "Attach to");
+    }
+    // The clasp, dropped from the library, doesn't know its sides yet
+    // (`place_connector`'s own members carry no `attach_to`): picked
+    // here instead, the Connectors panel's own "Side A"/"Side B"/
+    // "Attach" flow (`connectors.rs::merge_folds_the_connector_into_
+    // its_two_sides`'s own route) — the still-live `placed` state from
+    // when the clasp was placed, several steps and tool switches ago.
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    scroll_and_click(&mut h, "Side A: box (bottom)");
+    settle(&mut h);
+    scroll_and_click(&mut h, "Side B: box (top)");
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Attach");
+    wait_until(&mut h, "the clasp's merge", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "9-merged");
+
+    // Only body, lid and the two hinges' captive pins remain.
+    let names = objects(&h);
+    let pins = names.iter().filter(|n| n.contains("pin")).count();
+    assert_eq!(pins, 2, "{names:?}");
+    assert_eq!(names.len(), 2 + pins, "{names:?}");
+    assert!(names.contains(&"box (top)".to_owned()));
+    assert!(names.contains(&"box (bottom)".to_owned()));
+
+    // Assert: two closed, manifold objects that never touch.
+    let body_mesh = h
+        .state()
+        .session
+        .document()
+        .object(body_id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    let lid_mesh = h
+        .state()
+        .session
+        .document()
+        .object(lid_id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    for (mesh, label) in [(&body_mesh, "body"), (&lid_mesh, "lid")] {
+        let d = mf_geometry::inspect(mesh);
+        assert!(d.is_closed && d.is_manifold, "{label}: {d:?}");
+    }
+    let ctx = mf_runtime::RunContext::none();
+    let bvh = mf_geometry::Bvh::build(&body_mesh, &ctx).unwrap();
+    let gap =
+        mf_geometry::minimum_distance(&body_mesh, &bvh, &lid_mesh, &glam::DMat4::IDENTITY, &ctx)
+            .unwrap()
+            .unwrap();
+    // The binding clearance is "Free running"'s own (0.3 mm), tighter
+    // than the cut's own gap (0.4 mm): the hinges and the clasp were
+    // all merged with that as their `gap` check.
+    assert!(
+        gap >= 0.3 - 1e-6,
+        "body and lid stay apart by the gap: {gap}"
+    );
+}
