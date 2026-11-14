@@ -11,6 +11,6 @@ mod params;
 
 pub use model::{
     FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec, RuntimeSpec,
-    TargetSpec,
+    TargetSpec, format_length,
 };
 pub use params::{FaceList, ParamValue, Params, SpecError};

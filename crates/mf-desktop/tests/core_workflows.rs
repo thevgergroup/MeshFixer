@@ -92,6 +92,18 @@ fn isolated_settings_dir() -> &'static std::path::Path {
 }
 
 fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerApp> {
+    opened_with_units(objects, Unit::Millimeter)
+}
+
+/// As [`opened`], at `unit` instead of always millimetres (MF-UNIT-001):
+/// every other test opens a document in mm, which is why the owner's
+/// double mm-to-document-units conversion bug went uncaught — this is
+/// the one seam a test can open a non-mm document through without
+/// driving the unit prompt dialog itself.
+fn opened_with_units(
+    objects: Vec<(&str, Mesh, [f64; 12])>,
+    unit: Unit,
+) -> Harness<'static, MeshFixerApp> {
     let settings = Settings {
         config_dir: Some(isolated_settings_dir().to_owned()),
         ..Settings::default()
@@ -112,7 +124,7 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit,
         source: SourceInfo {
             path: "core-workflows.3mf".into(),
             content_hash: ContentHash([0; 32]),
@@ -4167,5 +4179,290 @@ mod hollow_acceptance {
             .unwrap();
         assert_eq!(topo.boundary_edges, 0, "Repair left the bunny open");
         three_ways(&mut h, "bunny", low + 50.25);
+    }
+
+    /// Case 5 (owner bug): the Stanford bunny opened at its own scale, in
+    /// metres — the unit a person actually gets picking "Import" on the
+    /// unit prompt's suggestion (`suggested_unit`, `import_dialog.rs`:
+    /// the bunny's ~0.156 largest dimension lands in the 10 mm..2 m window
+    /// only as metres). Repair (Fill all holes), then Make solid at the
+    /// default cell size, then Hollow: every length-param op must cross
+    /// document units to mm and back correctly (D20), or Make solid
+    /// refuses with a grid many orders too large (the owner's exact bug:
+    /// a 0.001 m cell size reaching `prepare` as 0.000001).
+    #[test]
+    fn the_stanford_bunny_opened_in_metres() {
+        require_gpu!("hollow_acceptance::the_stanford_bunny_opened_in_metres");
+        let Some(path) = mf_fixtures::real::path(
+            "stanford-bunny.obj",
+            "hollow_acceptance::the_stanford_bunny_opened_in_metres",
+        ) else {
+            return;
+        };
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = model.objects.into_iter().next().unwrap().mesh;
+        let diag = bunny.bounding_box().unwrap().diagonal();
+        // Genuinely metre-scale (the owner's report: 0.156 x 0.154 x
+        // 0.121 m), not `stood_bunny`'s mm-friendly rescale.
+        assert!(
+            diag < 1.0,
+            "the raw bunny should be metre-scale, got diagonal {diag}"
+        );
+        let mut h = opened_with_units(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))], Unit::Meter);
+        assert_eq!(h.state().session.document().units(), Unit::Meter);
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+        let (repaired, _) = object(&h, "bunny");
+        let topo = repaired
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert_eq!(topo.boundary_edges, 0, "Repair left the bunny open");
+
+        // Make solid at the default (automatic) cell size: must not be
+        // refused (grid_too_large was the owner's exact symptom).
+        row(&h, "bunny").click();
+        settle(&mut h);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Make solid at the default cell size was refused: {:?}",
+            h.state().refusal
+        );
+
+        // Hollow at its default wall thickness: must not be refused
+        // either (the same double-conversion would have broken this
+        // too, on wall_thickness/hole_diameter).
+        row(&h, "bunny").click();
+        settle(&mut h);
+        h.get_by_label("Hollow").click();
+        settle(&mut h);
+        let id = id_of(&h, "bunny");
+        wait_until(&mut h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(&mut h);
+        hollow_now(&mut h, "bunny");
+    }
+}
+
+/// Every length-param tool, in an mm document and in an m document, on
+/// the same model at the same real-world size (MF-UNIT-001, owner bug):
+/// Make solid's cell size, Hollow's wall thickness, Split's gap and a
+/// placed shape's own size must come out the same real-world size after
+/// scaling, whichever unit the document is in. Each panel edits and
+/// shows lengths in document units (a "2" in an mm document's field and
+/// a "0.002" in an m document's field are the same 2 mm), which
+/// `Session::prepare` converts to mm exactly once (D20); a desktop panel
+/// that skips the cross to mm before building its invocation makes
+/// `prepare` convert an already-document-units number a second time.
+mod unit_parity {
+    use super::*;
+
+    /// A document unit, paired with how many of its own units make one
+    /// millimetre (the inverse of `transform_tool::mm_per`): a
+    /// real-world length in mm, times this, is the number a panel's
+    /// document-units field shows for it.
+    const UNITS: [(Unit, f64); 2] = [(Unit::Millimeter, 1.0), (Unit::Meter, 0.001)];
+
+    /// A closed cube of `mm` millimetres across, opened as the one
+    /// object "cube" in a document at `unit` (its own numbers scaled so
+    /// the cube is the same real-world size in either unit).
+    fn cube_doc(mm: f64, unit: Unit, doc_units_per_mm: f64) -> Harness<'static, MeshFixerApp> {
+        let size = mm * doc_units_per_mm;
+        opened_with_units(
+            vec![("cube", mf_fixtures::cube(size), at([0.0, 0.0, 0.0]))],
+            unit,
+        )
+    }
+
+    /// "cube"'s world-space bounding box diagonal, in millimetres
+    /// (document units divided by `doc_units_per_mm`): the one number
+    /// every unit's run of a tool is compared by.
+    fn diagonal_mm(h: &Harness<'_, MeshFixerApp>, name: &str, doc_units_per_mm: f64) -> f64 {
+        let id = id_of(h, name);
+        world_bounds(h, id).diagonal() / doc_units_per_mm
+    }
+
+    /// Make solid at a cell size of `cell_mm` millimetres (entered in
+    /// the panel's own document-units field): the result's bounding box
+    /// diagonal, in millimetres.
+    fn make_solid_diagonal_mm(unit: Unit, doc_units_per_mm: f64, cell_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        h.state_mut().solid.cell = Some(cell_mm * doc_units_per_mm);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Make solid ({unit:?}, cell {cell_mm} mm): {:?}",
+            h.state().refusal
+        );
+        diagonal_mm(&h, "cube", doc_units_per_mm)
+    }
+
+    #[test]
+    fn make_solid_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::make_solid_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| make_solid_diagonal_mm(unit, doc_units_per_mm, 1.0))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "Make solid's result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// Hollow at its default wall thickness (2 mm, D20's auto default,
+    /// resolved from document units the same way the panel shows it):
+    /// the shell's resulting bounding box diagonal (unchanged by
+    /// Hollow, which keeps the outer surface exactly) and whether it
+    /// was refused, in millimetres.
+    fn hollow_result(unit: Unit, doc_units_per_mm: f64) -> (f64, bool) {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Hollow").click();
+        settle(&mut h);
+        let id = id_of(&h, "cube");
+        wait_until(&mut h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some() || a.refusal.is_some()
+        });
+        settle(&mut h);
+        let history = history_len(&h);
+        panel_button(&h, "Hollow").click();
+        wait_until(&mut h, "hollow", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        let refused = h.state().refusal.is_some();
+        (diagonal_mm(&h, "cube", doc_units_per_mm), refused)
+    }
+
+    #[test]
+    fn hollow_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::hollow_matches_in_mm_and_m_documents");
+        let results: Vec<(f64, bool)> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| hollow_result(unit, doc_units_per_mm))
+            .collect();
+        assert!(
+            !results[0].1 && !results[1].1,
+            "Hollow was refused in one of the documents: {results:?}"
+        );
+        assert!(
+            (results[0].0 - results[1].0).abs() < 0.5,
+            "Hollow's result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// Split at a gap of `gap_mm` millimetres, Keep both: the top
+    /// part's resulting bounding box diagonal, in millimetres.
+    fn split_gap_diagonal_mm(unit: Unit, doc_units_per_mm: f64, gap_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.state_mut().split.gap = gap_mm * doc_units_per_mm;
+        let history = history_len(&h);
+        scroll_and_click(&mut h, "Cut");
+        wait_until(&mut h, "the cut", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Split ({unit:?}, gap {gap_mm} mm): {:?}",
+            h.state().refusal
+        );
+        diagonal_mm(&h, "cube (top)", doc_units_per_mm)
+    }
+
+    #[test]
+    fn split_gap_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::split_gap_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| split_gap_diagonal_mm(unit, doc_units_per_mm, 1.0))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "Split's gapped result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// A placed library shape (a 10 mm Box) keeps its real-world size:
+    /// its world-space bounding box diagonal, in millimetres. Its own
+    /// transform's linear part carries the shape's mm-to-document-units
+    /// scale (its mesh is generated in mm, D16/D20), unlike every other
+    /// object `world_bounds` is used for in this file (placed with [`at`]
+    /// alone, no scale) — so every one of its local bounding box's 8
+    /// corners is carried through the full affine transform, not just
+    /// translated.
+    fn placed_box_diagonal_mm(unit: Unit, doc_units_per_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Parts").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Box").click_accesskit();
+        wait_until(&mut h, "the shape placed", |a| {
+            a.busy.is_none() && a.session.history_labels().len() > history
+        });
+        settle(&mut h);
+        let id = h.state().active.unwrap();
+        let doc = h.state().session.document();
+        let o = doc.object(id).unwrap();
+        let bb = o.mesh().unwrap().bounding_box().unwrap();
+        let t = o.transform;
+        let m = glam::DMat3::from_cols(
+            DVec3::new(t[0], t[1], t[2]),
+            DVec3::new(t[3], t[4], t[5]),
+            DVec3::new(t[6], t[7], t[8]),
+        );
+        let translation = DVec3::new(t[9], t[10], t[11]);
+        let corners = [bb.min, bb.max].into_iter().flat_map(|p0| {
+            [bb.min, bb.max].into_iter().flat_map(move |p1| {
+                [bb.min, bb.max]
+                    .into_iter()
+                    .map(move |p2| DVec3::new(p0[0], p1[1], p2[2]))
+            })
+        });
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for c in corners {
+            let world = m * c + translation;
+            lo = lo.min(world);
+            hi = hi.max(world);
+        }
+        (hi - lo).length() / doc_units_per_mm
+    }
+
+    #[test]
+    fn a_placed_shape_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::a_placed_shape_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| placed_box_diagonal_mm(unit, doc_units_per_mm))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "A placed shape's real-world size differs between mm and m documents: {results:?}"
+        );
     }
 }

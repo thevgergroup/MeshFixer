@@ -1123,15 +1123,12 @@ pub fn count(n: usize, noun: &str) -> String {
     }
 }
 
-/// A length to three significant figures (whole numbers from 100 up).
+/// A length to three significant figures (whole numbers from 100 up):
+/// the one formatter every panel's caption uses (`mf_spec::format_length`,
+/// the same rule the engine's own refusal messages use, D20 — so "at
+/// least 0.000" never reaches a person, in a panel or in a refusal).
 pub fn measure(v: f64) -> String {
-    let a = v.abs();
-    let decimals = if !a.is_finite() || a == 0.0 || a >= 100.0 {
-        0
-    } else {
-        (2 - a.log10().floor() as i32).max(0) as usize
-    };
-    format!("{v:.decimals$}")
+    mf_spec::format_length(v)
 }
 
 pub fn unit_symbol(units: Unit) -> &'static str {

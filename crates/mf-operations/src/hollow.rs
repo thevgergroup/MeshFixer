@@ -402,14 +402,19 @@ impl Band {
 
 fn too_large(h: f64, points: u64, wall: f64, needed: f64) -> OpError {
     let thicker = if needed > wall / 2.0 {
-        format!(" or a thicker wall (at least {:.3})", 2.0 * needed)
+        format!(
+            " or a thicker wall (at least {})",
+            mf_spec::format_length(2.0 * needed)
+        )
     } else {
         String::new()
     };
     failed(
         "grid_too_large",
         format!(
-            "A cell size of {h} needs about {points} grid points around the surface, more than the {MAX_POINTS} this can hold. Use a larger cell size (at least {needed:.3}){thicker}."
+            "A cell size of {} needs about {points} grid points around the surface, more than the {MAX_POINTS} this can hold. Use a larger cell size (at least {}){thicker}.",
+            mf_spec::format_length(h),
+            mf_spec::format_length(needed)
         ),
     )
 }

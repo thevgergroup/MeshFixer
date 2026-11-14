@@ -107,9 +107,11 @@ pub struct SplitState {
     pub bound: bool,
     /// "disc" or "rect".
     pub bound_shape: String,
-    /// The bound's diameter (disc) or width (rect), world mm.
+    /// The bound's diameter (disc) or width (rect), document units
+    /// (converted to mm when the invocation is built, D20).
     pub bound_width: f64,
-    /// The bound's height (rect only), world mm.
+    /// The bound's height (rect only), document units (converted to mm
+    /// when the invocation is built, D20).
     pub bound_height: f64,
 }
 
@@ -1304,9 +1306,17 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
+        // `cell_size` and `offset` are `unit: mm` params (D20): `cell`
+        // and `app.solid.offset` are document units (the panel's own
+        // slider and field, labelled in `units`), so cross to mm here,
+        // once, or `Session::prepare`'s single mm-to-document
+        // conversion runs on an already-document-units number (the
+        // owner's bug: a 0.001 m cell size reaching `prepare` as
+        // 0.000001 on a metre document).
+        let mm = crate::transform_tool::mm_per(app.session.document().units());
         let params = BTreeMap::from([
-            ("cell_size".to_owned(), cell.to_string()),
-            ("offset".to_owned(), app.solid.offset.to_string()),
+            ("cell_size".to_owned(), (cell * mm).to_string()),
+            ("offset".to_owned(), (app.solid.offset * mm).to_string()),
             ("preserve_sharp".to_owned(), (!app.solid.smooth).to_string()),
         ]);
         run(
@@ -1380,26 +1390,26 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
             }
         }
         // The bounded cut plane (Phase 1b): the disc or rectangle,
-        // translucent, centred on the plane's point.
+        // translucent, centred on the plane's point. `bound_width` and
+        // `bound_height` are document units, same as `point` (the
+        // panel's own fields, labelled with the document's unit
+        // symbol): no scale factor needed here, only when building the
+        // `mm`-unit invocation parameter (D20).
         if app.split.bound && app.active_mesh().is_some() {
             let point = app.split.point();
             let normal = app.split.normal();
             let u = normal.any_orthonormal_vector();
             let v = normal.cross(u);
-            let scale = 1.0 / crate::transform_tool::mm_per(app.session.document().units());
             let pts: Vec<egui::Pos2> = match app.split.bound_shape.as_str() {
                 "rect" => {
-                    let (hw, hh) = (
-                        app.split.bound_width * scale / 2.0,
-                        app.split.bound_height * scale / 2.0,
-                    );
+                    let (hw, hh) = (app.split.bound_width / 2.0, app.split.bound_height / 2.0);
                     [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
                         .into_iter()
                         .filter_map(|(x, y)| at(point + u * x + v * y))
                         .collect()
                 }
                 _ => {
-                    let r = app.split.bound_width * scale / 2.0;
+                    let r = app.split.bound_width / 2.0;
                     (0..48)
                         .filter_map(|i| {
                             let a = std::f64::consts::TAU * i as f64 / 48.0;

@@ -518,6 +518,26 @@ impl OperationSpec {
     }
 }
 
+/// A length in document units, to three significant figures: never
+/// "0.000" the way a plain `{:.3}` would print a sub-millimetre value
+/// on a metre document (the owner's bug — Make solid's refusal saying
+/// "at least 0.000" for a genuinely positive cell size). Whole numbers
+/// from 100 up drop the decimals; smaller ones get enough to keep three
+/// significant figures. No unit suffix: operations never see which
+/// unit the document is in (D20 keeps them working purely in document
+/// units), so a message built from this reads "at least 0.00025" —
+/// the frontend's own words around it name the unit, as every other
+/// length in its panels does.
+pub fn format_length(v: f64) -> String {
+    let a = v.abs();
+    let decimals = if !a.is_finite() || a == 0.0 || a >= 100.0 {
+        0
+    } else {
+        (2 - a.log10().floor() as i32).max(0) as usize
+    };
+    format!("{v:.decimals$}")
+}
+
 /// How many document units make up one millimetre. The document's own
 /// numbers are in `unit`, so a length given in mm is multiplied by this
 /// to land in document units (a metre document: 1 mm = 0.001 document

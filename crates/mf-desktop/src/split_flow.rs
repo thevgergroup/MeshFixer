@@ -1515,6 +1515,16 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
         .iter()
         .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
         .collect();
+    // `plane_point`, `cut_gap`, `bound_width` and `bound_height` are
+    // `unit: mm` params (D20); `s.point()`, `s.gap`, `s.bound_width` and
+    // `s.bound_height` are document units (the panel's own gizmo and
+    // fields, labelled with the document's unit symbol), so cross to mm
+    // here, once, or `Session::prepare`'s single mm-to-document
+    // conversion runs on an already-document-units number. `plane_normal`,
+    // `box_min` and `box_max` have no declared unit (a direction, and a
+    // box already in world/document units) and are left alone.
+    let mm = crate::transform_tool::mm_per(app.session.document().units());
+    let mm_point = |v: DVec3| vec3(v * mm);
     let (op, params) = match app.split_flow.mode {
         CutMode::Slice => {
             let s = &app.split;
@@ -1538,16 +1548,16 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 String::new()
             };
             let mut p = BTreeMap::from([
-                ("plane_point".to_owned(), vec3(s.point())),
+                ("plane_point".to_owned(), mm_point(s.point())),
                 ("plane_normal".to_owned(), vec3(s.normal())),
                 ("keep".to_owned(), s.keep.clone()),
-                ("cut_gap".to_owned(), s.gap.to_string()),
+                ("cut_gap".to_owned(), (s.gap * mm).to_string()),
                 ("cap".to_owned(), s.cap.to_string()),
                 ("regions".to_owned(), regions_param),
                 ("bound".to_owned(), s.bound.to_string()),
                 ("bound_shape".to_owned(), s.bound_shape.clone()),
-                ("bound_width".to_owned(), s.bound_width.to_string()),
-                ("bound_height".to_owned(), s.bound_height.to_string()),
+                ("bound_width".to_owned(), (s.bound_width * mm).to_string()),
+                ("bound_height".to_owned(), (s.bound_height * mm).to_string()),
             ]);
             if !s.bound {
                 // Keep today's defaults out of the log when the bound
@@ -1566,7 +1576,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 BTreeMap::from([
                     ("box_min".to_owned(), vec3(v.min())),
                     ("box_max".to_owned(), vec3(v.max())),
-                    ("cut_gap".to_owned(), app.split.gap.to_string()),
+                    ("cut_gap".to_owned(), (app.split.gap * mm).to_string()),
                     ("cap".to_owned(), app.split.cap.to_string()),
                 ]),
             )

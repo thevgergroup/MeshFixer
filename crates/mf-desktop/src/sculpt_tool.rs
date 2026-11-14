@@ -590,9 +590,15 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
     // frame (owner: "swap in a single frame").
     app.sculpt_pending = Some((stroke.object, stroke.render.clone()));
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
+    // `radius` and `pivot` are `unit: mm` params (D20): `settings.radius`
+    // and `world` are document units (the panel's own slider, and the
+    // stroke's world-space hit point), so cross to mm here, once, or
+    // `Session::prepare`'s single mm-to-document conversion runs on an
+    // already-document-units number.
+    let mm = crate::transform_tool::mm_per(app.session.document().units());
     let params: BTreeMap<String, String> = BTreeMap::from([
         ("brush".to_owned(), settings.brush.word().to_owned()),
-        ("radius".to_owned(), settings.radius.to_string()),
+        ("radius".to_owned(), (settings.radius * mm).to_string()),
         ("strength".to_owned(), settings.strength.to_string()),
         (
             "falloff".to_owned(),
@@ -601,7 +607,7 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
         ("symmetry_x".to_owned(), settings.symmetry[0].to_string()),
         ("symmetry_y".to_owned(), settings.symmetry[1].to_string()),
         ("symmetry_z".to_owned(), settings.symmetry[2].to_string()),
-        ("pivot".to_owned(), vec3(world)),
+        ("pivot".to_owned(), vec3(world * mm)),
         ("view_dir".to_owned(), vec3(cam.view_dir())),
         ("samples".to_owned(), samples_text(&samples)),
         (

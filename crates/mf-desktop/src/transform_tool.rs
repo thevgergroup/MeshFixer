@@ -289,6 +289,22 @@ pub fn mm_per(unit: Unit) -> f64 {
     }
 }
 
+/// `transform`'s linear part scaled by `factor` (its translation is
+/// left alone): a generator's mesh is built in mm (every library shape
+/// and connector, D16/D20), so a 12-value placement transform meant for
+/// one must scale its linear part by document-units-per-mm
+/// (`1.0 / mm_per(unit)`) before `object.add_shape` places it, or the
+/// mesh lands at its literal mm size in document units (1000x too big
+/// on a metre document). A part's own transform (its mesh baked at
+/// final size already) is never scaled this way.
+pub fn scale_linear(transform: &[f64; 12], factor: f64) -> [f64; 12] {
+    let mut m = *transform;
+    for v in &mut m[0..9] {
+        *v *= factor;
+    }
+    m
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)] // tests may panic on failure
 mod tests {

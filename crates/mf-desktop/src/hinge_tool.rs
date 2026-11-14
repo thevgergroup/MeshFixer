@@ -193,11 +193,16 @@ pub fn place_hinge(
     let Some(connector) = mf_parts::find_generator(HINGE) else {
         return;
     };
-    let length = (edge.length * 0.8).clamp(4.0, 30.0);
+    // `edge.length` and `position` are document units (world bounds,
+    // like every other point in this frame); the hinge's own `length`
+    // param is mm (D16/D20), so cross to mm here before clamping it to
+    // the generator's 4-30 mm range.
+    let mm = crate::transform_tool::mm_per(app.session.document().units());
+    let length_mm = (edge.length * mm * 0.8).clamp(4.0, 30.0);
     let raw = BTreeMap::from([
         ("gap".to_owned(), gap.to_string()),
         ("pin_clearance".to_owned(), clearance.to_string()),
-        ("length".to_owned(), length.to_string()),
+        ("length".to_owned(), length_mm.to_string()),
         ("fit_class".to_owned(), class),
         ("machine_profile".to_owned(), machine),
     ]);
@@ -205,6 +210,9 @@ pub fn place_hinge(
         Ok(p) => p,
         Err(e) => return refuse(app, "invalid_parameter", e.to_string()),
     };
+    // `length` (document units, matching `edge.length` and `position`
+    // before the frame's own mm scale is applied below).
+    let length = length_mm / mm;
     // The frame's origin is the edge's middle: the hinge runs from
     // x = 0, so start it half its length back, then slide it along the
     // edge by `position` (clamped so it still fits on the edge).
@@ -214,12 +222,18 @@ pub fn place_hinge(
     for c in 0..3 {
         frame[9 + c] += frame[c] * (centre - length / 2.0);
     }
+    // The hinge's own mesh is generated in mm (D16/D20): scale the
+    // frame's linear part (an orthonormal basis, scale 1) by
+    // document-units-per-mm, or it lands at its literal mm size in
+    // document units.
+    let mm = 1.0 / crate::transform_tool::mm_per(app.session.document().units());
+    let scaled_frame = crate::transform_tool::scale_linear(&frame, mm);
     let json = serde_json::to_string(&params).unwrap_or_default(); // allow-swallow: Params is plain data; serializing it can't fail
     let members = match crate::connector_tool::group_members(
         HINGE,
         &t!("hinge.name"),
         &json,
-        &frame,
+        &scaled_frame,
         Some((a, b)),
     ) {
         Ok(m) => m,
@@ -240,7 +254,7 @@ pub fn place_hinge(
                 ),
                 (
                     "transform".to_owned(),
-                    frame.map(|v| v.to_string()).join(","),
+                    scaled_frame.map(|v| v.to_string()).join(","),
                 ),
                 ("group".to_owned(), group),
             ]),
@@ -315,9 +329,10 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let edge = edges[app.hinge.edge.min(edges.len() - 1)].clone();
     let half = edge.length / 2.0;
     let position = app.hinge.position.get_or_insert(0.0);
+    let units = crate::defects::unit_symbol(app.session.document().units());
     ui.add(
         egui::Slider::new(position, -half..=half)
-            .suffix(" mm")
+            .suffix(format!(" {units}"))
             .text(t!("hinge.position")),
     );
     widgets::caption(ui, t!("hinge.position.help"));
