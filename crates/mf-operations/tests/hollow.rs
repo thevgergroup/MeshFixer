@@ -807,3 +807,9 @@ fn code_of(e: &OpError) -> &'static str {
         other => panic!("expected a refusal, got {other:?}"),
     }
 }
+
+// Ripple-smoothing's own ripple-amplitude and wall-floor regression
+// test lives in `mf-operations/src/hollow.rs`'s `ripple_tests` module
+// (a crate-internal unit test, since it needs `hollow_shell_passes` to
+// compare the surface with and without the extra smoothing passes on
+// identical input data — not exposed outside the crate).

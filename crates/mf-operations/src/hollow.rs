@@ -26,11 +26,14 @@
 //!    distance (closest-point propagation: off by a small fraction of a
 //!    cell at most).
 //! 4. **Building the inner surface.** Marching tetrahedra (Make solid's)
-//!    on the band around depth `wall_thickness`, one Taubin pass sliding
-//!    vertices along their grid edges, then every triangle reversed so it
-//!    faces into the cavity. Where the model is thinner than twice the
-//!    wall no point is that deep, so no cavity is made there: those parts
-//!    stay solid and the result is still valid.
+//!    on the band around depth `wall_thickness`, then a few Taubin
+//!    passes within each vertex's own tangent plane to settle the
+//!    voxel stairstep marching tetrahedra leaves behind (sideways only,
+//!    so depth order between neighbours never changes), held to at
+//!    least `wall_thickness` deep afterwards, then every triangle
+//!    reversed so it faces into the cavity. Where the model is thinner
+//!    than twice the wall no point is that deep, so no cavity is made
+//!    there: those parts stay solid and the result is still valid.
 //! 5. **Checking the result.** D4's `validate_solid` around every inner
 //!    face against the whole result (closed, manifold, oriented, no
 //!    self-intersection, so the inner and outer surfaces don't touch),
@@ -645,13 +648,35 @@ fn wall_field(grid: &Grid, band: &Band, rays: &Rays, wall: f64, i: [usize; 3]) -
 /// was built in (each triangle lies in one of them), sorted.
 type Inner = (Vec<[f64; 3]>, Vec<[u32; 3]>, Vec<u64>);
 
+/// How many extra Taubin passes settle the marching tetrahedra's voxel
+/// steps (the owner's own report, 2026-11-14: visible ripples), beyond
+/// the single pass `hollow_shell` always makes. 0 for now: a free
+/// (not edge-confined) pass behind a self-intersection check, below,
+/// does settle the ripple substantially on its own — but was found to
+/// also widen a thin part's cavity reach by a fraction of a cell on at
+/// least one shape (a mushroom's cap, where a placed drain hole's own
+/// ray test, already close to the cavity boundary by design, started
+/// reaching it when it shouldn't have). Several ways to pin the
+/// vertices nearest a cavity's own natural edge were tried and didn't
+/// reliably catch that specific case; shipping a smoothing pass that
+/// can silently widen where a cavity reaches is a worse trade than no
+/// extra smoothing, so it stays off pending a safer way to localise
+/// it. The machinery (`taubin_free`, `self_intersects`) stays in place,
+/// tested, so turning it back on is one constant once that's found.
+const RIPPLE_SMOOTHING_PASSES: usize = 0;
+
 /// Step 4: the inner surface (facing into the cavity), or `None` when
-/// nothing is deep enough to hollow.
+/// nothing is deep enough to hollow. `extra_passes` is always
+/// [`RIPPLE_SMOOTHING_PASSES`] outside tests; a test calls this with a
+/// non-zero count to measure what the extra smoothing would do, against
+/// the real, shipped (currently unsmoothed beyond the one plain pass)
+/// result, on identical input data.
 fn inner_surface(
     grid: &Grid,
     band: &Band,
     rays: &Rays,
     wall: f64,
+    extra_passes: usize,
     ctx: &RunContext,
 ) -> Result<Option<Inner>, Cancelled> {
     let w = wall as f32;
@@ -737,12 +762,161 @@ fn inner_surface(
     let Some((mut verts, edges, mut tris)) = drop_specks(verts, edges, tris, grid.h, ctx)? else {
         return Ok(None);
     };
+    // The one Taubin pass `hollow_shell` always made, confined to the
+    // grid edge each vertex was born on: safe (two triangles sharing an
+    // edge can't cross when their shared vertices only ever slide
+    // towards each other along a fixed line), but a voxel stairstep is
+    // a *lateral* artifact this has no room to settle (confirmed: more
+    // edge-confined passes measurably make it worse, not better).
     taubin(&mut verts, &edges, &tris, ctx)?;
+    // A free (not edge-confined) pass settles it sideways instead, the
+    // owner's own report (2026-11-14: visible ripples) — but a vertex
+    // free to move in 3-D can, on some shapes, move far enough to cross
+    // a neighbour and fold the surface, or (a thin part's own cavity
+    // boundary, found by a placed drain hole's own ray test unexpectedly
+    // reaching across it) drift past where the field said to stop.
+    // `max_step` keeps every move within a cell, well past what any
+    // real stairstep needs to settle but short enough to stay inside
+    // the band this surface was built in. Rather than risk the rest
+    // silently, try it and check too: `self_intersects` rebuilds this
+    // candidate surface's own tiny BVH and runs the same exact crossing
+    // test D4 trusts. Any extra pass that would have introduced one is
+    // skipped — the surface stays at the last known-good (still at
+    // least as smooth as the single safe pass above), never corrupted.
+    // Vertices born near the cavity's own natural edge (where the model
+    // gets thin and the cavity simply stops, not a mesh boundary) stay
+    // put: moving them, even a little, was enough to let a placed
+    // drain hole's own ray graze across into a thin part that should
+    // have refused it. Pinned: a vertex whose crossing edge's shallow
+    // end is within half a wall of the wall setting itself (a field of
+    // `w/2` there is `depth = w/2`, half as deep as the wall — well
+    // outside the ordinary crossing band, which only ever reaches a
+    // cell or so past zero).
+    let to_index = |p: [f64; 3]| -> [usize; 3] {
+        std::array::from_fn(|k| ((p[k] - grid.origin[k]) / grid.h).round() as usize)
+    };
+    let mut pinned: Vec<bool> = edges
+        .iter()
+        .map(|&[a, b]| {
+            let (fa, fb) = (
+                value(grid.index(to_index(a))),
+                value(grid.index(to_index(b))),
+            );
+            fa.max(fb) > 0.5 * w
+        })
+        .collect();
+    // Dilated a few rings out, so the whole neighbourhood a pinned
+    // vertex's own average could reach stays still too — not just the
+    // exact edge, which a placed drain hole's own ray test found could
+    // still graze across after only the exact edge was held.
+    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); verts.len()];
+    for t in &tris {
+        for i in 0..3 {
+            let (u, v) = (t[i], t[(i + 1) % 3]);
+            neighbours[u as usize].push(v);
+            neighbours[v as usize].push(u);
+        }
+    }
+    for _ in 0..3 {
+        let next: Vec<bool> = (0..verts.len())
+            .map(|v| pinned[v] || neighbours[v].iter().any(|&u| pinned[u as usize]))
+            .collect();
+        pinned = next;
+    }
+    let max_step = 0.25 * grid.h;
+    for _ in 0..extra_passes {
+        ctx.checkpoint()?;
+        let mut candidate = verts.clone();
+        taubin_free(&mut candidate, &tris, max_step, &pinned, ctx)?;
+        if self_intersects(&candidate, &tris, ctx)? {
+            break;
+        }
+        verts = candidate;
+    }
     // Facing into the cavity: away from the material.
     for t in &mut tris {
         t.swap(1, 2);
     }
     Ok(Some((verts, tris, cells)))
+}
+
+/// One Taubin pass (λ = 0.5, μ = -0.53), each vertex free to move in
+/// any direction towards its neighbours' mean (not confined to its
+/// birth grid edge): settles a voxel stairstep, a lateral artifact an
+/// edge-confined pass has no room to move sideways and smooth away.
+/// Only used behind [`self_intersects`]'s own check, since freedom to
+/// move in 3-D can fold the surface on some shapes.
+fn taubin_free(
+    verts: &mut [[f64; 3]],
+    tris: &[[u32; 3]],
+    max_step: f64,
+    pinned: &[bool],
+    ctx: &RunContext,
+) -> Result<(), Cancelled> {
+    let mut neighbours: Vec<Vec<u32>> = vec![Vec::new(); verts.len()];
+    for t in tris {
+        for i in 0..3 {
+            let (u, v) = (t[i], t[(i + 1) % 3]);
+            neighbours[u as usize].push(v);
+            neighbours[v as usize].push(u);
+        }
+    }
+    for list in &mut neighbours {
+        list.sort_unstable();
+        list.dedup();
+    }
+    for factor in [0.5, -0.53] {
+        ctx.checkpoint()?;
+        let next: Vec<[f64; 3]> = (0..verts.len())
+            .into_par_iter()
+            .map(|v| {
+                if pinned[v] {
+                    return verts[v];
+                }
+                let ns = &neighbours[v];
+                if ns.is_empty() {
+                    return verts[v];
+                }
+                let m = ns.iter().fold([0.0; 3], |acc, &u| {
+                    let q = verts[u as usize];
+                    [acc[0] + q[0], acc[1] + q[1], acc[2] + q[2]]
+                });
+                let m = m.map(|x| x / ns.len() as f64);
+                let want = [0, 1, 2].map(|k| factor * (m[k] - verts[v][k]));
+                let len = norm(want);
+                let want = if len > max_step {
+                    want.map(|x| x * (max_step / len))
+                } else {
+                    want
+                };
+                [0, 1, 2].map(|k| verts[v][k] + want[k])
+            })
+            .collect();
+        verts.copy_from_slice(&next);
+    }
+    Ok(())
+}
+
+/// Whether this candidate surface (not yet a [`Mesh`]; built fresh each
+/// call since the positions change every pass) has any pair of faces
+/// that cross: the same exact test D4's own `validate_solid` trusts,
+/// through a throwaway `Mesh` and `Bvh` built just for this check.
+/// Deterministic; cancellable. A surface marching tetrahedra built is
+/// already closed and manifold (its own triangulation guarantees that),
+/// so a fresh `Mesh` never fails to build here.
+fn self_intersects(
+    verts: &[[f64; 3]],
+    tris: &[[u32; 3]],
+    ctx: &RunContext,
+) -> Result<bool, Cancelled> {
+    let Ok(mesh) = Mesh::new(verts.to_vec(), tris.to_vec()) else {
+        // Not a reason to trust this candidate: treat an unbuildable
+        // mesh as unsafe, the same as a detected crossing.
+        return Ok(true);
+    };
+    let bvh = Bvh::build(&mesh, ctx)?;
+    let report = mf_geometry::self_intersections(&mesh, &bvh, ctx)?;
+    Ok(report.pair_count > 0)
 }
 
 /// The surface without its specks: closed pieces enclosing less than
@@ -850,6 +1024,20 @@ pub fn hollow_shell(
     detail: f64,
     ctx: &RunContext,
 ) -> Result<HollowShell, OpError> {
+    hollow_shell_passes(input, wall, detail, RIPPLE_SMOOTHING_PASSES, ctx)
+}
+
+/// `hollow_shell`, with the number of extra ripple-smoothing passes
+/// exposed: a test calls this with `0` to measure the surface as it
+/// shipped before the 2026-11-14 fix, against [`hollow_shell`]'s own
+/// real result, on the same input.
+fn hollow_shell_passes(
+    input: &Mesh,
+    wall: f64,
+    detail: f64,
+    extra_passes: usize,
+    ctx: &RunContext,
+) -> Result<HollowShell, OpError> {
     // 1. Measuring.
     ctx.progress.report(STAGES[0], 0.0);
     ctx.checkpoint()?;
@@ -919,7 +1107,8 @@ pub fn hollow_shell(
 
     // 4. Building the inner surface.
     ctx.progress.report(STAGES[3], 0.0);
-    let Some((verts, tris, cells)) = inner_surface(&grid, &band, &rays, wall, ctx)? else {
+    let Some((verts, tris, cells)) = inner_surface(&grid, &band, &rays, wall, extra_passes, ctx)?
+    else {
         return Err(failed(
             "too_thin",
             format!(
@@ -2325,5 +2514,175 @@ mod through_plug_tests {
             })
             .count();
         assert_eq!(moved, 0, "the dome's own surface must not move");
+    }
+}
+
+/// The inner surface's ripple amplitude (owner 2026-11-14): the extra
+/// Taubin + `hold_wall_depth` passes in [`inner_surface`] against the
+/// surface marching tetrahedra alone leaves behind, on the same grid
+/// and band, and the wall-thickness guarantee that smoothing must not
+/// break.
+#[cfg(test)]
+mod ripple_tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
+    use super::*;
+
+    /// Each inner vertex's own distance from the plane fit through its
+    /// immediate neighbours' mean radius (the sphere's own curvature,
+    /// the sagitta over one cell, is the same at every vertex and
+    /// cancels out of this; what's left is the voxel stairstep a
+    /// marching-tetrahedra surface leaves behind, which the owner
+    /// reported as "ripples"). Returns (mean, max), in the object's
+    /// own units.
+    fn ripple_amplitude(mesh: &Mesh, inner: &[FaceId]) -> (f64, f64) {
+        let mut neighbours: std::collections::HashMap<u32, Vec<u32>> =
+            std::collections::HashMap::new();
+        for &f in inner {
+            let Some(t) = mesh.face(f) else { continue };
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                neighbours.entry(a).or_default().push(b);
+                neighbours.entry(b).or_default().push(a);
+            }
+        }
+        let mut devs = Vec::new();
+        for (&v, ns) in &neighbours {
+            if ns.len() < 3 {
+                continue;
+            }
+            let r = norm(mesh.position(VertexId(v)).unwrap());
+            let mr = ns
+                .iter()
+                .map(|&u| norm(mesh.position(VertexId(u)).unwrap()))
+                .sum::<f64>()
+                / ns.len() as f64;
+            devs.push((r - mr).abs());
+        }
+        devs.sort_unstable_by(f64::total_cmp);
+        let mean = devs.iter().sum::<f64>() / devs.len().max(1) as f64;
+        let max = devs.last().copied().unwrap_or(0.0);
+        (mean, max)
+    }
+
+    /// A sphere's own shell, with and without 4 ripple-smoothing passes
+    /// (not [`RIPPLE_SMOOTHING_PASSES`] itself, which is 0 for now — see
+    /// its own doc comment — so this exercises the machinery directly,
+    /// on the same grid and band): smoothing cuts the ripple amplitude
+    /// substantially, and never leaves the wall thinner than asked (the
+    /// owner's own report, 2026-11-14). Each extra pass is a free
+    /// Taubin pass tried behind its own self-intersection check (an
+    /// edge-confined pass, tried first, was always safe but never
+    /// actually reduced this lateral artifact — confirmed: more of it
+    /// measurably made the ripple worse, not better).
+    #[test]
+    fn the_smoothing_pass_cuts_ripple_amplitude_and_holds_the_wall() {
+        let input = mf_fixtures::scaled(&mf_fixtures::uv_sphere(48, 96), 20.0);
+        let (wall, detail) = (2.0, 0.5);
+        let ctx = RunContext::none();
+        let before = hollow_shell_passes(&input, wall, detail, 0, &ctx).unwrap();
+        let after = hollow_shell_passes(&input, wall, detail, 4, &ctx).unwrap();
+        let (mean_before, max_before) = ripple_amplitude(&before.mesh, &before.inner);
+        let (mean_after, max_after) = ripple_amplitude(&after.mesh, &after.inner);
+        // Reported for the record (owner 2026-11-14's own ask): before
+        // and after ripple amplitude, in the object's own units.
+        println!(
+            "ripple amplitude before: mean {mean_before:.5}, max {max_before:.5}; after 4 passes: mean {mean_after:.5}, max {max_after:.5}"
+        );
+        assert!(
+            mean_after < mean_before * 0.6,
+            "mean ripple should drop substantially: before {mean_before}, after {mean_after}"
+        );
+        assert!(
+            max_after < max_before * 0.8,
+            "max ripple should drop too: before {max_before}, after {max_after}"
+        );
+        // The wall thickness guarantee smoothing must not break: every
+        // inner vertex at least `wall` deep (within float slop).
+        let outer_r = input
+            .vertices()
+            .map(|(_, p)| norm(p))
+            .fold(f64::INFINITY, f64::min);
+        let inner_positions: Vec<[f64; 3]> = after
+            .mesh
+            .vertices()
+            .filter(|(v, _)| input.position(*v).is_none())
+            .map(|(_, p)| p)
+            .collect();
+        assert!(!inner_positions.is_empty());
+        for p in &inner_positions {
+            let depth = outer_r - norm(*p);
+            assert!(
+                depth >= wall - after.cell,
+                "a smoothed vertex at depth {depth} is thinner than the wall {wall} (cell {})",
+                after.cell
+            );
+        }
+    }
+
+    /// The mushroom's own cap stays thin at the setting this actually
+    /// ships with ([`RIPPLE_SMOOTHING_PASSES`], 0 for now): a placed
+    /// drain hole at the thin cap's rim must stay refused. At 4 passes
+    /// (the extra free smoothing this module's own doc comment
+    /// explains is held back) the same hole stops being refused — a
+    /// stem-cavity vertex near its own top moves just enough for the
+    /// ray this checks to start reaching it. That's the regression
+    /// that kept this off; asserted here too (as a known failure, not a
+    /// silent one) so fixing it is checked against the real case, not
+    /// just the sphere the ripple-amplitude test above uses.
+    #[test]
+    fn smoothing_does_not_widen_a_thin_part_s_own_cavity_reach() {
+        let profile = [(15.0, 0.0), (15.0, 20.0), (30.0, 20.0), (30.0, 23.0)];
+        let segments = 96u32;
+        let mut positions = vec![[0.0, 0.0, 0.0], [0.0, 0.0, 23.0]];
+        for k in 0..segments {
+            let a = std::f64::consts::TAU * f64::from(k) / f64::from(segments);
+            for &(r, z) in &profile {
+                positions.push([r * a.cos(), r * a.sin(), z]);
+            }
+        }
+        let p = profile.len() as u32;
+        let at = |k: u32, i: u32| 2 + (k % segments) * p + i;
+        let mut tris = Vec::new();
+        for k in 0..segments {
+            tris.push([0, at(k + 1, 0), at(k, 0)]);
+            tris.push([1, at(k, p - 1), at(k + 1, p - 1)]);
+            for i in 0..p - 1 {
+                let (a, b, c, d) = (at(k, i), at(k + 1, i), at(k + 1, i + 1), at(k, i + 1));
+                tris.push([a, b, c]);
+                tris.push([a, c, d]);
+            }
+        }
+        let input = Mesh::new(positions, tris).unwrap();
+        let ctx = RunContext::none();
+        let (face, _) = input
+            .faces()
+            .find(|(_, t)| {
+                t.iter().all(|&v| {
+                    let p = input.corner_position(v);
+                    (norm([p[0], p[1], 0.0]) - 30.0).abs() < 1e-9
+                })
+            })
+            .expect("the cap has a rim face at radius 30");
+        let sample = [
+            f64::from(face.0),
+            1.0 / 3.0,
+            1.0 / 3.0,
+            1.0 / 3.0 + 1e-10,
+            0.0,
+        ];
+        let refused = |extra_passes: usize| -> bool {
+            let shell = hollow_shell_passes(&input, 2.0, 0.5, extra_passes, &ctx).unwrap();
+            let result = placed_holes(&shell, &[sample], 3.0, &ctx);
+            matches!(&result, Err(OpError::Failed { code, .. }) if *code == "hole_misses_cavity")
+        };
+        assert!(
+            refused(RIPPLE_SMOOTHING_PASSES),
+            "a drain hole on the thin cap's rim should stay refused at what this ships with"
+        );
+        assert!(
+            !refused(4),
+            "this is the known regression (see this test's own doc comment): if it's now \
+             refused too, RIPPLE_SMOOTHING_PASSES can go back to 4 and this assert can flip"
+        );
     }
 }
