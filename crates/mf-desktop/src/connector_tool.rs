@@ -867,6 +867,7 @@ fn save_connector_to_library(app: &mut MeshFixerApp, placed: &PlacedConnector) {
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        unit: mf_parts::Unit::Millimeter,
         mesh: String::new(),
         category: String::new(),
         description: String::new(),

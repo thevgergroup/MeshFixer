@@ -1018,6 +1018,11 @@ pub fn save_as_part(
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        // The mesh is saved exactly as stored on the object, in the
+        // document's own unit (consolidation plan C10), so the part
+        // round-trips at the same physical size regardless of what unit
+        // it's reloaded into.
+        unit: app.session.document().units(),
         mesh: String::new(),
         category: category.trim().to_owned(),
         description: description.trim().to_owned(),

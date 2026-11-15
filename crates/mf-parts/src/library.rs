@@ -9,6 +9,19 @@ use mf_runtime::{Cancelled, RunContext};
 use crate::builtin::{Builtin, builtins};
 use crate::manifest::PartManifest;
 
+/// Scales `mesh`'s positions by `factor`, leaving its topology untouched.
+fn scaled(mesh: Mesh, factor: f64) -> Result<Mesh, String> {
+    if factor == 1.0 {
+        return Ok(mesh);
+    }
+    let (positions, triangles) = mesh.to_arrays();
+    let positions = positions
+        .into_iter()
+        .map(|p| p.map(|c| c * factor))
+        .collect();
+    Mesh::new(positions, triangles).map_err(|e| e.to_string())
+}
+
 /// The manifest's file name in a part's folder.
 pub const MANIFEST_FILE: &str = "part.yaml";
 
@@ -60,12 +73,16 @@ impl LibraryPart {
         matches!(self.source, Source::Builtin(_))
     }
 
-    /// The part's mesh, in part space: a built-in's generated mesh, a
-    /// user part's stored mesh file, or — for a connector entry
+    /// The part's mesh, in part space and always in **millimetres** (D16:
+    /// generators are mm-internal): a built-in's generated mesh, a user
+    /// part's stored mesh file scaled from `manifest.unit` to mm
+    /// (consolidation plan C10), or — for a connector entry
     /// (`PartKind::Connector`) — every part the connector generates,
     /// merged into one mesh (a preview/placement shape; `object.
     /// add_connector`, Task 28, regenerates it with its parts kept
-    /// separate so `connector.join` can act on each role).
+    /// separate so `connector.join` can act on each role). The caller
+    /// (`object.add_part`) scales this mm mesh into the placing
+    /// document's own unit.
     pub fn mesh(&self, ctx: &RunContext) -> Result<Mesh, PartError> {
         if let crate::manifest::PartKind::Connector { connector, params } = &self.manifest.kind {
             return self.connector_mesh(connector, params, ctx);
@@ -79,12 +96,20 @@ impl LibraryPart {
             }
             Source::User { dir, .. } => {
                 let path = dir.join(&self.manifest.mesh);
-                mf_io::read_path(&path)
-                    .map(|i| i.mesh)
-                    .map_err(|e| PartError::Unreadable {
-                        id: self.manifest.id.clone(),
-                        reason: format!("{}: {e}", path.display()),
-                    })
+                let mesh =
+                    mf_io::read_path(&path)
+                        .map(|i| i.mesh)
+                        .map_err(|e| PartError::Unreadable {
+                            id: self.manifest.id.clone(),
+                            reason: format!("{}: {e}", path.display()),
+                        })?;
+                scaled(mesh, self.manifest.unit.mm_per()).map_err(|e| {
+                    PartError::Invalid(format!(
+                        "'{}' can't be scaled from {} to millimetres: {e}",
+                        self.manifest.id,
+                        self.manifest.unit.symbol()
+                    ))
+                })
             }
         }
     }
@@ -268,7 +293,12 @@ fn load_user(folder: &Path) -> Result<LibraryPart, String> {
 }
 
 /// Saves `mesh` as a user part `dir/<id>/` (`part.yaml` and `part.3mf`,
-/// which keeps its colours). Refuses an id that's already there.
+/// which keeps its colours). `mesh`'s coordinates are saved exactly as
+/// given, in `manifest.unit` (consolidation plan C10: the caller passes
+/// the source document's own unit, so a part saved from a metres model
+/// is labelled `unit: Meter`, not always `Millimeter`, and
+/// [`LibraryPart::mesh`] later scales it back to mm correctly). Refuses
+/// an id that's already there.
 pub fn save_object_as_part(
     mesh: &Mesh,
     manifest: &PartManifest,
@@ -287,7 +317,7 @@ pub fn save_object_as_part(
     m.mesh = "part.3mf".into();
     let model = mf_io::threemf::Model {
         metadata: Default::default(),
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: m.unit,
         objects: vec![mf_io::threemf::ModelObject {
             metadata: Default::default(),
             name: m.name.clone(),

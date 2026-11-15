@@ -251,6 +251,7 @@ fn saved_connector_regenerates_identically() {
             up: [1.0, 0.0, 0.0],
         },
         default_scale: 1.0,
+        unit: mf_parts::Unit::Millimeter,
         mesh: String::new(),
         category: String::new(),
         description: String::new(),

@@ -26,6 +26,20 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     }
 }
 
+/// Scales `mesh`'s positions by `factor` uniformly, leaving its topology
+/// untouched.
+fn scale_mesh(mesh: Mesh, factor: f64) -> Result<Mesh, mf_geometry::GeometryError> {
+    if factor == 1.0 {
+        return Ok(mesh);
+    }
+    let (positions, triangles) = mesh.to_arrays();
+    let positions = positions
+        .into_iter()
+        .map(|p| p.map(|c| c * factor))
+        .collect();
+    Mesh::new(positions, triangles)
+}
+
 /// The library a command reads: built-ins and the user's parts folder.
 fn library(ctx: &RunContext) -> Library {
     // allow-swallow: without a settings folder there are no user parts; built-ins still load
@@ -59,7 +73,7 @@ impl Operation for AddPart {
         &self,
         _inputs: &[OperandInput],
         params: &Params,
-        _doc: &DocContext,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let id = params.get_text("part_id")?;
@@ -95,6 +109,11 @@ impl Operation for AddPart {
             mf_parts::PartError::Cancelled => OpError::Cancelled,
             e => failed("part_unreadable", e.to_string()),
         })?;
+        // `LibraryPart::mesh` always returns millimetres (D16): scale into
+        // the placing document's own unit (consolidation plan C10), so a
+        // 10 mm part in a metres document lands at 0.01 doc units, not 10.
+        let mesh = scale_mesh(mesh, 1.0 / doc.unit.mm_per())
+            .map_err(|e| failed("part_unreadable", format!("can't scale the part: {e}")))?;
         let provenance = Provenance {
             created_faces: mesh.faces().map(|(f, _)| (f, Sources::default())).collect(),
             created_vertices: mesh.vertices().map(|(v, _)| v).collect(),
