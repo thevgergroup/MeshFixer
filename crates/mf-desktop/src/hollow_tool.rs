@@ -114,7 +114,7 @@ pub struct PreviewRequest {
 pub struct Preview {
     pub key: PreviewKey,
     pub mesh: Mesh,
-    pub outcome: Result<PreviewShell, (String, String)>,
+    pub outcome: Result<PreviewShell, crate::refusal_card::Refusal>,
 }
 
 /// The hollowed object as the preview draws it.
@@ -138,16 +138,17 @@ pub fn preview_work(
 ) -> Result<Message, Cancelled> {
     let outcome = match hollow::hollow_shell(&req.mesh, req.key.wall, req.key.detail, ctx) {
         Err(mf_operations::OpError::Cancelled) => return Err(Cancelled),
-        Err(mf_operations::OpError::Failed { code, message }) => Err((code.to_owned(), message)),
-        // ADR-0010, consolidation plan C14: a thin adapter rendering a
-        // declared refusal the same (code, message) shape this panel
-        // used before the registry existed; routing it to the panel
-        // through the registry's own RefusalCard is C16's job.
-        Err(mf_operations::OpError::Refused { code, args }) => Err((
-            code.to_owned(),
-            mf_operations::refusal::render_message(&args),
-        )),
-        Err(e) => Err(("invalid_parameter".to_owned(), e.to_string())),
+        // The preview's refusal is rendered exactly as Apply's would be
+        // (ADR-0010, C16): the same RefusalCard, in this panel.
+        Err(e) => Err(
+            crate::refusal_card::Refusal::from_op_error("mesh.hollow", &e).unwrap_or_else(|| {
+                crate::refusal_card::Refusal {
+                    op_id: "mesh.hollow".to_owned(),
+                    code: "invalid_parameter".to_owned(),
+                    message: e.to_string(),
+                }
+            }),
+        ),
         Ok(shell) => {
             ctx.checkpoint()?;
             let render = Arc::new(RenderMesh::build(
@@ -783,7 +784,7 @@ fn section(ui: &mut egui::Ui, text: &str) {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::shape_tools::refusal_card_for(app, ui, "mesh.hollow");
+    crate::refusal_card::show_for(app, ui, "mesh.hollow");
     let units = crate::defects::unit_symbol(app.session.document().units());
     let Some(id) = app.active else { return };
     ensure_defaults(app, id);
@@ -1008,12 +1009,11 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     );
                 }
             }
-            Some(Err((code, message))) => {
-                widgets::card(ui, |ui| {
-                    ui.label(RichText::new(t!("hollow.preview_refused")).color(theme::TEXT_STRONG));
-                    widgets::body(ui, message);
-                    widgets::caption(ui, format!("({code})"));
-                });
+            Some(Err(refusal)) => {
+                let refusal = refusal.clone();
+                crate::refusal_card::RefusalCard::new(&refusal)
+                    .title(t!("hollow.preview_refused"))
+                    .show(app, ui);
             }
         }
     }
