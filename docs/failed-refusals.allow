@@ -1,0 +1,58 @@
+# The reviewed OpError::Failed / ConnectorError::Failed construction
+# sites (ADR-0010, consolidation plan C14). Enforced by
+# crates/mf-operations/tests/refusal_registry.rs's
+# `failed_sites_are_on_the_reviewed_allow_list`: a `Failed {` site is
+# counted only where it builds a value (never a `let`-destructure or a
+# match arm's own pattern), per file; the file's count here must match
+# exactly. A genuine internal error (a malformed invocation, an id a
+# replay log carries that this build doesn't register, a transform
+# that can't be inverted) stays `Failed`; a refusal a person can act on
+# is built through the one registry helper
+# (`crate::refusal::refuse`/`refuse_plain`) instead, as
+# `OpError::Refused`. The list only shrinks: removing a site without
+# removing its entry fails too.
+#
+# <file> <count> <reason>
+
+# The 9 migrated per-module helpers plus leaf_hinge.rs (C14): every
+# site left here is a malformed invocation or an uninvertible
+# transform, never a declared refusal.
+mf-operations/src/boolean.rs 3 missing_operand/invalid_parameter/singular_transform are malformed invocations, never a declared refusal
+mf-operations/src/combine.rs 5 missing_operand x3 and singular_transform x2 are malformed invocations or an uninvertible transform
+mf-operations/src/align.rs 1 the fn failed helper itself (invalid_leaders/leaders_mismatch/invalid_leader/unknown_mode: malformed leaders/mode the panel never sends)
+mf-operations/src/connector_ops.rs 1 the fn failed helper itself (missing_operand/unknown_connector/invalid_connector_params: a stale or malformed command log)
+mf-operations/src/shapes.rs 1 the fn failed helper itself (invalid_shapes/nothing_to_add/singular_transform/invalid_members/invalid_generated/invalid_transforms/generators_mismatch/members_mismatch/transforms_mismatch: malformed invocations); a generator's own refusal is relayed as Refused by generator_error, not here
+mf-operations/src/split/mod.rs 3 the fn failed helper itself, missing_target, and the many-targets relay's own Failed re-wrap (naming the target) for a code that isn't one of this op's declared ones
+mf-operations/src/make_solid.rs 0 every Failed site here was migrated to Refused through fn failed
+mf-operations/src/hollow.rs 1 missing_target is a malformed invocation; part_error and fn failed were migrated to Refused
+mf-parts/src/connectors/leaf_hinge.rs 1 the fn refuse helper itself (cancelled/invalid_parameter: RunContext cancellation and malformed params the panel never sends)
+
+# Out of scope for C14 (not among the 9 helpers + leaf_hinge.rs the
+# task named): every other op's and generator's Failed sites, left as
+# they were. A future task migrating one of these removes its line
+# here in the same commit.
+mf-operations/src/add_part.rs 1 out of scope for C14 (object.add_part isn't one of the 9 helpers)
+mf-operations/src/document.rs 1 out of scope for C14 (document.reinterpret_units/scale_units aren't one of the 9 helpers)
+mf-operations/src/fill_holes/mod.rs 1 out of scope for C14 (mesh.fill_holes isn't one of the 9 helpers)
+mf-operations/src/inspect.rs 1 out of scope for C14 (mesh.inspect isn't one of the 9 helpers)
+mf-operations/src/intersections.rs 2 out of scope for C14 (mesh.intersections isn't one of the 9 helpers)
+mf-operations/src/lib.rs 4 out of scope for C14 (unsupported_target/needs_document/missing_target are shared Operation-trait helpers every op's execute_doc default calls)
+mf-operations/src/remove_small.rs 3 out of scope for C14 (mesh.remove_small_components isn't one of the 9 helpers)
+mf-operations/src/sculpt/mod.rs 1 out of scope for C14 (mesh.sculpt_stroke isn't one of the 9 helpers)
+mf-operations/src/sculpt/remesh.rs 1 out of scope for C14 (mesh.sculpt_stroke isn't one of the 9 helpers)
+mf-operations/src/sculpt/stroke.rs 3 out of scope for C14 (mesh.sculpt_stroke isn't one of the 9 helpers)
+mf-operations/src/split/joints.rs 2 out of scope for C14 (split.place_connectors isn't one of the 9 helpers)
+mf-operations/src/split/pegs.rs 1 out of scope for C14 (mesh.split_plane's pegs helper predates this pass; its own refusals already flow through split/mod.rs's refuse/refuse_at)
+mf-operations/src/split/region.rs 1 out of scope for C14 (mesh.split_region isn't one of the 9 helpers)
+mf-operations/src/split/volume.rs 2 out of scope for C14 (mesh.split_box isn't one of the 9 helpers)
+mf-operations/src/test_consume_tool.rs 4 test-only scaffolding (test.consume_tool), never shipped
+mf-operations/src/transform.rs 7 out of scope for C14 (object.set_transform/drop_to_plate aren't one of the 9 helpers)
+mf-parts/src/connectors/clasp.rs 1 out of scope for C14 (clasp.snap isn't leaf_hinge.rs)
+mf-parts/src/connectors/dovetail_slide.rs 1 out of scope for C14 (dovetail.slide isn't leaf_hinge.rs)
+mf-parts/src/connectors/flap.rs 1 out of scope for C14 (hinge.flap isn't leaf_hinge.rs)
+mf-parts/src/connectors/hinge.rs 1 out of scope for C14 (hinge.pin isn't leaf_hinge.rs)
+mf-parts/src/connectors/joint.rs 1 out of scope for C14 (joint.dowel/peg/insert/magnet/dovetail aren't leaf_hinge.rs)
+mf-parts/src/connectors/test_key.rs 2 out of scope for C14 (test.key isn't leaf_hinge.rs)
+mf-parts/src/connectors/thread.rs 1 out of scope for C14 (thread isn't leaf_hinge.rs)
+mf-parts/src/generator.rs 1 out of scope for C14 (upgraded()'s own version-mismatch check is shared generator infrastructure, not one connector's business logic)
+mf-parts/src/shape.rs 6 out of scope for C14 (shape.rs's generic shape generators aren't leaf_hinge.rs; unknown_generator/generator_version/unknown_part are relayed as Refused by shapes.rs's generator_error, which is the registry path a reviewer should check instead)

@@ -93,7 +93,7 @@ fn close(a: f64, b: f64, rel: f64) -> bool {
 
 fn code(r: Result<DocOutput, OpError>) -> &'static str {
     match r {
-        Err(OpError::Failed { code, .. }) => code,
+        Err(OpError::Failed { code, .. }) | Err(OpError::Refused { code, .. }) => code,
         other => panic!("expected a refusal, got {:?}", other.map(|o| o.report)),
     }
 }
@@ -892,7 +892,8 @@ fn bound_crossing_a_region_is_refused_with_the_next_action() {
         ],
     );
     match out {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "split_region_crosses_bound");
             assert!(
                 message.contains("Make the cut area larger or move it"),

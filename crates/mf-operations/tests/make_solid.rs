@@ -122,7 +122,8 @@ fn make_solid_refuses_over_budget_grid_with_next_action() {
         &[("cell_size", "0.001")],
         &RunContext::none(),
     ) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "grid_too_large");
             assert!(message.contains("Use a larger cell size"), "{message}");
         }
@@ -181,7 +182,8 @@ fn boolean_after_make_solid_succeeds_where_it_was_refused() {
         )
     };
     match union(&scan) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "operand_overlaps_itself");
             assert!(message.contains("Run Make solid on it first"));
         }

@@ -77,6 +77,39 @@ fn every_spec_declares_coalescing() {
     }
 }
 
+/// Every declared refusal (ADR-0010, consolidation plan C14) has a
+/// non-empty i18n message id (checked against mf-desktop's catalogue
+/// there, the same split as `history_label`) and a `next` from the
+/// closed [`mf_spec::RefusalNext`] set — which every enum variant
+/// already is, so this only guards against an empty `message` id and a
+/// duplicate `code` within one spec.
+#[test]
+fn every_declared_refusal_has_a_message_and_next() {
+    for spec in builtin::specs() {
+        let mut seen = std::collections::BTreeSet::new();
+        for r in &spec.refusals {
+            assert!(
+                !r.code.trim().is_empty(),
+                "{}: a refusal has an empty code",
+                spec.id
+            );
+            assert!(
+                r.message.starts_with("refusal."),
+                "{}: refusal '{}' has message {:?}, expected a 'refusal.*' id",
+                spec.id,
+                r.code,
+                r.message
+            );
+            assert!(
+                seen.insert(r.code.clone()),
+                "{}: refusal code '{}' is declared twice",
+                spec.id,
+                r.code
+            );
+        }
+    }
+}
+
 #[test]
 fn defaults_filled() {
     let spec = builtin::get("mesh.remove_small_components").unwrap();

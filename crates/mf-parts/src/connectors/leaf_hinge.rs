@@ -31,6 +31,7 @@ use mf_boolean::{BoolOp, ManifoldCpp};
 use mf_geometry::Mesh;
 use mf_runtime::RunContext;
 use mf_spec::{OperationSpec, Params};
+use mf_units::Unit;
 
 use crate::connector::{ConnectorError, Side};
 use crate::generator::{GenContext, Generator, PlacementHint, ShapePart};
@@ -46,6 +47,15 @@ fn spec() -> &'static OperationSpec {
 }
 
 const SEGMENTS: u32 = 32;
+
+/// A length already in millimetres (every generator is mm-internal,
+/// D16), through the one shared formatter (ADR-0010, consolidation plan
+/// C14): never a hard-coded "mm" or a bare `{:.2}`/`{:.1}`, so a value
+/// close to zero still reads as a genuine number rather than rounding
+/// away to "0.00".
+fn mm(v: f64) -> String {
+    mf_units::format_length(v, Unit::Millimeter)
+}
 
 fn refuse(code: &'static str, message: impl Into<String>) -> ConnectorError {
     ConnectorError::Failed {
@@ -135,9 +145,11 @@ fn sizes(params: &Params) -> Result<Sizes, ConnectorError> {
         return Err(refuse(
             "moving_parts_fused",
             format!(
-                "A print-in-place hinge needs clearance, but the fit gives {gap:.2} mm between \
-                 knuckles and {pin_clearance:.2} mm around the pin, so it would print fused. Pick \
-                 a looser Fit class (Sliding or Free running)."
+                "A print-in-place hinge needs clearance, but the fit gives {} between knuckles \
+                 and {} around the pin, so it would print fused. Pick a looser Fit class \
+                 (Sliding or Free running).",
+                mm(gap),
+                mm(pin_clearance)
             ),
         ));
     }
@@ -152,10 +164,10 @@ fn sizes(params: &Params) -> Result<Sizes, ConnectorError> {
         return Err(refuse(
             "pin_too_wide",
             format!(
-                "The pin and its clearance ({:.2} mm across) leave no knuckle wall in a {:.2} mm \
-                 knuckle; make the knuckles wider or the pin thinner.",
-                2.0 * r_bore,
-                2.0 * r_knuckle
+                "The pin and its clearance ({} across) leave no knuckle wall in a {} knuckle; \
+                 make the knuckles wider or the pin thinner.",
+                mm(2.0 * r_bore),
+                mm(2.0 * r_knuckle)
             ),
         ));
     }
@@ -163,9 +175,10 @@ fn sizes(params: &Params) -> Result<Sizes, ConnectorError> {
         return Err(refuse(
             "leaf_too_thick",
             format!(
-                "A {leaf_thickness:.2} mm leaf would reach the other leaf's knuckles; make it \
-                 thinner than {:.2} mm or the knuckles wider.",
-                r_knuckle + gap
+                "A {} leaf would reach the other leaf's knuckles; make it thinner than {} or the \
+                 knuckles wider.",
+                mm(leaf_thickness),
+                mm(r_knuckle + gap)
             ),
         ));
     }
@@ -175,8 +188,10 @@ fn sizes(params: &Params) -> Result<Sizes, ConnectorError> {
         return Err(refuse(
             "hinge_too_short",
             format!(
-                "{length:.1} mm can't fit {knuckles} knuckles with a {gap:.2} mm gap between them; \
-                 make the hinge longer or use fewer knuckles."
+                "{} can't fit {knuckles} knuckles with a {} gap between them; make the hinge \
+                 longer or use fewer knuckles.",
+                mm(length),
+                mm(gap)
             ),
         ));
     }

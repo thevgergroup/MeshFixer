@@ -188,11 +188,11 @@ fn fused_moving_parts_are_refused() {
     // here (both sides are plain cubes with the connector unioned in),
     // so a wildly inflated claimed gap can never be met.
     match join(&clasp_params_json(&[("gap", "0.4")]), "50", &empty, &a, &b) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
             assert_eq!(code, "moving_parts_fused");
             assert!(
-                message.contains("gap") || message.contains("fused"),
-                "{message}"
+                args.contains_key("measured") && args.contains_key("expected"),
+                "{args:?}"
             );
         }
         other => panic!("expected a refusal, got {:?}", other.map(|o| o.report)),

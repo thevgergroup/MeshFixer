@@ -23,6 +23,11 @@ use crate::{
 
 pub struct ConnectorJoin;
 
+/// A malformed invocation or a stale command log (an id or recorded
+/// params a replay can't make sense of) — never one of `connector.join`'s
+/// own declared refusals (ADR-0010: `moving_parts_fused` is `attach`'s,
+/// through [`crate::refusal::refuse`]; `connector.join` has none of its
+/// own). On the `OpError::Failed` allow-list, `docs/failed-refusals.allow`.
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     OpError::Failed {
         code,

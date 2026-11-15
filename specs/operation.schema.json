@@ -85,6 +85,42 @@
     "coalesce": {
       "enum": ["absolute", "never"],
       "$comment": "ADR-0009: whether the command queue may merge a newly queued invocation of this op into the one already waiting, same op and target, latest params winning. Defaults to never (every queued invocation is its own undo step); only an op whose params are the whole resulting state (object.set_transform, object.set_shape_params) declares absolute."
+    },
+    "refusals": {
+      "type": "array",
+      "$comment": "ADR-0010, consolidation plan C14: every refusal code this operation can return. Checked against the op's actual `Refused { code }` constructions by every_refusal_code_is_declared (mf-operations).",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "next"],
+        "properties": {
+          "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+          "message": {
+            "type": "string",
+            "pattern": "^refusal\\.[a-z][a-z0-9_.]*$",
+            "$comment": "A message id in mf-desktop's i18n catalogue, under refusal.*, the same split as history_label: mf-spec carries only the id."
+          },
+          "next": {
+            "enum": ["repair", "run_make_solid", "use_larger_cell", "move_plane", "undo", "none"],
+            "$comment": "RefusalNext (mf-spec::model): a closed set picked from the next actions already in use (Repair/Make solid buttons in shape_tools.rs; 'use a larger cell size' and 'move the plane' in Make solid's, Hollow's and Split's own refusal prose)."
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["name", "kind"],
+              "properties": {
+                "name": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+                "kind": {
+                  "enum": ["length", "count", "text"],
+                  "$comment": "RefusalArgKind: length is mf_units::Length (never a bare number or a pre-formatted 'mm' string); count is a whole number; text is already plain language."
+                }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

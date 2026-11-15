@@ -2908,6 +2908,7 @@ dependencies = [
  "mf-io",
  "mf-runtime",
  "mf-spec",
+ "mf-units",
  "serde",
  "serde-saphyr",
  "serde_json",

@@ -202,6 +202,14 @@ fn combine_under_small_transforms_is_valid_or_refused_by_name() {
                 );
                 *refused.entry(code).or_default() += 1;
             }
+            Err(CommandError::Operation(OpError::Refused { code, args })) => {
+                assert!(
+                    boolean_refusal_copy(code).is_some(),
+                    "seed {seed:#x}: refused without a named reason: {code}: {:?}",
+                    args
+                );
+                *refused.entry(code).or_default() += 1;
+            }
             Err(e) => panic!("seed {seed:#x}: combine failed unnamed: {e}"),
         }
     }

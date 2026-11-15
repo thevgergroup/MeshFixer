@@ -46,3 +46,50 @@ effects: [geometry_changes, topology_changes, removes_objects, creates_objects]
 runtime:
   cancellable: true
   progress: false
+# ADR-0010, consolidation plan C14: moving_parts_fused carries its gap
+# as mf_units::Length (never a hard-coded "mm" or a bare {:.3}), plus
+# every mesh.boolean/mesh.combine code a member-joining step can
+# return, named by object through refuse_naming.
+refusals:
+  - code: moving_parts_fused
+    message: refusal.moving_parts_fused
+    next: none
+    args:
+      - name: a
+        kind: text
+      - name: b
+        kind: text
+      - name: measured
+        kind: length
+      - name: expected
+        kind: length
+  - code: operand_not_closed
+    message: refusal.operand_not_closed
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: tool_not_closed
+    message: refusal.tool_not_closed
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: operand_overlaps_itself
+    message: refusal.operand_overlaps_itself
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text
+  - code: section_self_intersects
+    message: refusal.section_self_intersects
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text
+  - code: window_degenerate
+    message: refusal.window_degenerate
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text

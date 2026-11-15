@@ -11,6 +11,7 @@
 use mf_geometry::Mesh;
 use mf_spec::Params;
 
+use crate::refusal::RefusalArg;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
     Target, needs_document, unsupported_target,
@@ -18,11 +19,27 @@ use crate::{
 
 pub struct Align;
 
+/// A malformed invocation (`leaders`/`mode` the UI never sends on its
+/// own): never one of `object.align`'s declared refusals. On the
+/// `OpError::Failed` allow-list, `docs/failed-refusals.allow`.
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     OpError::Failed {
         code,
         message: message.into(),
     }
+}
+
+/// A declared refusal (ADR-0010), through the one registry helper.
+fn refuse_plain(code: &'static str) -> OpError {
+    crate::refusal::refuse_plain(code)
+}
+
+/// As [`refuse_plain`], naming the object at fault.
+fn refuse_object(code: &'static str, name: &str) -> OpError {
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([("name", RefusalArg::Text(name.to_owned()))]),
+    )
 }
 
 /// A world bounding box, min then max.
@@ -148,10 +165,7 @@ impl Operation for Align {
             }
         }
         if targets.len() < 2 {
-            return Err(failed(
-                "too_few_objects",
-                "Align needs at least two objects",
-            ));
+            return Err(refuse_plain("too_few_objects"));
         }
         ctx.checkpoint()?;
         let axis = axis_index(params.get_choice("axis")?);
@@ -162,10 +176,7 @@ impl Operation for Align {
         for t in targets {
             boxes.push(world_bounds(t, ctx)?.map(|(lo, hi)| Box3 { lo, hi }));
         }
-        let empty = |name: &str| OpError::Failed {
-            code: "empty_object",
-            message: format!("'{name}' has no geometry to align"),
-        };
+        let empty = |name: &str| refuse_object("empty_object", name);
         for (k, b) in boxes.iter().enumerate() {
             if b.is_none() && leaders[k].is_none() {
                 return Err(empty(targets[k].name));
@@ -240,10 +251,7 @@ impl Operation for Align {
                         .then(a.cmp(&b))
                 });
                 if order.len() < 2 {
-                    return Err(failed(
-                        "too_few_objects",
-                        "distributing needs at least two objects with geometry",
-                    ));
+                    return Err(refuse_plain("too_few_objects"));
                 }
                 let first = order[0];
                 let last = *order.last().expect("at least two");
@@ -605,7 +613,7 @@ mod tests {
             &DocContext::default(),
             &RunContext::none(),
         ) {
-            Err(OpError::Failed { code, .. }) => assert_eq!(code, "too_few_objects"),
+            Err(OpError::Refused { code, .. }) => assert_eq!(code, "too_few_objects"),
             other => panic!("{other:?}"),
         }
     }

@@ -147,11 +147,43 @@ fn normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|r| t[3 * r] * n[0] + t[3 * r + 1] * n[1] + t[3 * r + 2] * n[2])
 }
 
+/// A malformed invocation (an unreadable mesh, ADR-0010): never one of
+/// `mesh.split_plane`'s declared refusals, which [`refusal`] builds
+/// through the one registry helper instead. On the `OpError::Failed`
+/// allow-list, `docs/failed-refusals.allow`.
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     OpError::Failed {
         code,
         message: message.into(),
     }
+}
+
+/// Builds the [`OpError::Refused`] for `code` (ADR-0010, through the
+/// one registry helper), with `message` as the `detail` argument
+/// `specs/operations/mesh.split_plane.yaml`'s message fills in.
+fn refuse(code: &'static str, message: impl Into<String>) -> OpError {
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([(
+            "detail",
+            crate::refusal::RefusalArg::Text(message.into()),
+        )]),
+    )
+}
+
+/// As [`refuse`], naming a point ([`mf_units::Length`] × 3, never a bare
+/// `{:.3}`) as well as a `detail`.
+fn refuse_at(code: &'static str, at: [f64; 3], message: impl Into<String>) -> OpError {
+    use crate::refusal::RefusalArg;
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([
+            ("x", RefusalArg::Text(mf_spec::format_length(at[0]))),
+            ("y", RefusalArg::Text(mf_spec::format_length(at[1]))),
+            ("z", RefusalArg::Text(mf_spec::format_length(at[2]))),
+            ("detail", RefusalArg::Text(message.into())),
+        ]),
+    )
 }
 
 /// The refusals, with what to do next (the copy table's plain words).
@@ -162,21 +194,21 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
 fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
     match e {
         CutError::Cancelled => OpError::Cancelled,
-        CutError::NotClosed { boundary_edges, .. } => failed(
+        CutError::NotClosed { boundary_edges, .. } => refuse(
             "operand_not_closed",
             format!(
                 "This model isn't closed ({boundary_edges} open edges), so a cut has no inside \
                  to cap. Close holes first."
             ),
         ),
-        CutError::MissesObject { .. } => failed(
+        CutError::MissesObject { .. } => refuse(
             "plane_misses_object",
             "The cut plane doesn't pass through the object (or the gap is wider than it). Move \
              the plane so it crosses the model.",
         ),
         CutError::SectionSelfIntersects { at } => {
             let at = apply(transform, at);
-            failed(
+            refuse_at(
                 // A cut's own code, not `mesh.boolean`'s
                 // "section_self_intersects". Owner 2026-11-13: a cut through
                 // valid closed manifold geometry is never refused, wherever
@@ -187,11 +219,9 @@ fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
                 // a model whose surface crosses itself makes: Make solid is
                 // the fix, and the next action offered.
                 "split_section_self_intersects",
-                format!(
-                    "The model's surface crosses itself where the cut passes (near {:.3}, {:.3}, \
-                     {:.3}). Run Make solid on it first.",
-                    at[0], at[1], at[2]
-                ),
+                at,
+                "The model's surface crosses itself where the cut passes. Run Make solid on it \
+                 first.",
             )
         }
         // The plane lies along the surface (through a mesh edge or face)
@@ -201,26 +231,24 @@ fn refusal(transform: &[f64; 12], e: CutError) -> OpError {
         // model itself is fine, so Make solid isn't offered.
         CutError::SectionDegenerate { at } => {
             let at = apply(transform, at);
-            failed(
+            refuse_at(
                 "split_section_degenerate",
-                format!(
-                    "The cut runs exactly along the model's surface here (near {:.3}, {:.3}, \
-                     {:.3}), closer than its coordinates can separate; move the plane slightly.",
-                    at[0], at[1], at[2]
-                ),
+                at,
+                "The cut runs exactly along the model's surface here, closer than its \
+                 coordinates can separate; move the plane slightly.",
             )
         }
-        CutError::InvalidPlane => failed(
+        CutError::InvalidPlane => refuse(
             "invalid_plane",
             "The cut plane's direction is zero; give it a direction.",
         ),
         // Phase 1b, the bounded cut plane: a region's section straddles
         // the bound's edge, ambiguous which way it should go.
-        CutError::RegionCrossesBound { .. } => failed(
+        CutError::RegionCrossesBound { .. } => refuse(
             "split_region_crosses_bound",
             "A cut region crosses the cut area's edge. Make the cut area larger or move it.",
         ),
-        CutError::Geometry(e) => failed("invalid_mesh", e.to_string()),
+        CutError::Geometry(e) => refuse("invalid_mesh", e.to_string()),
     }
 }
 
@@ -399,10 +427,17 @@ impl Operation for SplitPlane {
                 }
                 // With several targets, one the plane misses is listed,
                 // not refused (unless the plane misses them all).
-                Err(OpError::Failed {
+                Err(OpError::Refused {
                     code: "plane_misses_object",
                     ..
                 }) if inputs.len() > 1 => missed.push(target.name.to_owned()),
+                Err(OpError::Refused { code, mut args }) if inputs.len() > 1 => {
+                    args.insert(
+                        "object",
+                        crate::refusal::RefusalArg::Text(target.name.to_owned()),
+                    );
+                    return Err(crate::refusal::refuse(code, args));
+                }
                 Err(OpError::Failed { code, message }) if inputs.len() > 1 => {
                     return Err(OpError::Failed {
                         code,
@@ -413,7 +448,7 @@ impl Operation for SplitPlane {
             }
         }
         if cut.is_empty() {
-            return Err(failed(
+            return Err(refuse(
                 "plane_misses_object",
                 "The cut plane doesn't pass through any of the selected objects (or the gap is \
                  wider than them). Move the plane so it crosses a model.",
@@ -769,14 +804,14 @@ fn alignment(
     let (dowel_d, dowel_len) = pegs::dowel_size(d, depth_above, depth_below, clearance, allowance);
     let attached_len = depth_below - allowance;
     if (pegs == "dowels" && dowel_len <= 0.0) || (pegs == "attached" && attached_len <= 0.0) {
-        return Err(failed(
+        return Err(refuse(
             "dowel_too_short",
             "The holes are too shallow for a dowel after the length allowance. Make the holes \
              deeper.",
         ));
     }
     if dowel_d <= 0.0 || d <= 0.0 {
-        return Err(failed(
+        return Err(refuse(
             "dowel_too_thin",
             "The hole is no wider than the clearance, so the dowel would have no width. Make \
              the hole wider.",
@@ -813,14 +848,15 @@ fn alignment(
         PegError::DoesNotFit {
             region,
             widest_fit_mm,
-        } => failed(
+        } => refuse(
             "section_too_thin",
             format!(
-                "Section {} is too thin for a {d:.2} hole with a {min_wall:.2} wall: the \
-                     widest hole that fits is {:.2}. Use a smaller hole diameter or minimum wall, \
-                     or Alignment: None.",
+                "Section {} is too thin for a {} hole with a {} wall: the widest hole that fits \
+                 is {}. Use a smaller hole diameter or minimum wall, or Alignment: None.",
                 region + 1,
-                widest_fit_mm * scale
+                mf_spec::format_length(d),
+                mf_spec::format_length(min_wall),
+                mf_spec::format_length(widest_fit_mm * scale)
             ),
         ),
     })?;
@@ -873,12 +909,14 @@ fn alignment(
                 span,
             ) * scale;
             if tail_half <= 0.0 || depth_below <= allowance {
-                return Err(failed(
+                return Err(refuse(
                     "section_too_thin",
                     format!(
-                        "Section {} is too small for a {d:.2} dovetail {depth_below:.2} deep. Use a \
-                         smaller hole diameter or depth, or Alignment: Dowels.",
-                        h.region + 1
+                        "Section {} is too small for a {} dovetail {} deep. Use a smaller hole \
+                         diameter or depth, or Alignment: Dowels.",
+                        h.region + 1,
+                        mf_spec::format_length(d),
+                        mf_spec::format_length(depth_below)
                     ),
                 ));
             }

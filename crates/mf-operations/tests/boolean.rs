@@ -84,6 +84,7 @@ fn volume(m: &Mesh) -> f64 {
 fn code(r: Result<DocOutput, OpError>) -> (&'static str, String) {
     match r {
         Err(OpError::Failed { code, message }) => (code, message),
+        Err(OpError::Refused { code, args }) => (code, mf_operations::refusal::render_args(&args)),
         Err(e) => panic!("{e}"),
         Ok(o) => panic!("expected a refusal, got {}", o.report),
     }
@@ -186,7 +187,8 @@ fn touching_operands_are_valid_or_refused_by_name() {
                     let d = inspect(result(&out).0);
                     assert_eq!(d.boundary_edges, 0, "{name} {op}");
                 }
-                Err(OpError::Failed { code, message }) => {
+                Err(OpError::Refused { code, args }) => {
+                    let message = mf_operations::refusal::render_args(&args);
                     assert!(
                         [
                             "result_not_manifold",
@@ -547,7 +549,9 @@ fn messy_corpus_booleans_are_valid_or_named() {
             );
             let verdict = match &r {
                 Ok(_) => "valid".to_string(),
-                Err(OpError::Failed { code, .. }) => code.to_string(),
+                Err(OpError::Failed { code, .. } | OpError::Refused { code, .. }) => {
+                    code.to_string()
+                }
                 Err(e) => panic!("{name} {op}: {e}"),
             };
             eprintln!("{name} {op}: {verdict} in {:?}", start.elapsed());

@@ -2887,13 +2887,34 @@ impl MeshFixerApp {
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
                     // The Shape tools' (and Parts'/Connectors') refusals
                     // show in their panel, in plain words with the next
-                    // action.
+                    // action. A thin adapter (ADR-0010, consolidation
+                    // plan C14): `Refused` renders the same (code,
+                    // message) shape `Failed` did before the registry
+                    // existed; routing it through the registry's own
+                    // RefusalCard, with its typed `next`, is C16's job.
                     Err(CommandError::Operation(mf_operations::OpError::Failed {
                         code,
                         message,
                     })) if crate::shape_tools::op_of(self.active_tool).is_some()
                         || self.last_invocation_op.is_some() =>
                     {
+                        self.status = Some(format!("Nothing was changed: {message}"));
+                        let op_id = crate::shape_tools::op_of(self.active_tool)
+                            .or(self.last_invocation_op)
+                            .expect("checked above");
+                        self.refusal = Some(crate::shape_tools::Refusal {
+                            op_id: op_id.to_owned(),
+                            code: code.to_owned(),
+                            message,
+                        });
+                    }
+                    Err(CommandError::Operation(mf_operations::OpError::Refused {
+                        code,
+                        args,
+                    })) if crate::shape_tools::op_of(self.active_tool).is_some()
+                        || self.last_invocation_op.is_some() =>
+                    {
+                        let message = mf_operations::refusal::render_args(&args);
                         self.status = Some(format!("Nothing was changed: {message}"));
                         let op_id = crate::shape_tools::op_of(self.active_tool)
                             .or(self.last_invocation_op)

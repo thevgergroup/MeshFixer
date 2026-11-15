@@ -81,3 +81,150 @@ effects: [geometry_changes, topology_changes]
 runtime:
   cancellable: true
   progress: true
+# ADR-0010, consolidation plan C14: every refusal mesh.hollow can
+# return, through the one registry helper (crate::refusal::refuse).
+refusals:
+  - code: invalid_parameter
+    message: refusal.hollow_invalid_parameter
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: singular_transform
+    message: refusal.hollow_singular_transform
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_input
+    message: refusal.open_input
+    next: repair
+    args:
+      - name: detail
+        kind: text
+  - code: non_manifold_input
+    message: refusal.non_manifold_input
+    next: run_make_solid
+    args:
+      - name: detail
+        kind: text
+  - code: inconsistent_input
+    message: refusal.inconsistent_input
+    next: run_make_solid
+    args:
+      - name: detail
+        kind: text
+  - code: inside_out_input
+    message: refusal.inside_out_input
+    next: run_make_solid
+    args:
+      - name: detail
+        kind: text
+  - code: cell_too_coarse
+    message: refusal.cell_too_coarse
+    next: use_larger_cell
+    args:
+      - name: detail
+        kind: text
+  - code: grid_too_large
+    message: refusal.grid_too_large
+    next: use_larger_cell
+    args:
+      - name: detail
+        kind: text
+  - code: too_thin
+    message: refusal.too_thin
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: empty
+    message: refusal.empty
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: result_not_valid
+    message: refusal.result_not_valid
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: hole_misses_cavity
+    message: refusal.hole_misses_cavity
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: hole_misses_outside
+    message: refusal.hole_misses_outside
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: hole_point_invalid
+    message: refusal.hole_point_invalid
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: no_hole_points
+    message: refusal.no_hole_points
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: missing_generator
+    message: refusal.missing_generator
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: region_not_supported
+    message: refusal.region_not_supported
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_needs_faces
+    message: refusal.open_through_needs_faces
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_nothing_under
+    message: refusal.open_through_nothing_under
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_region_invalid
+    message: refusal.open_through_region_invalid
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_region_degenerate
+    message: refusal.open_through_region_degenerate
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_region_too_small
+    message: refusal.open_through_region_too_small
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_region_too_curved
+    message: refusal.open_through_region_too_curved
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: open_through_cuts_around
+    message: refusal.open_through_cuts_around
+    next: none
+    args:
+      - name: detail
+        kind: text
