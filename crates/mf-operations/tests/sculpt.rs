@@ -12,7 +12,7 @@ use mf_io::threemf::IDENTITY;
 use mf_operations::sculpt::{
     BrushKind, BrushParams, DabSample, Falloff, SculptIndex, StrokeState, run_stroke,
 };
-use mf_operations::{DocOutput, ObjectChange, OperandInput, RunContext, Target, find};
+use mf_operations::{DocContext, DocOutput, ObjectChange, OperandInput, RunContext, Target, find};
 
 /// A UV sphere snapped to a 2⁻²⁰ grid, so it's exactly symmetric across
 /// x = 0 (checked).
@@ -307,6 +307,7 @@ fn sculpt_command(mesh: &Mesh, samples: &[DabSample], extra: &[(&str, &str)]) ->
                 target: Target::WholeObject,
             }],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap()
@@ -393,6 +394,7 @@ fn samples_remap_across_an_upstream_fill() {
             &holed,
             &Target::WholeObject,
             &fill_params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap()

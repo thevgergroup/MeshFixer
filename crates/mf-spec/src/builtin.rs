@@ -113,6 +113,14 @@ const SOURCES: &[(&str, &str)] = &[
         "split.place_connectors.yaml",
         include_str!("../../../specs/operations/split.place_connectors.yaml"),
     ),
+    (
+        "document.reinterpret_units.yaml",
+        include_str!("../../../specs/operations/document.reinterpret_units.yaml"),
+    ),
+    (
+        "document.scale_units.yaml",
+        include_str!("../../../specs/operations/document.scale_units.yaml"),
+    ),
     #[cfg(feature = "test-kinds")]
     (
         "test.consume_tool.yaml",

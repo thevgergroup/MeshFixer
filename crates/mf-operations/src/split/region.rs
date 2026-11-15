@@ -15,8 +15,8 @@ use mf_spec::Params;
 
 use super::pegs::compose;
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document,
 };
 
 /// The fill limit (the current O(n³) patch triangulation, MF-ISSUE-043).
@@ -77,6 +77,7 @@ fn cap(
     mesh: &Mesh,
     seam: &HashSet<u32>,
     style: &str,
+    doc: &DocContext,
     ctx: &RunContext,
 ) -> Result<(Mesh, Provenance), OpError> {
     let topo = mesh.topology_with(ctx)?;
@@ -107,7 +108,7 @@ fn cap(
         ("fill_style".to_string(), style.to_string()),
     ]);
     let params = spec.validate(&raw)?;
-    let out = crate::fill_holes::FillHoles.execute(mesh, &Target::Loops(ids), &params, ctx)?;
+    let out = crate::fill_holes::FillHoles.execute(mesh, &Target::Loops(ids), &params, doc, ctx)?;
     if let Some(skipped) = out.report["skipped_loops"]
         .as_array()
         .filter(|s| !s.is_empty())
@@ -140,6 +141,7 @@ impl Operation for SplitRegion {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -149,6 +151,7 @@ impl Operation for SplitRegion {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = inputs
@@ -195,8 +198,8 @@ impl Operation for SplitRegion {
         let (piece, piece_prov) = without(mesh, &rest)?;
         ctx.checkpoint()?;
         ctx.progress.report("closing", 0.0);
-        let (kept2, kept_cap) = cap(&kept, &seam, style, ctx)?;
-        let (piece2, piece_cap) = cap(&piece, &seam, style, ctx)?;
+        let (kept2, kept_cap) = cap(&kept, &seam, style, doc, ctx)?;
+        let (piece2, piece_cap) = cap(&piece, &seam, style, doc, ctx)?;
         let kept_prov = compose(&kept_prov, &kept_cap);
         let mut piece_prov = compose(&piece_prov, &piece_cap);
         // As a created object: every face is created, naming its source.
@@ -263,6 +266,7 @@ impl Operation for DeleteFaces {
         input: &Mesh,
         target: &Target,
         _: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         let sel = selected(target, input, self.id())?;

@@ -11,7 +11,9 @@ use std::collections::{BTreeMap, HashSet};
 use mf_document::ObjectId;
 use mf_fixtures::{cube, scaled, translated, uv_sphere};
 use mf_geometry::{FaceId, Mesh, Provenance};
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
 
@@ -52,6 +54,7 @@ fn run(
             },
         ],
         &params,
+        &DocContext::default(),
         ctx,
     )
 }

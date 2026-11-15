@@ -16,7 +16,7 @@
 use mf_geometry::{Mesh, Provenance};
 use mf_spec::Params;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 pub struct TestUnitConversion;
 
@@ -34,6 +34,7 @@ impl Operation for TestUnitConversion {
         input: &Mesh,
         target: &Target,
         params: &Params,
+        _doc: &DocContext,
         _ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         if *target != Target::WholeObject {

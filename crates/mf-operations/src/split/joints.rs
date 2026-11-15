@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 use super::failed;
 use crate::layout::{Footprint, Plate, layout_on_plate};
 use crate::{
-    Cancelled, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document, unsupported_target,
+    Cancelled, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
+    RunContext, Target, needs_document, unsupported_target,
 };
 
 /// Which piece of a joint.
@@ -1302,6 +1302,7 @@ impl Operation for PlaceConnectors {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -1315,9 +1316,10 @@ impl Operation for PlaceConnectors {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        self.execute_scene(inputs, &[], params, ctx)
+        self.execute_scene(inputs, &[], params, doc, ctx)
     }
 
     fn execute_scene(
@@ -1325,6 +1327,7 @@ impl Operation for PlaceConnectors {
         inputs: &[OperandInput],
         scene: &[crate::SceneObject],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let [a, b] = inputs else {

@@ -46,6 +46,7 @@ fn removes_island() {
                 op.id(),
                 &[("max_triangles", "5"), ("max_relative_size", "100")],
             ),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap();
@@ -71,6 +72,7 @@ fn kept_faces_keep_relative_order() {
                 op.id(),
                 &[("max_triangles", "5"), ("max_relative_size", "100")],
             ),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap()
@@ -92,6 +94,7 @@ fn keep_largest_guard() {
                 op.id(),
                 &[("max_triangles", "50"), ("max_relative_size", "100")],
             ),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap()
@@ -111,6 +114,7 @@ fn keep_largest_guard() {
                     ("keep_largest", "false"),
                 ],
             ),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap()
@@ -133,6 +137,7 @@ fn input_not_mutated() {
             op.id(),
             &[("max_triangles", "5"), ("max_relative_size", "100")],
         ),
+        &mf_operations::DocContext::default(),
         &mf_operations::RunContext::none(),
     )
     .unwrap();
@@ -148,6 +153,7 @@ fn inspect_is_read_only() {
             &cube(1.0),
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[]),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap();
@@ -164,6 +170,7 @@ fn empty_mesh_ok() {
             &Mesh::empty(),
             &mf_operations::Target::WholeObject,
             &params(op.id(), &[]),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap();
@@ -191,6 +198,7 @@ mod edit_based {
                     op.id(),
                     &[("max_triangles", "5"), ("max_relative_size", "100")],
                 ),
+                &mf_operations::DocContext::default(),
                 &mf_operations::RunContext::none(),
             )
             .unwrap();
@@ -210,6 +218,7 @@ mod edit_based {
                 &cube(1.0),
                 &Target::WholeObject,
                 &params(op.id(), &[]),
+                &mf_operations::DocContext::default(),
                 &mf_operations::RunContext::none(),
             )
             .unwrap();
@@ -225,6 +234,7 @@ mod edit_based {
                 &cube(1.0),
                 &Target::Faces(vec![FaceId(0)]),
                 &params(op.id(), &[]),
+                &mf_operations::DocContext::default(),
                 &mf_operations::RunContext::none(),
             )
             .err()

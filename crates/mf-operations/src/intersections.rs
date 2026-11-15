@@ -9,7 +9,8 @@ use mf_spec::Params;
 use serde_json::{Value, json};
 
 use crate::{
-    DocOutput, OpError, OpOutput, OperandInput, Operation, RunContext, Target, unsupported_target,
+    DocContext, DocOutput, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
+    unsupported_target,
 };
 
 pub struct Intersections;
@@ -42,6 +43,7 @@ impl Operation for Intersections {
         input: &Mesh,
         target: &Target,
         _: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         if *target != Target::WholeObject {
@@ -61,11 +63,12 @@ impl Operation for Intersections {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let report = match inputs {
             [target] => {
-                self.execute(target.mesh, &target.target, params, ctx)?
+                self.execute(target.mesh, &target.target, params, doc, ctx)?
                     .report
             }
             [target, other] => {

@@ -1,0 +1,26 @@
+id: document.scale_units
+version: 1
+summary: Rescale every object so the document keeps its unit but the model's physical size changes (Inspect's "Scale").
+history_label: history.label.document.scale_units
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+  many: true
+parameters:
+  - name: unit
+    type: choice
+    values: [um, mm, cm, m, in, ft]
+    default: mm
+    description: "The unit the document's current numbers were actually in: every target's transform is scaled so its physical size becomes what it would be if its coordinates had been in this unit, read in the document's own unit."
+preconditions:
+  - the document has at least one object
+postconditions:
+  - every target's transform is scaled by the ratio between the given unit and the document's unit
+  - geometry is unchanged and shared with the previous revision
+  - the document's own unit is unchanged
+  - nothing changes (no revision) if the ratio is exactly 1
+effects: [transform_changes]
+runtime:
+  cancellable: false
+  progress: false

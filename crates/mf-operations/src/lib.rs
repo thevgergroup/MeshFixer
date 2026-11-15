@@ -8,6 +8,7 @@ use mf_document::ObjectId;
 use mf_geometry::{FaceId, Mesh, Provenance};
 pub use mf_runtime::{Cancelled, RunContext};
 use mf_spec::{Params, SpecError};
+pub use mf_units::Unit;
 
 mod add_part;
 mod affine;
@@ -19,6 +20,8 @@ mod combine;
 pub use combine::{Applied, ApplyOrder, PartIn, apply_parts, check_moving_gap};
 mod compact;
 mod connector_ops;
+mod document;
+pub use document::{ReinterpretUnits, ScaleUnits};
 pub mod materials;
 pub use boolean::{kernel as boolean_kernel, refusal_copy as boolean_refusal_copy};
 mod fill_holes;
@@ -82,6 +85,18 @@ pub struct OpOutput {
     pub report: serde_json::Value,
 }
 
+/// The document's own unit, injected by `Session::prepare` into every
+/// operation run (ADR-0006 §6.2, consolidation plan C07). Params have
+/// already been converted to document units by the time `execute` runs
+/// (D20); an operation that places an mm-internal generator (library
+/// parts, connectors: D16) reads `unit` to scale that generator's output
+/// into the document's units itself, rather than relying on a frontend
+/// conversion that could double up (the bug this replaces).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct DocContext {
+    pub unit: Unit,
+}
+
 /// One operand of a command, as an operation sees it (D6,
 /// MF-P1-CMD-001). Operand 0 is the command's target; the rest follow in
 /// the order the spec's `operands:` list names them (an absent optional
@@ -143,6 +158,11 @@ pub enum ObjectChange {
         key: String,
         value: Option<String>,
     },
+    /// The document's own unit becomes `unit` (`document.reinterpret_units`,
+    /// consolidation plan C07): a relabelling, never a conversion. No
+    /// object's transform or geometry changes; `Session::commit` applies
+    /// this once per command, regardless of which operand names it.
+    Units { unit: Unit },
 }
 
 /// Which object an [`ObjectChange::Property`] is on.
@@ -261,12 +281,16 @@ pub trait Operation: Send + Sync {
     /// Runs the operation. Long work checks `ctx` for cancellation at least
     /// every 100 ms (MF-RT-002) and reports progress through it (MF-RT-003).
     /// A cancelled run returns [`OpError::Cancelled`], never a partial
-    /// result.
+    /// result. `doc` is the document's own unit (consolidation plan C07):
+    /// `params` are already in document units by this point (D20), so most
+    /// operations never read `doc`; it exists for the few that place an
+    /// mm-internal generator (D16) and must scale its output themselves.
     fn execute(
         &self,
         input: &Mesh,
         target: &Target,
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError>;
 
@@ -292,22 +316,24 @@ pub trait Operation: Send + Sync {
         inputs: &[OperandInput],
         _scene: &[SceneObject],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        self.execute_doc(inputs, params, ctx)
+        self.execute_doc(inputs, params, doc, ctx)
     }
 
     fn execute_doc(
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = inputs.first().ok_or_else(|| OpError::Failed {
             code: "missing_target",
             message: format!("{} was run with no target", self.id()),
         })?;
-        let out = self.execute(target.mesh, &target.target, params, ctx)?;
+        let out = self.execute(target.mesh, &target.target, params, doc, ctx)?;
         Ok(DocOutput {
             changes: out
                 .change
@@ -361,6 +387,8 @@ static REGISTRY: &[&dyn Operation] = &[
     &shapes::Attach,
     &shapes::MoveGroup,
     &connector_ops::ConnectorJoin,
+    &document::ReinterpretUnits,
+    &document::ScaleUnits,
     #[cfg(feature = "test-kinds")]
     &test_consume_tool::TestConsumeTool,
     #[cfg(feature = "test-kinds")]

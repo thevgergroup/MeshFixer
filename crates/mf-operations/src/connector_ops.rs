@@ -17,8 +17,8 @@ use mf_spec::Params;
 
 use crate::shapes::{AttachJob, GeneratedMember, attach};
 use crate::{
-    DocOutput, OpError, OpOutput, OperandInput, Operation, RunContext, Target, needs_document,
-    unsupported_target,
+    DocContext, DocOutput, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
+    needs_document, unsupported_target,
 };
 
 pub struct ConnectorJoin;
@@ -44,6 +44,7 @@ impl Operation for ConnectorJoin {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -53,6 +54,7 @@ impl Operation for ConnectorJoin {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let [target, side_a, side_b] = inputs else {

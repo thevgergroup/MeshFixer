@@ -46,8 +46,8 @@ pub mod pegs;
 pub mod region;
 pub mod volume;
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 use pegs::{PegError, PegShape};
 
@@ -304,6 +304,7 @@ impl Operation for SplitPlane {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -317,9 +318,10 @@ impl Operation for SplitPlane {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        self.execute_scene(inputs, &[], params, ctx)
+        self.execute_scene(inputs, &[], params, doc, ctx)
     }
 
     fn execute_scene(
@@ -327,6 +329,7 @@ impl Operation for SplitPlane {
         inputs: &[OperandInput],
         scene: &[crate::SceneObject],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         if inputs.is_empty() {

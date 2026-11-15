@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use mf_fixtures::{cube_with_missing_face, grid, uv_sphere};
 use mf_geometry::{FaceId, Mesh, VertexId, inspect};
-use mf_operations::{OpError, Target, find};
+use mf_operations::{DocContext, OpError, Target, find};
 use mf_spec::{Params, builtin};
 
 fn params(pairs: &[(&str, &str)]) -> Params {
@@ -29,6 +29,7 @@ fn fill(
         m,
         &target,
         &params(pairs),
+        &DocContext::default(),
         &mf_operations::RunContext::none(),
     )?;
     let (mesh, prov) = out.change.expect("fill_holes changed the mesh");
@@ -264,6 +265,7 @@ fn collinear_loop_is_never_filled_with_a_zero_area_triangle() {
                 &m,
                 &Target::WholeObject,
                 &params(&p),
+                &DocContext::default(),
                 &mf_operations::RunContext::none(),
             )
             .unwrap();
@@ -739,7 +741,7 @@ mod fairing {
             let start = std::time::Instant::now();
             let out = find("mesh.fill_holes")
                 .unwrap()
-                .execute(m, &Target::WholeObject, &p, &ctx)
+                .execute(m, &Target::WholeObject, &p, &DocContext::default(), &ctx)
                 .unwrap();
             let took = start.elapsed();
             assert_eq!(

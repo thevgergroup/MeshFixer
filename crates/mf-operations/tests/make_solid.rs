@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use mf_document::ObjectId;
 use mf_fixtures::{cube, merge, scaled, translated, uv_sphere};
 use mf_geometry::{Bvh, FaceId, Mesh, inspect};
-use mf_operations::{OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{DocContext, OpError, OperandInput, RunContext, Target, find};
 use mf_runtime::JobPool;
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -22,7 +22,13 @@ fn make_solid(m: &Mesh, params: &[(&str, &str)], ctx: &RunContext) -> Result<Mes
         .iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect();
-    let out = op.execute(m, &Target::WholeObject, &spec.validate(&raw).unwrap(), ctx)?;
+    let out = op.execute(
+        m,
+        &Target::WholeObject,
+        &spec.validate(&raw).unwrap(),
+        &DocContext::default(),
+        ctx,
+    )?;
     Ok(out.change.unwrap().0)
 }
 
@@ -170,6 +176,7 @@ fn boolean_after_make_solid_succeeds_where_it_was_refused() {
                 },
             ],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
     };

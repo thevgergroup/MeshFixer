@@ -2,7 +2,7 @@ use mf_geometry::{FaceId, Mesh, VertexId};
 use mf_spec::Params;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 /// `mesh.remove_small_components`. On a whole-object run a piece is
 /// "small" when it has fewer than `max_triangles` triangles *and* no more
@@ -183,6 +183,7 @@ impl Operation for RemoveSmallComponents {
         input: &Mesh,
         target: &Target,
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         let t = thresholds(params)?;
