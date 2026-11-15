@@ -1,7 +1,7 @@
 use mf_geometry::Mesh;
 use mf_spec::Params;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 pub struct Inspect;
 
@@ -19,6 +19,7 @@ impl Operation for Inspect {
         input: &Mesh,
         target: &Target,
         _params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         if *target != Target::WholeObject {

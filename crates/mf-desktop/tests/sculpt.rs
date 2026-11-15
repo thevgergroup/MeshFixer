@@ -87,12 +87,13 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "sculpt.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });
@@ -274,7 +275,14 @@ fn stroke_and_release_never_flicker() {
     // surface" (on by default) also measures its radius along the
     // surface, which reaches a little less far in screen-space terms
     // than the old straight-line brush did at the same nominal radius.
-    h.state_mut().sculpt.radius = 10.0;
+    let dab_world = {
+        let cam = h.state().camera.unwrap();
+        let center = glam::DVec3::new(0.0, 0.0, 20.0);
+        let to_eye = (cam.eye() - center).normalize();
+        (center + to_eye * (20.0 * 0.8)).to_array()
+    };
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), dab_world, 10.0).unwrap();
     h.state_mut().sculpt.strength = 1.0;
 
     let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);

@@ -2736,6 +2736,7 @@ dependencies = [
  "mf-runtime",
  "mf-selection",
  "mf-spec",
+ "mf-units",
  "rayon",
  "serde_json",
  "sysinfo",
@@ -2759,6 +2760,7 @@ dependencies = [
  "mf-runtime",
  "mf-selection",
  "mf-spec",
+ "mf-units",
  "rayon",
  "serde",
  "serde_json",
@@ -2787,6 +2789,7 @@ dependencies = [
  "mf-runtime",
  "mf-selection",
  "mf-spec",
+ "mf-units",
  "rfd",
  "serde_json",
  "sysinfo",
@@ -2840,6 +2843,7 @@ dependencies = [
  "mf-geometry",
  "mf-metrics",
  "mf-runtime",
+ "mf-units",
  "quick-xml 0.42.0",
  "rayon",
  "serde",
@@ -2882,6 +2886,7 @@ dependencies = [
  "mf-render",
  "mf-runtime",
  "mf-spec",
+ "mf-units",
  "rayon",
  "serde",
  "serde-saphyr",
@@ -2922,6 +2927,7 @@ dependencies = [
  "mf-io",
  "mf-metrics",
  "mf-runtime",
+ "mf-units",
  "pollster 0.4.0",
  "rayon",
  "thiserror 2.0.21",
@@ -2954,9 +2960,18 @@ dependencies = [
  "clap",
  "jsonschema",
  "mf-io",
+ "mf-units",
  "serde",
  "serde-saphyr",
  "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
+name = "mf-units"
+version = "0.0.1"
+dependencies = [
+ "serde",
  "thiserror 2.0.21",
 ]
 

@@ -81,12 +81,13 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "sculpt_grab.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });
@@ -119,10 +120,6 @@ fn facing_point_and_world(
     let world = glam::DVec3::from(center) + to_eye * (radius * 0.8);
     let px = h.state().screen_point(world.to_array()).unwrap();
     (px, world.to_array())
-}
-
-fn facing_point(h: &Harness<'_, MeshFixerApp>, center: [f64; 3], radius: f64) -> egui::Pos2 {
-    facing_point_and_world(h, center, radius).0
 }
 
 fn at(t: [f64; 3]) -> [f64; 12] {
@@ -193,12 +190,17 @@ fn grab_drag_never_moves_the_far_side_of_the_sphere() {
     h.get_by_label("Sculpt").click();
     settle(&mut h);
     h.state_mut().sculpt.brush = BrushKind::Drag;
-    h.state_mut().sculpt.radius = 5.0; // the owner's own report: a 5 mm radius
     h.state_mut().sculpt.strength = 1.0;
     assert_eq!(h.state().sculpt.brush, BrushKind::Drag);
 
     let before = h.state().active_mesh().unwrap().clone();
     let (top, drag_start_world) = facing_point_and_world(&h, [0.0, 0.0, 20.0], 20.0);
+    // The owner's own report: a 5 mm radius. The panel's own setting is
+    // screen points since the fix (owner bug 2026-11-14), so pin the
+    // brush to this exact world size at the drag's own starting depth,
+    // same as the old document-units `radius` field would have.
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), drag_start_world, 5.0).unwrap();
     // `before.vertices()` is the document's own mesh, in *object* space;
     // `facing_point_and_world`'s own point is world space. The ball's
     // transform here (`at([0, 0, 20])`) is a pure translation, so
@@ -286,10 +288,11 @@ fn grab_drag_never_moves_another_object() {
     h.get_by_label("Sculpt").click();
     settle(&mut h);
     h.state_mut().sculpt.brush = BrushKind::Drag;
-    h.state_mut().sculpt.radius = 5.0;
     h.state_mut().sculpt.strength = 1.0;
 
-    let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let (top, drag_start_world) = facing_point_and_world(&h, [0.0, 0.0, 20.0], 20.0);
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), drag_start_world, 5.0).unwrap();
     drag(&mut h, top, top + egui::vec2(40.0, 0.0), 10);
     wait_until(&mut h, "more than one dab recorded", |a| {
         a.sculpt_stroke.as_ref().is_some_and(|s| s.dab_count() > 1)
@@ -333,15 +336,16 @@ fn grab_drag_never_inverts_a_face() {
     h.get_by_label("Sculpt").click();
     settle(&mut h);
     h.state_mut().sculpt.brush = BrushKind::Drag;
-    // Deliberately aggressive: a bigger radius and full strength, the
-    // kind of large drag that tore the surface in the owner's report
-    // absent the fix.
-    h.state_mut().sculpt.radius = 10.0;
     h.state_mut().sculpt.strength = 1.0;
 
     let before = h.state().active_mesh().unwrap().clone();
     let before_normals = face_normals(&before);
-    let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let (top, drag_start_world) = facing_point_and_world(&h, [0.0, 0.0, 20.0], 20.0);
+    // Deliberately aggressive: a bigger radius and full strength, the
+    // kind of large drag that tore the surface in the owner's report
+    // absent the fix.
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), drag_start_world, 10.0).unwrap();
     drag(&mut h, top, top + egui::vec2(150.0, 40.0), 12);
     wait_until(&mut h, "more than one dab recorded", |a| {
         a.sculpt_stroke.as_ref().is_some_and(|s| s.dab_count() > 1)
@@ -382,11 +386,14 @@ fn grab_drag_moves_the_dabbed_point_by_about_the_drag_distance() {
     h.get_by_label("Sculpt").click();
     settle(&mut h);
     h.state_mut().sculpt.brush = BrushKind::Drag;
-    h.state_mut().sculpt.radius = 8.0;
     h.state_mut().sculpt.strength = 1.0;
 
     let before = h.state().active_mesh().unwrap().clone();
-    let top = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let (top, drag_start_world) = facing_point_and_world(&h, [0.0, 0.0, 20.0], 20.0);
+    let radius_mm = 8.0;
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), drag_start_world, radius_mm)
+            .unwrap();
 
     // Big enough, in screen pixels, to clear `DAB_SPACING`'s world-space
     // threshold (a fraction of the brush's own *world* radius) a few
@@ -425,7 +432,7 @@ fn grab_drag_moves_the_dabbed_point_by_about_the_drag_distance() {
         "nothing moved enough to read as a dab: {max_moved} mm"
     );
     assert!(
-        max_moved < 2.0 * h.state().sculpt.radius,
+        max_moved < 2.0 * radius_mm,
         "the most-moved vertex moved {max_moved} mm, more than twice the brush radius: looks like the bug"
     );
 }

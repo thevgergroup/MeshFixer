@@ -62,9 +62,6 @@ pub struct Dragging {
 #[derive(Debug)]
 pub struct TransformTool {
     pub mode: GizmoMode,
-    /// Snapping (grid, 15°, steps of 10%, the plate) is on; Cmd/Ctrl
-    /// while dragging inverts it.
-    pub snap: bool,
     /// Scale fields move together.
     pub uniform: bool,
     /// The handle under the pointer.
@@ -78,7 +75,6 @@ impl Default for TransformTool {
     fn default() -> Self {
         TransformTool {
             mode: GizmoMode::Move,
-            snap: true,
             uniform: true,
             hover: None,
             dragging: None,
@@ -287,6 +283,62 @@ pub fn mm_per(unit: Unit) -> f64 {
         Unit::Foot => 304.8,
         Unit::Meter => 1000.0,
     }
+}
+
+/// The smallest a zoom-adaptive grid step's on-screen size is let fall
+/// (screen points): below this a step reads as "not really a grid"
+/// (ADR-0006 rule 3: "at least about 8 pt"). Matches the plate snap's
+/// own 8pt catch distance ([`mf_render::PlateSnap::within_pt`]), a
+/// separate, pre-existing feature this isn't replacing. `pub(crate)` so
+/// `app::MeshFixerApp::plate`'s own zoom-adaptive grid-line spacing
+/// shares this one constant too, rather than a second "8.0" literal
+/// (consolidation plan C09: "delete duplicate step logic").
+pub(crate) const MIN_SNAP_PX: f64 = 8.0;
+
+/// The one shared snap step every gizmo tool calls (ADR-0006 rule 3: "no
+/// tool should have its own snap constant") — the Transform gizmo, Split's
+/// plane and print-volume box, and any future gizmo tool, all call this
+/// instead of keeping their own grid number. A 1-2-5-mm step, picked so
+/// it is at least [`MIN_SNAP_PX`] on screen at `cam`'s current zoom
+/// (measured at `pivot`), returned in document units alongside the mm
+/// value itself (for the tool hint, "snap 1 mm"). Replaces a fixed step
+/// in document units (`mf_render::Snap::default`'s old `grid: Some(1.0)`),
+/// which snapped every drag on a metre-scale document to zero, because
+/// "1 document unit" was 1000 mm there (the owner's stanford-bunny
+/// report, MF-OBJ-002) — "a literal length constant in document units is
+/// a bug" (ADR-0006 rule 3).
+pub fn snap_step(
+    cam: &mf_render::OrbitCamera,
+    pivot: DVec3,
+    view: (f64, f64),
+    unit: Unit,
+) -> (f64, f64) {
+    let mm = mm_per(unit);
+    let step_mm = mf_render::adaptive_grid_mm(cam, pivot, view, mm, MIN_SNAP_PX);
+    (step_mm / mm, step_mm)
+}
+
+/// The tool hint's snap clause ("snap 1 mm", "snap 0.5 mm"): `step_mm` as
+/// [`field_text`] gives it, so a sub-mm step (a micron-scale document)
+/// reads with no trailing zeros either.
+pub fn snap_hint(step_mm: f64) -> String {
+    format!("snap {} mm", field_text(step_mm))
+}
+
+/// `transform`'s linear part scaled by `factor` (its translation is
+/// left alone): a generator's mesh is built in mm (every library shape
+/// and connector, D16/D20), so a 12-value placement transform meant for
+/// one must scale its linear part by document-units-per-mm
+/// (`1.0 / mm_per(unit)`) before `object.add_shape` places it, or the
+/// mesh lands at its literal mm size in document units (1000x too big
+/// on a metre document). A part's own transform (its mesh baked at
+/// final size already) is never scaled this way.
+pub fn scale_linear(transform: &[f64; 12], factor: f64) -> [f64; 12] {
+    let mut m = *transform;
+    for v in &mut m[0..9] {
+        *v *= factor;
+    }
+    m
 }
 
 #[cfg(test)]

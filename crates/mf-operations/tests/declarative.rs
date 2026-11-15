@@ -220,7 +220,12 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
             target: Target::WholeObject,
         });
     }
-    let result = op.execute_doc(&inputs, &params, &mf_operations::RunContext::none());
+    let result = op.execute_doc(
+        &inputs,
+        &params,
+        &mf_operations::DocContext::default(),
+        &mf_operations::RunContext::none(),
+    );
 
     let mut problems = Vec::new();
     if let Some(Value::String(code)) = case.expect.get("error") {

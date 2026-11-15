@@ -460,3 +460,46 @@ fn a_tilted_cut_s_cap_has_no_off_plane_original_vertex() {
         }
     }
 }
+
+/// Whether `a` and `b` differ, but by at most one ulp in every
+/// coordinate: two points closer than their coordinates resolve.
+fn an_ulp_apart(a: [f64; 3], b: [f64; 3]) -> bool {
+    a != b && (0..3).all(|i| a[i] == b[i] || a[i].next_up() == b[i] || a[i].next_down() == b[i])
+}
+
+/// The owner's demo (2026-11-13): a sphere's equator ring lies a few
+/// ulps off the plane through its centre, so the cut points on the
+/// edges from each ring vertex round to within an ulp of the vertex (and
+/// of each other) without landing on it. The rim then carried vertices an
+/// ulp apart and the faces between them were slivers that no boolean
+/// window near them can cut (ADR-0011: `window_degenerate`). Such a
+/// vertex is on the plane for the cut.
+#[test]
+fn a_cut_through_a_sphere_s_equator_leaves_no_rim_vertices_an_ulp_apart() {
+    let ctx = RunContext::none();
+    let sphere = mf_fixtures::scaled(&uv_sphere(48, 96), 20.0);
+    for side in [Side::Below, Side::Above] {
+        let p = Plane {
+            point: [0.0, 0.0, 0.0],
+            normal: [0.0, 0.0, 1.0],
+        };
+        let c = cut_half(&sphere, &p, side, &ctx).unwrap();
+        let mut rim: Vec<[f64; 3]> = c
+            .cap_faces
+            .iter()
+            .filter_map(|&f| c.mesh.face(f))
+            .flatten()
+            .map(|v| c.mesh.corner_position(v))
+            .collect();
+        rim.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        rim.dedup();
+        for (i, a) in rim.iter().enumerate() {
+            for b in &rim[i + 1..] {
+                assert!(
+                    !an_ulp_apart(*a, *b),
+                    "{side:?}: rim vertices {a:?} and {b:?}"
+                );
+            }
+        }
+    }
+}

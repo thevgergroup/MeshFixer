@@ -7,7 +7,7 @@ use mf_geometry::{Mesh, Provenance};
 use mf_spec::Params;
 use serde_json::json;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target, unsupported_target};
 
 pub struct Compact;
 
@@ -25,6 +25,7 @@ impl Operation for Compact {
         input: &Mesh,
         target: &Target,
         _params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         const STAGE: &str = "compacting";

@@ -151,27 +151,40 @@ fn hollow_after_make_solid_on_combined_hemisphere_and_half_cube() {
 }
 
 /// The owner's step 4, the other way they tried it: `open_through` on the
-/// face at the bottom of the cut (the lowest-z live face, standing in for
-/// the owner's click on that region) must also never refuse a valid
-/// Make-solid output.
+/// bottom of the hemisphere (its downward-facing faces within 1 mm of
+/// its lowest point, standing in for the owner's click on that smooth
+/// region; a single sliver triangle there is too small to open through,
+/// refused by name) must also never refuse a valid Make-solid output.
 #[test]
 fn hollow_open_through_after_make_solid_on_combined_hemisphere_and_half_cube() {
     let mut s = session_from_demo();
     let solid = hemisphere_plus_half_cube_solid(&mut s);
     let mesh = s.document().object(solid).unwrap().mesh().unwrap().clone();
-    let seed = (0..mesh.face_slots())
-        .filter_map(|f| {
-            let face = mesh.face(mf_geometry::FaceId(f))?;
-            let z = face
-                .iter()
-                .map(|&v| mesh.corner_position(v)[2])
-                .sum::<f64>()
-                / 3.0;
-            Some((z, f))
+    let bottom = mesh.bounding_box().unwrap().min[2];
+    let picked: Vec<String> = mesh
+        .faces()
+        .filter(|(_, t)| {
+            let p = t.map(|v| mesh.corner_position(v));
+            let (a, b) = (
+                [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]],
+                [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]],
+            );
+            let n = [
+                a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0],
+            ];
+            let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            len > 0.0 && -n[2] >= 0.9 * len && p.iter().all(|q| q[2] <= bottom + 1.0)
         })
-        .min_by(|a, b| a.0.total_cmp(&b.0))
-        .map(|(_, f)| f)
-        .expect("a live face");
+        .map(|(f, _)| f.0.to_string())
+        .collect();
+    assert!(
+        picked.len() > 2,
+        "the hemisphere's bottom: {} faces",
+        picked.len()
+    );
+    let seed = picked.join(",");
 
     let result = s.execute(invoke(
         "mesh.hollow",
@@ -180,7 +193,7 @@ fn hollow_open_through_after_make_solid_on_combined_hemisphere_and_half_cube() {
             ("wall_thickness", "2"),
             ("inner_detail", "0.5"),
             ("open_through", "true"),
-            ("open_through_faces", &seed.to_string()),
+            ("open_through_faces", &seed),
         ],
     ));
     match result {
@@ -190,4 +203,137 @@ fn hollow_open_through_after_make_solid_on_combined_hemisphere_and_half_cube() {
         }
         Err(e) => panic!("Hollow (open_through) failed: {e}"),
     }
+}
+
+// ---------------------------------------------------------------------
+// Owner 2026-11-14, take 3: open through the flat cut face of
+// scan (bottom) + part (bottom), each split on its own.
+// ---------------------------------------------------------------------
+
+/// `name`'s world bounding-box centre: Split's default plane point for a
+/// lone selection (the GUI's own "selection's bounding-box centre").
+fn world_centre(s: &Session, name: &str) -> [f64; 3] {
+    let o = s.document().object(id_of(s, name)).unwrap();
+    let bb = o.mesh().unwrap().bounding_box().unwrap();
+    std::array::from_fn(|k| (bb.min[k] + bb.max[k]) / 2.0 + o.transform[9 + k])
+}
+
+/// Split `name` alone at its own default horizontal plane, Keep Bottom,
+/// Cap on. Returns the plane's world height.
+fn split_keep_bottom(s: &mut Session, name: &str) -> f64 {
+    let c = world_centre(s, name);
+    let target = id_of(s, name);
+    s.execute(invoke(
+        "mesh.split_plane",
+        target,
+        &[
+            ("plane_point", &format!("{},{},{}", c[0], c[1], c[2])),
+            ("plane_normal", "0,0,1"),
+            ("keep", "below"),
+            ("cap", "true"),
+        ],
+    ))
+    .unwrap_or_else(|e| panic!("split of {name} failed: {e}"));
+    c[2]
+}
+
+/// The owner's exact steps 1-4: Split 'scan' (Keep Bottom), Make solid
+/// on 'scan (bottom)', Split 'part' the same way, Combine the two into
+/// 'part (bottom)'. Returns the combined object and the cut's own local
+/// height in it.
+fn owner_take3_combined(s: &mut Session) -> (ObjectId, f64) {
+    let cut_z = split_keep_bottom(s, "scan");
+    let scan = id_of(s, "scan (bottom)");
+    s.execute(invoke("mesh.make_solid", scan, &[]))
+        .unwrap_or_else(|e| panic!("make_solid failed: {e}"));
+    let part_cut_z = split_keep_bottom(s, "part");
+    assert_eq!(cut_z, part_cut_z, "both cut at the same height");
+    let part = id_of(s, "part (bottom)");
+    s.execute(combine(part, &[scan]))
+        .unwrap_or_else(|e| panic!("combine failed: {e}"));
+    let o = s.document().object(part).unwrap();
+    (part, cut_z - o.transform[11])
+}
+
+/// Every live face lying flat on the cut plane, facing up: the flat cut
+/// face the owner clicked (a disc with the cube's tab joined on).
+fn cut_face(mesh: &mf_geometry::Mesh, cut_z: f64) -> Vec<u32> {
+    mesh.faces()
+        .filter(|(_, t)| {
+            let p = t.map(|v| mesh.corner_position(v));
+            let n = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]);
+            n > 0.0 && p.iter().all(|q| (q[2] - cut_z).abs() < 1e-6)
+        })
+        .map(|(f, _)| f.0)
+        .collect()
+}
+
+/// Owner 2026-11-14, take 3: Hollow (2 mm wall) with Open through on the
+/// flat cut face is refused (`open_through_region_too_curved`: the
+/// picked outline, shrunk inward by the wall, crossed itself at the
+/// tab's neck). The opening must instead follow the cavity: a single
+/// closed, manifold shell, open at the cut face, with the rim still at
+/// the cut height.
+#[test]
+fn hollow_open_through_the_flat_cut_face_of_scan_and_part_split_separately() {
+    let mut s = session_from_demo();
+    let (solid, cut_z) = owner_take3_combined(&mut s);
+    let mesh = s.document().object(solid).unwrap().mesh().unwrap().clone();
+    let faces = cut_face(&mesh, cut_z);
+    assert!(faces.len() > 2, "the cut face: {} faces", faces.len());
+    let list = faces
+        .iter()
+        .map(|f| f.to_string())
+        .collect::<Vec<_>>()
+        .join(",");
+    let result = s.execute(invoke(
+        "mesh.hollow",
+        solid,
+        &[
+            ("wall_thickness", "2"),
+            ("open_through", "true"),
+            ("open_through_faces", &list),
+        ],
+    ));
+    match result {
+        Ok(_) => {}
+        Err(e) => panic!("Hollow (open_through) on the flat cut face was refused: {e}"),
+    }
+    let shell = s.document().object(solid).unwrap().mesh().unwrap().clone();
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed");
+    assert!(
+        topo.non_manifold_edges.is_empty() && topo.inconsistent_edges == 0,
+        "{topo:?}"
+    );
+    assert_eq!(topo.components.len(), 1, "one open bowl");
+    let top = shell.bounding_box().unwrap().max[2];
+    assert!((top - cut_z).abs() < 1e-9, "rim at {top}, cut at {cut_z}");
+    // Open: the cut face's own middle is gone (no face left at the cut
+    // height over the cavity), yet the rim remains there.
+    let left = cut_face(&shell, cut_z).len();
+    assert!(left > 0, "the rim is still at the cut height");
+    let before: f64 = area_at(&mesh, cut_z);
+    let after: f64 = area_at(&shell, cut_z);
+    assert!(
+        after < 0.5 * before,
+        "the opening removed too little of the cut face: {after} of {before}"
+    );
+}
+
+fn area_at(mesh: &mf_geometry::Mesh, cut_z: f64) -> f64 {
+    let ids = cut_face(mesh, cut_z);
+    ids.iter()
+        .map(|&f| {
+            let p = mesh
+                .face(mf_geometry::FaceId(f))
+                .unwrap()
+                .map(|v| mesh.corner_position(v));
+            0.5 * ((p[1][0] - p[0][0]) * (p[2][1] - p[0][1])
+                - (p[1][1] - p[0][1]) * (p[2][0] - p[0][0]))
+        })
+        .sum()
 }

@@ -4,7 +4,7 @@
 
 use mf_geometry::Mesh;
 
-use crate::manifest::{Attach, PartKind, PartManifest};
+use crate::manifest::{Attach, PartKind, PartManifest, Unit};
 
 /// Segments around every round built-in.
 const SEGMENTS: u32 = 48;
@@ -188,6 +188,10 @@ fn manifest(id: &str, name: &str, kind: PartKind) -> PartManifest {
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        // Every built-in generator is mm-internal (D16): its mesh's
+        // coordinates are millimetres regardless of the placing
+        // document's unit.
+        unit: Unit::Millimeter,
         mesh: String::new(),
         category: String::new(),
         description: String::new(),

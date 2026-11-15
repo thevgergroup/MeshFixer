@@ -95,12 +95,13 @@ fn opened_with(
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "parts.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });

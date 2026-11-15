@@ -17,4 +17,6 @@ cd "$(dirname "$0")/.."
 toolchain="$HOME/.rustup/toolchains/$(sed -n 's/^channel = "\(.*\)"/\1/p' rust-toolchain.toml)-$(rustc -vV | sed -n 's/^host: //p')/bin"
 [ -d "$toolchain" ] && export PATH="$toolchain:$PATH"
 
-time cargo test -j 4 -p mf-desktop --test core_workflows --no-fail-fast -- --test-threads=1 "$@"
+# The Hollow acceptance flows (the four canonical shapes, three ways each)
+# are their own group, run by scripts/hollow-acceptance.sh.
+time cargo test -j 4 -p mf-desktop --test core_workflows --no-fail-fast -- --test-threads=1 --skip hollow_acceptance:: "$@"

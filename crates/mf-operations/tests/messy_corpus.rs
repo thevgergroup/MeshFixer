@@ -31,7 +31,7 @@ use std::time::Duration;
 use common::{edge_faces, untouched_outside};
 use mf_geometry::{Diagnostics, Mesh, inspect, inspect_with};
 use mf_metrics::{CountingAlloc, Phase, measure};
-use mf_operations::{OpError, OpOutput, RunContext, Target, find};
+use mf_operations::{DocContext, OpError, OpOutput, RunContext, Target, find};
 use mf_spec::{Params, builtin};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -508,7 +508,13 @@ fn fill_whole(
     let loops_before = mesh.topology().boundary_loops.len();
     let op = find("mesh.fill_holes").unwrap();
     let (r, phase, timed_out) = guarded("fill_holes", |ctx| {
-        op.execute(mesh, &Target::WholeObject, params, ctx)
+        op.execute(
+            mesh,
+            &Target::WholeObject,
+            params,
+            &DocContext::default(),
+            ctx,
+        )
     });
     let mut res = FillResult {
         style: style.into(),
@@ -569,7 +575,13 @@ fn remove_small(mesh: &Mesh) -> RemoveSmallResult {
     let max_relative = params.get_float("max_relative_size").unwrap();
     let op = find("mesh.remove_small_components").unwrap();
     let (r, phase, timed_out) = guarded("remove_small_components", |ctx| {
-        op.execute(mesh, &Target::WholeObject, &params, ctx)
+        op.execute(
+            mesh,
+            &Target::WholeObject,
+            &params,
+            &DocContext::default(),
+            ctx,
+        )
     });
     let mut res = RemoveSmallResult {
         outcome: Outcome::Ok,
@@ -625,7 +637,13 @@ fn targeted(
         .unwrap();
     let op = find("mesh.fill_holes").unwrap();
     let (r, phase, timed_out) = guarded("targeted_fill", |ctx| {
-        op.execute(mesh, &Target::Loops(vec![id]), &params, ctx)
+        op.execute(
+            mesh,
+            &Target::Loops(vec![id]),
+            &params,
+            &DocContext::default(),
+            ctx,
+        )
     });
     let mut res = TargetedResult {
         loop_id: Some(id),

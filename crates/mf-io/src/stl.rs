@@ -113,6 +113,26 @@ pub fn read_with_limits(
     read_ascii(bytes, ctx).map(|(m, p)| (m, p, Vec::new()))
 }
 
+/// The file's own header text, trimmed, for showing as an exporter hint
+/// (MF-ISSUE-045, "Exported from Blender — usually metres"): binary
+/// STL's 80-byte header if it holds printable text, else ASCII STL's
+/// `solid <name>` line. `None` if there's nothing nameable (an empty
+/// or all-whitespace header, or too short a file to have one).
+pub fn header_text(bytes: &[u8]) -> Option<String> {
+    let raw = if looks_ascii(bytes) {
+        let line = bytes.split(|&b| b == b'\n').next().unwrap_or(bytes);
+        std::str::from_utf8(line)
+            .ok()? // allow-swallow: non-UTF-8 text has no hint to show, same as a missing header
+            .trim()
+            .strip_prefix("solid")?
+    } else {
+        let header = bytes.get(..HEADER)?;
+        std::str::from_utf8(header).ok()? // allow-swallow: non-UTF-8 binary header bytes have no hint to show
+    };
+    let text = raw.trim_matches(|c: char| c.is_whitespace() || c == '\0');
+    (!text.is_empty()).then(|| text.to_owned())
+}
+
 fn looks_ascii(bytes: &[u8]) -> bool {
     let start = bytes
         .iter()

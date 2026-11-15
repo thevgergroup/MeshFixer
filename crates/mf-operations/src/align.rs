@@ -12,8 +12,8 @@ use mf_geometry::Mesh;
 use mf_spec::Params;
 
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 pub struct Align;
@@ -121,6 +121,7 @@ impl Operation for Align {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -130,6 +131,7 @@ impl Operation for Align {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         // The targets are every input except a trailing `anchor` operand
@@ -408,7 +410,12 @@ mod tests {
         ] {
             let inputs = [input("a", &a, ta, "target"), input("b", &b, tb, "target")];
             let out = Align
-                .execute_doc(&inputs, &params("x", mode, "[]"), &RunContext::none())
+                .execute_doc(
+                    &inputs,
+                    &params("x", mode, "[]"),
+                    &DocContext::default(),
+                    &RunContext::none(),
+                )
                 .unwrap();
             // No change for a target means its translation is already
             // what align wanted (`delta == 0.0`): its original x stands.
@@ -452,7 +459,12 @@ mod tests {
             input("anchor", &anchor, t_anchor, "anchor"),
         ];
         let out = Align
-            .execute_doc(&inputs, &params("x", "centre", "[]"), &RunContext::none())
+            .execute_doc(
+                &inputs,
+                &params("x", "centre", "[]"),
+                &DocContext::default(),
+                &RunContext::none(),
+            )
             .unwrap();
         assert_eq!(out.changes.len(), 2, "{:?}", out.changes);
         for c in &out.changes {
@@ -484,6 +496,7 @@ mod tests {
             .execute_doc(
                 &inputs,
                 &params("x", "distribute_gaps", "[]"),
+                &DocContext::default(),
                 &RunContext::none(),
             )
             .unwrap();
@@ -518,6 +531,7 @@ mod tests {
             .execute_doc(
                 &inputs,
                 &params("x", "distribute_centres", "[]"),
+                &DocContext::default(),
                 &RunContext::none(),
             )
             .unwrap();
@@ -549,6 +563,7 @@ mod tests {
             .execute_doc(
                 &inputs,
                 &params("x", "min", "[null, 0, null]"),
+                &DocContext::default(),
                 &RunContext::none(),
             )
             .unwrap();
@@ -584,7 +599,12 @@ mod tests {
     fn fewer_than_two_targets_is_refused_by_name() {
         let a = cube(10.0);
         let inputs = [input("a", &a, translate(0.0, 0.0, 0.0), "target")];
-        match Align.execute_doc(&inputs, &params("x", "centre", "[]"), &RunContext::none()) {
+        match Align.execute_doc(
+            &inputs,
+            &params("x", "centre", "[]"),
+            &DocContext::default(),
+            &RunContext::none(),
+        ) {
             Err(OpError::Failed { code, .. }) => assert_eq!(code, "too_few_objects"),
             other => panic!("{other:?}"),
         }

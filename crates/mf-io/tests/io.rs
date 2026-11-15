@@ -45,6 +45,33 @@ fn binary_with_solid_header() {
 }
 
 #[test]
+fn header_text_reads_a_binary_header() {
+    let mut bytes = stl::write_binary(&cube(1.0)).unwrap();
+    let tag = b"Exported from Blender";
+    bytes[..tag.len()].copy_from_slice(tag);
+    bytes[tag.len()..80].fill(0);
+    assert_eq!(
+        stl::header_text(&bytes),
+        Some("Exported from Blender".into())
+    );
+}
+
+#[test]
+fn header_text_reads_an_ascii_solid_name() {
+    let text = "solid SolidWorks STL\n facet normal 0 0 1\n";
+    assert_eq!(
+        stl::header_text(text.as_bytes()),
+        Some("SolidWorks STL".into())
+    );
+}
+
+#[test]
+fn header_text_is_none_for_a_blank_header() {
+    let bytes = vec![0u8; 84];
+    assert_eq!(stl::header_text(&bytes), None);
+}
+
+#[test]
 fn zero_facets() {
     let mut bytes = vec![0u8; 84];
     bytes[..4].copy_from_slice(b"mesh");
@@ -341,7 +368,7 @@ fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
     let p3 = dir.path().join("out.3mf");
     mf_io::write_path(&mesh, &p3, Format::ThreeMf, mf_io::threemf::Unit::Inch).unwrap();
     let model = read_model(&p3).unwrap();
-    assert_eq!(model.unit, mf_io::threemf::Unit::Inch);
+    assert_eq!(model.unit, Some(mf_io::threemf::Unit::Inch));
 }
 
 /// M4 final review I3: applying an object's transform for an STL/OBJ export

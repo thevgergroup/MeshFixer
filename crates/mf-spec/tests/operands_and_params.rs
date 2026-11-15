@@ -228,6 +228,177 @@ runtime:
     assert_eq!(params_mm.get_float("hole_diameter").unwrap(), 5.0);
 }
 
+/// `unit: document` (`ParamUnit::Document`, consolidation plan C05): a
+/// value already in document/world units, such as `mesh.split_box`'s
+/// `box_min`/`box_max` or an absolute transform's translation, is left
+/// untouched by `to_document_units` — never converted a second time,
+/// unlike a `unit: mm` (`ParamUnit::Length`) parameter.
+#[test]
+fn document_unit_params_are_never_converted() {
+    let yaml = r#"
+id: mesh.test_document_unit
+version: 1
+summary: Test fixture with a document-unit parameter.
+history_label: history.label.test_fixture
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: box_min
+    type: vec3
+    default: [1.0, 2.0, 3.0]
+    unit: document
+    description: Already in document units
+preconditions: []
+postconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true
+"#;
+    let spec: mf_spec::OperationSpec = serde_saphyr::from_str(yaml).unwrap();
+    let mut params = spec.validate(&Default::default()).unwrap();
+    spec.to_document_units(&mut params, Unit::Meter);
+    match params.0.get("box_min") {
+        Some(ParamValue::Vec3(v)) => assert_eq!(
+            *v,
+            [1.0, 2.0, 3.0],
+            "a document-unit vec3 must not be rescaled"
+        ),
+        other => panic!("expected Vec3, got {other:?}"),
+    }
+}
+
+/// `to_document_units` honours a `Length` param's own declared source
+/// unit, not just mm: `ParamUnit::Length(Unit::Inch)` converts from
+/// inches, the same way `ParamUnit::Length(Unit::Millimeter)` converts
+/// from mm.
+#[test]
+fn length_params_convert_from_their_own_declared_unit() {
+    let yaml = r#"
+id: mesh.test_inch_length
+version: 1
+summary: Test fixture with an inch-unit length parameter.
+history_label: history.label.test_fixture
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: bolt_length
+    type: float
+    default: 1.0
+    unit: in
+    description: A length given in inches
+preconditions: []
+postconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true
+"#;
+    let spec: mf_spec::OperationSpec = serde_saphyr::from_str(yaml).unwrap();
+    let mut params = spec.validate(&Default::default()).unwrap();
+    // 1 inch is 25.4 mm; on an mm document that's 25.4 document units.
+    spec.to_document_units(&mut params, Unit::Millimeter);
+    assert_eq!(params.get_float("bolt_length").unwrap(), 25.4);
+}
+
+/// ADR-0006 rule 1b / consolidation plan C05: a `Length`-unit `float`
+/// parameter's text is parsed with `mf_units::parse_length`, so a
+/// caller (a length field, the CLI, an old log) may write a value with
+/// an explicit unit — `"10 in"` on a param declared `unit: mm` means
+/// 254.0, not a rejected "expected a finite number". A bare number
+/// still means the param's own declared unit, exactly as before.
+#[test]
+fn length_param_parse_accepts_explicit_units() {
+    let yaml = r#"
+id: mesh.test_parse_length
+version: 1
+summary: Test fixture for parsing a length parameter's text.
+history_label: history.label.test_fixture
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: hole_diameter
+    type: float
+    default: 5.0
+    unit: mm
+    description: Hole diameter, declared in mm
+preconditions: []
+postconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true
+"#;
+    let spec: mf_spec::OperationSpec = serde_saphyr::from_str(yaml).unwrap();
+
+    // "10 in" on an mm-declared param means 254 mm.
+    let p = spec.validate(&raw(&[("hole_diameter", "10 in")])).unwrap();
+    assert_eq!(p.get_float("hole_diameter").unwrap(), 254.0);
+
+    // A bare number still means the param's own unit (mm), unchanged.
+    let p = spec.validate(&raw(&[("hole_diameter", "12.5")])).unwrap();
+    assert_eq!(p.get_float("hole_diameter").unwrap(), 12.5);
+
+    // Garbage is still a named error, not a silent zero.
+    let err = spec
+        .validate(&raw(&[("hole_diameter", "not a length")]))
+        .unwrap_err();
+    assert!(
+        matches!(err, mf_spec::SpecError::InvalidValue { .. }),
+        "{err:?}"
+    );
+}
+
+/// ADR-0006 rule 6: a spec's `unit:` string is validated when the spec
+/// loads. A typo'd or unrecognised unit is a load-time error, not a
+/// silently-ignored one that would leave `to_document_units` unable to
+/// find its length (the owner's bug: `cm`/`in` previously passed
+/// through unit `Option<String>` unconverted because only the literal
+/// string `"mm"` was ever matched).
+#[test]
+fn unrecognised_unit_is_a_load_error() {
+    let yaml = r#"
+id: mesh.test_bad_unit
+version: 1
+summary: Test fixture with an invalid unit string.
+history_label: history.label.test_fixture
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: hole_diameter
+    type: float
+    default: 5.0
+    unit: furlongs
+    description: An invalid unit
+preconditions: []
+postconditions: []
+effects: [geometry_changes]
+runtime:
+  cancellable: true
+  progress: true
+"#;
+    let err = serde_saphyr::from_str::<mf_spec::OperationSpec>(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("furlongs"),
+        "expected the error to name the bad unit, got: {err}"
+    );
+}
+
+fn raw(pairs: &[(&str, &str)]) -> std::collections::BTreeMap<String, String> {
+    pairs
+        .iter()
+        .map(|(k, v)| (k.to_string(), v.to_string()))
+        .collect()
+}
+
 /// An operand (or the target) may be `many`: a list of objects. Absent, it
 /// is a single operand, so every older spec parses unchanged.
 #[test]

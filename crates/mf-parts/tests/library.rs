@@ -82,6 +82,7 @@ fn manifest(id: &str) -> PartManifest {
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        unit: Unit::Millimeter,
         mesh: String::new(),
         category: String::new(),
         description: String::new(),

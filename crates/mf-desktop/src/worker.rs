@@ -1158,6 +1158,12 @@ pub struct PegPreviewRequest {
     pub allowance: f64,
     pub count: u32,
     pub min_wall: f64,
+    /// The document's unit: `diameter` and every other length here are
+    /// already document-unit values (ADR-0006 rule 2), shown through
+    /// [`mf_units::format_length`] in [`peg_preview`]'s refusal text,
+    /// never a literal "mm" (consolidation plan C11: "'{:.2} mm hole'
+    /// is printed for a value in doc units").
+    pub unit: mf_io::threemf::Unit,
 }
 
 /// One hole's placement, in world space, for the Alignment panel's
@@ -1204,12 +1210,18 @@ pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Messa
         m.transform_vector3(local).normalize_or_zero().to_array()
     };
     let point_obj = world_to_object(request.plane_point);
-    let normal_obj = {
-        let m = mf_render::model_matrix(&request.transform).inverse();
-        m.transform_vector3(glam::DVec3::from(request.plane_normal))
-            .normalize_or_zero()
-            .to_array()
-    };
+    // The plane's normal must go to object space the same way Apply's
+    // own `mf_operations::split::normal_to_object` does: `M·n`, `M`
+    // being `request.transform`'s (object→world) linear part, never
+    // that transform's inverse applied as if the normal were a point
+    // (wrong under a non-uniform scale: split_parity.rs's
+    // `split_preview_regions_equal_apply_regions`).
+    let normal_obj = glam::DVec3::from(mf_geometry::affine::world_normal_to_object(
+        &request.transform,
+        request.plane_normal,
+    ))
+    .normalize_or_zero()
+    .to_array();
     let plane = Plane {
         point: point_obj,
         normal: normal_obj,
@@ -1295,9 +1307,16 @@ pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Messa
                 unreachable!()
             };
             preview.dowel = dowel;
+            // `request.diameter` and `widest_fit_mm` are both already
+            // document-unit values (`widest_fit_mm`'s own doc comment:
+            // "document units" — the "_mm" is a historical misnomer),
+            // so this must go through the document's unit, never a
+            // literal "mm" (consolidation plan C11: "'{:.2} mm hole' is
+            // printed for a value in doc units").
+            let hole = mf_units::format_length(request.diameter, request.unit);
+            let widest = mf_units::format_length(widest_fit_mm, request.unit);
             preview.refusal = Some(format!(
-                "Section region {region} is too thin for a {:.2} mm hole: the widest that fits is {widest_fit_mm:.2} mm.",
-                request.diameter
+                "Section region {region} is too thin for a {hole} hole: the widest that fits is {widest}."
             ));
             Ok(Message::PegPreview(preview))
         }

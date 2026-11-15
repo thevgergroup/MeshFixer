@@ -11,6 +11,7 @@ parameters:
   - name: transforms
     type: text
     default: "[]"
+    unit: document
     description: "The new placements, as JSON: one list of 12 numbers (3x3 linear part row by row, then translation) per target, in order"
 preconditions:
   - one transform per target, none of them flattening

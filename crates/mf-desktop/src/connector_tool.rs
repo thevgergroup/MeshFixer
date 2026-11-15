@@ -299,6 +299,10 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         }
     };
     let group = new_group_id(app, id);
+    // The connector's own mesh is generated in mm (D16/D20);
+    // `object.add_shape` itself scales it by the document's unit
+    // (consolidation plan C12), so the placement transform goes through
+    // unscaled, never doubled up.
     let params = BTreeMap::from([
         (
             "shapes".to_owned(),
@@ -862,6 +866,7 @@ fn save_connector_to_library(app: &mut MeshFixerApp, placed: &PlacedConnector) {
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        unit: mf_parts::Unit::Millimeter,
         mesh: String::new(),
         category: String::new(),
         description: String::new(),

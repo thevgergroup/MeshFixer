@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use mf_document::ObjectId;
 use mf_fixtures::uv_sphere;
 use mf_io::threemf::IDENTITY;
-use mf_operations::{ObjectChange, OperandInput, RunContext, Target, find};
+use mf_operations::{DocContext, ObjectChange, OperandInput, RunContext, Target, find};
 
 fn timed_split(rings: u32, budget: Duration) {
     let mesh = uv_sphere(rings, rings);
@@ -42,6 +42,7 @@ fn timed_split(rings: u32, budget: Duration) {
                 target: Target::WholeObject,
             }],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();

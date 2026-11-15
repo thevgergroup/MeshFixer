@@ -9,7 +9,7 @@ use mf_geometry::{Mesh, Provenance};
 use mf_io::threemf::ModelObject;
 use mf_io::{Imported, ImportedModel, SourceInfo};
 use mf_operations::{
-    ChangeObject, DocOutput, ObjectChange, OpError, OperandInput, Operation, Target,
+    ChangeObject, DocContext, DocOutput, ObjectChange, OpError, OperandInput, Operation, Target,
 };
 use mf_runtime::RunContext;
 use mf_selection::{Selection, SelectionKind, Step, TranslateError, Translation};
@@ -68,6 +68,18 @@ pub struct Invocation {
 /// (a log read by a tool with no i18n catalogue, or before the frontend
 /// renders the row), so it must stand on its own without risking a raw
 /// parameter dump.
+/// Scale every coordinate of `mesh` by `k` (object space), for a
+/// cross-unit import (consolidation plan C07): a physically correct,
+/// uniform resize, never a per-panel `* mm` conversion. The transform
+/// itself is left alone; only the mesh's own numbers change, exactly as
+/// the first import into an empty document already stores a mesh in the
+/// document's own units with an identity transform.
+fn scale_mesh(mesh: &Mesh, k: f64) -> Mesh {
+    let scale = [k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0, k, 0.0, 0.0, 0.0];
+    mf_io::transform_mesh(mesh, &scale, &RunContext::none())
+        .expect("a finite uniform scale never pushes coordinates out of range")
+}
+
 fn generic_label(op_id: &str, target_name: &str) -> String {
     let title = op_id
         .rsplit('.')
@@ -254,6 +266,12 @@ pub struct Prepared {
     /// order given).
     operands: Vec<PreparedOperand>,
     params: Params,
+    /// The document's own unit at the base revision (ADR-0006 §6.2,
+    /// consolidation plan C07), injected into the operation as a
+    /// [`DocContext`]. Params are already in document units by this point
+    /// (D20); this is for the few operations that place an mm-internal
+    /// generator and must scale it themselves.
+    doc_unit: Unit,
     /// The ids a recorded run of this command gave the objects it created
     /// (replay and re-execution), so the same objects get the same ids.
     created_ids: Option<Vec<ObjectId>>,
@@ -315,9 +333,16 @@ impl Prepared {
                     *object, mesh, transform, ctx,
                 )?);
             }
-            self.op.execute_scene(&inputs, &scene, &self.params, ctx)?
+            let doc = DocContext {
+                unit: self.doc_unit,
+            };
+            self.op
+                .execute_scene(&inputs, &scene, &self.params, &doc, ctx)?
         } else {
-            self.op.execute_doc(&inputs, &self.params, ctx)?
+            let doc = DocContext {
+                unit: self.doc_unit,
+            };
+            self.op.execute_doc(&inputs, &self.params, &doc, ctx)?
         };
         drop(inputs);
         #[cfg(feature = "test-position-jitter")]
@@ -407,7 +432,8 @@ impl Prepared {
                 ObjectChange::Transform { .. }
                 | ObjectChange::Remove { .. }
                 | ObjectChange::Rename { .. }
-                | ObjectChange::Property { .. } => ChangeInfo::default(),
+                | ObjectChange::Property { .. }
+                | ObjectChange::Units { .. } => ChangeInfo::default(),
             });
         }
         let target = &self.operands[0];
@@ -483,7 +509,8 @@ fn check_changes(
             ObjectChange::Transform { .. }
             | ObjectChange::Remove { .. }
             | ObjectChange::Rename { .. }
-            | ObjectChange::Property { .. } => continue,
+            | ObjectChange::Property { .. }
+            | ObjectChange::Units { .. } => continue,
         };
         for (_, sources) in &provenance.created_faces {
             for &(k, face) in &sources.operands {
@@ -553,7 +580,11 @@ fn check_changes(
             ObjectChange::Transform { operand, .. } => (*operand, 1),
             ObjectChange::Remove { operand } => (*operand, 2),
             ObjectChange::Rename { operand, .. } => (*operand, 3),
-            ObjectChange::Create { .. } | ObjectChange::Property { .. } => continue,
+            ObjectChange::Create { .. }
+            | ObjectChange::Property { .. }
+            | ObjectChange::Units { .. } => {
+                continue;
+            }
         };
         let o = operands.get(operand).ok_or_else(|| {
             invalid(format!(
@@ -808,12 +839,28 @@ impl Session {
     pub fn import_model(&mut self, model: ImportedModel) -> (Vec<ObjectId>, Vec<String>) {
         let mut warnings = model.warnings;
         let first_import = self.document().objects().is_empty();
-        if !first_import && self.document().units() != model.unit {
+        // STL/OBJ declare no unit (mf-io's `ImportedModel.unit` is `None`);
+        // until a caller says otherwise (the CLI's `--units`, the desktop's
+        // import dialog), they're read as millimetres, as they always have
+        // been (C07 owns teaching this path to convert cross-unit imports).
+        let unit = model.unit.unwrap_or(mf_io::threemf::Unit::Millimeter);
+        // A second import in another unit converts its objects' placement
+        // into the document's unit (consolidation plan C07), rather than
+        // leaving the raw numbers in place: a 10 mm part imported into a
+        // metres document must measure 0.01 doc units across, not 10. The
+        // document's own unit is unaffected (`with_units` isn't called
+        // here); only the newly imported objects' transforms are scaled,
+        // by the ratio between the file's unit and the document's.
+        let cross_unit_scale = self.cross_unit_scale(unit);
+        if cross_unit_scale.is_some() {
+            let doc_unit = self.document().units();
             warnings.push(format!(
-                "{} uses {:?} but the document uses {:?}; coordinates are not converted",
+                "{} uses {:?} but the document uses {:?}; converted from {} to {}",
                 model.source.path.display(),
-                model.unit,
-                self.document().units()
+                unit,
+                doc_unit,
+                unit.symbol(),
+                doc_unit.symbol(),
             ));
         }
         // What the file's ids were when saved (`meshfixer:object_ids`):
@@ -896,7 +943,7 @@ impl Session {
             .into_iter()
             .enumerate()
             .map(|(part, o)| {
-                let units = first_import.then_some(model.unit);
+                let units = first_import.then_some(unit);
                 let mut properties = mf_document::properties_from_metadata(&o.metadata);
                 let attach = mf_operations::shapes::ATTACH_TO;
                 if let Some(to) = properties.get(attach).cloned() {
@@ -918,8 +965,12 @@ impl Session {
                         }
                     }
                 }
+                let mesh = match cross_unit_scale {
+                    Some(k) => scale_mesh(&o.mesh, k),
+                    None => o.mesh,
+                };
                 self.add_object(
-                    Geometry::Mesh(o.mesh),
+                    Geometry::Mesh(mesh),
                     o.name,
                     Some(model.source.clone()),
                     part,
@@ -943,6 +994,20 @@ impl Session {
         (ids, warnings)
     }
 
+    /// The scale factor `import_model`, `import_object` and
+    /// `import_object_as` apply to a newly imported object's transform
+    /// when its file's unit differs from the document's (consolidation
+    /// plan C07): `None` for the first import (which sets the document's
+    /// unit instead, so there is nothing to convert) or a same-unit
+    /// import.
+    fn cross_unit_scale(&self, unit: Unit) -> Option<f64> {
+        if self.document().objects().is_empty() || self.document().units() == unit {
+            None
+        } else {
+            Some(mf_units::Length::new(1.0, unit).in_doc(self.document().units()))
+        }
+    }
+
     /// Import one object of a source file (used by replay).
     pub fn import_object(
         &mut self,
@@ -952,8 +1017,12 @@ impl Session {
         part: usize,
     ) -> ObjectId {
         let units = self.document().objects().is_empty().then_some(unit);
+        let mesh = match self.cross_unit_scale(unit) {
+            Some(k) => scale_mesh(&object.mesh, k),
+            None => object.mesh,
+        };
         self.add_object(
-            Geometry::Mesh(object.mesh),
+            Geometry::Mesh(mesh),
             object.name,
             Some(source),
             part,
@@ -977,9 +1046,13 @@ impl Session {
     ) -> Result<ObjectId, CommandError> {
         self.claim_recorded_id(id)?;
         let units = self.document().objects().is_empty().then_some(unit);
+        let mesh = match self.cross_unit_scale(unit) {
+            Some(k) => scale_mesh(&object.mesh, k),
+            None => object.mesh,
+        };
         Ok(self.add_object_as(
             id,
-            Geometry::Mesh(object.mesh),
+            Geometry::Mesh(mesh),
             object.name,
             Some(source),
             part,
@@ -1215,6 +1288,7 @@ impl Session {
             op,
             operands: prepared,
             params,
+            doc_unit: self.document().units(),
             created_ids: None,
             scene,
         })
@@ -1416,6 +1490,14 @@ impl Session {
                     let id = c.operands[operand].object;
                     document = document.with_name(id, name).ok_or(unknown(id))?;
                     operand_changed[operand] = true;
+                }
+                // Document-wide (consolidation plan C07): relabels the
+                // document's own unit. No operand's hash or transform
+                // changes, so nothing here marks an operand changed; the
+                // record still carries the command's affected operands as
+                // its outputs (every target named by the invocation).
+                ObjectChange::Units { unit } => {
+                    document = document.with_units(unit);
                 }
                 ObjectChange::Property { object, key, value } => {
                     let id = match object {

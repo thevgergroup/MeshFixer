@@ -86,3 +86,19 @@ pub fn from_dmat4(m: &DMat4) -> [f64; 12] {
 pub fn tool_to_target(tool: &[f64; 12], target: &[f64; 12]) -> Option<[f64; 12]> {
     Some(compose(tool, &inverse(target)?))
 }
+
+/// A world-space normal `n`, carried into `t`'s object space (`t` is
+/// object→world, i.e. `p_world = p_object · t + translation`, [`apply`]'s
+/// convention): `M · n`, `M` being `t`'s linear part's rows taken
+/// directly — never `t`'s inverse applied to `n` as if it were a point.
+/// Points and planes both land correctly under a uniform scale or a pure
+/// rotation (inverse-linear and this agree there), but a non-uniform
+/// scale needs this one: a plane's normal doesn't scale the way its
+/// points do (MF-SPLIT-PARITY-001, split_parity.rs). Every caller that
+/// needs a plane's normal in object space from a world one — Apply
+/// (`mf_operations::split::normal_to_object`), Split's region preview
+/// and the peg preview worker — must go through this, so the preview
+/// always cuts the same regions Apply would.
+pub fn world_normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|r| t[3 * r] * n[0] + t[3 * r + 1] * n[1] + t[3 * r + 2] * n[2])
+}

@@ -78,6 +78,9 @@ timing=(
   # A 1M-triangle orbit on the GPU (a smoke test, not an fps gate): alone,
   # so its frames don't compete with other GPU tests.
   "mf-cli bench_orbit bench_orbit_json_has_device_info_and_percentiles"
+  # Idle memory with each previewing tool open on the bunny (memleak-report):
+  # resource counts and heap stay flat over many frames. ~51 s in debug.
+  "mf-desktop idle_memory idle_with_tool_open_memory_is_bounded"
 )
 
 # Skipped here and run by nobody in this script: the boolean kernel

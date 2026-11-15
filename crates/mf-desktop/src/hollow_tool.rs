@@ -1027,14 +1027,21 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .iter()
             .map(|p| format!("{},{},{},{},0", p.face.0, p.bary[0], p.bary[1], p.bary[2]))
             .collect();
+        // `wall_thickness`, `inner_detail` and `hole_diameter` are
+        // `unit: mm` params (D20): `wall`, `s.detail` and `s.diameter`
+        // are document units (the panel's own sliders and fields), so
+        // cross to mm here, once, or `Session::prepare`'s single
+        // mm-to-document conversion runs on an already-document-units
+        // number.
+        let mm = mm_per(app);
         let mut params = BTreeMap::from([
-            ("wall_thickness".to_owned(), wall.to_string()),
+            ("wall_thickness".to_owned(), (wall * mm).to_string()),
             (
                 "inner_detail".to_owned(),
-                s.detail.unwrap_or(0.0).to_string(),
+                (s.detail.unwrap_or(0.0) * mm).to_string(),
             ),
             ("drain_holes".to_owned(), s.drain.clone()),
-            ("hole_diameter".to_owned(), s.diameter.to_string()),
+            ("hole_diameter".to_owned(), (s.diameter * mm).to_string()),
             ("hole_count".to_owned(), s.count.to_string()),
             ("hole_profile".to_owned(), s.profile.clone()),
             ("open_through".to_owned(), s.open_through.to_string()),

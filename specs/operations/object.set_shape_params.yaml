@@ -24,3 +24,7 @@ effects: [geometry_changes, topology_changes]
 runtime:
   cancellable: true
   progress: false
+# ADR-0009: each target's recipe is the whole resulting state, not a
+# delta, so a newly queued set_shape_params may merge into the one
+# already waiting (same target), latest params winning.
+coalesce: absolute

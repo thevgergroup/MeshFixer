@@ -300,6 +300,9 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
         transform: None,
         group: None,
     }];
+    // The shape's own mesh is generated in mm (D16/D20); `object.add_shape`
+    // itself scales it by the document's unit (consolidation plan C12),
+    // so the placement transform goes through unscaled, never doubled up.
     let params = BTreeMap::from([
         (
             "shapes".to_owned(),
@@ -932,9 +935,17 @@ pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, lab
             );
         }
         JoinMode::Blend => {
+            // `blend_width` is a `unit: mm` param (D20); `app.parts.blend_width`
+            // is document units (the panel's own slider), so cross to mm
+            // here, once, or `Session::prepare`'s single mm-to-document
+            // conversion runs on an already-document-units number.
+            let mm = crate::transform_tool::mm_per(app.session.document().units());
             let params = BTreeMap::from([
                 ("operation".to_owned(), "union".to_owned()),
-                ("blend_width".to_owned(), app.parts.blend_width.to_string()),
+                (
+                    "blend_width".to_owned(),
+                    (app.parts.blend_width * mm).to_string(),
+                ),
             ]);
             run_on(
                 app,
@@ -1005,6 +1016,11 @@ pub fn save_as_part(
             up: [0.0, 1.0, 0.0],
         },
         default_scale: 1.0,
+        // The mesh is saved exactly as stored on the object, in the
+        // document's own unit (consolidation plan C10), so the part
+        // round-trips at the same physical size regardless of what unit
+        // it's reloaded into.
+        unit: app.session.document().units(),
         mesh: String::new(),
         category: category.trim().to_owned(),
         description: description.trim().to_owned(),

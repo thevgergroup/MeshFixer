@@ -304,3 +304,23 @@ Attribution (required by CC BY): "OpenRC 1:10 RC Differential" by barspin (https
 Why: The large model: 5,672,212 triangles (dataset: 707 self-intersections, 50 degenerate faces); a 244.7 MB OBJ.
 
 Attribution (required by CC BY): "Winged Victory of Samothrace" by CosmoWenman (https://www.thingiverse.com/thing:196038), licensed under CC BY 3.0; used unmodified as a test input.
+
+## `stanford-bunny.obj`
+
+| | |
+|---|---|
+| Object | The Stanford Bunny (Turk and Levoy, SIGGRAPH 1994), the `bun_zipper` reconstruction: 35,947 vertices, 69,451 triangles, with the holes in its base |
+| Publisher | Stanford University Computer Graphics Laboratory, The Stanford 3D Scanning Repository (http://graphics.stanford.edu/data/3Dscanrep/) |
+| Mirror | Alec Jacobson's common-3d-test-models (https://github.com/alecjacobson/common-3d-test-models), commit `8a4f8642acaf43f9cd7b67858a1502e1055ef202`, `data/stanford-bunny.obj` (the original converted to OBJ by MeshLab, unmodified otherwise); the repository's own table credits Stanford University as its source |
+| Download | https://raw.githubusercontent.com/alecjacobson/common-3d-test-models/8a4f8642acaf43f9cd7b67858a1502e1055ef202/data/stanford-bunny.obj |
+| Licence | The Stanford 3D Scanning Repository's terms: the models may be used freely for research (and other non-commercial) purposes, with credit to the Stanford Computer Graphics Laboratory; not redistributed here (fetched for tests only, never committed) |
+| SHA-256 | `1eb35d1e21ce99e5ce911353b6be278990713448dd9e8f5c9387f9de39b32205` (2.4 MB, plain file) |
+| Accessed | 2026-11-14 |
+
+Why: Meshmixer's own classic Hollow test, the canonical organic model for
+`mesh.hollow`'s acceptance tests (`crates/mf-command/tests/hollow_acceptance.rs`
+and `core_workflows.rs`): Repair (fill its base holes), then Hollow. Units
+are metres (about 0.16 × 0.15 × 0.12); the tests scale it to 100 mm.
+
+Credit: The Stanford Bunny, Stanford University Computer Graphics
+Laboratory, The Stanford 3D Scanning Repository.

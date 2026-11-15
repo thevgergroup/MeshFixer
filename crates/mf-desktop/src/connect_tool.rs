@@ -537,7 +537,11 @@ pub fn add_as_shapes(app: &mut MeshFixerApp, j: usize) {
             Ok(params) => params,
             Err(e) => return refuse_shapes(app, e.to_string()),
         };
-        let world = mf_operations::placement_to_world(&joint.frame, p, mm);
+        // `object.add_shape` scales the generator's own mm mesh itself
+        // (consolidation plan C12), so the placement's frame is built at
+        // scale 1 here (rotation and position only), never pre-scaled by
+        // `mm`, or the mesh would be scaled twice.
+        let world = mf_operations::placement_to_world(&joint.frame, p, 1.0);
         let transform = [
             world.x_axis.x,
             world.x_axis.y,

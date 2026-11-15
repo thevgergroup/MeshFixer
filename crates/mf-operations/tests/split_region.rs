@@ -9,7 +9,9 @@ use mf_fixtures::{cube, scaled, uv_sphere};
 use mf_geometry::affine::to_dmat4;
 use mf_geometry::{Bvh, FaceId, Mesh, inspect, intersections_between};
 use mf_io::threemf::IDENTITY;
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 
 fn run(
     op: &str,
@@ -32,6 +34,7 @@ fn run(
             target,
         }],
         &spec.validate(&raw).unwrap(),
+        &DocContext::default(),
         &RunContext::none(),
     )
 }
@@ -196,6 +199,7 @@ fn delete_faces_leaves_an_open_boundary_listed_as_a_hole() {
                 .unwrap()
                 .validate(&BTreeMap::new())
                 .unwrap(),
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();

@@ -57,9 +57,12 @@ pub struct VolumeBox {
     pub size: DVec3,
     /// The preset it came from ("Custom" once typed or dragged).
     pub preset: String,
-    /// The selection it was last placed for (a new selection places it
-    /// again, centred on it, resting on the plate).
-    pub placed_for: Option<Vec<ObjectId>>,
+    /// The selection, each with its own transform at the time, it was
+    /// last placed for (a new selection, or the same selection moved
+    /// since — the same staleness the plane gizmo had, MF-OBJ-002's
+    /// 2026-11-14 follow-up — places it again, centred on it, resting on
+    /// the plate).
+    pub placed_for: Option<Vec<(ObjectId, [f64; 12])>>,
     /// A gizmo drag moving it: (drag, start placement).
     pub drag: Option<(mf_render::Drag, [f64; 12])>,
     pub hover: Option<Handle>,
@@ -527,13 +530,17 @@ fn compute_region_preview(
     let (linear, translation) = linear_and_translation(&inv);
     let object_point = linear * point + translation;
     let (inv_linear, _) = linear_and_translation(transform);
-    // A world normal `n_w` becomes `M^T n_w` in object space when `M`
-    // is object→world's linear part (the same identity `mf_operations::
-    // split::normal_to_object` uses): using `inv`'s linear part
-    // directly (rather than transposing the forward one) matches a
-    // uniform-scale/rotation transform exactly and is close enough for
-    // this preview under a non-uniform one.
-    let object_normal = linear * normal;
+    // The world normal must go to object space the same way Apply's own
+    // `mf_operations::split::normal_to_object` does: `M·n`, `M` being
+    // `transform`'s (object→world) linear part, never `inv`'s linear
+    // part applied as if the normal were a point. The two only agree
+    // under a uniform scale or a pure rotation; split_parity.rs's
+    // `split_preview_regions_equal_apply_regions` catches the
+    // divergence under a non-uniform one.
+    let object_normal = DVec3::from(mf_geometry::affine::world_normal_to_object(
+        transform,
+        normal.to_array(),
+    ));
     let plane = mf_boolean::Plane {
         point: object_point.to_array(),
         normal: object_normal.to_array(),
@@ -695,9 +702,22 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
                 app.split_flow.cut_caps.push((object, frame));
             }
             // The box stays where the cut was made (not re-placed on the
-            // piece the cut made active).
+            // piece the cut made active): the key is the *new* selection
+            // (the cut pieces replacing the targets) paired with their
+            // just-committed transforms, so this placement is the cache's
+            // baseline going forward, not something a transform change
+            // immediately invalidates again.
             if op == "mesh.split_box" {
-                app.split_flow.volume.placed_for = Some(app.selected_objects());
+                let key: Vec<(ObjectId, [f64; 12])> = app
+                    .selected_objects()
+                    .iter()
+                    .filter_map(|&id| {
+                        // A selected id with no object contributes nothing to the key.
+                        let t = app.session.document().object(id)?.transform;
+                        Some((id, t))
+                    })
+                    .collect();
+                app.split_flow.volume.placed_for = Some(key);
             }
             let made = app.split_flow.joints.len() - first;
             if made > 0 {
@@ -1193,6 +1213,15 @@ pub fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         CutMode::Slice => crate::shape_tools::slice_controls(app, ui),
         CutMode::Volume => volume_controls(app, ui),
     }
+    // The shared Snap checkbox (owner, 2026-11-14: "can't we disable
+    // snap?"): the same preference and live step as Transform's own,
+    // for whichever gizmo this mode is showing (the plane's point, or
+    // the print-volume box's centre).
+    let pivot = match app.split_flow.mode {
+        CutMode::Slice => Some(app.split.point()),
+        CutMode::Volume => Some(app.split_flow.volume.center),
+    };
+    crate::shape_tools::snap_checkbox(app, ui, pivot);
     cut_section(app, ui);
 }
 
@@ -1296,13 +1325,22 @@ fn selection_bounds(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
 }
 
 /// Place the box: the chosen preset's size, centred on the selection,
-/// resting on the plate (when the selection changed, or `force`).
+/// resting on the plate (when the selection or any target's own
+/// transform changed, or `force`).
 pub fn place_box(app: &mut MeshFixerApp, force: bool) {
     let selected = app.selected_objects();
     if selected.is_empty() {
         return;
     }
-    if !force && app.split_flow.volume.placed_for.as_deref() == Some(selected.as_slice()) {
+    let key: Vec<(ObjectId, [f64; 12])> = selected
+        .iter()
+        .filter_map(|&id| {
+            // A selected id with no object contributes nothing to the key.
+            let t = app.session.document().object(id)?.transform;
+            Some((id, app.shown_transform(id).unwrap_or(t)))
+        })
+        .collect();
+    if !force && app.split_flow.volume.placed_for.as_deref() == Some(key.as_slice()) {
         return;
     }
     let Some((lo, hi)) = selection_bounds(app) else {
@@ -1324,7 +1362,7 @@ pub fn place_box(app: &mut MeshFixerApp, force: bool) {
     let v = &mut app.split_flow.volume;
     let c = (lo + hi) / 2.0;
     v.center = DVec3::new(c.x, c.y, v.size.z / 2.0);
-    v.placed_for = Some(selected);
+    v.placed_for = Some(key);
 }
 
 /// Where the box's faces would cut, piece by piece, from the selection's
@@ -1515,6 +1553,16 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
         .iter()
         .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
         .collect();
+    // `plane_point`, `cut_gap`, `bound_width` and `bound_height` are
+    // `unit: mm` params (D20); `s.point()`, `s.gap`, `s.bound_width` and
+    // `s.bound_height` are document units (the panel's own gizmo and
+    // fields, labelled with the document's unit symbol), so cross to mm
+    // here, once, or `Session::prepare`'s single mm-to-document
+    // conversion runs on an already-document-units number. `plane_normal`,
+    // `box_min` and `box_max` have no declared unit (a direction, and a
+    // box already in world/document units) and are left alone.
+    let mm = crate::transform_tool::mm_per(app.session.document().units());
+    let mm_point = |v: DVec3| vec3(v * mm);
     let (op, params) = match app.split_flow.mode {
         CutMode::Slice => {
             let s = &app.split;
@@ -1538,16 +1586,16 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 String::new()
             };
             let mut p = BTreeMap::from([
-                ("plane_point".to_owned(), vec3(s.point())),
+                ("plane_point".to_owned(), mm_point(s.point())),
                 ("plane_normal".to_owned(), vec3(s.normal())),
                 ("keep".to_owned(), s.keep.clone()),
-                ("cut_gap".to_owned(), s.gap.to_string()),
+                ("cut_gap".to_owned(), (s.gap * mm).to_string()),
                 ("cap".to_owned(), s.cap.to_string()),
                 ("regions".to_owned(), regions_param),
                 ("bound".to_owned(), s.bound.to_string()),
                 ("bound_shape".to_owned(), s.bound_shape.clone()),
-                ("bound_width".to_owned(), s.bound_width.to_string()),
-                ("bound_height".to_owned(), s.bound_height.to_string()),
+                ("bound_width".to_owned(), (s.bound_width * mm).to_string()),
+                ("bound_height".to_owned(), (s.bound_height * mm).to_string()),
             ]);
             if !s.bound {
                 // Keep today's defaults out of the log when the bound
@@ -1566,7 +1614,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 BTreeMap::from([
                     ("box_min".to_owned(), vec3(v.min())),
                     ("box_max".to_owned(), vec3(v.max())),
-                    ("cut_gap".to_owned(), app.split.gap.to_string()),
+                    ("cut_gap".to_owned(), (app.split.gap * mm).to_string()),
                     ("cap".to_owned(), app.split.cap.to_string()),
                 ]),
             )
@@ -1724,7 +1772,9 @@ fn volume_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Inpu
     let Some((cam, size)) = view(app) else {
         return Input::Pass;
     };
-    let snap = if input.modifiers.command {
+    // The shared Snap preference, inverted while Cmd/Ctrl is held: see
+    // `shape_tools::plane_input`.
+    let snap = if !app.gizmo_snap_on(input.modifiers.command) {
         Snap {
             grid: None,
             angle_deg: None,
@@ -1732,7 +1782,11 @@ fn volume_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Inpu
             plate: None,
         }
     } else {
+        // Zoom-adaptive, unit-aware (MF-OBJ-002): see `shape_tools::plane_input`.
+        let units = app.session.document().units();
+        let (grid, _) = crate::transform_tool::snap_step(&cam, g.pivot, size, units);
         Snap {
+            grid: Some(grid),
             plate: None,
             ..Snap::default()
         }

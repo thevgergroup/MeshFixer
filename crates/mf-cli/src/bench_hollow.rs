@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
 use clap::{Arg, ArgMatches, Command};
-use mf_operations::{ObjectChange, OperandInput, Target};
+use mf_operations::{DocContext, ObjectChange, OperandInput, Target};
 use mf_runtime::RunContext;
 
 use crate::Failure;
@@ -163,6 +163,7 @@ pub fn run(m: &ArgMatches, ctx: &RunContext) -> Result<(), Failure> {
             target: Target::WholeObject,
         }],
         &params,
+        &DocContext::default(),
         ctx,
     );
     let hollow_s = start.elapsed().as_secs_f64();

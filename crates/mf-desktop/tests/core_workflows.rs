@@ -92,6 +92,18 @@ fn isolated_settings_dir() -> &'static std::path::Path {
 }
 
 fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerApp> {
+    opened_with_units(objects, Unit::Millimeter)
+}
+
+/// As [`opened`], at `unit` instead of always millimetres (MF-UNIT-001):
+/// every other test opens a document in mm, which is why the owner's
+/// double mm-to-document-units conversion bug went uncaught — this is
+/// the one seam a test can open a non-mm document through without
+/// driving the unit prompt dialog itself.
+fn opened_with_units(
+    objects: Vec<(&str, Mesh, [f64; 12])>,
+    unit: Unit,
+) -> Harness<'static, MeshFixerApp> {
     let settings = Settings {
         config_dir: Some(isolated_settings_dir().to_owned()),
         ..Settings::default()
@@ -112,12 +124,13 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(unit),
         source: SourceInfo {
             path: "core-workflows.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: Vec::new(),
     });
@@ -787,11 +800,7 @@ fn hollow_open_through_the_picked_cap_gives_an_open_topped_shell() {
     // Split the ball near its own centre (world z = 21.3, off the seam
     // of vertex rings), Keep: Bottom, Cap on: a hemisphere, its flat
     // cap near the equator facing up (visible from the default
-    // camera) — gentle curvature under the whole cap, the common case
-    // `open_through` is for (a cap close to the pole tapers too fast
-    // for a straight-sided opening to stay inside the solid, refused
-    // by name rather than silently cutting the rim's own wall away;
-    // owner 2026-11-14).
+    // camera) — the common case `open_through` is for.
     h.get_by_label("Split").click();
     settle(&mut h);
     h.state_mut().split.plane[11] = 21.3;
@@ -1407,6 +1416,127 @@ fn owner_hollow_the_combined_hemisphere_and_half_cube_is_never_refused() {
     assert_eq!(history_len(&h), history + 1, "one undo step");
 }
 
+/// Owner 2026-11-14, take 3, clicked exactly as the owner did: Split
+/// 'scan' alone (Keep Bottom), Make solid on 'scan (bottom)', Split
+/// 'part' the same way, Combine the two into 'part (bottom)', open
+/// Hollow (2 mm wall), click the flat cut face (a disc with the cube's
+/// tab joined on), turn on "Open through this surface", Hollow. It was
+/// refused (`open_through_region_too_curved`: shrinking the picked
+/// outline by the wall crossed itself at the tab's neck); the opening
+/// now follows the cavity itself, so it is never refused here, and the
+/// result is one closed, manifold, open shell with the rim at the cut.
+#[test]
+fn owner_hollow_open_through_the_cut_face_of_scan_and_part_split_separately() {
+    require_gpu!("owner_hollow_open_through_the_cut_face_of_scan_and_part_split_separately");
+    let mut h = opened_owner_demo();
+
+    row(&h, "scan").click();
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    let cut_z = h.state().split.point().z;
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert!(names.contains(&"scan (bottom)".to_string()), "{names:?}");
+
+    row(&h, "scan (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Make solid").click();
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label("Make it solid").click();
+    wait_until(&mut h, "make solid", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+
+    row(&h, "part").click();
+    settle(&mut h);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().split.point().z, cut_z, "the same cut height");
+    let names = cut_with_keep(&mut h, "Bottom");
+    assert!(names.contains(&"part (bottom)".to_string()), "{names:?}");
+
+    select_together(&mut h, &["part (bottom)", "scan (bottom)"]);
+    h.get_by_label("Combine").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "combine");
+    let history = history_len(&h);
+    panel_button(&h, "Combine").click();
+    wait_until(&mut h, "the combine", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let names = objects(&h);
+    assert!(
+        names.contains(&"part (bottom)".to_string())
+            && !names.contains(&"scan (bottom)".to_string()),
+        "{names:?}"
+    );
+
+    let id = id_of(&h, "part (bottom)");
+    row(&h, "part (bottom)").click();
+    settle(&mut h);
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "hollow");
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    // The disc's own middle, on the cut face.
+    let bb = world_bounds(&h, id);
+    let disc = [
+        (bb.min[0] + bb.max[0]) / 2.0,
+        (bb.min[1] + bb.max[1]) / 2.0,
+        cut_z,
+    ];
+    let p = h.state().screen_point(disc).unwrap();
+    click_at(&mut h, p);
+    settle(&mut h);
+    let picked = h
+        .state()
+        .hollow
+        .picked_region
+        .as_ref()
+        .map(|r| r.faces.len())
+        .unwrap_or(0);
+    assert!(
+        picked > 2,
+        "the click should pick the cut face: {picked} faces"
+    );
+    h.get_by_label("Open through this surface").click();
+    settle(&mut h);
+    assert!(h.state().hollow.open_through, "the checkbox should be on");
+
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none()
+            && (a.session.history_labels().len() > history
+                || a.refusal.is_some()
+                || a.error.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert!(h.state().error.is_none(), "{:?}", h.state().error);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let shell = mesh_of(&h, "part (bottom)");
+    let topo = shell
+        .topology_with(&mf_runtime::RunContext::none())
+        .unwrap();
+    assert_eq!(topo.boundary_edges, 0, "closed");
+    assert!(
+        topo.non_manifold_edges.is_empty() && topo.non_manifold_vertices == 0,
+        "{topo:?}"
+    );
+    assert_eq!(topo.components.len(), 1, "one open shell");
+    let top = world_bounds(&h, id).max[2];
+    assert!((top - cut_z).abs() < 1e-9, "rim at {top}, cut at {cut_z}");
+}
+
 // ---------------------------------------------------------------------
 // Split: cross-section picking and the bounded cut plane (Phase 1b).
 // ---------------------------------------------------------------------
@@ -1955,11 +2085,18 @@ fn sculpt_inflate_stroke_leaves_the_cap_untouched_with_stay_on_surface() {
     settle(&mut h);
     assert!(h.state().sculpt.stay_on_surface, "on by default");
     h.state_mut().sculpt.strength = 1.0;
-    h.state_mut().sculpt.radius = 6.0;
 
     // A dab well away from the cap, on the curved surface (the ball's
     // equator, facing the camera).
     let dab = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let dab_world = {
+        let cam = h.state().camera.unwrap();
+        let center = DVec3::new(0.0, 0.0, 20.0);
+        let to_eye = (cam.eye() - center).normalize();
+        (center + to_eye * (20.0 * 0.8)).to_array()
+    };
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), dab_world, 6.0).unwrap();
     let before_mesh = h.state().active_mesh().unwrap().clone();
     h.event(egui::Event::PointerMoved(dab));
     h.event(egui::Event::PointerButton {
@@ -1998,6 +2135,166 @@ fn sculpt_inflate_stroke_leaves_the_cap_untouched_with_stay_on_surface() {
     assert_eq!(
         cap_before, cap_after,
         "\"stay on this surface\" must never move the cap's own faces"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Sculpt: the brush radius is screen-relative (owner bug 2026-11-14):
+// the default radius must stay a small local patch regardless of the
+// document's units, on a metre-scale scan and on a millimetre-scale
+// primitive. Before the fix, the panel's "5" was read as 5 *document
+// units*, which is 5 m on the Stanford bunny (imported in metres) —
+// enough to move all 34,978 of its vertices in one stroke.
+// ---------------------------------------------------------------------
+
+/// Half of `bb`'s shortest side: a radius [`facing_point`] can use that
+/// always lands inside the box along every axis, so the sampled dab
+/// stays on the mesh's own surface rather than drifting past its
+/// silhouette (unlike `bb.diagonal() * 0.5`, which overshoots on
+/// anything that isn't a cube).
+fn inscribed_radius(bb: &Aabb) -> f64 {
+    (0..3)
+        .map(|k| (bb.max[k] - bb.min[k]) * 0.5)
+        .fold(f64::MAX, f64::min)
+}
+
+/// How many of `before`'s live vertices moved (by more than `eps`) in
+/// `after`, as a fraction of `before`'s vertex count. Compared by
+/// `VertexId` (stable across one stroke, which only moves vertices,
+/// never renumbers them unless dynamic detail is on — off here).
+fn fraction_of_vertices_moved(before: &Mesh, after: &Mesh, eps: f64) -> f64 {
+    let moved = before
+        .vertices()
+        .filter(|&(id, p)| match after.position(id) {
+            Some(q) => {
+                let d2 = (0..3).map(|k| (p[k] - q[k]).powi(2)).sum::<f64>();
+                d2.sqrt() > eps
+            }
+            // Gone in `after`: dynamic detail would explain this, but it's
+            // off by default, so this never happens in these tests.
+            None => true,
+        })
+        .count();
+    moved as f64 / before.vertex_count().max(1) as f64
+}
+
+/// One Inflate stroke at the panel's default settings, dragged a short
+/// distance on the active object's camera-facing surface near
+/// `center`/`radius` (world space): the mesh before and after.
+fn one_default_inflate_stroke(
+    h: &mut Harness<'_, MeshFixerApp>,
+    center: [f64; 3],
+    radius: f64,
+) -> (Mesh, Mesh) {
+    h.get_by_label("Sculpt").click();
+    settle(h);
+    assert_eq!(
+        h.state().sculpt.brush,
+        mf_operations::sculpt::BrushKind::Inflate,
+        "Inflate is the default brush"
+    );
+    let before_mesh = h.state().active_mesh().unwrap().clone();
+    let dab = facing_point(h, center, radius);
+    h.event(egui::Event::PointerMoved(dab));
+    h.event(egui::Event::PointerButton {
+        pos: dab,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    let to = dab + egui::vec2(15.0, 0.0);
+    for i in 1..=6 {
+        let p = dab + (to - dab) * (i as f32 / 6.0);
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+    }
+    wait_until(h, "a dab recorded", |a| {
+        a.sculpt_stroke.as_ref().is_some_and(|s| s.dab_count() > 0)
+    });
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    wait_until(h, "the stroke to commit", |a| {
+        a.sculpt_stroke.is_none() && a.busy.is_none()
+    });
+    settle(h);
+    let after_mesh = h.state().active_mesh().unwrap().clone();
+    (before_mesh, after_mesh)
+}
+
+/// The owner's exact repro: open the Stanford bunny (imported in
+/// metres, ~0.156 m across), choose Sculpt, Inflate (the default
+/// brush), and drag one stroke. At the panel's default radius, the
+/// stroke must move only a local patch — under 5% of the bunny's
+/// 34,978 vertices — never the whole model.
+#[test]
+fn sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres() {
+    require_gpu!("sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres");
+    let Some(path) = mf_fixtures::real::path(
+        "stanford-bunny.obj",
+        "sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres",
+    ) else {
+        return;
+    };
+    let model = mf_io::read_model(&path).unwrap();
+    let bunny = model.objects.into_iter().next().unwrap().mesh;
+    let bb = bunny.bounding_box().unwrap();
+    assert!(
+        bb.diagonal() < 1.0,
+        "the raw bunny should be metre-scale, got diagonal {}",
+        bb.diagonal()
+    );
+    let vertex_count = bunny.vertex_count();
+    let mut h = opened_with_units(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))], Unit::Meter);
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+
+    let (before_mesh, after_mesh) =
+        one_default_inflate_stroke(&mut h, bb.center(), inscribed_radius(&bb));
+    assert!(
+        !Mesh::ptr_eq(&before_mesh, &after_mesh),
+        "the stroke must change the mesh"
+    );
+    let fraction = fraction_of_vertices_moved(&before_mesh, &after_mesh, 1e-9);
+    assert!(
+        fraction < 0.05,
+        "one Inflate stroke at the default radius moved {:.1}% of {vertex_count} vertices \
+         (expected under 5%, a local patch): the radius must be screen-relative, not \
+         5 document units (5 m on this document)",
+        fraction * 100.0,
+    );
+}
+
+/// The same check on a millimetre-scale model (a ~50 mm sphere): the
+/// default radius must still read as a small local patch there too, so
+/// the fix is screen-relative rather than merely "assume metres".
+#[test]
+fn sculpt_inflate_stroke_moves_only_a_local_patch_on_a_small_mm_model() {
+    require_gpu!("sculpt_inflate_stroke_moves_only_a_local_patch_on_a_small_mm_model");
+    // Fine enough that even a few-millimetre brush radius clearly
+    // displaces some vertices (unlike `ball`'s coarse 32x48 sphere,
+    // where a handful of millimetres can fall between vertices and
+    // move none at all — not what this test is probing).
+    let sphere = mf_fixtures::scaled(&mf_fixtures::uv_sphere(96, 144), 25.0); // ~50 mm across
+    let vertex_count = sphere.vertex_count();
+    let bb = sphere.bounding_box().unwrap();
+    let mut h = opened(vec![("ball", sphere, at([0.0, 0.0, 0.0]))]);
+
+    let (before_mesh, after_mesh) =
+        one_default_inflate_stroke(&mut h, bb.center(), inscribed_radius(&bb));
+    assert!(
+        !Mesh::ptr_eq(&before_mesh, &after_mesh),
+        "the stroke must change the mesh"
+    );
+    let fraction = fraction_of_vertices_moved(&before_mesh, &after_mesh, 1e-9);
+    assert!(
+        fraction < 0.20,
+        "one Inflate stroke at the default radius moved {:.1}% of {vertex_count} vertices \
+         on a 50 mm model (expected under 20%)",
+        fraction * 100.0,
     );
 }
 
@@ -3354,5 +3651,1576 @@ fn align_dots_sit_on_their_axis_rail() {
                 dot.mode
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// UC3 "The hinged box" (Phase 1 Task 30): Hollow a box, Split it into a
+// lid and a body with a gap, place two hinges and a clasp from the
+// Connectors library, resize a hinge with its Size field, Merge each,
+// then a view-only swing of the lid.
+// ---------------------------------------------------------------------
+
+/// With `MF_ARTIFACTS` set, saves a frame to
+/// `<dir>/uc3/<step>-<w>x<h>.png`.
+fn uc3_capture(h: &mut Harness<'_, MeshFixerApp>, step: &str) {
+    let Some(dir) = std::env::var_os("MF_ARTIFACTS") else {
+        return;
+    };
+    let dir = PathBuf::from(dir).join("uc3");
+    std::fs::create_dir_all(&dir).unwrap();
+    let size = h.ctx.content_rect().size();
+    let name = format!("{step}-{}x{}.png", size.x as u32, size.y as u32);
+    h.render().unwrap().save(dir.join(name)).unwrap();
+}
+
+/// A closed box, outer corner at the origin, size `[sx, sy, sz]` mm
+/// (`mf_fixtures::cube`, non-uniformly scaled).
+fn hinge_box(sx: f64, sy: f64, sz: f64) -> Mesh {
+    let (p, t) = mf_fixtures::cube(1.0).to_arrays();
+    let p = p
+        .into_iter()
+        .map(|[x, y, z]| [x * sx, y * sy, z * sz])
+        .collect();
+    Mesh::new(p, t).unwrap()
+}
+
+/// Clicks the Connectors tool's "Attach to A and B" button on the
+/// selection panel (`shape_panel::editor`'s own button, shown once a
+/// linked group's members know which two objects they join) and waits
+/// for the merge to commit, one undo step.
+fn attach_selected_group(h: &mut Harness<'_, MeshFixerApp>, label_contains: &str) {
+    let history = history_len(h);
+    h.get_by_label_contains(label_contains).click();
+    wait_until(h, "the attach", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(h), history + 1, "one undo step");
+}
+
+/// The hinged box, end to end through the real UI: a hollow box with
+/// thick walls, split into a lid and a body with a gap, two hinges and
+/// a clasp placed from the Connectors library and snapped to the seam,
+/// one hinge resized with its Size field, each connector merged, and a
+/// view-only swing of the lid.
+#[test]
+fn uc3_hinged_box_through_the_gui() {
+    require_gpu!("uc3_hinged_box_through_the_gui");
+    let mut h = opened(vec![(
+        "box",
+        hinge_box(80.0, 60.0, 40.0),
+        at([0.0, 0.0, 0.0]),
+    )]);
+    uc3_capture(&mut h, "0-opened");
+
+    // Step 1: Hollow, 3 mm walls (a coarse cell so the GUI test stays
+    // fast; matches the command-layer scenario's own `inner_detail`).
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    let box_id = id_of(&h, "box");
+    h.state_mut().hollow.wall = Some(3.0);
+    h.state_mut().hollow.detail = Some(1.0);
+    settle(&mut h);
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, box_id).is_some()
+    });
+    settle(&mut h);
+    uc3_capture(&mut h, "1-hollow-preview");
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "2-hollowed");
+
+    // Step 2: Split 8 mm below the top (z = 32), with a 0.4 mm gap at
+    // the cut ("Print-in-place lid": the cut's own gap, non-zero, so
+    // the two halves separate cleanly) — "box (top)" is the lid, "box
+    // (bottom)" the body.
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] = 32.0;
+    h.state_mut().split.gap = 0.4;
+    settle(&mut h);
+    let history = history_len(&h);
+    let names = cut_with_keep(&mut h, "Both");
+    assert_eq!(names, ["box (top)", "box (bottom)"], "{names:?}");
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "3-split");
+    let (lid_id, body_id) = (id_of(&h, "box (top)"), id_of(&h, "box (bottom)"));
+
+    // Step 3: two hinges on the back wall (y = 60), from the
+    // Connectors tool, placed 25 mm either side of the shared edge's
+    // own middle (the 80 mm wall's middle sits at x = 40, so this
+    // lands them 15 mm from each end, same as the brief): the
+    // "Position along the edge" slider this task adds (there was no
+    // way to place a second hinge clear of the first before).
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    h.state_mut().connectors.fit_class = "Free running".into(); // Snug would print it fused.
+    h.state_mut().hinge.a = Some(body_id);
+    h.state_mut().hinge.b = Some(lid_id);
+    settle(&mut h);
+    uc3_capture(&mut h, "4-hinge-section");
+
+    let place_hinge_at = |h: &mut Harness<'_, MeshFixerApp>, position: f64, step: &str| {
+        h.state_mut().hinge.position = Some(position);
+        settle(h);
+        let history = history_len(h);
+        scroll_and_click(h, "Place hinge");
+        wait_until(h, "the hinge placed", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        assert_eq!(history_len(h), history + 1, "one undo step");
+        uc3_capture(h, step);
+    };
+    place_hinge_at(&mut h, -25.0, "5-hinge-1-placed");
+    let hinge1_leaf_a = id_of(&h, "Pin hinge (leaf a)");
+    place_hinge_at(&mut h, 25.0, "6-hinge-2-placed");
+    // The second hinge's own leaf a: the first's is found by name
+    // before the second is placed (both pieces share the same name,
+    // "Pin hinge (leaf a)" — `connector_tool::new_group_id` numbers the
+    // *groups*, not each piece's own name) — so collect every leaf a
+    // by group instead, once both are down.
+    let leaf_as: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .filter(|o| o.name == "Pin hinge (leaf a)")
+        .map(|o| o.id)
+        .collect();
+    assert_eq!(leaf_as.len(), 2, "two separate hinges: {leaf_as:?}");
+    assert!(leaf_as.contains(&hinge1_leaf_a));
+    let hinge2_leaf_a = *leaf_as.iter().find(|&&id| id != hinge1_leaf_a).unwrap();
+
+    // The two hinges don't overlap (placed at x = 15 and x = 65 on the
+    // 80 mm wall, each up to 24 mm long: well clear of each other).
+    assert!(
+        !mf_desktop::shape_panel::members(h.state(), hinge1_leaf_a)
+            .iter()
+            .any(|(m, _)| *m == hinge2_leaf_a),
+        "the two hinges are separate groups"
+    );
+
+    // Step 3b: one clasp on the front wall (y = 0), from the library,
+    // then dragged into place with Transform — the same "drop, then
+    // place exactly" flow Connect's own dovetail/clasp tests use
+    // (`connectors.rs::merge_folds_the_connector_into_its_two_sides`):
+    // the library always drops a connector on the active object's own
+    // highest point, never where a second connector on a different
+    // wall actually belongs, so it's moved after. Its own frame here
+    // mirrors the command-layer scenario's `clasp_frame` exactly (a
+    // narrower width than the spec default so its footprint fits the
+    // hollow box's 3 mm wall rim, and its height chosen so the catch
+    // stays on the body's own side of the cut gap and the hook on the
+    // lid's).
+    h.state_mut().set_active(body_id);
+    settle(&mut h);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Snap clasp");
+    wait_until(&mut h, "the clasp placed", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let clasp_id = h.state().active.unwrap();
+    // Narrow its width to fit the hollow box's 3 mm wall rim (the
+    // spec's own default, 12 mm, is sized for a thick block, not a
+    // thin shell): the selection panel's own "Width" field,
+    // `shape_panel::set_param`.
+    let clasp_width = 2.4_f64;
+    h.get_by_label("Width");
+    let history = history_len(&h);
+    mf_desktop::shape_panel::set_param(
+        h.state_mut(),
+        "width",
+        mf_spec::ParamValue::Float(clasp_width),
+    );
+    wait_until(&mut h, "the width change", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let arm_length = 10.0_f64; // clasp.snap's own spec default.
+    let ridge_height = 2.0 * 1.6_f64.max(0.3); // 2 * max(arm_thickness, lip_depth).
+    let clasp_frame: [f64; 12] = [
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        0.0,
+        1.0,
+        40.0 - arm_length / 2.0,
+        0.0,
+        32.0 - 0.2 - ridge_height,
+    ];
+    h.state_mut()
+        .commit_transform(clasp_id, clasp_frame, "test place clasp".into());
+    wait_until(&mut h, "the clasp's move", |a| a.busy.is_none());
+    settle(&mut h);
+    uc3_capture(&mut h, "7-clasp-placed");
+
+    // Step 4: resize hinge 1 to 24 mm with its Size field (the
+    // selection panel's schema-driven "Length" field,
+    // `shape_panel::set_param` — the same code path typing into the
+    // field itself would commit through).
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(hinge1_leaf_a);
+    settle(&mut h);
+    h.get_by_label("Length");
+    let history = history_len(&h);
+    mf_desktop::shape_panel::set_param(h.state_mut(), "length", mf_spec::ParamValue::Float(24.0));
+    wait_until(&mut h, "the resize", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    let resized_length = h
+        .state()
+        .session
+        .document()
+        .object(hinge1_leaf_a)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .bounding_box()
+        .unwrap()
+        .max[0];
+    assert!((resized_length - 24.0).abs() < 1e-6, "{resized_length}");
+    uc3_capture(&mut h, "8-hinge-1-resized");
+
+    // A view-only rotation of the lid (the swing preview), before any
+    // merge: `hinge_tool::swing_setup` reads the group through its own
+    // live member objects (`attach_to`), which the merge below removes
+    // for the hinges' leaves — so the preview is checked here, while
+    // the connector is still its own linked group, the same point
+    // `connectors.rs::a_hinge_between_two_objects_swings_and_attaches`
+    // checks it, just before its own Attach.
+    h.state_mut().set_active(hinge1_leaf_a);
+    settle(&mut h);
+    wait_until(&mut h, "the swing check", |a| {
+        mf_desktop::hinge_tool::swing_report(a).is_some()
+    });
+    settle(&mut h);
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 90.0;
+    }
+    settle(&mut h);
+    let lid_shown = h.state().shown_transform(lid_id).expect("the lid turns");
+    uc3_capture(&mut h, "8b-swing-90");
+    let report = mf_desktop::hinge_tool::swing_report(h.state())
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report.first_contact_deg,
+        None,
+        "the lid swings clear on hinge 1's own axis: {:?}",
+        report.contacts.first()
+    );
+    let _ = lid_shown;
+    if let Some(s) = h.state_mut().hinge.swing.as_mut() {
+        s.angle = 0.0;
+    }
+    settle(&mut h);
+
+    // Step 5: Merge each connector.
+    //
+    // The hinges know their own two sides already (picked in the
+    // Connectors panel's A/B pickers before placing, `hinge_tool`'s own
+    // flow), so their merge is the selection panel's "Attach to A and
+    // B" button, which only shows while the Select tool is active
+    // (`tool_panels::inspector_card`).
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    for leaf_a in [hinge1_leaf_a, hinge2_leaf_a] {
+        h.state_mut().set_active(leaf_a);
+        settle(&mut h);
+        attach_selected_group(&mut h, "Attach to");
+    }
+    // The clasp, dropped from the library, doesn't know its sides yet
+    // (`place_connector`'s own members carry no `attach_to`): picked
+    // here instead, the Connectors panel's own "Side A"/"Side B"/
+    // "Attach" flow (`connectors.rs::merge_folds_the_connector_into_
+    // its_two_sides`'s own route) — the still-live `placed` state from
+    // when the clasp was placed, several steps and tool switches ago.
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    scroll_and_click(&mut h, "Side A: box (bottom)");
+    settle(&mut h);
+    scroll_and_click(&mut h, "Side B: box (top)");
+    settle(&mut h);
+    let history = history_len(&h);
+    scroll_and_click(&mut h, "Attach");
+    wait_until(&mut h, "the clasp's merge", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(history_len(&h), history + 1, "one undo step");
+    uc3_capture(&mut h, "9-merged");
+
+    // Only body, lid and the two hinges' captive pins remain.
+    let names = objects(&h);
+    let pins = names.iter().filter(|n| n.contains("pin")).count();
+    assert_eq!(pins, 2, "{names:?}");
+    assert_eq!(names.len(), 2 + pins, "{names:?}");
+    assert!(names.contains(&"box (top)".to_owned()));
+    assert!(names.contains(&"box (bottom)".to_owned()));
+
+    // Assert: two closed, manifold objects that never touch.
+    let body_mesh = h
+        .state()
+        .session
+        .document()
+        .object(body_id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    let lid_mesh = h
+        .state()
+        .session
+        .document()
+        .object(lid_id)
+        .unwrap()
+        .mesh()
+        .unwrap()
+        .clone();
+    for (mesh, label) in [(&body_mesh, "body"), (&lid_mesh, "lid")] {
+        let d = mf_geometry::inspect(mesh);
+        assert!(d.is_closed && d.is_manifold, "{label}: {d:?}");
+    }
+    let ctx = mf_runtime::RunContext::none();
+    let bvh = mf_geometry::Bvh::build(&body_mesh, &ctx).unwrap();
+    let gap =
+        mf_geometry::minimum_distance(&body_mesh, &bvh, &lid_mesh, &glam::DMat4::IDENTITY, &ctx)
+            .unwrap()
+            .unwrap();
+    // The binding clearance is "Free running"'s own (0.3 mm), tighter
+    // than the cut's own gap (0.4 mm): the hinges and the clasp were
+    // all merged with that as their `gap` check.
+    assert!(
+        gap >= 0.3 - 1e-6,
+        "body and lid stay apart by the gap: {gap}"
+    );
+}
+
+/// The import flow end to end (MF-ISSUE-045, owner 2026-11-14 "smarter
+/// import units"): opening a unitless STL asks for its unit, defaulting
+/// to whichever "fits the plate" best — here, with no Machine profile
+/// configured, the plain 250 mm default plate. An 8×6×4-unit box reads
+/// as 8×6×4 mm (fits, tiny), 80×60×40 mm (fits, cm), 8000 mm (too big,
+/// metres) or 203×152×102 mm (fits, inches): inches gives the largest
+/// reading that still fits, so it's preselected over millimetres and
+/// centimetres.
+#[test]
+fn import_flow_asks_for_units_and_preselects_the_one_that_fits_the_plate() {
+    require_gpu!("import_flow_asks_for_units_and_preselects_the_one_that_fits_the_plate");
+    let settings_dir = tempfile::tempdir().expect("a temp settings dir");
+    let import_dir = tempfile::tempdir().expect("a temp import dir");
+    let path = import_dir.path().join("part.stl");
+    let mesh = mf_fixtures::cube(1.0);
+    // 8 x 6 x 4 "units": unscaled numbers, but non-cubic so the
+    // dialog's rows are distinguishable per axis.
+    let positions: Vec<[f64; 3]> = mesh
+        .vertices()
+        .map(|(_, p)| [p[0] * 8.0, p[1] * 6.0, p[2] * 4.0])
+        .collect();
+    let (_, triangles) = mesh.to_arrays();
+    let scaled = Mesh::new(positions, triangles).unwrap();
+    mf_io::write_path(&scaled, &path, Format::StlBinary, Unit::Millimeter).unwrap();
+
+    let settings = Settings {
+        unit_prompt: true,
+        config_dir: Some(settings_dir.path().to_owned()),
+        ..Settings::default()
+    };
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(move |cc| {
+            MeshFixerApp::with_settings(cc, Some(path.clone()), settings).unwrap()
+        });
+    wait_until(&mut h, "the unit dialog", |a| a.unit_prompt().is_some());
+    h.run();
+    let prompt = h.state().unit_prompt().unwrap();
+    assert_eq!(prompt.extent, [8.0, 6.0, 4.0], "{prompt:?}");
+    assert_eq!(prompt.choice, Unit::Inch, "{prompt:?}");
+    assert!(
+        !prompt.needs_scale,
+        "203 x 152 x 102 mm fits a 250 mm plate"
+    );
+    h.get_by_label(
+        "Inches · 8.00 × 6.00 × 4.00 in (203 × 152 × 102 mm) — Fits a 250 mm plate \
+         (203 × 152 × 102 mm)",
+    );
+    h.get_by_label("Import").click();
+    wait_until(&mut h, "import + analysis", |a| {
+        a.unit_prompt().is_none() && a.current_analysis().is_some()
+    });
+    assert_eq!(h.state().session.document().units(), Unit::Inch);
+}
+
+// ---------------------------------------------------------------------
+// Hollow acceptance (owner 2026-11-14): the four canonical shapes, each
+// hollowed plain, with Auto drain holes, and opened through a flat cut
+// face, clicked through the app. Their own group (`hollow_acceptance::`),
+// skipped by scripts/core-workflows.sh (which stays fast) and run by
+// scripts/hollow-acceptance.sh; the same checks as the command layer's
+// crates/mf-command/tests/hollow_acceptance.rs.
+// ---------------------------------------------------------------------
+
+mod hollow_acceptance {
+    use super::*;
+    use mf_fixtures::hollow_check::{Opening, check, flat_at, holes_found, stood_bunny};
+
+    const WALL: f64 = 2.0;
+
+    /// A Parts-library shape's mesh, generated by the shape itself.
+    fn generated(id: &str, params: &[(&str, &str)]) -> Mesh {
+        let g = mf_parts::find_generator(id).unwrap();
+        let raw: std::collections::BTreeMap<String, String> = params
+            .iter()
+            .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+            .collect();
+        let params = g.spec().validate(&raw).unwrap();
+        let ctx = mf_runtime::RunContext::none();
+        let mut parts = g
+            .generate(&params, &mf_parts::GenContext::new(&ctx))
+            .unwrap();
+        parts.remove(0).mesh
+    }
+
+    /// The object's mesh (object space) and its translation.
+    fn object(h: &Harness<'_, MeshFixerApp>, name: &str) -> (Mesh, [f64; 3]) {
+        let o = h.state().session.document().object(id_of(h, name)).unwrap();
+        (
+            o.mesh().unwrap().clone(),
+            [o.transform[9], o.transform[10], o.transform[11]],
+        )
+    }
+
+    /// Hollow's own automatic cell size for `mesh` at the default wall.
+    fn cell_of(mesh: &Mesh) -> f64 {
+        mf_operations::hollow::cell_size(0.0, WALL, mesh.bounding_box().unwrap().diagonal())
+    }
+
+    /// Opens Hollow on `name`, sets the drain mode by its label, and runs
+    /// it; then the result, which must not have been refused.
+    fn run_hollow(h: &mut Harness<'_, MeshFixerApp>, name: &str, drain: &str) -> Mesh {
+        row(h, name).click();
+        settle(h);
+        if h.state().active_tool != "hollow" {
+            h.get_by_label("Hollow").click();
+            settle(h);
+        }
+        let id = id_of(h, name);
+        h.get_by_label(drain).click();
+        settle(h);
+        wait_until(h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(h);
+        hollow_now(h, name)
+    }
+
+    /// Presses the panel's Hollow button and waits for it.
+    fn hollow_now(h: &mut Harness<'_, MeshFixerApp>, name: &str) -> Mesh {
+        let rev = h.state().session.current();
+        panel_button(h, "Hollow").click();
+        wait_until(h, &format!("the hollow of {name}"), |a| {
+            a.busy.is_none()
+                && (a.session.current() != rev || a.refusal.is_some() || a.error.is_some())
+        });
+        settle(h);
+        assert!(
+            h.state().refusal.is_none(),
+            "{name}: {:?}",
+            h.state().refusal
+        );
+        assert!(h.state().error.is_none(), "{name}: {:?}", h.state().error);
+        let parent = h
+            .state()
+            .session
+            .node(h.state().session.current())
+            .unwrap()
+            .parent;
+        assert_eq!(parent, Some(rev), "{name}: one undo step");
+        object(h, name).0
+    }
+
+    fn undo_to(h: &mut Harness<'_, MeshFixerApp>, name: &str, mesh: &Mesh) {
+        let id = id_of(h, name);
+        let want = mesh.content_hash();
+        h.get_by_label("Undo").click();
+        wait_until(h, "the undo", |a| {
+            a.busy.is_none()
+                && a.session
+                    .document()
+                    .object(id)
+                    .and_then(|o| o.mesh())
+                    .is_some_and(|m| m.content_hash() == want)
+        });
+        settle(h);
+    }
+
+    /// `name` hollowed three ways through the app: plain, Auto drain
+    /// holes, and (after Split at world `cut_z`, Keep Bottom) opened
+    /// through the clicked cut face; each checked, each undone after.
+    fn three_ways(h: &mut Harness<'_, MeshFixerApp>, name: &str, cut_z: f64) {
+        let (before, t) = object(h, name);
+        let cell = cell_of(&before);
+
+        let out = run_hollow(h, name, "None");
+        check(
+            &format!("{name}, plain"),
+            &before,
+            &out,
+            WALL,
+            cell,
+            &Opening::None,
+        );
+        undo_to(h, name, &before);
+
+        let out = run_hollow(h, name, "Auto");
+        let holes = holes_found(&before, &out, [0.0, 0.0, -1.0]);
+        assert!(!holes.is_empty(), "{name}: Auto cut no drain hole");
+        let diameter = h.state().hollow.diameter;
+        check(
+            &format!("{name}, auto drain holes"),
+            &before,
+            &out,
+            WALL,
+            cell,
+            &Opening::Holes(holes, diameter),
+        );
+        undo_to(h, name, &before);
+        h.get_by_label("None").click();
+        settle(h);
+
+        // Split, Keep Bottom, at `cut_z`.
+        row(h, name).click();
+        settle(h);
+        h.get_by_label("Split").click();
+        settle(h);
+        h.state_mut().split.plane[11] = cut_z;
+        settle(h);
+        h.get_by_label("Bottom").click();
+        settle(h);
+        let rev = h.state().session.current();
+        scroll_and_click(h, "Cut");
+        wait_until(h, "the cut", |a| {
+            a.busy.is_none() && (a.session.current() != rev || a.refusal.is_some())
+        });
+        settle(h);
+        assert!(
+            h.state().refusal.is_none(),
+            "{name}: {:?}",
+            h.state().refusal
+        );
+        let bottom = format!("{name} (bottom)");
+        let (cut, _) = object(h, &bottom);
+        let z = cut_z - t[2];
+        let faces = flat_at(&cut, z, 1.0);
+
+        // Hollow, click the cut face, Open through, Hollow.
+        row(h, &bottom).click();
+        settle(h);
+        h.get_by_label("Hollow").click();
+        settle(h);
+        let id = id_of(h, &bottom);
+        wait_until(h, "the cut part's preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(h);
+        // A point on the cut face itself, well inside it.
+        let f = *faces.first().expect("a cut face");
+        let p = cut.face(FaceId(f)).unwrap().map(|v| cut.corner_position(v));
+        let seed: [f64; 3] = std::array::from_fn(|k| (p[0][k] + p[1][k] + p[2][k]) / 3.0 + t[k]);
+        let p = h.state().screen_point(seed).unwrap();
+        click_at(h, p);
+        settle(h);
+        let picked: Vec<u32> = h
+            .state()
+            .hollow
+            .picked_region
+            .as_ref()
+            .map(|r| r.faces.iter().map(|f| f.0).collect())
+            .unwrap_or_default();
+        assert!(!picked.is_empty(), "{name}: the click picked no surface");
+        if !h.state().hollow.open_through {
+            h.get_by_label("Open through this surface").click();
+            settle(h);
+        }
+        assert!(h.state().hollow.open_through);
+        let out = hollow_now(h, &bottom);
+        check(
+            &format!("{name}, open through the cut face"),
+            &cut,
+            &out,
+            WALL,
+            cell_of(&cut),
+            &Opening::Through {
+                z,
+                side: 1.0,
+                faces: &picked,
+            },
+        );
+    }
+
+    use mf_geometry::FaceId;
+
+    /// Case 1: A single parametric shape: a Box, and a Cylinder.
+    #[test]
+    fn a_single_parametric_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::a_single_parametric_box_and_cylinder");
+        let mut h = opened(vec![
+            (
+                "box",
+                generated(
+                    "shape.box",
+                    &[("width", "30"), ("depth", "24"), ("height", "20")],
+                ),
+                at([0.0, 0.0, 0.0]),
+            ),
+            (
+                "cylinder",
+                generated("shape.cylinder", &[("diameter", "26"), ("height", "20")]),
+                at([60.0, 0.0, 0.0]),
+            ),
+        ]);
+        three_ways(&mut h, "box", 12.25);
+        three_ways(&mut h, "cylinder", 12.25);
+    }
+
+    /// Opens a box with a cylinder standing up out of its top, then
+    /// Combines them (selecting both, Combine) into "box".
+    fn combined() -> Harness<'static, MeshFixerApp> {
+        let boxed = generated(
+            "shape.box",
+            &[("width", "40"), ("depth", "40"), ("height", "20")],
+        );
+        let bb = boxed.bounding_box().unwrap();
+        let centre = [
+            (bb.min[0] + bb.max[0]) / 2.0,
+            (bb.min[1] + bb.max[1]) / 2.0,
+            0.0,
+        ];
+        let mut h = opened(vec![
+            ("box", boxed, at([0.0, 0.0, 0.0])),
+            (
+                "cylinder",
+                generated("shape.cylinder", &[("diameter", "24"), ("height", "40")]),
+                at(centre),
+            ),
+        ]);
+        select_together(&mut h, &["box", "cylinder"]);
+        h.get_by_label("Combine").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        panel_button(&h, "Combine").click();
+        wait_until(&mut h, "the combine", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        assert_eq!(objects(&h), ["box"]);
+        h
+    }
+
+    /// Case 2: Combined parametric shapes: Box ∪ Cylinder.
+    #[test]
+    fn combined_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::combined_box_and_cylinder");
+        let mut h = combined();
+        three_ways(&mut h, "box", 30.25);
+    }
+
+    /// Case 3: Make solid on Box ∪ Cylinder, then Hollow.
+    #[test]
+    fn make_solid_of_combined_box_and_cylinder() {
+        require_gpu!("hollow_acceptance::make_solid_of_combined_box_and_cylinder");
+        let mut h = combined();
+        row(&h, "box").click();
+        settle(&mut h);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+        three_ways(&mut h, "box", 30.25);
+    }
+
+    /// Case 4: The Stanford bunny: Repair (Fill all holes, its base's), then
+    /// Hollow three ways, the open-through one on a cut taken across its
+    /// middle (Keep Bottom). Skipped (recorded) if it hasn't been
+    /// fetched (scripts/fetch-fixtures.sh).
+    #[test]
+    fn the_stanford_bunny() {
+        require_gpu!("hollow_acceptance::the_stanford_bunny");
+        let Some(path) = mf_fixtures::real::path(
+            "stanford-bunny.obj",
+            "hollow_acceptance::the_stanford_bunny",
+        ) else {
+            return;
+        };
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = stood_bunny(&model.objects.into_iter().next().unwrap().mesh);
+        let low = bunny.bounding_box().unwrap().min[2];
+        let mut h = opened(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))]);
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+        let (repaired, _) = object(&h, "bunny");
+        let topo = repaired
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert_eq!(topo.boundary_edges, 0, "Repair left the bunny open");
+        three_ways(&mut h, "bunny", low + 50.25);
+    }
+
+    /// Case 5 (owner bug): the Stanford bunny opened at its own scale, in
+    /// metres — the unit a person actually gets picking "Import" on the
+    /// unit prompt's suggestion (`suggested_unit`, `import_dialog.rs`:
+    /// the bunny's ~0.156 largest dimension lands in the 10 mm..2 m window
+    /// only as metres). Repair (Fill all holes), then Make solid at the
+    /// default cell size, then Hollow: every length-param op must cross
+    /// document units to mm and back correctly (D20), or Make solid
+    /// refuses with a grid many orders too large (the owner's exact bug:
+    /// a 0.001 m cell size reaching `prepare` as 0.000001).
+    #[test]
+    fn the_stanford_bunny_opened_in_metres() {
+        require_gpu!("hollow_acceptance::the_stanford_bunny_opened_in_metres");
+        let Some(path) = mf_fixtures::real::path(
+            "stanford-bunny.obj",
+            "hollow_acceptance::the_stanford_bunny_opened_in_metres",
+        ) else {
+            return;
+        };
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = model.objects.into_iter().next().unwrap().mesh;
+        let diag = bunny.bounding_box().unwrap().diagonal();
+        // Genuinely metre-scale (the owner's report: 0.156 x 0.154 x
+        // 0.121 m), not `stood_bunny`'s mm-friendly rescale.
+        assert!(
+            diag < 1.0,
+            "the raw bunny should be metre-scale, got diagonal {diag}"
+        );
+        let mut h = opened_with_units(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))], Unit::Meter);
+        assert_eq!(h.state().session.document().units(), Unit::Meter);
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+        let (repaired, _) = object(&h, "bunny");
+        let topo = repaired
+            .topology_with(&mf_runtime::RunContext::none())
+            .unwrap();
+        assert_eq!(topo.boundary_edges, 0, "Repair left the bunny open");
+
+        // Make solid at the default (automatic) cell size: must not be
+        // refused (grid_too_large was the owner's exact symptom).
+        row(&h, "bunny").click();
+        settle(&mut h);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Make solid at the default cell size was refused: {:?}",
+            h.state().refusal
+        );
+
+        // Hollow at its default wall thickness: must not be refused
+        // either (the same double-conversion would have broken this
+        // too, on wall_thickness/hole_diameter).
+        row(&h, "bunny").click();
+        settle(&mut h);
+        h.get_by_label("Hollow").click();
+        settle(&mut h);
+        let id = id_of(&h, "bunny");
+        wait_until(&mut h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some()
+        });
+        settle(&mut h);
+        hollow_now(&mut h, "bunny");
+    }
+}
+
+/// Every length-param tool, in an mm document and in an m document, on
+/// the same model at the same real-world size (MF-UNIT-001, owner bug):
+/// Make solid's cell size, Hollow's wall thickness, Split's gap and a
+/// placed shape's own size must come out the same real-world size after
+/// scaling, whichever unit the document is in. Each panel edits and
+/// shows lengths in document units (a "2" in an mm document's field and
+/// a "0.002" in an m document's field are the same 2 mm), which
+/// `Session::prepare` converts to mm exactly once (D20); a desktop panel
+/// that skips the cross to mm before building its invocation makes
+/// `prepare` convert an already-document-units number a second time.
+mod unit_parity {
+    use super::*;
+
+    /// A document unit, paired with how many of its own units make one
+    /// millimetre (the inverse of `transform_tool::mm_per`): a
+    /// real-world length in mm, times this, is the number a panel's
+    /// document-units field shows for it.
+    const UNITS: [(Unit, f64); 2] = [(Unit::Millimeter, 1.0), (Unit::Meter, 0.001)];
+
+    /// A closed cube of `mm` millimetres across, opened as the one
+    /// object "cube" in a document at `unit` (its own numbers scaled so
+    /// the cube is the same real-world size in either unit).
+    fn cube_doc(mm: f64, unit: Unit, doc_units_per_mm: f64) -> Harness<'static, MeshFixerApp> {
+        let size = mm * doc_units_per_mm;
+        opened_with_units(
+            vec![("cube", mf_fixtures::cube(size), at([0.0, 0.0, 0.0]))],
+            unit,
+        )
+    }
+
+    /// "cube"'s world-space bounding box diagonal, in millimetres
+    /// (document units divided by `doc_units_per_mm`): the one number
+    /// every unit's run of a tool is compared by.
+    fn diagonal_mm(h: &Harness<'_, MeshFixerApp>, name: &str, doc_units_per_mm: f64) -> f64 {
+        let id = id_of(h, name);
+        world_bounds(h, id).diagonal() / doc_units_per_mm
+    }
+
+    /// Make solid at a cell size of `cell_mm` millimetres (entered in
+    /// the panel's own document-units field): the result's bounding box
+    /// diagonal, in millimetres.
+    fn make_solid_diagonal_mm(unit: Unit, doc_units_per_mm: f64, cell_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Make solid").click();
+        settle(&mut h);
+        h.state_mut().solid.cell = Some(cell_mm * doc_units_per_mm);
+        let history = history_len(&h);
+        h.get_by_label("Make it solid").click();
+        wait_until(&mut h, "make solid", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Make solid ({unit:?}, cell {cell_mm} mm): {:?}",
+            h.state().refusal
+        );
+        diagonal_mm(&h, "cube", doc_units_per_mm)
+    }
+
+    #[test]
+    fn make_solid_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::make_solid_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| make_solid_diagonal_mm(unit, doc_units_per_mm, 1.0))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "Make solid's result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// Hollow at its default wall thickness (2 mm, D20's auto default,
+    /// resolved from document units the same way the panel shows it):
+    /// the shell's resulting bounding box diagonal (unchanged by
+    /// Hollow, which keeps the outer surface exactly) and whether it
+    /// was refused, in millimetres.
+    fn hollow_result(unit: Unit, doc_units_per_mm: f64) -> (f64, bool) {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Hollow").click();
+        settle(&mut h);
+        let id = id_of(&h, "cube");
+        wait_until(&mut h, "the hollow preview", |a| {
+            mf_desktop::hollow_tool::preview_render(a, id).is_some() || a.refusal.is_some()
+        });
+        settle(&mut h);
+        let history = history_len(&h);
+        panel_button(&h, "Hollow").click();
+        wait_until(&mut h, "hollow", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        let refused = h.state().refusal.is_some();
+        (diagonal_mm(&h, "cube", doc_units_per_mm), refused)
+    }
+
+    #[test]
+    fn hollow_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::hollow_matches_in_mm_and_m_documents");
+        let results: Vec<(f64, bool)> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| hollow_result(unit, doc_units_per_mm))
+            .collect();
+        assert!(
+            !results[0].1 && !results[1].1,
+            "Hollow was refused in one of the documents: {results:?}"
+        );
+        assert!(
+            (results[0].0 - results[1].0).abs() < 0.5,
+            "Hollow's result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// Split at a gap of `gap_mm` millimetres, Keep both: the top
+    /// part's resulting bounding box diagonal, in millimetres.
+    fn split_gap_diagonal_mm(unit: Unit, doc_units_per_mm: f64, gap_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.state_mut().split.gap = gap_mm * doc_units_per_mm;
+        let history = history_len(&h);
+        scroll_and_click(&mut h, "Cut");
+        wait_until(&mut h, "the cut", |a| {
+            a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+        });
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "Split ({unit:?}, gap {gap_mm} mm): {:?}",
+            h.state().refusal
+        );
+        diagonal_mm(&h, "cube (top)", doc_units_per_mm)
+    }
+
+    #[test]
+    fn split_gap_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::split_gap_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| split_gap_diagonal_mm(unit, doc_units_per_mm, 1.0))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "Split's gapped result differs between mm and m documents: {results:?}"
+        );
+    }
+
+    /// A placed library shape (a 10 mm Box) keeps its real-world size:
+    /// its world-space bounding box diagonal, in millimetres. Its own
+    /// transform's linear part carries the shape's mm-to-document-units
+    /// scale (its mesh is generated in mm, D16/D20), unlike every other
+    /// object `world_bounds` is used for in this file (placed with [`at`]
+    /// alone, no scale) — so every one of its local bounding box's 8
+    /// corners is carried through the full affine transform, not just
+    /// translated.
+    fn placed_box_diagonal_mm(unit: Unit, doc_units_per_mm: f64) -> f64 {
+        let mut h = cube_doc(20.0, unit, doc_units_per_mm);
+        h.get_by_label("Parts").click();
+        settle(&mut h);
+        let history = history_len(&h);
+        h.get_by_label("Box").click_accesskit();
+        wait_until(&mut h, "the shape placed", |a| {
+            a.busy.is_none() && a.session.history_labels().len() > history
+        });
+        settle(&mut h);
+        let id = h.state().active.unwrap();
+        let doc = h.state().session.document();
+        let o = doc.object(id).unwrap();
+        let bb = o.mesh().unwrap().bounding_box().unwrap();
+        let t = o.transform;
+        let m = glam::DMat3::from_cols(
+            DVec3::new(t[0], t[1], t[2]),
+            DVec3::new(t[3], t[4], t[5]),
+            DVec3::new(t[6], t[7], t[8]),
+        );
+        let translation = DVec3::new(t[9], t[10], t[11]);
+        let corners = [bb.min, bb.max].into_iter().flat_map(|p0| {
+            [bb.min, bb.max].into_iter().flat_map(move |p1| {
+                [bb.min, bb.max]
+                    .into_iter()
+                    .map(move |p2| DVec3::new(p0[0], p1[1], p2[2]))
+            })
+        });
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for c in corners {
+            let world = m * c + translation;
+            lo = lo.min(world);
+            hi = hi.max(world);
+        }
+        (hi - lo).length() / doc_units_per_mm
+    }
+
+    #[test]
+    fn a_placed_shape_matches_in_mm_and_m_documents() {
+        require_gpu!("unit_parity::a_placed_shape_matches_in_mm_and_m_documents");
+        let results: Vec<f64> = UNITS
+            .iter()
+            .map(|&(unit, doc_units_per_mm)| placed_box_diagonal_mm(unit, doc_units_per_mm))
+            .collect();
+        assert!(
+            (results[0] - results[1]).abs() < 0.5,
+            "A placed shape's real-world size differs between mm and m documents: {results:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------
+// Gizmo snapping is zoom-adaptive and unit-aware (owner bug, MF-OBJ-002):
+// the gizmo's grid used to be a fixed 1 *document unit* step
+// (`mf_render::Snap::default`), which on the owner's metre-scale
+// stanford-bunny document was 1000 mm — every drag on the 0.15 m model
+// snapped to zero, reading as "the move handle wasn't working". The fix
+// (`transform_tool::snap_step`) picks a 1-2-5-mm step sized to stay
+// visible on screen at the current zoom, in document units, applied to
+// both the Transform gizmo and Split's plane gizmo.
+mod gizmo_snap {
+    use super::*;
+
+    /// `id`'s world-space bounding box, correct under rotation (unlike
+    /// the file-level `world_bounds`, which only adds translation —
+    /// fine for every other test here, none of which rotate the
+    /// object, but wrong once a test does): all 8 corners of the local
+    /// bounding box, carried through the transform's full linear part,
+    /// not just its translation column.
+    fn world_bounds_rotated(h: &Harness<'_, MeshFixerApp>, id: mf_command::ObjectId) -> Aabb {
+        let doc = h.state().session.document();
+        let o = doc.object(id).unwrap();
+        let bb = o.mesh().unwrap().bounding_box().unwrap();
+        let t = o.transform;
+        let m = glam::DMat3::from_cols(
+            DVec3::new(t[0], t[1], t[2]),
+            DVec3::new(t[3], t[4], t[5]),
+            DVec3::new(t[6], t[7], t[8]),
+        );
+        let translation = DVec3::new(t[9], t[10], t[11]);
+        let corners = [bb.min, bb.max].into_iter().flat_map(|p0| {
+            [bb.min, bb.max].into_iter().flat_map(move |p1| {
+                [bb.min, bb.max]
+                    .into_iter()
+                    .map(move |p2| DVec3::new(p0[0], p1[1], p2[2]))
+            })
+        });
+        let (mut lo, mut hi) = (DVec3::splat(f64::MAX), DVec3::splat(f64::MIN));
+        for c in corners {
+            let world = m * c + translation;
+            lo = lo.min(world);
+            hi = hi.max(world);
+        }
+        Aabb {
+            min: lo.to_array(),
+            max: hi.to_array(),
+        }
+    }
+
+    /// Opens the raw Stanford bunny scan (metre-scale, y-up, exactly as
+    /// the owner's file reads: 0.156 x 0.154 x 0.121 m — see
+    /// `hollow_acceptance::the_stanford_bunny_opened_in_metres`) as a
+    /// metre document, the owner's own exact first step. `None` (and a
+    /// recorded skip) if the fixture hasn't been fetched.
+    fn opened_bunny_in_metres(test: &str) -> Option<Harness<'static, MeshFixerApp>> {
+        let path = mf_fixtures::real::path("stanford-bunny.obj", test)?;
+        let model = mf_io::read_model(&path).unwrap();
+        let bunny = model.objects.into_iter().next().unwrap().mesh;
+        Some(opened_with_units(
+            vec![("bunny", bunny, at([0.0, 0.0, 0.0]))],
+            Unit::Meter,
+        ))
+    }
+
+    /// A point to grab (and the outward drag direction) on gizmo `g`'s
+    /// `handle`, read from its own drawn geometry — the same way
+    /// `x_arrow`/`handle_point` do for the Transform gizmo, generalised
+    /// to any gizmo (here, Split's).
+    fn axis_handle_point(
+        h: &Harness<'_, MeshFixerApp>,
+        g: &mf_render::Gizmo,
+        handle: mf_render::Handle,
+    ) -> (egui::Pos2, egui::Vec2) {
+        let app = h.state();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        let shape = g
+            .handles(&cam, view)
+            .into_iter()
+            .find(|s| s.handle == handle)
+            .unwrap_or_else(|| panic!("{handle:?} is drawn"));
+        let mf_render::HandleGeometry::Arrow {
+            shaft_start,
+            shaft_end,
+            ..
+        } = shape.geometry
+        else {
+            panic!("{handle:?}'s geometry isn't an arrow");
+        };
+        let mid = (
+            (shaft_start.0 + shaft_end.0) / 2.0,
+            (shaft_start.1 + shaft_end.1) / 2.0,
+        );
+        let dir = egui::vec2(
+            (shaft_end.0 - shaft_start.0) as f32,
+            (shaft_end.1 - shaft_start.1) as f32,
+        )
+        .normalized();
+        (
+            rect.left_top() + egui::vec2(mid.0 as f32, mid.1 as f32),
+            dir,
+        )
+    }
+
+    /// The owner's exact steps: open the bunny (metres), open Split,
+    /// choose Vertical Y, then drag the plane's move handle. Before the
+    /// fix, the gizmo's grid was a fixed 1 document unit (1000 mm on
+    /// this document), so every drag snapped to zero and the handle
+    /// read as broken; the plane must actually move and follow the
+    /// cursor along its own normal (+Y).
+    #[test]
+    fn split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny() {
+        require_gpu!(
+            "gizmo_snap::split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny"
+        );
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_vertical_y_move_handle_follows_the_cursor_on_the_metre_bunny",
+        ) else {
+            return;
+        };
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.get_by_label("Vertical Y").click();
+        settle(&mut h);
+        assert_eq!(h.state().split.mode, mf_render::GizmoMode::Move);
+        let n = h.state().split.normal();
+        assert!((n.y - 1.0).abs() < 1e-9, "{n:?}");
+        let before = h.state().split.point();
+
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_y) = axis_handle_point(&h, &g, mf_render::Handle::Axis(1));
+        // A real screen drag, well short of the gizmo's own 110pt arm,
+        // so it only ever tests the grid step, never the arm's length.
+        let to = p + dir_y * 40.0;
+        drag(&mut h, p, to, 10);
+        settle(&mut h);
+
+        let after = h.state().split.point();
+        assert!(
+            (after - before).length() > 1e-6,
+            "the plane's move handle didn't move it: before {before:?}, after {after:?}"
+        );
+        // Follows the cursor: the point moved along +Y (the dragged
+        // axis), clearly more than off-axis noise — the ray-plane drag
+        // math moves a little off the pure axis near the screen edge of
+        // the arm, on the order of a couple of grid steps, not a sign
+        // the drag went somewhere else entirely — and nowhere near 0,
+        // which an oversized (pre-fix) snap step would have clamped it
+        // to.
+        let moved = after - before;
+        assert!(moved.y > 0.01, "{moved:?}");
+        assert!(moved.x.abs() < moved.y * 0.2, "{moved:?}");
+        assert!(moved.z.abs() < moved.y * 0.2, "{moved:?}");
+    }
+
+    /// The shared Snap checkbox (owner, 2026-11-14: "can't we disable
+    /// snap?"), unchecked: dragging Split's plane on the metre bunny
+    /// moves smoothly — continuously tracking the cursor one pixel step
+    /// at a time, not jumping between quantised grid positions — the
+    /// same way Transform's own "Snap" checkbox has always let a drag
+    /// move freely when unchecked.
+    #[test]
+    fn split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny() {
+        require_gpu!(
+            "gizmo_snap::split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny"
+        );
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_plane_drags_smoothly_with_snap_unchecked_on_the_metre_bunny",
+        ) else {
+            return;
+        };
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        h.get_by_label("Vertical Y").click();
+        settle(&mut h);
+        assert!(h.state().gizmo_snap, "snap is on by default");
+        h.state_mut().gizmo_snap = false;
+        settle(&mut h);
+
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_y) = axis_handle_point(&h, &g, mf_render::Handle::Axis(1));
+
+        // Drag one pixel at a time over a longer run than egui's own
+        // click-vs-drag deadzone (the first handful of pixel steps
+        // move nothing yet, while the pointer is still inside that
+        // deadzone — real UI behaviour, not a snap defect): once past
+        // it, every further pixel step should move the plane a little
+        // with no snap on, not sit on a handful of quantised
+        // positions. The back half of the run (steps 31-60, well clear
+        // of any deadzone) is what's checked.
+        let mut ys = Vec::new();
+        h.event(egui::Event::PointerMoved(p));
+        h.event(egui::Event::PointerButton {
+            pos: p,
+            button: egui::PointerButton::Primary,
+            pressed: true,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        const STEPS: i32 = 60;
+        for i in 1..=STEPS {
+            let at = p + dir_y * i as f32;
+            h.event(egui::Event::PointerMoved(at));
+            h.step();
+            ys.push(h.state().split.point().y);
+        }
+        h.event(egui::Event::PointerButton {
+            pos: p + dir_y * STEPS as f32,
+            button: egui::PointerButton::Primary,
+            pressed: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+        h.step();
+        settle(&mut h);
+
+        let back_half = &ys[(STEPS as usize / 2)..];
+        let distinct = {
+            let mut sorted = back_half.to_vec();
+            sorted.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+            sorted.len()
+        };
+        assert!(
+            distinct >= back_half.len() - 1,
+            "a smooth (unsnapped) drag should move on almost every pixel step, \
+             only {distinct} distinct positions out of {} steps: {ys:?}",
+            back_half.len()
+        );
+        assert!(
+            back_half.windows(2).all(|w| w[1] >= w[0] - 1e-9),
+            "a smooth drag along +Y should move monotonically: {ys:?}"
+        );
+    }
+
+    /// Transform move on the metre-scale bunny actually moves it: the
+    /// same fixed-1-document-unit grid bug affected the Transform
+    /// gizmo too (`app::transform_snap`), not just Split's.
+    #[test]
+    fn transform_move_on_the_metre_bunny_moves_it() {
+        require_gpu!("gizmo_snap::transform_move_on_the_metre_bunny_moves_it");
+        let Some(mut h) =
+            opened_bunny_in_metres("gizmo_snap::transform_move_on_the_metre_bunny_moves_it")
+        else {
+            return;
+        };
+        let id = id_of(&h, "bunny");
+        open_transform(&mut h);
+        settle(&mut h);
+        let before = transform_of(&h, id);
+        let history = history_len(&h);
+
+        let (p, dir_x) = x_arrow(&h);
+        let to = p + dir_x * 40.0;
+        drag(&mut h, p, to, 10);
+        wait_until(&mut h, "the move commits", |a| {
+            a.busy.is_none() && a.session.history_labels().len() == history + 1
+        });
+        settle(&mut h);
+
+        let after = transform_of(&h, id);
+        assert!(
+            after[9] > before[9] + 1e-6,
+            "the bunny didn't move: before {before:?}, after {after:?}"
+        );
+        assert_eq!(after[..9], before[..9], "only the translation changes");
+    }
+
+    /// Drags the Z-axis move handle so the plane's point lands on
+    /// `target_z` (document units), the same gizmo interaction the
+    /// owner used: each pass measures how much world Z the last screen
+    /// drag covered (and its sign, since whether the arm's on-screen
+    /// direction is +Z or -Z depends on the view), to work out the next
+    /// pixel delta — a perspective camera's screen-to-world ratio isn't
+    /// quite constant, so a few passes converge where one guess
+    /// wouldn't.
+    /// Drags the Z-axis move handle so the plane's point lands within
+    /// `tolerance` (document units) of `target_z`: a first calibration
+    /// drag measures how much world Z a screen point of drag covers
+    /// (and its sign, since whether the arm's on-screen direction is +Z
+    /// or -Z depends on the view), then a few passes correct for a
+    /// perspective camera's screen-to-world ratio not being quite
+    /// constant. Panics (with where it got stuck) if it never lands
+    /// within tolerance.
+    fn drag_split_plane_z_to(h: &mut Harness<'_, MeshFixerApp>, target_z: f64, tolerance: f64) {
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_z) = axis_handle_point(h, &g, mf_render::Handle::Axis(2));
+        const CALIBRATE_PX: f32 = 30.0;
+        let mut world_per_px = {
+            let before = h.state().split.point().z;
+            drag(h, p, p + dir_z * CALIBRATE_PX, 6);
+            settle(h);
+            let after = h.state().split.point().z;
+            assert!(
+                (after - before).abs() > 1e-9,
+                "the Z handle moved nothing on a {CALIBRATE_PX}pt drag (world {after} vs {before})"
+            );
+            (after - before) / CALIBRATE_PX as f64
+        };
+        for _ in 0..10 {
+            let z = h.state().split.point().z;
+            let remaining = target_z - z;
+            if remaining.abs() < tolerance {
+                return;
+            }
+            // Never a wild, possibly off-screen guess: capped to a
+            // screen-reasonable step even if `world_per_px` came out
+            // tiny (e.g. a snap step landed exactly on the calibration
+            // probe's end, moving it by ~0).
+            let px = (remaining / world_per_px).clamp(-500.0, 500.0) as f32;
+            drag(h, p, p + dir_z * px, 10);
+            settle(h);
+            let moved = h.state().split.point().z - z;
+            if moved.abs() > 1e-9 && px.abs() > 1e-6 {
+                world_per_px = moved / px as f64;
+            }
+        }
+        let z = h.state().split.point().z;
+        assert!(
+            (z - target_z).abs() < tolerance,
+            "dragging the Z handle never converged on {target_z}, stuck at {z}"
+        );
+    }
+
+    /// Splitting the bunny with a horizontal plane near its feet (its
+    /// bounding box's low Z), placed by *dragging the move handle*
+    /// (not a typed field) — the owner's own way of placing a plane —
+    /// succeeds, and the kept bottom part's own floor is flat and
+    /// capped: a zoom-adaptive grid step must still let a dragged plane
+    /// land close to a real surface, not snap it somewhere coarse.
+    #[test]
+    fn split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom() {
+        require_gpu!("gizmo_snap::split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom");
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_near_the_feet_on_the_metre_bunny_leaves_a_flat_bottom",
+        ) else {
+            return;
+        };
+        // Repair first (Split refuses an open mesh), same as
+        // `hollow_acceptance::the_stanford_bunny_opened_in_metres`.
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+
+        let id = id_of(&h, "bunny");
+        let bb0 = world_bounds(&h, id);
+        let low_z = bb0.min[2];
+        let height = bb0.max[2] - low_z;
+        // Near enough the feet that most of the bunny stays in the
+        // kept "Bottom" part's complement (document units: metres):
+        // within the bottom tenth of its own height, with a tolerance
+        // comfortably inside that band — loose enough for the
+        // zoom-adaptive grid's own step (a few mm here) and a
+        // perspective camera's screen-to-world ratio not being quite
+        // constant, but still nowhere near the bunny's middle.
+        let target_z = low_z + height * 0.05;
+        let tolerance = (height * 0.08).max(0.01);
+
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        let n = h.state().split.normal();
+        assert!(
+            (n.z - 1.0).abs() < 1e-9,
+            "a default plane's normal is +Z: {n:?}"
+        );
+        drag_split_plane_z_to(&mut h, target_z, tolerance);
+        let cut_z = h.state().split.point().z;
+        assert!(
+            cut_z < low_z + height * 0.2,
+            "the dragged plane should have landed near the feet, not the middle: {cut_z} (feet {low_z}, height {height})"
+        );
+
+        let names = cut_with_keep(&mut h, "Bottom");
+        assert_eq!(names, ["bunny (bottom)"], "{names:?}");
+        let kept = h
+            .state()
+            .session
+            .document()
+            .object(id_of(&h, "bunny (bottom)"))
+            .unwrap()
+            .mesh()
+            .unwrap()
+            .clone();
+        let topo = kept.topology_with(&mf_runtime::RunContext::none()).unwrap();
+        assert_eq!(topo.boundary_edges, 0, "the cut's cap left the bottom open");
+        let bb = world_bounds(&h, id_of(&h, "bunny (bottom)"));
+        assert!(
+            bb.max[2] <= cut_z + 1e-6,
+            "the kept bottom part reaches above the cut: {bb:?}"
+        );
+        assert!(
+            (bb.min[2] - low_z).abs() < 1e-6,
+            "the kept bottom part should still reach down to the original feet: {bb:?}"
+        );
+    }
+
+    /// An mm-scale model still snaps to a plain 1 mm step at a normal
+    /// zoom (the fix is zoom-*adaptive*, not merely "always finer"): the
+    /// zoom-adaptive grid must not regress the common case every other
+    /// test in this file already relies on implicitly.
+    #[test]
+    fn mm_model_snaps_to_one_millimetre_at_normal_zoom() {
+        require_gpu!("gizmo_snap::mm_model_snaps_to_one_millimetre_at_normal_zoom");
+        let mut h = opened(vec![("cube", mf_fixtures::cube(40.0), at([0.0; 3]))]);
+        open_transform(&mut h);
+        settle(&mut h);
+        let app = h.state();
+        let g = app.transform_gizmo().unwrap();
+        let cam = app.camera.unwrap();
+        let rect = app.viewport.last_rect.unwrap();
+        let view = (rect.width() as f64, rect.height() as f64);
+        let (grid, step_mm) =
+            mf_desktop::transform_tool::snap_step(&cam, g.pivot, view, Unit::Millimeter);
+        assert!(
+            (step_mm - 1.0).abs() < 1e-9,
+            "a normal-zoom mm document should still pick a 1 mm step, got {step_mm} mm"
+        );
+        assert!(
+            (grid - 1.0).abs() < 1e-9,
+            "{grid} document units != 1 mm here"
+        );
+    }
+
+    /// The owner's follow-up report (2026-11-14): import the bunny
+    /// (metres), rotate it 90 degrees about X, drop it to the plate, fill
+    /// its holes, *then* open Split. Before this fix, Split's plane
+    /// (`SplitState::placed_for`) cached the *selection* it was last
+    /// centred for, not that selection's transform — so once Split had
+    /// placed the plane for "bunny" at all (even in an earlier, unrelated
+    /// open of the tool), a later open with the same selection but a
+    /// moved bunny left the plane exactly where it used to be: Point
+    /// showed (0, 0, 0), off to the side of the rotated, dropped model,
+    /// and the move handle read as broken because it was there on the
+    /// gizmo's own small on-screen arm, just nowhere near the bunny.
+    /// Opening Split must re-centre the plane on the selection's CURRENT
+    /// world bounding box, on open and after any transform change.
+    #[test]
+    fn split_recentres_the_plane_after_a_rotate_and_drop_to_plate() {
+        require_gpu!("gizmo_snap::split_recentres_the_plane_after_a_rotate_and_drop_to_plate");
+        let Some(mut h) = opened_bunny_in_metres(
+            "gizmo_snap::split_recentres_the_plane_after_a_rotate_and_drop_to_plate",
+        ) else {
+            return;
+        };
+        let id = id_of(&h, "bunny");
+
+        // Open Split once already (so `placed_for` caches "bunny" at its
+        // *original* placement) before the rotate and drop — reproducing
+        // the owner's own session shape, where Split wasn't necessarily
+        // opened for the first time afterwards.
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        open_transform(&mut h);
+        settle(&mut h);
+
+        // Rotate 90 degrees about X, about the bounding-box centre.
+        let before = h.state().session.document().object(id).unwrap().transform;
+        let centre = {
+            let doc = h.state().session.document();
+            let mesh = doc.object(id).unwrap().mesh().unwrap();
+            DVec3::from(mesh.bounding_box().unwrap().center())
+        };
+        let rotated = mf_desktop::transform_tool::with_rotation_scale(
+            &before,
+            centre,
+            DVec3::new(90.0, 0.0, 0.0),
+            DVec3::ONE,
+        )
+        .unwrap();
+        h.state_mut().active = Some(id);
+        h.state_mut()
+            .commit_transform(id, rotated, "Rotated bunny 90 about X".into());
+        wait_until(&mut h, "the rotate commits", |a| {
+            a.busy.is_none() && a.session.document().object(id).unwrap().transform != before
+        });
+        settle(&mut h);
+
+        // Drop to plate.
+        let before_drop = h.state().session.document().object(id).unwrap().transform;
+        h.state_mut().drop_to_plate();
+        wait_until(&mut h, "drop to plate commits", |a| {
+            a.busy.is_none() && a.session.document().object(id).unwrap().transform != before_drop
+        });
+        settle(&mut h);
+
+        // Fill holes (Repair).
+        h.get_by_label("Repair").click();
+        settle(&mut h);
+        h.get_by_label("Fill all holes").click();
+        settle(&mut h);
+        let rev = h.state().session.current();
+        h.get_by_label("Apply").click();
+        wait_until(&mut h, "the repair", |a| {
+            a.session.current() != rev && a.busy.is_none() && a.hole_view().is_some()
+        });
+        settle(&mut h);
+
+        // The bunny's own current world bounds, after rotate and drop
+        // (rotation-aware — the bunny is no longer axis-aligned with its
+        // local box after a 90-degree turn).
+        let bb = world_bounds_rotated(&h, id);
+        let expected_centre = (DVec3::from(bb.min) + DVec3::from(bb.max)) * 0.5;
+
+        // Now open Split: the plane must be centred on the CURRENT
+        // bounds, not wherever it was left before the rotate.
+        h.get_by_label("Split").click();
+        settle(&mut h);
+        let point = h.state().split.point();
+        assert!(
+            (point - expected_centre).length() < 1e-6,
+            "the plane didn't re-centre on the rotated, dropped bunny: \
+             point {point:?}, expected near {expected_centre:?} (bounds {bb:?})"
+        );
+
+        // And the move handle actually moves it from there (not stuck,
+        // the owner's literal complaint).
+        let (g, _) = mf_desktop::shape_tools::split_gizmo(h.state()).unwrap();
+        let (p, dir_z) = axis_handle_point(&h, &g, mf_render::Handle::Axis(2));
+        drag(&mut h, p, p + dir_z * 40.0, 10);
+        settle(&mut h);
+        let after = h.state().split.point();
+        assert!(
+            (after - point).length() > 1e-6,
+            "the plane's move handle still didn't move it: {point:?} -> {after:?}"
+        );
     }
 }

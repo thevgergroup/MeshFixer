@@ -43,8 +43,8 @@ use serde::{Deserialize, Serialize};
 use super::failed;
 use crate::layout::{Footprint, Plate, layout_on_plate};
 use crate::{
-    Cancelled, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document, unsupported_target,
+    Cancelled, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
+    RunContext, Target, needs_document, unsupported_target,
 };
 
 /// Which piece of a joint.
@@ -1294,7 +1294,17 @@ impl Operation for PlaceConnectors {
     }
 
     fn version(&self) -> u32 {
-        1
+        2
+    }
+
+    /// Version 1 recorded a `mm` param (a scale factor disguised as a
+    /// length, units-audit.md's "fake `mm` length param"): document
+    /// units per millimetre, filled in by `prepare`'s unit conversion.
+    /// Version 2 drops the param and reads [`DocContext::mm_to_doc`]
+    /// instead (consolidation plan C12), so an old record's `mm` value
+    /// just sits in its params, unread, and replay stays byte-identical.
+    fn upgrade_params(&self, recorded: u32, _params: &mut Params) -> bool {
+        matches!(recorded, 1 | 2)
     }
 
     fn execute(
@@ -1302,6 +1312,7 @@ impl Operation for PlaceConnectors {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -1315,9 +1326,10 @@ impl Operation for PlaceConnectors {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        self.execute_scene(inputs, &[], params, ctx)
+        self.execute_scene(inputs, &[], params, doc, ctx)
     }
 
     fn execute_scene(
@@ -1325,6 +1337,7 @@ impl Operation for PlaceConnectors {
         inputs: &[OperandInput],
         scene: &[crate::SceneObject],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let [a, b] = inputs else {
@@ -1342,10 +1355,13 @@ impl Operation for PlaceConnectors {
         let normal = DVec3::from(params.get_vec3("plane_normal")?);
         let u = DVec3::from(params.get_vec3("plane_u")?);
         let gap = params.get_float("gap")?;
-        let mm = params.get_float("mm")?;
-        if mm.is_nan() || mm <= 0.0 {
-            return Err(failed("invalid_units", "mm must be positive"));
-        }
+        // Document units per millimetre (consolidation plan C12): the
+        // connectors are generated in mm (D16) and scaled by this,
+        // straight from the document's own unit rather than the old
+        // `mm` param (a scale factor disguised as a length, dropped in
+        // version 2; `upgrade_params` keeps an older log's own `mm`
+        // readable, but this op never reads it back).
+        let mm = doc.mm_to_doc();
         let frame = JointFrame::new(point, normal, u, gap)
             .ok_or_else(|| failed("invalid_plane", "The joint's plane has no direction."))?;
         let placements: Vec<Placement> = serde_json::from_str(params.get_text("connectors")?)

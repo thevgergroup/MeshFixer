@@ -25,8 +25,8 @@ use mf_spec::Params;
 
 use crate::affine::{apply, apply_linear, determinant, inverse};
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 /// The progress stages of `mesh.sculpt_stroke`.
@@ -151,6 +151,7 @@ impl Operation for SculptStroke {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -160,6 +161,7 @@ impl Operation for SculptStroke {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = inputs.first().ok_or_else(|| {

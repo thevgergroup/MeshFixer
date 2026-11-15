@@ -35,12 +35,13 @@ fn big_model() -> ImportedModel {
             mesh: damaged_sphere(&DamageSpec::for_triangles(BIG, 11)),
             transform: mf_io::threemf::IDENTITY,
         }],
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: None,
         source: SourceInfo {
             path: "big.stl".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::StlBinary,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

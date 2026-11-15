@@ -389,6 +389,14 @@ pub struct MeshFixerApp {
     /// material or colour always overrides this (`mf_render::DrawItem`'s
     /// `object_color` is only used where the mesh has none of its own).
     pub object_colors: bool,
+    /// Every gizmo tool's snap switch (owner, 2026-11-14: "can't we
+    /// disable snap?") — one shared preference for the Transform gizmo
+    /// and Split's plane and print-volume box, each showing it as its
+    /// own "Snap: 1 mm"-style checkbox (`transform_tool::snap_step` for
+    /// the live step shown). On by default; Cmd/Ctrl while dragging
+    /// inverts it for that drag, in every tool
+    /// ([`MeshFixerApp::gizmo_snap_on`]).
+    pub gizmo_snap: bool,
     /// The Shape tools' state (UI plan step 5): Split's plane, Combine's
     /// tool and operation, Make solid's settings.
     pub split: crate::shape_tools::SplitState,
@@ -430,6 +438,11 @@ pub struct MeshFixerApp {
     /// The Sculpt panel's "Show sculpt changes" overlay (off by default):
     /// tints vertices by how far they've moved since the tool was opened.
     pub sculpt_show_changes: bool,
+    /// The radius panel's typed-unit field while it has focus (ADR-0006
+    /// rule 1b: "3 mm" and the like): `None` shows the live "≈ X at this
+    /// zoom" readout instead. Mirrors [`crate::transform_tool::TransformTool::editing`]'s
+    /// pattern — the text a person is typing, not yet committed.
+    pub sculpt_radius_text: Option<String>,
     /// The active object's mesh as it was when Sculpt was opened (the
     /// "Show sculpt changes" overlay's reference point): `None` outside
     /// Sculpt. Reset whenever the active object changes while Sculpt
@@ -453,6 +466,14 @@ pub struct MeshFixerApp {
     /// Editable holes whose profile a move left stale, to re-resolve once
     /// idle (`shape_panel::after_commit`).
     pub pending_reorient: Option<Vec<(ObjectId, mf_parts::GeneratorRecord)>>,
+    /// Set right after importing at "Scale to fit plate" (MF-ISSUE-045):
+    /// the newly imported object and the uniform factor to scale it by,
+    /// applied on the next idle frame as its own undoable
+    /// `object.set_transform` step (import itself is a separate step,
+    /// so Undo first restores the file's own size, then removes the
+    /// import, matching the brief's "Record the scaling as its own
+    /// undoable step").
+    pub pending_scale_to_fit: Option<(ObjectId, f64)>,
     /// Set by Parts/Connectors right before placing (`object.add_part`):
     /// once that command's `Message::Completed` has run (so `active` is
     /// already the newly created object, D6's own `after_object_changes`
@@ -876,6 +897,7 @@ impl MeshFixerApp {
             first_use_hint: true,
             shading: mf_render::Shading::default(),
             object_colors: true,
+            gizmo_snap: true,
             split: Default::default(),
             split_flow: Default::default(),
             alignment: Default::default(),
@@ -891,6 +913,7 @@ impl MeshFixerApp {
             sculpt_pending: None,
             sculpt_hover: None,
             sculpt_show_changes: false,
+            sculpt_radius_text: None,
             sculpt_baseline: None,
             solid: Default::default(),
             parts: Default::default(),
@@ -898,6 +921,7 @@ impl MeshFixerApp {
             shape_edit: None,
             hinge: Default::default(),
             pending_reorient: None,
+            pending_scale_to_fit: None,
             pending_open_transform: None,
             last_invocation_op: None,
             in_flight_invocation: None,
@@ -1048,7 +1072,18 @@ impl MeshFixerApp {
                     .path
                     .file_name()
                     .map_or_else(|| "the file".into(), |n| n.to_string_lossy().into_owned());
-                self.unit_prompt = Some(UnitPrompt::new(name, extent, model));
+                // "Active Machine profile" means one the user picked: the
+                // built-in Uncalibrated profile (always active until they
+                // choose otherwise) counts as "no profile", so an
+                // unconfigured install checks against the plain 250 mm
+                // default plate rather than Uncalibrated's own volume.
+                let (profiles, profile_err) = crate::connector_tool::machine_profiles(self);
+                let active = (profile_err.is_none()
+                    && profiles.active != mf_parts::UNCALIBRATED_NAME)
+                    .then(|| profiles.active_profile());
+                let plate = crate::import_dialog::Plate::from_profile(active);
+                let hint = model.source.exporter_hint.clone();
+                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint));
             }
             _ => {
                 model.warnings.push(format!(
@@ -1073,18 +1108,42 @@ impl MeshFixerApp {
         };
         match crate::import_dialog::show(prompt, ctx) {
             None => {}
-            Some(true) => {
+            Some((true, scale_to_fit)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
+                    let factor = scale_to_fit.then(|| prompt.scale_to_fit_factor());
                     self.import_model(prompt.into_model());
+                    if let (Some(factor), Some(id)) = (factor, self.active) {
+                        self.pending_scale_to_fit = Some((id, factor));
+                    }
                 }
             }
-            Some(false) => {
+            Some((false, _)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
                     self.workers.discard(prompt);
                 }
                 self.status = Some("Import cancelled: nothing opened".into());
             }
         }
+    }
+
+    /// Applies a "Scale to fit plate" import's scaling, once the import
+    /// itself has committed and nothing else is busy: a uniform scale
+    /// of the newly imported object's transform, as its own undoable
+    /// step (`commit_transform`), so Undo first restores the file's own
+    /// size, then removes the import.
+    fn run_pending_scale_to_fit(&mut self) {
+        if self.busy.is_some() {
+            return;
+        }
+        let Some((id, factor)) = self.pending_scale_to_fit.take() else {
+            return;
+        };
+        let Some(current) = self.session.document().object(id).map(|o| o.transform) else {
+            return; // the object was removed (e.g. the import was undone)
+        };
+        let scaled = transform_tool::scale_linear(&current, factor);
+        self.active = Some(id);
+        self.commit_transform(id, scaled, "Scale to fit plate".into());
     }
 
     /// Mark a job as running (`label` in the status bar) and return the
@@ -2164,17 +2223,24 @@ impl MeshFixerApp {
     /// point every command (a tool's Apply, a slider or drag commit, an
     /// auto re-aim, `move_group`...) goes through: with a command already
     /// running, `inv` is queued instead of raced against it (in order;
-    /// coalesced with the last queued command when it has the same op
-    /// and target, latest params winning), and run once the running one's
-    /// result has been handled (`drain_pending_invocation`). This is what
-    /// keeps two app-issued commands from ever preparing against the same
-    /// base and committing out of order (owner-reported "document changed
-    /// while the command ran").
+    /// coalesced with the last queued command only when that command's
+    /// own spec declares `coalesce: absolute` (ADR-0009) and the key —
+    /// same op, same target — matches, latest params winning), and run
+    /// once the running one's result has been handled
+    /// (`drain_pending_invocation`). This is what keeps two app-issued
+    /// commands from ever preparing against the same base and
+    /// committing out of order (owner-reported "document changed while
+    /// the command ran"), without silently dropping a delta command
+    /// (`mesh.sculpt_stroke`'s default `coalesce: never`): three quick
+    /// strokes queued behind a running one are three undo steps, not
+    /// fewer.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
         if self.busy.is_some() {
+            let coalesces = mf_spec::builtin::get(&inv.op_id)
+                .is_some_and(|spec| spec.coalesce == mf_spec::Coalesce::Absolute);
             match self.pending_invocation.back_mut() {
                 Some((queued, queued_label))
-                    if queued.op_id == inv.op_id && queued.target == inv.target =>
+                    if coalesces && queued.op_id == inv.op_id && queued.target == inv.target =>
                 {
                     *queued = inv;
                     *queued_label = label;
@@ -2794,6 +2860,17 @@ impl MeshFixerApp {
                     _ => None,
                 };
                 let is_new_revision = matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
+                // A refused, cancelled or no-op placement command leaves
+                // nothing to open Transform on: drop the pending
+                // placement right here rather than letting the frame
+                // loop's drain (`pending_open_transform.take()`) act on
+                // it later with no way to tell the refusal apart from a
+                // commit (the owner-reported connector bug: a refused
+                // `object.add_shape` still opened Transform on the scan
+                // and recorded it as the placed connector).
+                if !is_new_revision {
+                    self.pending_open_transform = None;
+                }
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(match placed {
@@ -4932,6 +5009,7 @@ impl MeshFixerApp {
             allowance: key.allowance,
             count: key.count,
             min_wall: key.min_wall,
+            unit: self.session.document().units(),
         });
     }
 
@@ -5149,28 +5227,100 @@ impl MeshFixerApp {
         ))
     }
 
-    /// The line at the view's top-left while Transform is open.
-    fn transform_hint(&self) -> Option<&'static str> {
-        self.transform_tool()?;
-        Some("Transform · W move · E rotate · R scale · Cmd/Ctrl: snap off · Esc: done")
+    /// Whether a gizmo drag snaps right now: [`Self::gizmo_snap`] (the
+    /// one shared preference every gizmo tool's own "Snap" checkbox
+    /// shows and edits), inverted while Cmd/Ctrl is held (`invert`),
+    /// exactly like [`Self::transform_snap`] always has — Split's plane
+    /// and print-volume box, and any future gizmo tool, read this too
+    /// instead of keeping their own switch (owner, 2026-11-14: "can't we
+    /// disable snap?").
+    pub(crate) fn gizmo_snap_on(&self, invert: bool) -> bool {
+        self.gizmo_snap != invert
     }
 
-    /// The build plate, sized in the document's units.
+    /// The line at the view's top-left while Transform or Split's gizmo
+    /// is open, with the live grid step (MF-OBJ-002, "snap 1 mm") when
+    /// snapping is on: the same zoom-adaptive, unit-aware step every
+    /// gizmo drag now snaps to ([`transform_tool::snap_step`]).
+    fn tool_hint(&self) -> Option<String> {
+        let snap = self.gizmo_snap_on(false);
+        if self.transform_tool().is_some() {
+            let clause = self.snap_hint_clause(snap, self.transform_gizmo().map(|g| g.pivot));
+            return Some(format!(
+                "Transform · W move · E rotate · R scale{clause} · Cmd/Ctrl: snap off · Esc: done"
+            ));
+        }
+        if self.active_tool == crate::shape_tools::SPLIT {
+            let (gizmo, _) = crate::shape_tools::split_gizmo(self)?;
+            let clause = self.snap_hint_clause(snap, Some(gizmo.pivot));
+            return Some(format!("Split · drag the plane to move or tilt it{clause}"));
+        }
+        None
+    }
+
+    /// " · snap 1 mm", or "" when snapping is off or the step can't be
+    /// worked out (no camera/viewport yet).
+    fn snap_hint_clause(&self, snap_on: bool, pivot: Option<glam::DVec3>) -> String {
+        if !snap_on {
+            return String::new();
+        }
+        let (Some(cam), Some(rect), Some(pivot)) = (self.camera, self.viewport.last_rect, pivot)
+        else {
+            return String::new();
+        };
+        let view = (rect.width() as f64, rect.height() as f64);
+        let (_, step_mm) =
+            transform_tool::snap_step(&cam, pivot, view, self.session.document().units());
+        format!(" · {}", transform_tool::snap_hint(step_mm))
+    }
+
+    /// The build plate, sized in the document's units. The plate's own
+    /// physical size (`size_mm`) is fixed — it's a real print bed's
+    /// dimensions, not something zoom should change — but its grid-line
+    /// spacing is zoom-adaptive (consolidation plan C09), through the
+    /// same [`mf_units::nice_step`] every gizmo snap now uses
+    /// ([`transform_tool::snap_step`]): a fixed 10 mm grid reads as
+    /// nothing at all zoomed far out on a large part, and as visual
+    /// noise zoomed in close on a small one (ADR-0006 rule 3: "grid and
+    /// cell sizes derive from the bounding box", "a literal length
+    /// constant in document units is a bug"). `major_mm` is always 5
+    /// minor steps, so the major/minor ratio stays the one the owner
+    /// tuned (10 mm minor, 50 mm major) at every zoom. Falls back to the
+    /// fixed default spacing without a live camera/viewport yet (the
+    /// first frame, before either is set).
     fn plate(&self) -> mf_render::Plate {
         let mm = transform_tool::mm_per(self.session.document().units());
         let d = mf_render::Plate::default();
+        let grid_mm = self
+            .camera
+            .zip(self.viewport.last_rect)
+            .map(|(cam, rect)| {
+                let view = (rect.width() as f64, rect.height() as f64);
+                mf_render::adaptive_grid_mm(
+                    &cam,
+                    glam::DVec3::ZERO,
+                    view,
+                    mm,
+                    transform_tool::MIN_SNAP_PX,
+                )
+            })
+            .unwrap_or(d.grid_mm);
         mf_render::Plate {
             size_mm: d.size_mm.map(|v| v / mm),
-            grid_mm: d.grid_mm / mm,
-            major_mm: d.major_mm / mm,
+            grid_mm: grid_mm / mm,
+            major_mm: grid_mm * 5.0 / mm,
         }
     }
 
-    /// The snapping a drag uses now: the tool's switch, inverted while
-    /// Cmd/Ctrl is held. The grid is 1 mm in document units; the plate
-    /// snap needs the object's lowest point, found on a worker.
+    /// The snapping a drag uses now: the shared [`Self::gizmo_snap`]
+    /// switch, inverted while Cmd/Ctrl is held. The grid is a 1-2-5-mm
+    /// step picked so it reads on screen at the current zoom
+    /// (MF-OBJ-002, [`transform_tool::snap_step`] — a fixed
+    /// 1-document-unit grid snapped every drag on a metre-scale document
+    /// to zero); the plate snap needs the object's lowest point, found
+    /// on a worker.
     fn transform_snap(&self, invert: bool, object: ObjectId, start: &[f64; 12]) -> Snap {
-        let on = self.transform_tool().is_some_and(|t| t.snap) != invert;
+        let on = self.gizmo_snap_on(invert);
         if !on {
             return Snap {
                 grid: None,
@@ -5179,7 +5329,6 @@ impl MeshFixerApp {
                 plate: None,
             };
         }
-        let mm = transform_tool::mm_per(self.session.document().units());
         let mesh = self
             .session
             .document()
@@ -5192,8 +5341,11 @@ impl MeshFixerApp {
                 *o == object && mesh.is_some_and(|c| Mesh::ptr_eq(c, m)) && t == start
             })
             .and_then(|(.., z)| *z);
+        let grid = self.transform_grab().map(|(g, cam, view)| {
+            transform_tool::snap_step(&cam, g.pivot, view, self.session.document().units()).0
+        });
         Snap {
-            grid: Some(1.0 / mm),
+            grid,
             plate: lowest.map(|world_min_z| PlateSnap {
                 world_min_z,
                 within_pt: 8.0,
@@ -5652,6 +5804,7 @@ impl MeshFixerApp {
         // when some later command finishes (final review I2).
         self.drain_pending_invocation();
         crate::shape_panel::run_pending_reorient(self);
+        self.run_pending_scale_to_fit();
         if self.busy.is_none()
             && let Some(pending) = self.pending_open_transform.take()
         {
@@ -5955,7 +6108,7 @@ impl MeshFixerApp {
                 }
                 let gizmo = self.tool_gizmo();
                 let plate = self.tool_hides_defects().then(|| self.plate());
-                let hint = self.transform_hint();
+                let hint = self.tool_hint();
                 let split_preview = crate::shape_tools::split_preview(self);
                 let shading = crate::shape_tools::shading(self);
                 let intersections = self.intersection_views();
@@ -6433,7 +6586,10 @@ fn catalogue_history_label(
             // allow-swallow: a label only: an unreadable wall value falls back to the spec default
             let wall = rec.params.get_float("wall_thickness").unwrap_or(2.0);
             let open = rec.params.get_bool("open_through").unwrap_or(false);
-            let wall_text = format!("{} mm", crate::defects::measure(wall));
+            // `wall` is already a document-unit value (ADR-0006 rule 2):
+            // on a metres document the spec's own "mm" was wrongly taken
+            // as the shown unit (consolidation plan C11).
+            let wall_text = mf_units::format_length(wall, node.document.units());
             if open {
                 crate::t!(
                     "history.label.mesh.hollow.open",
@@ -6603,13 +6759,19 @@ fn plural_s(n: usize) -> &'static str {
 /// connector list) are left out: they'd only repeat it.
 fn history_details(node: &mf_command::RevisionNode) -> String {
     node.record.as_ref().map_or_else(String::new, |rec| {
-        history_details_of(&rec.op_id, &rec.params)
+        history_details_of(&rec.op_id, &rec.params, node.document.units())
     })
 }
 
 /// [`history_details`], from an op id and its parameters directly (so it
-/// can be tested without a whole revision).
-fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
+/// can be tested without a whole revision). `unit` is the *document's*
+/// unit (consolidation plan C11): every recorded length parameter is
+/// already a document-unit value (`Session::prepare`'s one conversion
+/// boundary, ADR-0006 rule 2), never the spec's own declared unit
+/// (almost always mm, D16) — labelling a 0.002 doc-unit value "mm" on a
+/// metres document was the owner's exact bug ("History Details shows
+/// '0.00200 mm' for a 2 mm wall on a metres doc").
+fn history_details_of(op_id: &str, params: &mf_spec::Params, unit: mf_io::threemf::Unit) -> String {
     let Some(spec) = mf_spec::builtin::get(op_id) else {
         return String::new();
     };
@@ -6646,7 +6808,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
                 format!(
                     "{}: {}",
                     param_label(op_id, &p.name),
-                    summarize_value(value, p.unit.as_deref())
+                    summarize_value(value, p.unit, unit)
                 )
             })
         })
@@ -6659,22 +6821,35 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
 /// Details section (I5, owner 2026-11-13: a raw dump — a `faces` list of
 /// hundreds of ids, an `affine`'s 12 numbers, a bare float with no unit —
 /// is not for people). Never longer than one line.
-fn summarize_value(value: &ParamValue, unit: Option<&str>) -> String {
+///
+/// `value` is always already in *document* units when `param_unit` is
+/// [`mf_spec::ParamUnit::Length`] (`Session::prepare`'s one conversion
+/// boundary, ADR-0006 rule 2: a recorded length parameter is never left
+/// in the spec's own declared unit, almost always mm, D16). `doc_unit`
+/// is the document's unit, the only one ever shown; it goes through
+/// [`mf_units::format_length`] rather than a literal `"mm"` suffix, the
+/// owner's exact bug (consolidation plan C11: "History Details shows
+/// '0.00200 mm' for a 2 mm wall on a metres doc").
+fn summarize_value(
+    value: &ParamValue,
+    param_unit: mf_spec::ParamUnit,
+    doc_unit: mf_io::threemf::Unit,
+) -> String {
     match value {
         ParamValue::Faces(l) => crate::defects::count(l.faces.len(), "face"),
         ParamValue::Samples(s) => crate::defects::count(s.len(), "dab"),
-        ParamValue::Affine(m) => summarize_affine(m),
-        ParamValue::Float(f) if unit == Some("mm") => {
-            format!("{} mm", crate::defects::measure(*f))
+        ParamValue::Affine(m) => summarize_affine(m, doc_unit),
+        ParamValue::Float(f) if matches!(param_unit, mf_spec::ParamUnit::Length(_)) => {
+            mf_units::format_length(*f, doc_unit)
         }
-        ParamValue::Float(f) if unit == Some("%") => {
+        ParamValue::Float(f) if matches!(param_unit, mf_spec::ParamUnit::Percent) => {
             format!("{}%", crate::defects::measure(*f))
         }
-        ParamValue::Vec3(v) if unit == Some("mm") => format!(
-            "{}, {}, {} mm",
-            crate::defects::measure(v[0]),
-            crate::defects::measure(v[1]),
-            crate::defects::measure(v[2])
+        ParamValue::Vec3(v) if matches!(param_unit, mf_spec::ParamUnit::Length(_)) => format!(
+            "{}, {}, {}",
+            mf_units::format_length(v[0], doc_unit),
+            mf_units::format_length(v[1], doc_unit),
+            mf_units::format_length(v[2], doc_unit)
         ),
         other => other.to_string(),
     }
@@ -6684,13 +6859,16 @@ fn summarize_value(value: &ParamValue, unit: Option<&str>) -> String {
 /// each left out when it's the identity (a mesh.combine's default
 /// placement, say "moved 10, 0, 0 mm" with no rotation or scale said).
 /// A sheared transform (no clean rotate/scale split) just says so.
-fn summarize_affine(m: &[f64; 12]) -> String {
+/// `doc_unit` is the document's unit: the translation is a recorded,
+/// already-doc-unit value, shown through [`mf_units::format_length`]
+/// rather than a literal `"mm"` (consolidation plan C11).
+fn summarize_affine(m: &[f64; 12], doc_unit: mf_io::threemf::Unit) -> String {
     let fmt3 = |v: glam::DVec3| {
         format!(
             "{}, {}, {}",
-            crate::defects::measure(v.x),
-            crate::defects::measure(v.y),
-            crate::defects::measure(v.z)
+            mf_units::significant_figures(v.x, 3),
+            mf_units::significant_figures(v.y, 3),
+            mf_units::significant_figures(v.z, 3)
         )
     };
     match mf_render::decompose(m) {
@@ -6701,7 +6879,7 @@ fn summarize_affine(m: &[f64; 12]) -> String {
         } => {
             let mut parts = Vec::new();
             if translate.length() > 1e-9 {
-                parts.push(format!("moved {} mm", fmt3(translate)));
+                parts.push(format!("moved {} {}", fmt3(translate), doc_unit.symbol()));
             }
             if rotate_deg_xyz.length() > 1e-9 {
                 parts.push(format!("rotated {}°", fmt3(rotate_deg_xyz)));
@@ -6907,14 +7085,22 @@ mod tests {
             .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
             .collect();
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert_eq!(details, "", "every parameter is at its default: {details}");
 
         let mut raw = raw;
         raw.insert("hole_diameter".into(), "7.5".into());
         raw.insert("cut_gap".into(), "0.4".into());
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert!(
             !details.contains("Hole diameter"),
             "pegs is none: hole_diameter doesn't apply: {details}"
@@ -6935,7 +7121,11 @@ mod tests {
         raw.insert("pegs".into(), "dowels".into());
         raw.insert("hole_diameter".into(), "7.5".into());
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert!(details.contains("Hole diameter: 7.5"), "{details}");
         assert!(details.contains("Pegs: dowels"), "{details}");
     }
@@ -6954,7 +7144,14 @@ mod tests {
         let mut raw = raw;
         raw.insert("transform".into(), "1,0,0,0,1,0,0,0,1,12,0,0".into());
         let params = spec.validate(&raw).unwrap();
-        assert_eq!(history_details_of("object.set_transform", &params), "");
+        assert_eq!(
+            history_details_of(
+                "object.set_transform",
+                &params,
+                mf_io::threemf::Unit::Millimeter
+            ),
+            ""
+        );
 
         let spec = mf_spec::builtin::get("split.place_connectors").unwrap();
         let raw: BTreeMap<String, String> = spec
@@ -6963,7 +7160,14 @@ mod tests {
             .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
             .collect();
         let params = spec.validate(&raw).unwrap();
-        assert!(!history_details_of("split.place_connectors", &params).contains("connectors"));
+        assert!(
+            !history_details_of(
+                "split.place_connectors",
+                &params,
+                mf_io::threemf::Unit::Millimeter
+            )
+            .contains("connectors")
+        );
     }
 
     /// Every registered operation spec's `history_label` resolves in the

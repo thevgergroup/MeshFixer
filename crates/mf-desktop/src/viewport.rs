@@ -127,7 +127,7 @@ pub struct ViewOptions<'a> {
     /// The build plate to draw under the model.
     pub plate: Option<mf_render::Plate>,
     /// The open interactive tool's line at the view's top-left.
-    pub tool_hint: Option<&'a str>,
+    pub tool_hint: Option<String>,
     /// How the surface is shaded (the View menu's presets and wireframe).
     pub shading: mf_render::Shading,
     /// Split's plane (point, normal; world): the two sides are shaded
@@ -539,11 +539,9 @@ impl Viewport {
         }
         // The open interactive tool says so, and how to leave it (I8).
         if let Some(hint) = tool_hint {
-            let text = ui.painter().layout_no_wrap(
-                hint.to_owned(),
-                egui::FontId::proportional(13.0),
-                theme::TEXT,
-            );
+            let text =
+                ui.painter()
+                    .layout_no_wrap(hint, egui::FontId::proportional(13.0), theme::TEXT);
             let area = egui::Rect::from_min_size(top, text.size()).expand(4.0);
             ui.painter()
                 .rect_filled(area, 4.0, theme::VIEWPORT_BACKGROUND.gamma_multiply(0.85));

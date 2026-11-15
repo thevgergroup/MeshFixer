@@ -25,6 +25,7 @@ mf-geometry.workspace = true
 mf-io.workspace = true
 mf-spec.workspace = true
 mf-operations.workspace = true
+mf-units.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 

@@ -21,7 +21,10 @@
 
 use mf_geometry::Mesh;
 use mf_runtime::RunContext;
-use mf_spec::{OperationSpec, ParamKind, ParamSpec, ParamValue, Params, RuntimeSpec, TargetSpec};
+use mf_spec::{
+    Coalesce, OperationSpec, ParamKind, ParamSpec, ParamUnit, ParamValue, Params, RuntimeSpec,
+    TargetSpec,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::connector::ConnectorError;
@@ -187,7 +190,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                     min: Some(min),
                     max,
                 },
-                unit: Some("mm".into()),
+                unit: ParamUnit::parse(Some("mm")).expect("'mm' is a known unit symbol"),
                 default_from: None,
                 fit_role: None,
                 description: description.into(),
@@ -195,7 +198,8 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
             P::Num(name, default, min, max, unit, description) => ParamSpec {
                 name: name.into(),
                 kind: ParamKind::Float { default, min, max },
-                unit: unit.map(Into::into),
+                unit: ParamUnit::parse(unit)
+                    .unwrap_or_else(|e| panic!("{name}'s unit symbol: {e}")),
                 default_from: None,
                 fit_role: None,
                 description: description.into(),
@@ -207,7 +211,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                     min: Some(min),
                     max: Some(max),
                 },
-                unit: None,
+                unit: ParamUnit::None,
                 default_from: None,
                 fit_role: None,
                 description: description.into(),
@@ -218,7 +222,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                     default: default.into(),
                     values: values.iter().map(|v| (*v).to_owned()).collect(),
                 },
-                unit: None,
+                unit: ParamUnit::None,
                 default_from: None,
                 fit_role: None,
                 description: description.into(),
@@ -228,7 +232,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
                 kind: ParamKind::Text {
                     default: default.into(),
                 },
-                unit: None,
+                unit: ParamUnit::None,
                 default_from: None,
                 fit_role: None,
                 description: description.into(),
@@ -262,6 +266,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
             cancellable: false,
             progress: false,
         },
+        coalesce: Coalesce::Never,
     }
 }
 

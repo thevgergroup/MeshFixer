@@ -21,7 +21,7 @@ use rayon::prelude::*;
 use serde_json::json;
 
 use crate::{
-    OpError, OpOutput, Operation, RunContext, TRIANGULATION_BUDGET_BYTES, Target,
+    DocContext, OpError, OpOutput, Operation, RunContext, TRIANGULATION_BUDGET_BYTES, Target,
     unsupported_target,
 };
 
@@ -277,6 +277,7 @@ impl Operation for FillHoles {
         input: &Mesh,
         target: &Target,
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         let max_edges = params.get_int("max_loop_edges")?.max(3) as usize;

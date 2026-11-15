@@ -42,5 +42,5 @@ pub use machine::{
     MACHINE_PROFILES_FILE, MachineError, MachineProfile, MachineProfiles, PRINT_VOLUME_PRESETS,
     UNCALIBRATED_NAME,
 };
-pub use manifest::{Attach, PartKind, PartManifest};
+pub use manifest::{Attach, PartKind, PartManifest, Unit};
 pub use shape::{GeneratorRecord, ShapeRole, builtin_shapes, new_record, record_spec, regenerate};

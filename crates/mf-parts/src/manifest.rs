@@ -3,6 +3,8 @@
 use mf_spec::Params;
 use serde::{Deserialize, Serialize};
 
+pub use mf_io::threemf::Unit;
+
 /// Whether a part is a closed solid or an open "stamp" (capped when
 /// joined, D14), or a connector (Task 28, MF-MODEL-005): "Save to
 /// library" on a connector object writes `Connector { connector,
@@ -41,6 +43,14 @@ pub struct PartManifest {
     pub kind: PartKind,
     pub attach: Attach,
     pub default_scale: f64,
+    /// The unit the stored mesh's coordinates are in (consolidation plan
+    /// C10): a built-in's generator and an older manifest with no `unit`
+    /// field are both millimetres, the default. `object.add_part` reads
+    /// this to scale the mesh into the placing document's unit, so a part
+    /// round-trips at the same physical size across mm, m and in
+    /// documents.
+    #[serde(default)]
+    pub unit: Unit,
     /// The mesh file next to `part.yaml` (user parts; empty for built-ins).
     #[serde(default)]
     pub mesh: String,

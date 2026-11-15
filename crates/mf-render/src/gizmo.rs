@@ -1309,8 +1309,17 @@ fn apply_plate_snap(drag: &Drag, translate: DVec3, plate: PlateSnap) -> DVec3 {
     }
 }
 
-/// Snapping configuration for a drag. Defaults are a 1mm grid, 15 degrees,
-/// steps of 0.1, and 8pt from the plate.
+/// Snapping configuration for a drag. Defaults are 15 degrees, steps of
+/// 0.1, and 8pt from the plate — no world-unit grid (ADR-0006 rule 3: "a
+/// literal length constant in document units is a bug"). A fixed 1
+/// document-unit grid used to live here (`grid: Some(1.0)`), which on a
+/// metre-scale document was 1000 mm: every drag snapped to zero (the
+/// owner's stanford-bunny report, MF-OBJ-002). There is no document-unit
+/// default a gizmo tool could fall back to that would be correct at
+/// every scale, so callers that want a grid must compute one themselves
+/// (consolidation plan C09), typically through
+/// [`mf_units::nice_step`]/[`adaptive_grid_mm`], and set `grid` to
+/// `Some(..)` explicitly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Snap {
     pub grid: Option<f64>,
@@ -1322,7 +1331,7 @@ pub struct Snap {
 impl Default for Snap {
     fn default() -> Snap {
         Snap {
-            grid: Some(1.0),
+            grid: None,
             angle_deg: Some(15.0),
             scale_step: Some(0.1),
             plate: Some(PlateSnap {
@@ -1339,6 +1348,68 @@ impl Default for Snap {
 pub struct PlateSnap {
     pub world_min_z: f64,
     pub within_pt: f64,
+}
+
+/// A grid step (millimetres, from the 1-2-5 sequence) sized so it is at
+/// least `min_px` screen points at `cam`'s current zoom, measured at
+/// `pivot` (MF-OBJ-002: a fixed 1-document-unit grid snapped every drag on
+/// a metre-scale model to zero, because a whole document unit was 1000 mm).
+/// `mm_per_unit` is [`crate::camera`]-independent document-to-mm scale
+/// (`mm_per` in the desktop crate); the step is picked in mm (not document
+/// units) so the same screen-size rule gives the same on-screen step
+/// regardless of the document's own units, then the caller converts it
+/// back to document units for [`Snap::grid`].
+///
+/// A thin delegation to [`mf_units::nice_step`] (consolidation plan C03,
+/// ADR-0006) for the 1-2-5 sequence lookup itself; this function's own
+/// job is turning a camera and a pivot into the `world_per_pt` that
+/// `nice_step` needs. Falls back to the sequence's own largest step if
+/// even that still projects under `min_px` (an extreme zoom-out, or a
+/// degenerate camera): snapping then does less than asked rather than
+/// silently vanishing.
+pub fn adaptive_grid_mm(
+    cam: &OrbitCamera,
+    pivot: DVec3,
+    view: (f64, f64),
+    mm_per_unit: f64,
+    min_px: f64,
+) -> f64 {
+    // Pixels per mm at the pivot, probed along a screen-facing axis of the
+    // camera (never end-on, unlike a world axis under some views) so the
+    // probe's own projection never degenerates.
+    let right = {
+        let fwd = (cam.target - cam.eye()).normalize_or_zero();
+        let fallback = DVec3::X;
+        let dir = fwd.cross(DVec3::Z);
+        if dir.length_squared() < 1e-9 {
+            fallback
+        } else {
+            dir.normalize()
+        }
+    };
+    // `one_mm_in_units`: exactly 1 mm of real distance, in document
+    // units (`mm_per_unit` document units make 1 mm, so 1 mm is
+    // `1/mm_per_unit` document units) — so the probe's own projected
+    // length *is* pixels-per-mm directly, with no further division by
+    // a quantity that's already "one" by construction (that was the
+    // bug: dividing by the document-unit probe length again double
+    // counts `mm_per_unit`, so an inch or metre document picked a step
+    // many times too fine to ever clear `min_px`).
+    let one_mm_in_units = 1.0 / mm_per_unit.max(1e-12);
+    let px_per_mm = projected_length_px(cam, pivot, view, pivot, right, one_mm_in_units)
+        .filter(|px| *px > 1e-9)
+        .unwrap_or(0.0);
+    // A degenerate projection (a camera that can't see the probe at all)
+    // can't be expressed as a finite `world_per_pt`; the coarsest step
+    // in the sequence is the same documented fallback `nice_step` itself
+    // uses for an ordinary zoomed-out-too-far case, so reuse it directly
+    // rather than inventing a second fallback path.
+    let world_per_pt = if px_per_mm > 0.0 {
+        1.0 / px_per_mm
+    } else {
+        f64::INFINITY
+    };
+    mf_units::nice_step(world_per_pt, min_px, mf_units::Unit::Millimeter).value
 }
 
 fn round_to_step(value: f64, step: f64) -> f64 {

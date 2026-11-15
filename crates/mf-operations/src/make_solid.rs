@@ -35,7 +35,7 @@ use mf_runtime::Cancelled;
 use mf_spec::Params;
 use rayon::prelude::*;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target};
 
 pub struct MakeSolid;
 
@@ -94,6 +94,7 @@ impl Operation for MakeSolid {
         input: &Mesh,
         target: &Target,
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         if *target != Target::WholeObject {
@@ -131,11 +132,13 @@ impl Operation for MakeSolid {
         let n = [0, 1, 2].map(|a| ((bb.max[a] - bb.min[a] + 2.0 * pad) / h).ceil() as u64 + 1);
         let total = n[0].saturating_mul(n[1]).saturating_mul(n[2]);
         if total > MAX_GRID_POINTS {
+            let needed = h * (total as f64 / MAX_GRID_POINTS as f64).cbrt() * 1.01;
             return Err(failed(
                 "grid_too_large",
                 format!(
-                    "A cell size of {h} needs {total} grid points, more than the {MAX_GRID_POINTS} this can hold. Use a larger cell size (at least {:.3}).",
-                    h * (total as f64 / MAX_GRID_POINTS as f64).cbrt() * 1.01
+                    "A cell size of {} needs {total} grid points, more than the {MAX_GRID_POINTS} this can hold. Use a larger cell size (at least {}).",
+                    mf_spec::format_length(h),
+                    mf_spec::format_length(needed)
                 ),
             ));
         }

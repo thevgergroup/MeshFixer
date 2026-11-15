@@ -13,8 +13,8 @@ use mf_geometry::Mesh;
 use mf_spec::Params;
 
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 pub struct Boolean;
@@ -53,6 +53,10 @@ pub fn refusal_copy(code: &str) -> Option<(&'static str, &'static str)> {
         ),
         "section_self_intersects" => (
             "The model folds onto itself where the tool's working area cuts it",
+            "Run Make solid on it first, or move the tool slightly",
+        ),
+        "window_degenerate" => (
+            "The model's surface near the tool is too thin to cut cleanly",
             "Run Make solid on it first, or move the tool slightly",
         ),
         "result_not_manifold" => (
@@ -115,6 +119,7 @@ impl Operation for Boolean {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -124,6 +129,7 @@ impl Operation for Boolean {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let [target, tool] = inputs else {
@@ -175,7 +181,7 @@ impl Operation for Boolean {
                     d if d > 0.0 => d,
                     _ => 0.5 * blend_width,
                 };
-                (cap_and_sink(&in_frame, depth, ctx)?, true)
+                (cap_and_sink(&in_frame, depth, doc, ctx)?, true)
             } else {
                 (in_frame, false)
             };
@@ -236,7 +242,12 @@ impl Operation for Boolean {
 /// `depth` along its caps' outward normal (into the surface it's joined
 /// to). The cap faces come after the part's own, so they can be told apart
 /// in the union's provenance.
-fn cap_and_sink(part: &Mesh, depth: f64, ctx: &RunContext) -> Result<Mesh, OpError> {
+fn cap_and_sink(
+    part: &Mesh,
+    depth: f64,
+    doc: &DocContext,
+    ctx: &RunContext,
+) -> Result<Mesh, OpError> {
     let fill = crate::find("mesh.fill_holes").expect("mesh.fill_holes is registered");
     let spec = mf_spec::builtin::get("mesh.fill_holes").expect("its spec is built in");
     let raw = [("fill_style", "flat"), ("refine", "false")]
@@ -245,7 +256,7 @@ fn cap_and_sink(part: &Mesh, depth: f64, ctx: &RunContext) -> Result<Mesh, OpErr
         .collect();
     let params = spec.validate(&raw)?;
     let capped = match fill
-        .execute(part, &Target::WholeObject, &params, ctx)?
+        .execute(part, &Target::WholeObject, &params, doc, ctx)?
         .change
     {
         Some((mesh, _)) => mesh,

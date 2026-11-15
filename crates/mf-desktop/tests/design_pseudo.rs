@@ -69,12 +69,13 @@ fn the_pseudo_locale_brackets_catalogued_strings() {
                 mesh,
                 transform: IDENTITY,
             }],
-            unit: Unit::Millimeter,
+            unit: Some(Unit::Millimeter),
             source: SourceInfo {
                 path: "plate.3mf".into(),
                 content_hash: ContentHash([0; 32]),
                 format: Format::ThreeMf,
                 precision: SourcePrecision::F32,
+                exporter_hint: None,
             },
             warnings: Vec::new(),
         });

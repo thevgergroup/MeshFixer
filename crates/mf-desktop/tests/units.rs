@@ -1,10 +1,12 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! Units for unitless files (MF-ISSUE-045): STL and OBJ don't say what
-//! their numbers measure, so opening one asks. The dialog shows the
-//! model's size read in millimetres, centimetres, metres and inches and
-//! preselects the one that makes it between 10 mm and 2 m (else
-//! millimetres); the document records the choice and 3MF export writes it.
+//! Units for unitless files (MF-ISSUE-045, owner 2026-11-14 "smarter
+//! import units"): STL and OBJ don't say what their numbers measure, so
+//! opening one asks. The dialog shows the model's size read in
+//! millimetres, centimetres, metres and inches against the active
+//! Machine profile's print volume (a plain 250 mm plate with none),
+//! and preselects whichever unit "fits the plate" with the largest
+//! size; the document records the choice and 3MF export writes it.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -14,8 +16,29 @@ use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT, Queryable};
 use mf_desktop::{MeshFixerApp, Settings};
 use mf_io::threemf::Unit;
+use mf_parts::{MachineProfile, MachineProfiles, UNCALIBRATED_NAME};
 
 const WINDOW: (f32, f32) = (1440.0, 900.0);
+
+/// A settings directory with a large-plate Machine profile active, so
+/// a metre-scale scan fits (these tests are about unit preselection,
+/// not the plate-fit "Scale to fit" path, which has its own tests in
+/// `import_dialog.rs`).
+fn big_plate_settings_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    let mut profiles = MachineProfiles::load(dir.path()).unwrap();
+    profiles.duplicate(UNCALIBRATED_NAME, "Big plate").unwrap();
+    profiles
+        .update(MachineProfile {
+            name: "Big plate".into(),
+            print_volume_mm: [600.0, 600.0, 600.0],
+            ..MachineProfile::uncalibrated()
+        })
+        .unwrap();
+    profiles.set_active("Big plate").unwrap();
+    profiles.save(dir.path()).unwrap();
+    dir
+}
 
 macro_rules! require_gpu {
     ($name:literal) => {
@@ -62,8 +85,9 @@ fn metre_scale_box(dir: &Path) -> PathBuf {
 }
 
 /// The app as launched by a person (it asks for the units of a unitless
-/// file), opening `path`.
-fn opening(path: PathBuf) -> Harness<'static, MeshFixerApp> {
+/// file), opening `path`, with `config_dir` as its settings directory
+/// (`None`: the platform default, same as a real launch).
+fn opening_with(path: PathBuf, config_dir: Option<PathBuf>) -> Harness<'static, MeshFixerApp> {
     Harness::builder()
         .with_size(WINDOW)
         .with_step_dt(1.0 / 60.0)
@@ -71,10 +95,19 @@ fn opening(path: PathBuf) -> Harness<'static, MeshFixerApp> {
         .build_eframe(move |cc| {
             let settings = Settings {
                 unit_prompt: true,
+                config_dir: config_dir.clone(),
                 ..Settings::default()
             };
             MeshFixerApp::with_settings(cc, Some(path.clone()), settings).unwrap()
         })
+}
+
+/// As [`opening_with`], against the 600 mm [`big_plate_settings_dir`]
+/// (so a metre-scale scan fits).
+fn opening(path: PathBuf) -> (Harness<'static, MeshFixerApp>, tempfile::TempDir) {
+    let dir = big_plate_settings_dir();
+    let h = opening_with(path, Some(dir.path().to_owned()));
+    (h, dir)
 }
 
 /// Opens `path`, waits for the unit dialog, checks it preselected metres
@@ -112,15 +145,20 @@ fn import_at_the_suggested_unit(h: &mut Harness<'_, MeshFixerApp>, timeout: Dura
 fn unit_prompt_preselects_metres_for_the_archaeopteryx_scale() {
     require_gpu!("unit_prompt_preselects_metres_for_the_archaeopteryx_scale");
     let dir = tempfile::tempdir().unwrap();
-    let mut h = opening(metre_scale_box(dir.path()));
+    let (mut h, _settings) = opening(metre_scale_box(dir.path()));
     wait_until(&mut h, "the unit dialog", Duration::from_secs(30), |a| {
         a.unit_prompt().is_some()
     });
     h.run();
     // The size in each unit: 0.5 × 0.4 × 0.3 (the numbers don't change,
-    // only what they mean), with millimetres alongside.
-    h.get_by_label("Metres · 0.500 × 0.400 × 0.300 m (500 × 400 × 300 mm)");
-    h.get_by_label("Millimetres · 0.500 × 0.400 × 0.300 mm");
+    // only what they mean), with millimetres alongside, and the
+    // preselected unit's "Fits your plate" wording (the 600 mm Big
+    // plate profile, [`big_plate_settings_dir`]).
+    h.get_by_label(
+        "Metres · 0.500 × 0.400 × 0.300 m (500 × 400 × 300 mm) — Fits your Big plate plate \
+         (500 × 400 × 300 mm)",
+    );
+    h.get_by_label("Millimetres · 0.500 × 0.400 × 0.300 mm — too small to print");
     import_at_the_suggested_unit(&mut h, Duration::from_secs(30));
     assert_eq!(h.state().session.document().units(), Unit::Meter);
     // Measurements read in the chosen unit.
@@ -132,7 +170,7 @@ fn unit_prompt_preselects_metres_for_the_archaeopteryx_scale() {
 fn cancelling_the_unit_prompt_imports_nothing() {
     require_gpu!("cancelling_the_unit_prompt_imports_nothing");
     let dir = tempfile::tempdir().unwrap();
-    let mut h = opening(metre_scale_box(dir.path()));
+    let (mut h, _settings) = opening(metre_scale_box(dir.path()));
     wait_until(&mut h, "the unit dialog", Duration::from_secs(30), |a| {
         a.unit_prompt().is_some()
     });
@@ -165,7 +203,8 @@ fn unit_prompt_imports_the_real_scan_at_metre_scale() {
     ) else {
         return;
     };
-    let mut h = opening(path);
+    let dir = big_plate_settings_dir();
+    let mut h = opening_with(path, Some(dir.path().to_owned()));
     import_at_the_suggested_unit(&mut h, Duration::from_secs(300));
     assert_eq!(h.state().session.document().units(), Unit::Meter);
 }
@@ -174,7 +213,7 @@ fn unit_prompt_imports_the_real_scan_at_metre_scale() {
 fn exported_3mf_carries_the_chosen_unit() {
     require_gpu!("exported_3mf_carries_the_chosen_unit");
     let dir = tempfile::tempdir().unwrap();
-    let mut h = opening(metre_scale_box(dir.path()));
+    let (mut h, _settings) = opening(metre_scale_box(dir.path()));
     import_at_the_suggested_unit(&mut h, Duration::from_secs(30));
     let out = dir.path().join("out.3mf");
     h.state_mut().export_to(out.clone());
@@ -183,7 +222,7 @@ fn exported_3mf_carries_the_chosen_unit() {
     });
     assert_eq!(h.state().error, None);
     let back = mf_io::read_model(&out).unwrap();
-    assert_eq!(back.unit, Unit::Meter);
+    assert_eq!(back.unit, Some(Unit::Meter));
 }
 
 /// Without the prompt (tests, scripted use), a unitless file reads as

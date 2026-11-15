@@ -12,7 +12,8 @@ use mf_geometry::{Mesh, inspect};
 use mf_io::threemf::IDENTITY;
 use mf_operations::layout::{Plate, layout_on_plate};
 use mf_operations::{
-    DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, dowel_size, find,
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, dowel_size,
+    find,
 };
 
 fn split(mesh: &Mesh, params: &[(&str, &str)]) -> Result<DocOutput, OpError> {
@@ -31,6 +32,7 @@ fn split(mesh: &Mesh, params: &[(&str, &str)]) -> Result<DocOutput, OpError> {
             target: Target::WholeObject,
         }],
         &spec.validate(&raw).unwrap(),
+        &DocContext::default(),
         &RunContext::none(),
     )
 }

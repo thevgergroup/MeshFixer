@@ -61,7 +61,10 @@
           "values": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "minItems": 2, "uniqueItems": true },
           "min": { "type": "number" },
           "max": { "type": "number" },
-          "unit": { "type": "string" },
+          "unit": {
+            "enum": ["mm", "cm", "m", "in", "ft", "deg", "%", "document"],
+            "$comment": "ParamUnit (ADR-0006, consolidation plan C05): mm/cm/m/in/ft are Length(unit), converted to document units by OperationSpec::to_document_units at prepare time; document is already in document/world units (never converted); deg is Angle and % is Percent (neither converted); absent means ParamUnit::None (not a quantity with a unit)."
+          },
           "default_from": { "type": "string", "pattern": "^fit\\.[a-z_]+$" },
           "description": { "type": "string", "minLength": 1 }
         }
@@ -69,7 +72,7 @@
     },
     "preconditions": { "type": "array", "items": { "type": "string" } },
     "postconditions": { "type": "array", "items": { "type": "string" } },
-    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements", "transform_changes", "removes_objects", "creates_objects", "renames_objects"] } },
+    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements", "transform_changes", "removes_objects", "creates_objects", "renames_objects", "unit_changes"] } },
     "runtime": {
       "type": "object",
       "additionalProperties": false,
@@ -78,6 +81,10 @@
         "cancellable": { "type": "boolean" },
         "progress": { "type": "boolean" }
       }
+    },
+    "coalesce": {
+      "enum": ["absolute", "never"],
+      "$comment": "ADR-0009: whether the command queue may merge a newly queued invocation of this op into the one already waiting, same op and target, latest params winning. Defaults to never (every queued invocation is its own undo step); only an op whose params are the whole resulting state (object.set_transform, object.set_shape_params) declares absolute."
     }
   }
 }

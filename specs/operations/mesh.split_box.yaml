@@ -15,10 +15,12 @@ parameters:
   - name: box_min
     type: vec3
     default: [-128, -128, 0]
+    unit: document
     description: "The box's lowest corner, in world space and document units: x,y,z"
   - name: box_max
     type: vec3
     default: [128, 128, 256]
+    unit: document
     description: "The box's highest corner, in world space and document units: x,y,z"
   - name: cut_gap
     type: float

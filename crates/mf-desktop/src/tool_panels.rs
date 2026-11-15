@@ -1329,15 +1329,15 @@ fn transform_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .on_hover_text("The placement flips the object, as in a mirror image");
     }
     section(ui, &t!("transform.section.options"));
+    let pivot = Some(p.position);
     if let Some(t) = app.transform_tool_mut() {
         ui.add_enabled(
             !sheared,
             egui::Checkbox::new(&mut t.uniform, t!("transform.uniform")),
         )
         .on_hover_text(t!("transform.uniform.tip"));
-        ui.checkbox(&mut t.snap, t!("transform.snap"))
-            .on_hover_text(t!("transform.snap.tip"));
     }
+    crate::shape_tools::snap_checkbox(app, ui, pivot);
     ui.add_space(theme::SPACE_M);
     ui.horizontal(|ui| {
         let half = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
@@ -1855,7 +1855,7 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                     let range = min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX);
                     let suffix = p
                         .unit
-                        .as_deref()
+                        .symbol()
                         .map(|u| format!(" {u}"))
                         // allow-swallow: no unit means no suffix
                         .unwrap_or_default();

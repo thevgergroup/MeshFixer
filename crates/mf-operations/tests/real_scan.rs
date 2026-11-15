@@ -75,6 +75,7 @@ fn fill_each_small_hole_of_real_scan_untouched_outside() {
             &m,
             &Target::Loops(vec![id]),
             &params,
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         ) {
             Ok(out) => out,
@@ -213,6 +214,7 @@ fn real_scan_holes_fill_smoothly() {
                 &m,
                 &Target::Loops(vec![id]),
                 params,
+                &mf_operations::DocContext::default(),
                 &mf_operations::RunContext::none(),
             );
             (out, start.elapsed())
@@ -303,6 +305,7 @@ fn real_scan_fill_keeps_orientation_consistent() {
             &m,
             &Target::WholeObject,
             &params(),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap();
@@ -338,6 +341,7 @@ fn real_scan_render_before_after() {
             &m,
             &Target::WholeObject,
             &params(),
+            &mf_operations::DocContext::default(),
             &mf_operations::RunContext::none(),
         )
         .unwrap();

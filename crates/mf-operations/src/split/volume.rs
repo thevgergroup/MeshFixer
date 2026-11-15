@@ -26,8 +26,8 @@ use mf_spec::Params;
 use super::{as_created, failed, normal_to_object, refusal};
 use crate::affine::{apply, inverse};
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 pub struct SplitBox;
@@ -93,6 +93,7 @@ impl Operation for SplitBox {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -102,6 +103,7 @@ impl Operation for SplitBox {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         if inputs.is_empty() {

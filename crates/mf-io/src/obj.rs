@@ -11,6 +11,22 @@ pub fn read(text: &str) -> Result<(Mesh, SourcePrecision, Vec<String>), IoError>
     read_with(text, &RunContext::none())
 }
 
+/// A `#` comment naming the file's unit, if the exporter left one
+/// (MF-ISSUE-045, "OBJ: unit comments, if any"), e.g. `# unit mm` or
+/// `# Units: millimeters`: the first comment line containing "unit"
+/// (case-insensitive), with its leading `#`s and surrounding space
+/// trimmed. Not parsed further — shown as a hint, never acted on
+/// automatically.
+pub fn unit_comment(text: &str) -> Option<String> {
+    text.lines().find_map(|line| {
+        let comment = line.trim().strip_prefix('#')?.trim();
+        comment
+            .to_ascii_lowercase()
+            .contains("unit")
+            .then(|| comment.to_owned())
+    })
+}
+
 /// As [`read`], cancellable, reporting stage `"reading"` by bytes parsed.
 pub fn read_with(
     text: &str,

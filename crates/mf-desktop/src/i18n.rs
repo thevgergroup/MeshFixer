@@ -421,6 +421,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("export.section.file", "File"),
     ("export.section.log", "Command log"),
+    ("gizmo.snap", "Snap: {step}"),
+    (
+        "gizmo.snap.tip",
+        "To a step sized to stay visible at this zoom (15° steps and 10% scale steps too, in Transform). Hold Cmd/Ctrl while dragging to invert.",
+    ),
     ("hinge.axis", "Hinge axis"),
     ("hinge.edge", "{face} edge, along {along}"),
     (
@@ -439,6 +444,11 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hinge.object_a", "Object A (stays put)"),
     ("hinge.object_b", "Object B (swings open)"),
     ("hinge.place", "Place hinge"),
+    ("hinge.position", "Position along the edge"),
+    (
+        "hinge.position.help",
+        "Centred on the edge's own middle by default; move it to place a second hinge clear of the first.",
+    ),
     ("hinge.same_object", "Pick two different objects."),
     ("hinge.section", "Hinge between two objects"),
     ("hinge.shared_edge", "Shared edge ({edge})"),
@@ -466,6 +476,14 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hint.first_use.dismiss", "Dismiss hint"),
     ("history.empty", "No history yet"),
     ("history.label.connector.join", "Joined connector to {name}"),
+    (
+        "history.label.document.reinterpret_units",
+        "Reinterpreted {name}'s units",
+    ),
+    (
+        "history.label.document.scale_units",
+        "Scaled {name} to new units",
+    ),
     // A generator's own spec (a shape or connector's parameter schema,
     // crate mf-parts): never shown by this id. The command recorded is
     // always object.add_shape, object.set_shape_params or
@@ -867,7 +885,16 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("sculpt.section.detail", "Detail"),
     ("sculpt.section.falloff", "Falloff"),
     ("sculpt.section.overlay", "Overlay"),
-    ("sculpt.section.radius", "Radius ({unit})"),
+    ("sculpt.section.radius", "Radius"),
+    ("sculpt.section.radius.approx", "≈ {size} at this zoom"),
+    (
+        "sculpt.section.radius.typed.error",
+        "\"{text}\" isn't a length; nothing changed",
+    ),
+    (
+        "sculpt.section.radius.typed.hint",
+        "or type a size, e.g. \"3 mm\"",
+    ),
     ("sculpt.section.strength", "Strength"),
     ("sculpt.section.symmetry", "Symmetry"),
     ("sculpt.show_changes", "Show sculpt changes"),
@@ -1044,7 +1071,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "split.refuse_open",
         "The model has holes; cutting needs a closed model. Fill the holes in Repair, then split.",
     ),
-    ("split.region.area", "{area} {unit}²"),
+    // `{area}` already carries its own unit and `²` (`mf_units::format_area`,
+    // consolidation plan C11: this used to be a bare `{:.0}` of a
+    // document-units² value next to the unit's *symbol*, so a small
+    // region on a metres document rounded to "0 m²").
+    ("split.region.area", "{area}"),
     ("split.regions", "Cross-section regions"),
     (
         "split.regions_help",
@@ -1194,11 +1225,6 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("transform.section.position", "Position ({unit})"),
     ("transform.section.rotation", "Rotation (°)"),
     ("transform.section.scale", "Scale (%)"),
-    ("transform.snap", "Snap"),
-    (
-        "transform.snap.tip",
-        "To the 1 mm grid, 15° steps, 10% steps and the plate. Hold Cmd/Ctrl while dragging to invert.",
-    ),
     ("transform.uniform", "Uniform scale"),
     ("transform.uniform.tip", "Scale fields change together"),
     ("view.clay", "Clay"),

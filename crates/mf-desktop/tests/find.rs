@@ -58,12 +58,13 @@ fn model(objects: Vec<(&str, Mesh, [f64; 12])>) -> ImportedModel {
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "find.3mf".into(),
             content_hash: ContentHash([0; 32]),
             format: Format::ThreeMf,
             precision: SourcePrecision::F32,
+            exporter_hint: None,
         },
         warnings: vec![],
     }

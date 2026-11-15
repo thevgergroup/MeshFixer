@@ -13,8 +13,8 @@ use mf_spec::Params;
 
 use crate::affine::determinant;
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, scale_mesh,
 };
 
 pub struct AddPart;
@@ -49,6 +49,7 @@ impl Operation for AddPart {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -58,6 +59,7 @@ impl Operation for AddPart {
         &self,
         _inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let id = params.get_text("part_id")?;
@@ -93,6 +95,11 @@ impl Operation for AddPart {
             mf_parts::PartError::Cancelled => OpError::Cancelled,
             e => failed("part_unreadable", e.to_string()),
         })?;
+        // `LibraryPart::mesh` always returns millimetres (D16): scale into
+        // the placing document's own unit (consolidation plan C10), so a
+        // 10 mm part in a metres document lands at 0.01 doc units, not 10.
+        let mesh = scale_mesh(mesh, doc.mm_to_doc())
+            .map_err(|e| failed("part_unreadable", format!("can't scale the part: {e}")))?;
         let provenance = Provenance {
             created_faces: mesh.faces().map(|(f, _)| (f, Sources::default())).collect(),
             created_vertices: mesh.vertices().map(|(v, _)| v).collect(),

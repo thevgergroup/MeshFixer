@@ -11,7 +11,7 @@ mod compare;
 mod diagnostics;
 mod distance;
 mod edit;
-mod exact;
+pub mod exact;
 mod grid;
 mod hash;
 mod ids;

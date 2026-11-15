@@ -78,6 +78,10 @@ pub enum BooleanError {
     OperandOverlapsItself { tool: bool, faces: usize },
     #[error("the section where the window cuts the target folds onto itself")]
     SectionSelfIntersects,
+    /// No window within the D5 margin avoids touching the target exactly
+    /// (ADR-0011): the window refuses rather than grow to the whole model.
+    #[error("the target's surface near the tool is too thin to cut cleanly")]
+    WindowDegenerate,
     #[error("the result is not a closed, manifold surface: {0}")]
     ResultNotManifold(String),
     #[error("the result intersects itself: {0}")]
@@ -100,6 +104,7 @@ impl BooleanError {
             BooleanError::NoOverlap => "no_overlap",
             BooleanError::OperandOverlapsItself { .. } => "operand_overlaps_itself",
             BooleanError::SectionSelfIntersects => "section_self_intersects",
+            BooleanError::WindowDegenerate => "window_degenerate",
             BooleanError::ResultNotManifold(_) => "result_not_manifold",
             BooleanError::ResultSelfIntersects(_) => "result_self_intersects",
             BooleanError::ResultEmpty => "result_empty",
@@ -214,6 +219,7 @@ pub fn boolean(
         ClipOptions {
             close_openings: op == BoolOp::Union,
             limit,
+            margin,
         },
         ctx,
     )
@@ -231,6 +237,7 @@ pub fn boolean(
         ClipError::Section(SectionError::Degenerate) | ClipError::Degenerate => {
             BooleanError::SectionSelfIntersects
         }
+        ClipError::WindowDegenerate => BooleanError::WindowDegenerate,
     })?;
     let a = &clipped.inside;
 
