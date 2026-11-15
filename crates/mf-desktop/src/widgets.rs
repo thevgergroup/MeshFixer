@@ -11,6 +11,10 @@ use eframe::egui::{self, RichText};
 
 use crate::{icons, theme};
 
+pub mod length_field;
+
+pub use length_field::{LengthFieldOpts, length_field, length_slider};
+
 /// A section label: small, upper-case, muted and letter-spaced, with the
 /// grid's spacing above it.
 pub fn section(ui: &mut egui::Ui, text: &str) {

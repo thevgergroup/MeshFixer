@@ -19,6 +19,7 @@ use mf_parts::GeneratorRecord;
 use mf_spec::{ParamKind, ParamValue, Params};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{InspectorSection, RegisterError, Shell};
 use crate::widgets;
 use crate::{icons, t, theme};
@@ -201,22 +202,14 @@ pub fn regenerate(
 ) {
     let Some(&first) = ids.first() else { return };
     app.refusal = None;
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: mf_command::SET_SHAPE_PARAMS.into(),
-            target: first,
-            selection: None,
-            operands: ids[1..]
-                .iter()
-                .map(|&o| ("target".to_owned(), o, None))
-                .collect(),
-            raw_params: BTreeMap::from([(
-                "generators".to_owned(),
-                mf_operations::shapes::generators_param(&records),
-            )]),
-        },
-        label,
-    );
+    let intent = Intent::op(mf_command::SET_SHAPE_PARAMS)
+        .on(first)
+        .operands(ids[1..].iter().map(|&o| ("target".to_owned(), o, None)))
+        .param(
+            "generators",
+            mf_operations::shapes::generators_param(&records),
+        );
+    app.run_intent(intent, label);
 }
 
 fn refuse(app: &mut MeshFixerApp, message: String) {

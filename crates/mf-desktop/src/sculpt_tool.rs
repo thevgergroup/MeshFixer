@@ -730,55 +730,38 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
     // frame (owner: "swap in a single frame").
     app.sculpt_pending = Some((stroke.object, stroke.render.clone()));
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
-    // `radius` and `pivot` are `unit: mm` params (D20): `stroke.radius_world`
-    // and `world` are document units (fixed when the stroke began —
-    // [`world_radius_at`] at the time, and the stroke's world-space hit
-    // point), so cross to mm here, once, or `Session::prepare`'s single
-    // mm-to-document conversion runs on an already-document-units
-    // number. Not recomputed from the panel's current screen-points
-    // setting or the camera's current position: a replay must give the
-    // same result however the camera has moved since (same reasoning as
-    // the fixed pivot and view direction just above).
-    let mm = crate::transform_tool::mm_per(app.session.document().units());
-    let params: BTreeMap<String, String> = BTreeMap::from([
-        ("brush".to_owned(), settings.brush.word().to_owned()),
-        ("radius".to_owned(), (stroke.radius_world * mm).to_string()),
-        ("strength".to_owned(), settings.strength.to_string()),
-        (
-            "falloff".to_owned(),
-            falloff_word(settings.falloff).to_owned(),
-        ),
-        ("symmetry_x".to_owned(), settings.symmetry[0].to_string()),
-        ("symmetry_y".to_owned(), settings.symmetry[1].to_string()),
-        ("symmetry_z".to_owned(), settings.symmetry[2].to_string()),
-        ("pivot".to_owned(), vec3(world * mm)),
-        ("view_dir".to_owned(), vec3(cam.view_dir())),
-        ("samples".to_owned(), samples_text(&samples)),
-        (
-            "detail_mode".to_owned(),
-            (if settings.detail_on {
+    // `radius` and `pivot` are lengths in document units (fixed when the
+    // stroke began — [`world_radius_at`] at the time, and the stroke's
+    // world-space hit point), handed to the `Intent` with that unit:
+    // `Session::prepare` is the one place that converts them. Not
+    // recomputed from the panel's current screen-points setting or the
+    // camera's current position: a replay must give the same result
+    // however the camera has moved since (same reasoning as the fixed
+    // pivot and view direction just above).
+    let doc = app.session.document().units();
+    let intent = crate::intent::Intent::op("mesh.sculpt_stroke")
+        .on(stroke.object)
+        .param("brush", settings.brush.word())
+        .set("radius", mf_units::Length::new(stroke.radius_world, doc))
+        .param("strength", settings.strength)
+        .param("falloff", falloff_word(settings.falloff))
+        .param("symmetry_x", settings.symmetry[0])
+        .param("symmetry_y", settings.symmetry[1])
+        .param("symmetry_z", settings.symmetry[2])
+        .set_point("pivot", world.to_array(), doc)
+        .param("view_dir", vec3(cam.view_dir()))
+        .param("samples", samples_text(&samples))
+        .param(
+            "detail_mode",
+            if settings.detail_on {
                 "adaptive"
             } else {
                 "off"
-            })
-            .to_owned(),
-        ),
-        ("detail".to_owned(), settings.detail.to_string()),
-        (
-            "stay_on_surface".to_owned(),
-            settings.stay_on_surface.to_string(),
-        ),
-    ]);
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: "mesh.sculpt_stroke".into(),
-            target: stroke.object,
-            selection: None,
-            operands: Vec::new(),
-            raw_params: params,
-        },
-        t!("sculpt.apply"),
-    );
+            },
+        )
+        .param("detail", settings.detail)
+        .param("stay_on_surface", settings.stay_on_surface);
+    app.run_intent(intent, t!("sculpt.apply"));
 }
 
 fn vec3(v: DVec3) -> String {

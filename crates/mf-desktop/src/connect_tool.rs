@@ -36,10 +36,11 @@ use std::collections::BTreeMap;
 
 use eframe::egui::{self, RichText};
 use glam::DVec3;
-use mf_command::Invocation;
 use mf_operations::{CapRegion, Check, JointSide, Placement};
+use mf_units::{Length, Unit};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
 use crate::split_flow::{self, Drag, GeomSlot, Hit, Joint, applied_now, exists, mm, name_of};
 use crate::widgets::{self, Kind};
@@ -580,22 +581,11 @@ pub fn add_as_shapes(app: &mut MeshFixerApp, j: usize) {
         return;
     }
     app.refusal = None;
-    app.run_invocation(
-        Invocation {
-            op_id: "object.add_shape".into(),
-            target: joint.a,
-            selection: None,
-            operands: Vec::new(),
-            raw_params: BTreeMap::from([
-                (
-                    "shapes".to_owned(),
-                    mf_operations::shapes::shapes_param(&shapes),
-                ),
-                ("group".to_owned(), String::new()),
-            ]),
-        },
-        t!("connect.shapes_label"),
-    );
+    let intent = Intent::op("object.add_shape")
+        .on(joint.a)
+        .param("shapes", mf_operations::shapes::shapes_param(&shapes))
+        .param("group", "");
+    app.run_intent(intent, t!("connect.shapes_label"));
 }
 
 fn refuse_shapes(app: &mut MeshFixerApp, message: String) {
@@ -882,36 +872,26 @@ fn apply_connectors(app: &mut MeshFixerApp, j: usize, label: String) {
         |p| p.print_volume_mm,
     );
     let connectors = serde_json::to_string(&joint.placements).unwrap_or_default(); // allow-swallow: Placement is plain data; serializing it can't fail
-    let params = BTreeMap::from([
-        ("plane_point".to_owned(), vec3(joint.frame.point)),
-        ("plane_normal".to_owned(), vec3(joint.frame.normal)),
-        ("plane_u".to_owned(), vec3(joint.frame.u)),
-        ("gap".to_owned(), joint.frame.gap.to_string()),
-        ("connectors".to_owned(), connectors),
-        ("min_wall".to_owned(), s.min_wall.to_string()),
-        (
-            "fit_clearance".to_owned(),
-            s.fit_class.clearance.to_string(),
-        ),
-        (
-            "machine_tolerance".to_owned(),
-            s.machine.hole_undersize.to_string(),
-        ),
-        ("plate_width".to_owned(), plate[0].to_string()),
-        ("plate_depth".to_owned(), plate[1].to_string()),
-    ]);
+    // The joint's frame and gap are already in document units (`unit:
+    // document`); the print-intent sizes (wall, clearances, plate) are
+    // physical millimetres, said so on the `Intent`.
+    let mm = |v: f64| Length::new(v, Unit::Millimeter);
+    let intent = Intent::op("split.place_connectors")
+        .on(joint.a)
+        .operand("side_b", joint.b, None)
+        .set_doc("plane_point", vec3(joint.frame.point))
+        .param("plane_normal", vec3(joint.frame.normal))
+        .set_doc("plane_u", vec3(joint.frame.u))
+        .set_doc("gap", joint.frame.gap)
+        .param("connectors", connectors)
+        .set("min_wall", mm(s.min_wall))
+        .set("fit_clearance", mm(s.fit_class.clearance))
+        .set("machine_tolerance", mm(s.machine.hole_undersize))
+        .set("plate_width", mm(plate[0]))
+        .set("plate_depth", mm(plate[1]));
     app.refusal = None;
     app.split_flow.pending_apply = Some(j);
-    app.run_invocation(
-        Invocation {
-            op_id: "split.place_connectors".into(),
-            target: joint.a,
-            selection: None,
-            operands: vec![("side_b".to_owned(), joint.b, None)],
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent, label);
     if app.busy.is_none() {
         app.split_flow.pending_apply = None;
     }

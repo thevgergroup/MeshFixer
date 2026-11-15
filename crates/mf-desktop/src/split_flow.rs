@@ -23,17 +23,18 @@
 //! reads and mutates it through the `pub` items here, since a joint
 //! outlives the Split tool that made it.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use eframe::egui::{self, RichText};
 use glam::{DMat4, DVec3};
-use mf_command::{Invocation, ObjectId, RevisionId};
+use mf_command::{ObjectId, RevisionId};
 use mf_geometry::{Aabb, Bvh, Mesh};
 use mf_operations::{Check, JointFrame, JointSide, Placement};
 use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Claims, Input};
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
@@ -1549,21 +1550,19 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
     let Some((&first, rest)) = selected.split_first() else {
         return;
     };
-    let more = rest
+    let more: Vec<_> = rest
         .iter()
         .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
         .collect();
     // `plane_point`, `cut_gap`, `bound_width` and `bound_height` are
-    // `unit: mm` params (D20); `s.point()`, `s.gap`, `s.bound_width` and
-    // `s.bound_height` are document units (the panel's own gizmo and
-    // fields, labelled with the document's unit symbol), so cross to mm
-    // here, once, or `Session::prepare`'s single mm-to-document
-    // conversion runs on an already-document-units number. `plane_normal`,
-    // `box_min` and `box_max` have no declared unit (a direction, and a
-    // box already in world/document units) and are left alone.
-    let mm = crate::transform_tool::mm_per(app.session.document().units());
-    let mm_point = |v: DVec3| vec3(v * mm);
-    let (op, params) = match app.split_flow.mode {
+    // lengths; `s.point()`, `s.gap`, `s.bound_width` and `s.bound_height`
+    // are document units (the panel's own gizmo and fields), so they go
+    // on the `Intent` as lengths in the document's unit, and
+    // `Session::prepare` alone converts them. `box_min`/`box_max` are
+    // `unit: document` (a box already in world/document units).
+    let doc = app.session.document().units();
+    let len = |v: f64| mf_units::Length::new(v, doc);
+    let intent = match app.split_flow.mode {
         CutMode::Slice => {
             let s = &app.split;
             // Cross-section picking (Phase 1b): only meaningful for a
@@ -1585,53 +1584,37 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
             } else {
                 String::new()
             };
-            let mut p = BTreeMap::from([
-                ("plane_point".to_owned(), mm_point(s.point())),
-                ("plane_normal".to_owned(), vec3(s.normal())),
-                ("keep".to_owned(), s.keep.clone()),
-                ("cut_gap".to_owned(), (s.gap * mm).to_string()),
-                ("cap".to_owned(), s.cap.to_string()),
-                ("regions".to_owned(), regions_param),
-                ("bound".to_owned(), s.bound.to_string()),
-                ("bound_shape".to_owned(), s.bound_shape.clone()),
-                ("bound_width".to_owned(), (s.bound_width * mm).to_string()),
-                ("bound_height".to_owned(), (s.bound_height * mm).to_string()),
-            ]);
-            if !s.bound {
+            let mut p = Intent::op("mesh.split_plane")
+                .set_point("plane_point", s.point().to_array(), doc)
+                .param("plane_normal", vec3(s.normal()))
+                .param("keep", &s.keep)
+                .set("cut_gap", len(s.gap))
+                .param("cap", s.cap)
+                .param("regions", regions_param)
+                .param("bound", s.bound);
+            if s.bound {
                 // Keep today's defaults out of the log when the bound
                 // is off, same spirit as every other op: nothing new
                 // changes replay unless it's actually used.
-                p.remove("bound_shape");
-                p.remove("bound_width");
-                p.remove("bound_height");
+                p = p
+                    .param("bound_shape", &s.bound_shape)
+                    .set("bound_width", len(s.bound_width))
+                    .set("bound_height", len(s.bound_height));
             }
-            ("mesh.split_plane", p)
+            p
         }
         CutMode::Volume => {
             let v = &app.split_flow.volume;
-            (
-                "mesh.split_box",
-                BTreeMap::from([
-                    ("box_min".to_owned(), vec3(v.min())),
-                    ("box_max".to_owned(), vec3(v.max())),
-                    ("cut_gap".to_owned(), (app.split.gap * mm).to_string()),
-                    ("cap".to_owned(), app.split.cap.to_string()),
-                ]),
-            )
+            Intent::op("mesh.split_box")
+                .set_doc("box_min", vec3(v.min()))
+                .set_doc("box_max", vec3(v.max()))
+                .set("cut_gap", len(app.split.gap))
+                .param("cap", app.split.cap)
         }
     };
     app.refusal = None;
     app.split_flow.last_cut = None;
-    app.run_invocation(
-        Invocation {
-            op_id: op.into(),
-            target: first,
-            selection: None,
-            operands: more,
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent.on(first).operands(more), label);
 }
 
 // ---------------------------------------------------------------------
