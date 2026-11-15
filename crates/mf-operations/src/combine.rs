@@ -35,6 +35,7 @@ const TARGET_CODES: &[&str] = &[
     "operand_not_closed",
     "operand_overlaps_itself",
     "section_self_intersects",
+    "window_degenerate",
 ];
 
 /// A refusal naming `object` first, then the copy table's words.

@@ -68,10 +68,15 @@ pub enum ClipError {
     /// is too irregular to close flat.
     #[error("the section where the window cuts the target {0}")]
     Section(SectionError),
-    /// No box near the requested one avoided touching the target's
-    /// geometry exactly along an edge or at a corner.
+    /// One attempt touched the target's geometry exactly along an edge or
+    /// at a corner (internal: [`clip_to_box`] moves the box and retries).
     #[error("the window touches the target only along an edge or at a point")]
     Degenerate,
+    /// No box within the D5 margin of the requested one avoided touching
+    /// the target's geometry (almost) exactly: the window refuses rather
+    /// than grow past the margin (ADR-0011).
+    #[error("no window within the margin avoids touching the target exactly")]
+    WindowDegenerate,
 }
 
 impl From<Cancelled> for ClipError {
@@ -129,7 +134,14 @@ pub struct ClipOptions {
     pub close_openings: bool,
     /// The window may grow to contain an opening's loop, up to this box.
     pub limit: Aabb,
+    /// The D5 margin: the farthest any plane may move off the requested
+    /// (or opening-grown) box while avoiding an exact touch with the
+    /// target. Past it the clip is [`ClipError::WindowDegenerate`].
+    pub margin: f64,
 }
+
+/// The first nudge, as a fraction of the box's size (see `clip_to_box`).
+const NUDGE_START: f64 = 1e-6;
 
 #[derive(Clone, Copy)]
 struct Planes {
@@ -171,6 +183,10 @@ impl Planes {
 
     fn overlaps(&self, lo: [f64; 3], hi: [f64; 3]) -> bool {
         (0..3).all(|a| lo[a] <= self.hi[a] && self.lo[a] <= hi[a])
+    }
+
+    fn within_margin(&self, start: &Planes, margin: f64) -> bool {
+        (0..3).all(|a| self.lo[a] >= start.lo[a] - margin && self.hi[a] <= start.hi[a] + margin)
     }
 
     fn within(&self, limit: &Aabb) -> bool {
@@ -261,6 +277,9 @@ pub fn clip_to_box(
         lo: window.min,
         hi: window.max,
     };
+    // Where the nudges start from: the requested box, or the box grown
+    // for an opening (D15, bounded by `options.limit`).
+    let mut start = planes;
     let mut nudges = 0;
     loop {
         ctx.checkpoint()?;
@@ -276,38 +295,39 @@ pub fn clip_to_box(
                     return Err(ClipError::OpeningTooLarge);
                 }
                 planes = to;
+                start = to;
             }
-            Err(ClipError::Degenerate) if nudges < 28 => {
+            Err(ClipError::Degenerate) => {
                 // Touching (almost) exactly along an edge or at a point:
                 // move the planes out a little, by different amounts per
                 // plane (a symmetric move keeps a symmetric model's
                 // coincidence), and try again. The step doubles each
-                // time (not a fixed multiple of the attempt count):
-                // where the crowding is a genuine box/mesh tangency a
-                // few small steps clear it (as they always have), but
-                // where two of the target's own cut points come out a
-                // fraction of an ulp apart regardless of the box's
-                // position (the owner's demo, a half-cube sunk into a
-                // sphere capped on the same plane: a vertex an ulp from
-                // the window's own edge gives two of its edges' cut
-                // points a fraction of an ulp apart, however the box
-                // moves) only a step that grows geometrically reaches
-                // the scale that separates them within a sane number of
-                // attempts — linear growth needed over a thousand. 28
-                // attempts (measured minimum: 21) is comfortably past
-                // that without being unbounded (the step still doubles
-                // from a millionth of the box's own size, so even the
-                // last attempt is a few hundred times the box, not the
-                // tool's whole scene).
+                // time from a millionth of the box's size, so a genuine
+                // box/mesh tangency clears in a few small steps. It never
+                // moves a plane past the D5 margin (`options.margin`)
+                // from where it started: past that the window would stop
+                // being local (e182cb7 let it reach a few hundred times
+                // the box, the whole model), so the clip refuses by name
+                // instead (ADR-0011). Crowding that no nearby box clears
+                // is the target's own (a sliver face an ulp across).
                 nudges += 1;
                 let size = (0..3)
                     .map(|a| planes.hi[a] - planes.lo[a])
                     .fold(0.0, f64::max);
+                let mut next = planes;
                 for (a, f) in [1.0, 1.7, 2.3].into_iter().enumerate() {
-                    let step = size * 1e-6 * f * 2.0_f64.powi(nudges - 1);
-                    planes.lo[a] -= step * 0.737;
-                    planes.hi[a] += step;
+                    let step = size * NUDGE_START * f * 2.0_f64.powi(nudges - 1);
+                    next.lo[a] -= step * 0.737;
+                    next.hi[a] += step;
                 }
+                if !(0..3).all(|a| {
+                    next.lo[a] >= start.lo[a] - options.margin
+                        && next.hi[a] <= start.hi[a] + options.margin
+                }) {
+                    return Err(ClipError::WindowDegenerate);
+                }
+                planes = next;
+                debug_assert!(planes.within_margin(&start, options.margin));
             }
             Err(e) => return Err(e),
         }

@@ -575,6 +575,7 @@ fn next_action(code: &str) -> Option<Next> {
         | "inconsistent_input"
         | "inside_out_input"
         | "section_self_intersects"
+        | "window_degenerate"
         | "split_section_self_intersects"
         | "result_self_intersects" => Some(Next::MakeSolid),
         _ => None,

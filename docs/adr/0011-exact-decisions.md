@@ -13,3 +13,10 @@ The exact predicates are private to mf-geometry, so mf-operations and mf-parts d
 
 ## Enforcement
 The epsilon-literal lint, `affine_is_implemented_once` and `window_never_exceeds_d5_margin`.
+
+## Implementation (C20, 2026-11-15)
+- `mf_geometry::exact` is public: `orient2d`, `orient3d`, `side_of`, `on_plane` (a plane given by three points), `same_point` and `point_in_solid` (exact crossing parity).
+- `clip_to_box` takes the D5 margin (`ClipOptions::margin`, the margin the window already has over the tool). Its nudges never move a plane past it; past it the boolean refuses with `window_degenerate`. The e182cb7 doubling nudge had reached the whole model on the owner's demo. Enforced by `window_never_exceeds_d5_margin` (mf-boolean `tests/window.rs`) and a `debug_assert` in the clip.
+- The demo's crowding came from the split, not the window. The equator ring of a sphere sits 1.2e-15 off the cut plane, so the cut points on its edges landed an ulp from each ring vertex, and the rim carried vertices an ulp apart. `plane_cut` now treats such a vertex as on the plane: on an axis-aligned plane, the cut point is within an ulp of it in every coordinate the edge moves in. This is an f64 comparison, not a tolerance.
+- The tolerance allow-list is `docs/tolerances.allow`, enforced by `crates/mf-geometry/tests/epsilon_lint.rs`. It is seeded with the 89 sites found at C20 and only shrinks.
+- `mf-command/tests/combine_robust.rs`: under random small transforms, Combine commits a valid solid or refuses with a worded code.

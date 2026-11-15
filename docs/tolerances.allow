@@ -1,0 +1,105 @@
+# The reviewed tolerance literals (ADR-0011). Enforced by
+# crates/mf-geometry/tests/epsilon_lint.rs: every float literal with a
+# negative exponent in the production code of mf-operations, mf-parts or
+# mf-desktop is one line here. "On plane", "same point" and "inside" are
+# decided by mf_geometry::exact, never by a literal on this list.
+#
+# Format: <file under crates/> <literal> <one-line reason>. One line per
+# site (sites are counted per file and literal, so moving code is free).
+# Seeded with the sites at C20 (2026-11-15); later tasks shrink it, and
+# the lint fails on a stale line, so it only ever shrinks.
+
+# mf-operations
+mf-operations/src/combine.rs 1e-6 moving-gap check: floor on the 10% chord tolerance for a zero gap (absolute length, ->U ADR-0006)
+mf-operations/src/hollow.rs 1e-4 nearest-hit tie-break: a hit must beat the known one by a sliver of a cell (f32 distances)
+mf-operations/src/hollow.rs 1e-3 grid cell range, low end: a box edge exactly on a cell boundary takes the cell (fraction of a cell)
+mf-operations/src/hollow.rs 1e-3 grid cell range, high end: same rounding guard as the low end
+mf-operations/src/hollow.rs 1e-9 relative scale tolerance for the shell's offset check (fraction of the model's scale)
+mf-operations/src/hollow.rs 1e-7 parity ray start pushed inward by a fraction of a cell (AR 4: to replace with exact point_in_solid)
+mf-operations/src/hollow.rs 1e-7 open-through parity ray start, the same nudge as above (AR 4)
+mf-operations/src/make_solid.rs 1e-6 search radius floor, a millionth of the diagonal (relative)
+mf-operations/src/make_solid.rs 1e-9 grid column index rounding guard (fraction of a cell)
+mf-operations/src/make_solid.rs 1e-3 marching-cubes crossing kept off the grid corners (lower clamp, fraction of an edge)
+mf-operations/src/make_solid.rs 1e-3 the same clamp, upper bound
+mf-operations/src/make_solid.rs 1e-3 refined crossing kept off the grid corners (lower clamp)
+mf-operations/src/make_solid.rs 1e-3 the same clamp, upper bound
+mf-operations/src/fill_holes/fairing.rs 1e-10 named TOLERANCE: the fairing solver's convergence threshold
+mf-operations/src/fill_holes/mod.rs 1e-12 degenerate-triangle area floor relative to the hole's diagonal squared
+mf-operations/src/fill_holes/refine.rs 1e-12 Delaunay circumcircle test made strict by a relative sliver
+mf-operations/src/sculpt/remesh.rs 1e-3 triangle quality floor for a remesh flip (dimensionless shape measure)
+mf-operations/src/sculpt/stroke.rs 1e-300 singular-determinant guard before a division (not a geometric tolerance)
+mf-operations/src/split/joints.rs 1e-12 parallel-line guard before a division in the joint frame
+mf-operations/src/split/joints.rs 1e-9 ray parameter must be strictly ahead of the start
+mf-operations/src/split/joints.rs 1e-6 on_cap distance tolerance (AR 4: to replace with tagged cap faces)
+mf-operations/src/split/joints.rs 1e-9 axis-aligned normal detection (dimensionless cosine)
+mf-operations/src/split/joints.rs 1e-12 zero-scale guard before dividing by an axis length
+mf-operations/src/split/joints.rs 1e-9 joint limit floor for a zero wall (absolute length, ->U ADR-0006)
+mf-operations/src/split/joints.rs 1e-12 zero-scale guard before dividing by an axis length
+mf-operations/src/split/joints.rs 1e-6 depth reached within a relative millionth
+mf-operations/src/split/mod.rs 1e-12 zero-length vector guard before normalising
+mf-operations/src/split/mod.rs 1e-6 peg margin floor for a zero allowance (absolute length, ->U ADR-0006)
+mf-operations/src/split/pegs.rs 1e-6 polylabel precision floor relative to the region's size
+mf-operations/src/split/pegs.rs 1e-3 polylabel precision, a thousandth of the peg diameter (relative)
+mf-operations/src/split/pegs.rs 1e-12 zero-length segment guard before normalising
+
+# mf-parts
+mf-parts/src/builtin.rs 1e-12 profile x that trigonometry left a rounding off the axis is put on it
+mf-parts/src/builtin_shapes.rs 1e-4 chord tolerance floor for a tiny radius (absolute length, ->U ADR-0006)
+mf-parts/src/builtin_shapes.rs 1e-4 the same chord tolerance floor for the keyed profile
+mf-parts/src/generator.rs 1e-12 profile point dedup, x coordinate (generated 2D outline)
+mf-parts/src/generator.rs 1e-12 profile point dedup, y coordinate
+mf-parts/src/generator.rs 1e-12 collinear-point area floor relative to the span squared
+mf-parts/src/swing.rs 1e-9 swing angle inclusive upper bound (degrees)
+mf-parts/src/swing.rs 1e-9 swing angle match (degrees)
+mf-parts/src/swing.rs 1e-9 swing sweep loop end (degrees)
+mf-parts/src/connectors/dovetail_slide.rs 1e-6 zero-taper guard before a division
+mf-parts/src/connectors/flap.rs 1e-4 sleeve bore floor over the pin (absolute length, ->U ADR-0006)
+mf-parts/src/connectors/hinge.rs 1e-9 positions on the hinge's knuckle plane (generated geometry, exact by construction)
+mf-parts/src/connectors/hinge.rs 1e-4 sleeve bore clearance over the pin (absolute length, ->U ADR-0006)
+mf-parts/src/connectors/hole_profile.rs 1e-9 zero-length direction guard before normalising
+mf-parts/src/connectors/hole_profile.rs 1e-9 zero-length direction guard before normalising
+mf-parts/src/connectors/hole_profile.rs 1e-9 profile offset epsilon (generated 2D outline)
+mf-parts/src/connectors/joint.rs 1e-4 chord tolerance floor (absolute length, ->U ADR-0006)
+mf-parts/src/connectors/joint.rs 1e-12 outline point dedup, x coordinate
+mf-parts/src/connectors/joint.rs 1e-12 outline point dedup, y coordinate
+mf-parts/src/connectors/joint.rs 1e-9 room check made inclusive by a rounding
+mf-parts/src/connectors/joint.rs 1e-6 distance-to-edge check made inclusive by a rounding
+mf-parts/src/connectors/joint.rs 1e-6 over-the-edge check made inclusive by a rounding
+mf-parts/src/connectors/thread.rs 1e-3 thread core prism overlap into the nut (absolute length, ->U ADR-0006)
+mf-parts/src/connectors/thread.rs 1e-3 the same overlap for the bolt's core
+
+# mf-desktop
+mf-desktop/src/align_tool.rs 1e-3 named RAIL_CORNER_SPREAD_MIN: minimum corner spread for an align rail
+mf-desktop/src/app.rs 1e-9 translate edit counts as no change below this (UI)
+mf-desktop/src/app.rs 1e-9 rotate edit counts as no change below this (UI)
+mf-desktop/src/app.rs 1e-9 scale edit counts as no change below this (UI)
+mf-desktop/src/connect_tool.rs 1e-6 zero-length drag direction guard
+mf-desktop/src/connect_tool.rs 1e-3 preview bounds pad, a thousandth of the bounds (relative)
+mf-desktop/src/connect_tool.rs 1e-6 preview bounds pad floor (absolute length, ->U ADR-0006)
+mf-desktop/src/connect_tool.rs 1e-9 ray parallel to the drag plane guard
+mf-desktop/src/connect_tool.rs 1e-9 ray parallel to the drag plane guard
+mf-desktop/src/defects.rs 1e-12 sliver highlight area floor relative to the diagonal squared
+mf-desktop/src/dovetail_tool.rs 1e-6 slider value counts as unchanged (UI)
+mf-desktop/src/dovetail_tool.rs 1e-6 zero-length drag direction guard
+mf-desktop/src/framing.rs 1e-4 named MIN_RADIUS_OF_SCENE: the camera's smallest framing radius
+mf-desktop/src/framing.rs 1e-9 zero-size scene guard for the camera
+mf-desktop/src/framing.rs 1e-3 camera step, a thousandth of the radius
+mf-desktop/src/framing.rs 1e-9 camera step floor relative to the scene
+mf-desktop/src/framing.rs 1e-9 zero-length view direction guard
+mf-desktop/src/hinge_tool.rs 1e-9 zero-size bounds guard
+mf-desktop/src/hollow_tool.rs 1e-300 singular-denominator guard before a division (AR 4)
+mf-desktop/src/hollow_tool.rs 1e-9 zero-size bounds guard
+mf-desktop/src/sculpt_tool.rs 1e-300 singular-denominator guard before a division (AR 4)
+mf-desktop/src/sculpt_tool.rs 1e-12 world-per-point floor for the brush radius
+mf-desktop/src/shape_tools.rs 1e-9 zero-size bounds guard
+mf-desktop/src/split_flow.rs 1e-18 singular linear part guard (AR 4: the duplicated affine inverse, C22 deletes it)
+mf-desktop/src/split_flow.rs 1e-12 ray parallel to the plane guard
+mf-desktop/src/transform_tool.rs 1e-12 matrices compared for display as unchanged
+mf-desktop/src/transform_tool.rs 1e-300 singular linear part guard before inverting
+mf-desktop/src/transform_tool.rs 1e-9 axis-aligned rotation detection (dimensionless cosine)
+mf-desktop/src/transform_tool.rs 1e-300 zero-size guard before a percentage
+mf-desktop/src/transform_tool.rs 1e-9 uniform scale detection, x against y (percent)
+mf-desktop/src/transform_tool.rs 1e-9 uniform scale detection, y against z (percent)
+mf-desktop/src/transform_tool.rs 1e-9 shown value rounded to zero (UI)
+mf-desktop/src/worker.rs 1e-6 peg placement hit must be strictly nearer (relative)
+mf-desktop/src/worker.rs 1e-6 peg placement slack relative to the distance

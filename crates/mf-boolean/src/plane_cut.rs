@@ -858,7 +858,42 @@ fn cut_half_core(
                 .then(|| ((lo, hi), if distance(x) <= distance(y) { lo } else { hi }))
         })
         .collect();
+    // The same, where an axis-aligned plane passes a vertex closer than
+    // the cut can resolve without folding anything: the cut point on an
+    // edge from it is that vertex to within an ulp in every coordinate
+    // the edge moves in (the axis coordinate aside, which is the plane's
+    // own), yet not the vertex.
+    // Left a separate point, the rim carries two vertices an ulp apart,
+    // and the faces between them are slivers no boolean window near
+    // them can cut (owner 2026-11-13, the demo's sphere equator 1.2e-15
+    // above the plane; ADR-0011). That vertex is on the plane for this
+    // cut, exactly as above: an f64 comparison of the point the cut
+    // computed, not a tolerance.
+    let unresolved: Vec<u32> = cut_at
+        .iter()
+        .filter_map(|(&(lo, hi), p)| {
+            let (x, y) = (mesh.corner_position(lo), mesh.corner_position(hi));
+            let (v, n) = if distance(x) <= distance(y) {
+                (lo, x)
+            } else {
+                (hi, y)
+            };
+            // The coordinates the edge moves in, the plane's own aside.
+            let along: Vec<usize> = (0..3)
+                .filter(|&i| axis != Some(i) && x[i] != y[i])
+                .collect();
+            let adjacent =
+                |i: usize| p[i] == n[i] || p[i] == n[i].next_up() || p[i] == n[i].next_down();
+            (axis.is_some() && !along.is_empty() && along.iter().all(|&i| adjacent(i))).then_some(v)
+        })
+        .collect();
     let mut onto_any = false;
+    for v in unresolved {
+        if side[v as usize] != 0 {
+            side[v as usize] = 0;
+            onto_any = true;
+        }
+    }
     if !lost.is_empty() {
         let crossing: Vec<[u32; 3]> = scans
             .iter()

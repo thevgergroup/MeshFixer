@@ -55,6 +55,10 @@ pub fn refusal_copy(code: &str) -> Option<(&'static str, &'static str)> {
             "The model folds onto itself where the tool's working area cuts it",
             "Run Make solid on it first, or move the tool slightly",
         ),
+        "window_degenerate" => (
+            "The model's surface near the tool is too thin to cut cleanly",
+            "Run Make solid on it first, or move the tool slightly",
+        ),
         "result_not_manifold" => (
             "The objects only touch along an edge or at a point, so the result wouldn't be a clean solid",
             "Move one slightly so they overlap",
