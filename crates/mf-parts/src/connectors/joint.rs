@@ -691,8 +691,19 @@ fn anchor(id: &str, params: &Params) -> Anchor {
 /// centre to the other piece's cut face on each side, through (recorded
 /// well past the edge) when the drag reached it, stopped at exactly the
 /// dragged length when it fell short on purpose.
+///
+/// "Through" needs a reach that's unambiguously past the real edge,
+/// measured by `ctx` (consolidation plan C18): a flat millimetre
+/// constant assumed every piece was under a metre, so a dovetail dragged
+/// edge-to-edge on a larger piece (a metre, say, or three) could still
+/// stop short of actually clearing it once its own local-frame geometry
+/// moved past the overshoot. [`OVER_THE_EDGE_FRACTION`] is relative to
+/// `edge` itself instead — the distance `ctx` just measured to the
+/// target's own cut-face boundary — so the margin always scales with the
+/// piece; [`OVER_THE_EDGE_MIN`] keeps it from vanishing on a tiny one.
 fn line_params(half: f64, ctx: &GenContext) -> ParamPatch {
-    const OVER_THE_EDGE: f64 = 1000.0;
+    const OVER_THE_EDGE_FRACTION: f64 = 0.5;
+    const OVER_THE_EDGE_MIN: f64 = 10.0;
     const SLIVER: f64 = 10.0;
     let mut patch = ParamPatch::default();
     for (dir, reach_key, open_key) in [
@@ -700,7 +711,10 @@ fn line_params(half: f64, ctx: &GenContext) -> ParamPatch {
         ([1.0, 0.0], "groove_b", "open_b"),
     ] {
         let (reach, open) = match ctx.boundary_along(Side::B, dir) {
-            Some(edge) if half >= edge - 1e-6 => (edge + OVER_THE_EDGE, true),
+            Some(edge) if half >= edge - 1e-6 => {
+                let over_the_edge = (edge * OVER_THE_EDGE_FRACTION).max(OVER_THE_EDGE_MIN);
+                (edge + over_the_edge, true)
+            }
             _ => (half.max(SLIVER), false),
         };
         patch.set.insert(

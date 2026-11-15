@@ -160,7 +160,16 @@ fn sizes(params: &Params) -> Result<Sizes, ConnectorError> {
         ));
     }
     let r_bore = r_pin + pin_clearance;
-    if r_bore + 0.4 >= r_knuckle {
+    // The knuckle needs some wall left outside the bore, or it prints as
+    // a shell with no strength (or breaks through into open air). The
+    // margin used to be a bare 0.4 mm literal; it now reuses
+    // `pin_clearance` itself (consolidation plan C18: "comes from the
+    // fit profile"), the Fit class/Machine profile's own resolved bore
+    // clearance for this generator — a looser fit (which already needs
+    // more room around the pin) also demands a thicker wall, instead of
+    // a constant with no tie to either profile.
+    let min_knuckle_wall = pin_clearance;
+    if r_bore + min_knuckle_wall >= r_knuckle {
         return Err(refuse(
             "pin_too_wide",
             format!(

@@ -226,3 +226,51 @@ fn the_swing_reports_the_first_contact_at_the_clasp_lip() {
         report.contacts.first()
     );
 }
+
+// ---------------------------------------------------------------------
+// Consolidation plan C18: the knuckle's minimum wall around the bore
+// comes from the fit profile (`pin_clearance`, already resolved from
+// the Fit class and Machine profile through `fit_role: hole`), not a
+// bare 0.4 mm literal with no tie to either.
+// ---------------------------------------------------------------------
+
+/// `knuckle_diameter 6` (r_knuckle 3) and `pin_diameter 2` (r_pin 1):
+/// `r_bore = r_pin + pin_clearance`, and the knuckle needs at least
+/// `pin_clearance` of wall left outside it. At `pin_clearance = 0.9`,
+/// `r_bore (1.9) + wall (0.9) = 2.8 < r_knuckle (3.0)`: still enough
+/// wall. At `pin_clearance = 1.0`, `r_bore (2.0) + wall (1.0) = 3.0`:
+/// no wall left, refused. A fixed 0.4 mm margin (the old literal) would
+/// have let both through (`1.9+0.4=2.3`, `2.0+0.4=2.4`, both < 3.0):
+/// the threshold must move with the fit, not stay put.
+#[test]
+fn the_minimum_knuckle_wall_follows_the_fit_profile() {
+    let ctx = RunContext::none();
+    let common: &[(&str, &str)] = &[
+        ("knuckle_diameter", "6"),
+        ("pin_diameter", "2"),
+        ("gap", "0.3"),
+    ];
+    let looser = {
+        let mut raw = common.to_vec();
+        raw.push(("pin_clearance", "0.9"));
+        hinge().generate(&params(&raw), &mf_parts::GenContext::new(&ctx))
+    };
+    assert!(
+        looser.is_ok(),
+        "pin_clearance 0.9 should leave a 0.9 mm wall: {looser:?}"
+    );
+
+    let tighter_wall = {
+        let mut raw = common.to_vec();
+        raw.push(("pin_clearance", "1.0"));
+        hinge().generate(&params(&raw), &mf_parts::GenContext::new(&ctx))
+    };
+    match tighter_wall {
+        Err(mf_parts::ConnectorError::Failed { code, .. }) => {
+            assert_eq!(code, "pin_too_wide");
+        }
+        other => {
+            panic!("pin_clearance 1.0 should refuse (no wall left outside the bore): {other:?}")
+        }
+    }
+}

@@ -22,9 +22,16 @@ use crate::theme;
 /// [`Unit`], not the import dialog's original 4).
 const OFFERED: [Unit; 6] = Unit::ALL;
 
-/// The plate used when no Machine profile is active (brief: "the
-/// default 250 × 250 × 250 mm").
-const DEFAULT_PLATE_MM: [f64; 3] = [250.0, 250.0, 250.0];
+/// The plate used when no Machine profile is active: the one print
+/// volume the app knows without a user choice, the built-in Uncalibrated
+/// profile's own (consolidation plan C18, "There is ONE print volume,
+/// from the machine profile"). This used to be a second, independent
+/// `250 × 250 × 250 mm` literal, inconsistent with both
+/// [`mf_parts::MachineProfile::uncalibrated`]'s volume and the render
+/// plate's own default.
+fn default_plate_mm() -> [f64; 3] {
+    mf_parts::MachineProfile::uncalibrated().print_volume_mm
+}
 
 /// Below this, on its largest side, a unit's reading is unprintable.
 const TOO_SMALL_MM: f64 = 5.0;
@@ -89,8 +96,8 @@ fn classify(extent_mm: [f64; 3], volume_mm: [f64; 3]) -> Fit {
 }
 
 /// The plate a model is checked against: the active Machine profile's
-/// print volume and a name to show, or [`DEFAULT_PLATE_MM`] unnamed
-/// when there's no profile (brief: "Fits a 250 mm plate").
+/// print volume and a name to show, or [`default_plate_mm`] unnamed when
+/// there's no profile.
 #[derive(Debug, Clone)]
 pub struct Plate {
     pub name: Option<String>,
@@ -106,16 +113,22 @@ impl Plate {
             },
             None => Plate {
                 name: None,
-                volume_mm: DEFAULT_PLATE_MM,
+                volume_mm: default_plate_mm(),
             },
         }
     }
 
-    /// "Fits your Prusa MK4 plate" / "Fits a 250 mm plate" with none.
+    /// "Fits your Prusa MK4 plate" / "Fits a 220 × 220 × 250 mm plate"
+    /// with none — the actual numbers, read off `self`, rather than a
+    /// second copy of [`default_plate_mm`]'s own values that could drift
+    /// from them.
     fn fits_label(&self) -> String {
         match &self.name {
             Some(name) => format!("Fits your {name} plate"),
-            None => "Fits a 250 mm plate".into(),
+            None => {
+                let [x, y, z] = self.volume_mm;
+                format!("Fits a {x:.0} × {y:.0} × {z:.0} mm plate")
+            }
         }
     }
 }
@@ -568,11 +581,11 @@ mod tests {
         // The brief's test: "the bunny (0.156 units) defaults to m,
         // which gives 156 mm, labelled fits."
         let extent = [0.156, 0.156, 0.156];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Meter);
         assert!(!choice.needs_scale);
         assert_eq!(
-            classify(extent.map(|v| v * 1000.0), DEFAULT_PLATE_MM),
+            classify(extent.map(|v| v * 1000.0), default_plate_mm()),
             Fit::Fits
         );
     }
@@ -580,20 +593,23 @@ mod tests {
     #[test]
     fn a_100_unit_cube_defaults_to_millimetres() {
         let extent = [100.0, 100.0, 100.0];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Millimeter);
         assert!(!choice.needs_scale);
     }
 
     #[test]
     fn a_3000_unit_part_defaults_to_scale_to_fit() {
-        // Every candidate unit overflows a 250 mm plate (3000 mm, 30 m,
-        // 300 cm, 76200 in): nothing fits.
+        // Every candidate unit overflows the default plate (3000 mm,
+        // 30 m, 300 cm, 76200 in): nothing fits.
         let extent = [3000.0, 3000.0, 3000.0];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert!(choice.needs_scale, "{choice:?}");
 
-        // Scaling to fit brings it to 90% of the plate on every axis.
+        // Scaling to fit brings a cube model to 90% of the plate's own
+        // smallest axis (its tightest constraint): the other axes land
+        // short of their own 90%, since one uniform factor applies to
+        // every axis of a cube model.
         let model = mf_io::ImportedModel {
             objects: Vec::new(),
             unit: None,
@@ -611,14 +627,15 @@ mod tests {
             "p".into(),
             extent,
             model,
-            plate(DEFAULT_PLATE_MM),
+            plate(default_plate_mm()),
             None,
             &ImportMemory::default(),
         );
         let factor = prompt.scale_to_fit_factor();
         let scaled_mm = prompt.extent_mm(prompt.choice).map(|v| v * factor);
-        for (s, p) in scaled_mm.iter().zip(DEFAULT_PLATE_MM) {
-            assert!((s - 0.9 * p).abs() < 1e-9, "{scaled_mm:?}");
+        let smallest = default_plate_mm().into_iter().fold(f64::INFINITY, f64::min);
+        for s in scaled_mm {
+            assert!((s - 0.9 * smallest).abs() < 1e-9, "{scaled_mm:?}");
         }
     }
 
@@ -627,19 +644,19 @@ mod tests {
         // At 0.02 units: mm -> 0.02mm (too small), cm -> 0.2mm (too
         // small), m -> 20mm (fits), inch -> 0.508mm (too small). Only
         // metres fits, so it wins outright.
-        let choice = choose_unit([0.02, 0.02, 0.02], &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit([0.02, 0.02, 0.02], &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Meter);
 
         // At 5.0 units: mm -> 5mm (fits, borderline), cm -> 50mm
         // (fits), m -> 5000mm (too big), inch -> 127mm (fits). The
         // largest that fits is inches.
-        let choice = choose_unit([5.0, 5.0, 5.0], &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit([5.0, 5.0, 5.0], &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Inch);
     }
 
     #[test]
     fn status_words_cover_every_bracket() {
-        let v = DEFAULT_PLATE_MM;
+        let v = default_plate_mm();
         assert_eq!(classify([1.0, 1.0, 1.0], v), Fit::TooSmall);
         assert_eq!(classify([10.0, 10.0, 10.0], v), Fit::VerySmall);
         assert_eq!(classify([50.0, 50.0, 50.0], v), Fit::Fits);
@@ -684,8 +701,12 @@ mod tests {
             volume_mm: [250.0, 210.0, 220.0],
         };
         assert_eq!(p.fits_label(), "Fits your Prusa MK4 plate");
-        let none = plate(DEFAULT_PLATE_MM);
-        assert_eq!(none.fits_label(), "Fits a 250 mm plate");
+        let none = plate(default_plate_mm());
+        let [x, y, z] = default_plate_mm();
+        assert_eq!(
+            none.fits_label(),
+            format!("Fits a {x:.0} × {y:.0} × {z:.0} mm plate")
+        );
     }
 
     fn model_at(path: &str, exporter_hint: Option<String>) -> ImportedModel {
@@ -712,7 +733,7 @@ mod tests {
     #[test]
     fn a_second_import_from_the_same_folder_is_remembered() {
         let extent = [100.0, 100.0, 100.0];
-        let plate = plate(DEFAULT_PLATE_MM);
+        let plate = plate(default_plate_mm());
 
         let first = UnitPrompt::new(
             "a.stl".into(),
@@ -755,7 +776,7 @@ mod tests {
     #[test]
     fn a_second_import_from_the_same_exporter_is_remembered() {
         let extent = [100.0, 100.0, 100.0];
-        let plate = plate(DEFAULT_PLATE_MM);
+        let plate = plate(default_plate_mm());
         let hint = Some("Exported from Blender-3.6.0".to_owned());
 
         let first = UnitPrompt::new(

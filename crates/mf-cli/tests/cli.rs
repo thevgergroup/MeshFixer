@@ -1575,3 +1575,120 @@ fn cli_stl_export_from_a_metres_document_writes_millimetre_bytes() {
          the document's raw 0.01, 1000x too small"
     );
 }
+
+/// Consolidation plan C18: `mesh.split_box`'s spec once defaulted
+/// `box_min`/`box_max` to `[-128,-128,0]`/`[128,128,256]` — a millimetre
+/// plate's own numbers, read as document units — so a `split-box` run
+/// with no `--box-min`/`--box-max` on a metres document cut (or tried
+/// to fit inside) a 256 metre box instead of the active Machine
+/// profile's actual print volume. The CLI now fills the default from
+/// the profile, converted into the document's own units, once the
+/// document is open.
+#[test]
+fn split_box_default_fits_metres_doc() {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    let model = Model {
+        metadata: Default::default(),
+        unit: Unit::Meter,
+        objects: vec![ModelObject {
+            metadata: Default::default(),
+            name: "block".into(),
+            // 0.3 m a side: bigger than the Uncalibrated profile's own
+            // 0.22 x 0.22 x 0.25 m print volume on every axis, so the
+            // default box genuinely cuts it (not a no-op either way).
+            mesh: cube(0.3),
+            transform: IDENTITY,
+        }],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let out = dir.path().join("out.3mf");
+    let o = meshfixer(&[
+        "split-box",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    let line = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("mesh.split_box: "))
+        .unwrap_or_else(|| panic!("no mesh.split_box report line: {stderr}"));
+    let report: serde_json::Value = serde_json::from_str(line).unwrap();
+
+    // The box's own reported corners are a metres-scale box (well under
+    // 1 document unit across on every axis, in line with a sub-metre
+    // Uncalibrated profile), never anywhere near 256 (a dead giveaway
+    // the old literal mm plate size was read as document units).
+    let lo = report["box_min"].as_array().unwrap();
+    let hi = report["box_max"].as_array().unwrap();
+    for i in 0..3 {
+        let span = hi[i].as_f64().unwrap() - lo[i].as_f64().unwrap();
+        assert!(
+            span > 0.0 && span < 1.0,
+            "box_min {lo:?} / box_max {hi:?}: axis {i} spans {span} document units, \
+             not a metres-scale default"
+        );
+    }
+
+    // The 0.3 m block was too big for the box on X/Y: it was actually
+    // cut, so the default box did real, sensible work rather than
+    // either vanishing (a near-zero box) or swallowing the whole part
+    // whole (a many-metre box that would never need a cut).
+    let pieces = report["pieces"].as_array().unwrap();
+    assert!(
+        pieces.len() > 1,
+        "the default print-volume box should have cut the oversized block: {report}"
+    );
+}
+
+/// Same bug, the `run --op mesh.split_box` path (`run_sequence`, a
+/// separate fill site from the dedicated `split-box` subcommand's
+/// `run_operation`): both must fill the default from the profile.
+#[test]
+fn split_box_default_fits_metres_doc_via_run_op() {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    let model = Model {
+        metadata: Default::default(),
+        unit: Unit::Meter,
+        objects: vec![ModelObject {
+            metadata: Default::default(),
+            name: "block".into(),
+            mesh: cube(0.3),
+            transform: IDENTITY,
+        }],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let out = dir.path().join("out.3mf");
+    let o = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "--op",
+        "mesh.split_box",
+        "-o",
+        out.to_str().unwrap(),
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let stderr = String::from_utf8_lossy(&o.stderr);
+    let line = stderr
+        .lines()
+        .find_map(|l| l.strip_prefix("mesh.split_box: "))
+        .unwrap_or_else(|| panic!("no mesh.split_box report line: {stderr}"));
+    let report: serde_json::Value = serde_json::from_str(line).unwrap();
+    let lo = report["box_min"].as_array().unwrap();
+    let hi = report["box_max"].as_array().unwrap();
+    for i in 0..3 {
+        let span = hi[i].as_f64().unwrap() - lo[i].as_f64().unwrap();
+        assert!(
+            span > 0.0 && span < 1.0,
+            "box_min {lo:?} / box_max {hi:?}: axis {i} spans {span} document units, \
+             not a metres-scale default"
+        );
+    }
+}
