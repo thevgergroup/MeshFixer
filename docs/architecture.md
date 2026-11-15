@@ -1,3 +1,5 @@
+> **This is the original vision document.** For the code as it is built today (crates, engines, the command path and where the consolidation is heading), see [architecture-as-built.md](architecture-as-built.md).
+
 I’d architect MeshFixer as a **desktop-first, cross-platform CAD/mesh application with a native geometry core, a GPU-accelerated viewport, a non-destructive operation graph, and an automation layer that treats humans and LLMs as equal clients of the same command system**.
 
 The central design principle would be: **everything the UI can do, the CLI/MCP layer can also do, and everything modifies the model through the same deterministic operation engine**.
