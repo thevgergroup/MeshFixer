@@ -24,7 +24,7 @@ use glam::DVec3;
 use mf_command::ObjectId;
 use mf_geometry::Mesh;
 use mf_operations::sculpt::{BrushKind, BrushParams, DabSample, Falloff, SculptIndex, StrokeState};
-use mf_render::MeshVertices;
+use mf_render::{MeshVertices, OrbitCamera};
 use mf_spec::{ParamValue, Params};
 
 use crate::MeshFixerApp;
@@ -52,10 +52,17 @@ const DAB_SPACING: f64 = 0.25;
 #[derive(Debug, Clone)]
 pub struct SculptSettings {
     pub brush: BrushKind,
-    /// World-space (the document's own units, like Split's gap: M4
-    /// `shape_tools.rs` house style passes GUI values straight through as
-    /// the spec's `unit: mm` parameters).
-    pub radius: f64,
+    /// Screen-relative, like Meshmixer's own brush size (owner bug
+    /// 2026-11-14): screen points under the cursor, not a document-unit
+    /// length. A fixed *document-units* radius reads as a wildly
+    /// different real-world size depending on the document's units and
+    /// scale — 5 document units is 5 mm on an mm document, but 5 m on
+    /// the Stanford bunny (imported in metres), enough to move the
+    /// whole 34,978-vertex model in one stroke. [`world_radius_at`]
+    /// converts this to a world-space radius each stroke, from the
+    /// camera and the cursor's depth on the surface, so the same "40"
+    /// always reads as the same angular size on screen.
+    pub radius_pt: f64,
     pub strength: f64,
     pub falloff: Falloff,
     pub symmetry: [bool; 3],
@@ -71,7 +78,7 @@ impl Default for SculptSettings {
     fn default() -> SculptSettings {
         SculptSettings {
             brush: BrushKind::Inflate,
-            radius: 5.0,
+            radius_pt: 40.0,
             strength: 0.5,
             falloff: Falloff::Smooth,
             symmetry: [false, false, false],
@@ -282,18 +289,23 @@ fn surface_point(
 /// The stroke's brush parameters (object space) from the panel settings,
 /// the camera's view direction and `pivot_world` (the symmetry planes'
 /// point, world space: the first dab's hit, kept for the whole stroke).
+/// `radius_world` is the brush's world-space (document units) radius
+/// for this stroke, already converted from the panel's screen-points
+/// setting by [`world_radius_at`] — not `settings.radius_pt` itself,
+/// which is screen points, not a length.
 fn brush_params(
     cam_view_dir: DVec3,
     settings: &SculptSettings,
     transform: &[f64; 12],
     pivot_world: DVec3,
+    radius_world: f64,
 ) -> Option<BrushParams> {
     let mut map = BTreeMap::new();
     map.insert(
         "brush".to_owned(),
         ParamValue::Text(settings.brush.word().to_owned()),
     );
-    map.insert("radius".to_owned(), ParamValue::Float(settings.radius));
+    map.insert("radius".to_owned(), ParamValue::Float(radius_world));
     map.insert("strength".to_owned(), ParamValue::Float(settings.strength));
     map.insert(
         "falloff".to_owned(),
@@ -453,11 +465,18 @@ fn begin_stroke(app: &mut MeshFixerApp) {
             .unwrap_or_default()
     });
     let Some(cam) = app.camera else { return };
-    let settings = app.sculpt.clone();
-    let Some(brush) = brush_params(cam.view_dir(), &settings, &transform, world) else {
+    let Some(rect) = app.viewport.last_rect else {
         return;
     };
-    let radius_world = brush.radius * determinant_cbrt(&transform);
+    let settings = app.sculpt.clone();
+    // The brush's world-space radius, fixed for this whole stroke
+    // (like `pivot`/`view_dir` below): the cursor's depth on the
+    // surface right now, at the panel's screen-points radius.
+    let radius_world = world_radius_at(&cam, rect.height() as f64, world, settings.radius_pt);
+    let Some(brush) = brush_params(cam.view_dir(), &settings, &transform, world, radius_world)
+    else {
+        return;
+    };
     let index = SculptIndex::from_bvh(bvh);
     let mut state = StrokeState::new(&mesh, index, brush);
     let ctx = mf_runtime::RunContext::none();
@@ -487,16 +506,42 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     });
 }
 
-/// `transform`'s mean scale: the cube root of its linear part's
-/// determinant's magnitude, as `mf_operations::sculpt::brush_params` uses
-/// to convert a world radius to the object's own space.
-fn determinant_cbrt(transform: &[f64; 12]) -> f64 {
-    let m = glam::DMat3::from_cols(
-        DVec3::new(transform[0], transform[1], transform[2]),
-        DVec3::new(transform[3], transform[4], transform[5]),
-        DVec3::new(transform[6], transform[7], transform[8]),
-    );
-    m.determinant().abs().cbrt()
+/// The world-space radius `radius_pt` screen points reads as at `world`
+/// (a point on the surface, typically the dab under the cursor), from
+/// `cam` and the viewport's `view_height_pt` — screen-relative sizing,
+/// as Meshmixer's own brush does: the same angular size on screen,
+/// whatever the document's units or the model's scale, converted fresh
+/// from the camera each time this is called (once per stroke, at the
+/// cursor's own depth on the surface, not the camera's distance to its
+/// orbit target, which can be well in front of or behind the surface).
+///
+/// `view_height_pt` and `radius_pt` are the same unit throughout this
+/// module (egui's logical points): the viewport rect and the camera's
+/// own `ray`/`screen_position` already work in points, not physical
+/// pixels, so no `pixels_per_point` conversion belongs here.
+fn world_radius_at(cam: &OrbitCamera, view_height_pt: f64, world: DVec3, radius_pt: f64) -> f64 {
+    let depth = (world - cam.eye()).length();
+    let world_per_pt = 2.0 * depth * (cam.fov_y * 0.5).tan() / view_height_pt.max(1.0);
+    world_per_pt * radius_pt
+}
+
+/// Test support: the panel's `radius_pt` that reads as `world_radius`
+/// document units at `world`'s depth, under `app`'s current camera and
+/// viewport — [`world_radius_at`]'s inverse. Since the fix, the panel's
+/// setting is screen points, not a world-space length, so a test that
+/// wants a brush of an exact world size (to check *geometry*, like how
+/// far a bump reaches, not the screen-relative sizing itself) sets
+/// `app.sculpt.radius_pt` to this instead of a document-units number
+/// directly. `None` without a camera or a viewport rect yet.
+pub fn radius_pt_for_world(app: &MeshFixerApp, world: [f64; 3], world_radius: f64) -> Option<f64> {
+    let cam = app.camera?;
+    let rect = app.viewport.last_rect?;
+    let depth = (DVec3::from(world) - cam.eye()).length();
+    let world_per_pt = 2.0 * depth * (cam.fov_y * 0.5).tan() / (rect.height() as f64).max(1.0);
+    if world_per_pt <= 0.0 || !world_per_pt.is_finite() {
+        return None;
+    }
+    Some(world_radius / world_per_pt)
 }
 
 /// Continues the open stroke to `px`, sampling once the pointer has moved
@@ -590,15 +635,19 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
     // frame (owner: "swap in a single frame").
     app.sculpt_pending = Some((stroke.object, stroke.render.clone()));
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
-    // `radius` and `pivot` are `unit: mm` params (D20): `settings.radius`
-    // and `world` are document units (the panel's own slider, and the
-    // stroke's world-space hit point), so cross to mm here, once, or
-    // `Session::prepare`'s single mm-to-document conversion runs on an
-    // already-document-units number.
+    // `radius` and `pivot` are `unit: mm` params (D20): `stroke.radius_world`
+    // and `world` are document units (fixed when the stroke began —
+    // [`world_radius_at`] at the time, and the stroke's world-space hit
+    // point), so cross to mm here, once, or `Session::prepare`'s single
+    // mm-to-document conversion runs on an already-document-units
+    // number. Not recomputed from the panel's current screen-points
+    // setting or the camera's current position: a replay must give the
+    // same result however the camera has moved since (same reasoning as
+    // the fixed pivot and view direction just above).
     let mm = crate::transform_tool::mm_per(app.session.document().units());
     let params: BTreeMap<String, String> = BTreeMap::from([
         ("brush".to_owned(), settings.brush.word().to_owned()),
-        ("radius".to_owned(), (settings.radius * mm).to_string()),
+        ("radius".to_owned(), (stroke.radius_world * mm).to_string()),
         ("strength".to_owned(), settings.strength.to_string()),
         (
             "falloff".to_owned(),
@@ -694,12 +743,10 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     let Some((_, world)) = surface_point(app, id, &mesh, px) else {
         return;
     };
-    let transform = app
-        .shown_transform(id)
-        .or_else(|| app.session.document().object(id).map(|o| o.transform))
-        // allow-swallow: id is checked live just above (active_mesh/surface_point); a vanished object falls back to identity rather than panicking this frame.
-        .unwrap_or_default();
-    let radius_world = app.sculpt.radius * determinant_cbrt(&transform);
+    // Live each frame (not fixed to a stroke): the ring must track the
+    // cursor's own depth on the surface as the camera orbits or zooms,
+    // same as the real stroke's own radius would if one started here.
+    let radius_world = world_radius_at(&cam, rect.height() as f64, world, app.sculpt.radius_pt);
     let view = (rect.width() as f64, rect.height() as f64);
     let normal = DVec3::from(cam.ray(cam.target, view, px).1) * -1.0;
     let u = normal.any_orthonormal_vector();
@@ -740,6 +787,31 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
+/// The brush panel's "≈ 4.2 mm at this zoom" readout: `app.sculpt.radius_pt`
+/// converted to a world-space (document units) length, at the cursor's
+/// own depth on the surface while it's hovering the active object, or
+/// (not hovering, or nothing to hit) the camera's distance to its own
+/// orbit target — a reasonable stand-in depth so the panel still shows
+/// *something* while the pointer is off the viewport, rather than
+/// blanking the label. `None` only without a camera at all (the tool
+/// just opened, before the first frame's render).
+fn brush_radius_preview_world(app: &MeshFixerApp) -> Option<f64> {
+    let cam = app.camera?;
+    let rect = app.viewport.last_rect?;
+    let depth_point = app
+        .active
+        .zip(app.active_mesh().cloned())
+        .zip(app.sculpt_hover)
+        .and_then(|((id, mesh), px)| surface_point(app, id, &mesh, px).map(|(_, world)| world))
+        .unwrap_or(cam.target);
+    Some(world_radius_at(
+        &cam,
+        rect.height() as f64,
+        depth_point,
+        app.sculpt.radius_pt,
+    ))
+}
+
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     widgets::body(ui, t!("sculpt.help"));
     let units = crate::defects::unit_symbol(app.session.document().units());
@@ -763,13 +835,23 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         }
     });
 
-    section(ui, &t!("sculpt.section.radius", unit = units));
+    section(ui, &t!("sculpt.section.radius"));
     ui.add(
-        egui::Slider::new(&mut app.sculpt.radius, 0.1..=200.0)
+        egui::Slider::new(&mut app.sculpt.radius_pt, 5.0..=200.0)
             .logarithmic(true)
-            .suffix(format!(" {units}"))
-            .max_decimals(2),
+            .suffix(" pt")
+            .max_decimals(1),
     );
+    if let Some(world) = brush_radius_preview_world(app) {
+        widgets::body(
+            ui,
+            t!(
+                "sculpt.section.radius.approx",
+                size = mf_spec::format_length(world),
+                unit = units
+            ),
+        );
+    }
 
     section(ui, &t!("sculpt.section.strength"));
     ui.add(egui::Slider::new(&mut app.sculpt.strength, 0.0..=1.0).max_decimals(2));
@@ -897,6 +979,40 @@ pub fn sculpt_changes_face_states(baseline: &Mesh, current: &Mesh) -> mf_render:
 mod tests {
     use super::*;
     use std::collections::HashSet;
+
+    /// Owner bug (2026-11-14): the brush radius is screen-relative, like
+    /// Meshmixer's own — zooming in on the same surface point must halve
+    /// the world-space radius the same screen-points setting converts
+    /// to, since the point is now twice as close (and so twice the
+    /// angular size for the same world length).
+    #[test]
+    fn brush_world_radius_tracks_zoom() {
+        let cam = OrbitCamera {
+            target: DVec3::ZERO,
+            distance: 100.0,
+            yaw: 0.0,
+            pitch: 0.0,
+            fov_y: 40f64.to_radians(),
+            radius: 50.0,
+        };
+        // A point on the surface, between the eye and the target (the
+        // dab's own world point would be, on a real mesh): simplest to
+        // reason about is the target itself.
+        let world = cam.target;
+        let view_height_pt = 1000.0;
+        let radius_pt = 40.0;
+        let at_1x = world_radius_at(&cam, view_height_pt, world, radius_pt);
+
+        let mut zoomed_in = cam;
+        zoomed_in.distance *= 0.5; // 2x zoom: half the distance to the target
+        let at_2x = world_radius_at(&zoomed_in, view_height_pt, world, radius_pt);
+
+        assert!(at_1x > 0.0, "{at_1x}");
+        assert!(
+            (at_2x - at_1x * 0.5).abs() < at_1x * 1e-9,
+            "zooming in 2x should halve the world radius: {at_1x} -> {at_2x}"
+        );
+    }
 
     /// Owner (2026-11-11): "Brush icons are identical." Every brush must
     /// draw its own glyph, not all fall back to the tool's own
