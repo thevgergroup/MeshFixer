@@ -15,17 +15,24 @@ Setup: keep both, capped, no gap, plane (0.3, 0.1, 1) through the bbox centre; o
 |---|---|---:|---|---|---:|---:|---:|---|---|---|
 | 1M | sphere 1M | 998,284 | custom cut | baseline | 0.06 | 72 | 10 | `5b2d20b` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
 | 1M | sphere 1M | 998,284 | Manifold | **rejected** | 0.68 | 814 | 751 | `df500a4` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
-| 1M | sphere 1M | 998,284 | custom cut, hardened | current | 0.06 | 72 | 8 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 1M | sphere 1M | 998,284 | custom cut, hardened | superseded | 0.06 | 72 | 8 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 1M | sphere 1M | 998,284 | custom cut, hardened | current | 0.05 | 75 | 13 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
+| 1M | sullivan scan x4 (1.6M) | 1,557,144 | custom cut, hardened | current | 0.10 | 155 | 23 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
 | 5M | sphere 5M | 4,995,960 | custom cut | baseline | 0.28 | 434 | 62 | `5b2d20b` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
 | 5M | sphere 5M | 4,995,960 | Manifold | **rejected** | 3.98 | 3,494 | 3,123 | `df500a4` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
-| 5M | sphere 5M | 4,995,960 | custom cut, hardened | current | 0.24 | 434 | 62 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 5M | sphere 5M | 4,995,960 | custom cut, hardened | superseded | 0.24 | 434 | 62 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 5M | sphere 5M | 4,995,960 | custom cut, hardened | current | 0.25 | 434 | 64 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
+| 5M | winged-victory scan (5.7M) | 5,672,212 | custom cut, hardened | current | 0.24 | 709 | 69 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
+| 30M | winged-victory scan x4 (22.7M) | 22,688,848 | custom cut, hardened | current | 0.97 | 1,333 | 264 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
 | 30M | sphere 30M | 29,992,512 | custom cut | baseline | 1.41 | 1,749 | 312 | `5b2d20b` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
 | 30M | sphere 30M | 29,992,512 | Manifold | **rejected** | 33.19 | 18,417 | 16,981 | `df500a4` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
-| 30M | sphere 30M | 29,992,512 | custom cut, hardened | current | 1.40 | 2,104 | 322 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 30M | sphere 30M | 29,992,512 | custom cut, hardened | superseded | 1.40 | 2,104 | 322 | `7ce2700` | 2026-11-13 | Apple M2 Max, 32 GB, 11 worker threads |
+| 30M | sphere 30M | 29,992,512 | custom cut, hardened | current | 1.40 | 1,748 | 312 | `239df62` | 2026-11-15 | Apple M2 Max, 32 GB, 11 worker threads |
 
 - `5b2d20b` (custom cut, baseline): custom plane cut at c3e111e, harness 5b2d20b
 - `df500a4` (Manifold, rejected): Split on Manifold (p1b-cut), rejected by the owner 2026-11-13
-- `7ce2700` (custom cut, hardened, current): topological section, split-harden (p1c-split)
+- `7ce2700` (custom cut, hardened, superseded): topological section, split-harden (p1c-split)
+- `239df62` (custom cut, hardened, current): after C20: equator rim vertices one ulp apart unified in plane_cut (d1b0da0)
 
 ## `mesh.hollow`
 
