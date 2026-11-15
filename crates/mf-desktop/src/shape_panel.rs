@@ -585,7 +585,7 @@ pub fn param_grid(
                 let name = label(&p.name);
                 ui.add(egui::Label::new(&name).wrap_mode(egui::TextWrapMode::Extend))
                     .on_hover_text(&p.description);
-                let suffix = match p.unit.as_deref() {
+                let suffix = match p.unit.symbol() {
                     Some("mm") => " mm",
                     Some("deg") => "°",
                     _ => "",

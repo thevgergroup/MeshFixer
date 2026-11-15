@@ -13,6 +13,11 @@ parameters:
     # the numeric fields compute it, so replay runs no trigonometry and is
     # Exact on every OS.
     default: [1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, 0]
+    # The 3x3 linear part has no unit (rotation and scale), and the
+    # translation is already in world/document units (ADR-0006 §6.2),
+    # so the whole 12-value affine is `document`, not converted by
+    # to_document_units.
+    unit: document
     description: "The object's new placement: 12 numbers m00,m01,m02,m10,m11,m12,m20,m21,m22 (the 3x3 linear part, row by row, 3MF order) then the translation x,y,z"
 preconditions:
   - target is a whole object

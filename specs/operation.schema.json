@@ -61,7 +61,10 @@
           "values": { "type": "array", "items": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" }, "minItems": 2, "uniqueItems": true },
           "min": { "type": "number" },
           "max": { "type": "number" },
-          "unit": { "type": "string" },
+          "unit": {
+            "enum": ["mm", "cm", "m", "in", "ft", "deg", "%", "document"],
+            "$comment": "ParamUnit (ADR-0006, consolidation plan C05): mm/cm/m/in/ft are Length(unit), converted to document units by OperationSpec::to_document_units at prepare time; document is already in document/world units (never converted); deg is Angle and % is Percent (neither converted); absent means ParamUnit::None (not a quantity with a unit)."
+          },
           "default_from": { "type": "string", "pattern": "^fit\\.[a-z_]+$" },
           "description": { "type": "string", "minLength": 1 }
         }

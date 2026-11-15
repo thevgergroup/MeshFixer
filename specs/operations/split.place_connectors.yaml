@@ -22,6 +22,7 @@ parameters:
   - name: plane_point
     type: vec3
     default: [0, 0, 0]
+    unit: document
     description: "A point on the joint's mid-plane, in world space and document units: x,y,z"
   - name: plane_normal
     type: vec3
@@ -30,11 +31,13 @@ parameters:
   - name: plane_u
     type: vec3
     default: [1, 0, 0]
+    unit: document
     description: "The in-plane direction the connectors' 2D positions are measured along (its part in the plane is used; v is normal x u)"
   - name: gap
     type: float
     default: 0.0
     min: 0.0
+    unit: document
     description: "The joint's gap between the two cut faces, in document units (as the cut recorded it)"
   - name: connectors
     type: text

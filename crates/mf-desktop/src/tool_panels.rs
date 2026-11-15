@@ -1855,7 +1855,7 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                     let range = min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX);
                     let suffix = p
                         .unit
-                        .as_deref()
+                        .symbol()
                         .map(|u| format!(" {u}"))
                         // allow-swallow: no unit means no suffix
                         .unwrap_or_default();
