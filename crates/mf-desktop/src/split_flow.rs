@@ -36,7 +36,7 @@ use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 use crate::MeshFixerApp;
 use crate::intent::Intent;
 use crate::shell::{Claims, Input};
-use crate::widgets::{self, Kind};
+use crate::widgets::{self, Kind, LengthFieldOpts, doc_length_field};
 use crate::{icons, t, theme};
 
 // ---------------------------------------------------------------------
@@ -51,7 +51,12 @@ pub enum CutMode {
     Volume,
 }
 
-/// The print-volume box: world axis-aligned, document units.
+/// The print-volume box: world axis-aligned, document units. Its
+/// default is empty: [`place_box`] sizes it from the active machine
+/// profile's print volume (in mm, converted to the document's unit) and
+/// centres it on the selection the first time Print volume shows, so it
+/// never starts as a literal size in document units (the old 256 that
+/// meant 256 m on a metres document).
 #[derive(Debug, Clone)]
 pub struct VolumeBox {
     pub center: DVec3,
@@ -76,8 +81,8 @@ pub struct VolumeBox {
 impl Default for VolumeBox {
     fn default() -> VolumeBox {
         VolumeBox {
-            center: DVec3::new(0.0, 0.0, 128.0),
-            size: DVec3::splat(256.0),
+            center: DVec3::ZERO,
+            size: DVec3::ZERO,
             preset: String::new(),
             placed_for: None,
             drag: None,
@@ -352,9 +357,13 @@ pub fn kind_label_plural(id: &str) -> String {
     format!("{}s", kind_label(id).to_lowercase())
 }
 
-/// Document units per millimetre.
-pub fn mm(app: &MeshFixerApp) -> f64 {
-    1.0 / crate::transform_tool::mm_per(app.session.document().units())
+/// Document units per millimetre: the scale the `mf_operations::split`
+/// geometry helpers (mm-internal connector generators placed in a
+/// document-unit joint frame) and the printer presets (mm) need. Never a
+/// panel field's conversion: those hold a typed `Length`
+/// (`widgets::length_field`).
+pub fn doc_units_per_millimetre(app: &MeshFixerApp) -> f64 {
+    mf_units::Length::new(1.0, mf_units::Unit::Millimeter).in_doc(app.session.document().units())
 }
 
 pub(crate) fn name_of(app: &MeshFixerApp, id: ObjectId) -> String {
@@ -942,7 +951,7 @@ pub(crate) fn settings(app: &MeshFixerApp) -> mf_operations::CheckSettings {
             .get(&app.connectors.machine_profile)
             .cloned()
             .unwrap_or_else(mf_parts::MachineProfile::uncalibrated),
-        mm: mm(app),
+        mm: doc_units_per_millimetre(app),
     }
 }
 
@@ -1065,7 +1074,7 @@ pub(crate) fn refresh_previews(app: &mut MeshFixerApp) {
     {
         return;
     }
-    let scale = mm(app);
+    let scale = doc_units_per_millimetre(app);
     let previews: Vec<Vec<PreviewPart>> = joint
         .placements
         .iter()
@@ -1347,8 +1356,8 @@ pub fn place_box(app: &mut MeshFixerApp, force: bool) {
     let Some((lo, hi)) = selection_bounds(app) else {
         return;
     };
-    let scale = mm(app);
-    if app.split_flow.volume.preset.is_empty() {
+    let scale = doc_units_per_millimetre(app);
+    if app.split_flow.volume.preset.is_empty() || app.split_flow.volume.size == DVec3::ZERO {
         let all = presets(app);
         let chosen = all
             .iter()
@@ -1417,8 +1426,8 @@ fn box_warning(app: &MeshFixerApp) -> Option<String> {
 
 fn volume_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     place_box(app, false);
-    let units = crate::defects::unit_symbol(app.session.document().units());
-    let scale = mm(app);
+    let scale = doc_units_per_millimetre(app);
+    let doc = app.session.document().units();
     if let Some(w) = box_warning(app) {
         warning_card(ui, &w);
     }
@@ -1455,25 +1464,29 @@ fn volume_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 app.split_flow.volume.preset = custom.clone();
             }
         });
-    section(ui, &t!("split.section.size", unit = units));
+    // W × D × H and the centre: length fields (ADR-0006 rule 1), each
+    // scrubbing in a `nice_step` at this zoom; the box itself stays in
+    // document units because its gizmo drags it too.
+    let lengths = app.scale_ctx();
+    section(ui, &t!("split.section.size"));
     let mut size = app.split_flow.volume.size;
     let mut changed = false;
+    let size_range = (
+        crate::widgets::length_field::scrub_step(&lengths),
+        crate::widgets::length_field::UNBOUNDED.1,
+    );
     ui.horizontal(|ui| {
+        let width = crate::widgets::length_field::row_field_width(ui, 3);
         for (k, name) in ["W", "D", "H"].into_iter().enumerate() {
-            ui.label(
-                RichText::new(name)
-                    .size(theme::TYPE_CAPTION)
-                    .color(theme::TEXT_MUTED),
-            );
-            let r = ui.add(
-                egui::DragValue::new(&mut size[k])
-                    .speed(1.0)
-                    .range(1.0 * scale..=10_000.0 * scale)
-                    .max_decimals(1),
-            );
             let label = format!("Print volume {name}");
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &label));
-            changed |= r.changed();
+            let opts = LengthFieldOpts {
+                range: size_range,
+                scale: &lengths,
+                label: name,
+            };
+            let id = egui::Id::unique(("print volume size", k));
+            changed |=
+                doc_length_field(ui, id, &mut size[k], &opts, Some((&label, width))).changed();
         }
     });
     if changed {
@@ -1483,21 +1496,21 @@ fn volume_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         f.center.z = z0 + size.z / 2.0;
         f.preset = custom.clone();
     }
-    section(ui, &t!("split.section.position", unit = units));
+    section(ui, &t!("split.section.position"));
     let mut c = app.split_flow.volume.center;
     let mut moved = false;
     ui.horizontal(|ui| {
+        let width = crate::widgets::length_field::row_field_width(ui, 3);
         for k in 0..3 {
-            let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][k];
-            ui.label(
-                RichText::new(crate::transform_tool::AXIS_NAMES[k])
-                    .size(theme::TYPE_CAPTION)
-                    .color(color),
-            );
-            let r = ui.add(egui::DragValue::new(&mut c[k]).speed(0.5).max_decimals(2));
-            let label = format!("Box centre {}", crate::transform_tool::AXIS_NAMES[k]);
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &label));
-            moved |= r.changed();
+            let short = crate::transform_tool::AXIS_NAMES[k];
+            let label = format!("Box centre {short}");
+            let opts = LengthFieldOpts {
+                range: crate::widgets::length_field::UNBOUNDED,
+                scale: &lengths,
+                label: short,
+            };
+            let id = egui::Id::unique(("box centre", k));
+            moved |= doc_length_field(ui, id, &mut c[k], &opts, Some((&label, width))).changed();
         }
     });
     if moved {
@@ -1517,15 +1530,14 @@ fn volume_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     match box_pieces(app) {
         Some(pieces) if pieces.len() > 1 => {
             for (label, s) in pieces {
-                let s = s / scale;
                 widgets::body(
                     ui,
                     t!(
                         "split.piece.size",
                         piece = label,
-                        w = format!("{:.0}", s.x),
-                        d = format!("{:.0}", s.y),
-                        h = format!("{:.0}", s.z),
+                        w = mf_units::format_length(s.x, doc),
+                        d = mf_units::format_length(s.y, doc),
+                        h = mf_units::format_length(s.z, doc),
                     ),
                 );
             }
@@ -1554,14 +1566,13 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
         .iter()
         .map(|&id| (mf_command::TARGET_OPERAND.to_owned(), id, None))
         .collect();
-    // `plane_point`, `cut_gap`, `bound_width` and `bound_height` are
-    // lengths; `s.point()`, `s.gap`, `s.bound_width` and `s.bound_height`
-    // are document units (the panel's own gizmo and fields), so they go
-    // on the `Intent` as lengths in the document's unit, and
-    // `Session::prepare` alone converts them. `box_min`/`box_max` are
-    // `unit: document` (a box already in world/document units).
+    // `cut_gap`, `bound_width` and `bound_height` are typed lengths (the
+    // panel's own fields) and `plane_point` is the gizmo's point in
+    // document units: `Session::prepare` alone converts them.
+    // `box_min`/`box_max` are `unit: document` (a box already in
+    // world/document units).
     let doc = app.session.document().units();
-    let len = |v: f64| mf_units::Length::new(v, doc);
+    let (bound_width, bound_height) = crate::shape_tools::bound_size(app);
     let intent = match app.split_flow.mode {
         CutMode::Slice => {
             let s = &app.split;
@@ -1588,7 +1599,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 .set_point("plane_point", s.point().to_array(), doc)
                 .param("plane_normal", vec3(s.normal()))
                 .param("keep", &s.keep)
-                .set("cut_gap", len(s.gap))
+                .set("cut_gap", s.gap)
                 .param("cap", s.cap)
                 .param("regions", regions_param)
                 .param("bound", s.bound);
@@ -1598,8 +1609,8 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
                 // changes replay unless it's actually used.
                 p = p
                     .param("bound_shape", &s.bound_shape)
-                    .set("bound_width", len(s.bound_width))
-                    .set("bound_height", len(s.bound_height));
+                    .set("bound_width", bound_width)
+                    .set("bound_height", bound_height);
             }
             p
         }
@@ -1608,7 +1619,7 @@ fn apply_cut(app: &mut MeshFixerApp, label: String) {
             Intent::op("mesh.split_box")
                 .set_doc("box_min", vec3(v.min()))
                 .set_doc("box_max", vec3(v.max()))
-                .set("cut_gap", len(app.split.gap))
+                .set("cut_gap", app.split.gap)
                 .param("cap", app.split.cap)
         }
     };
@@ -1768,13 +1779,14 @@ fn volume_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Inpu
         // Zoom-adaptive, unit-aware (MF-OBJ-002): see `shape_tools::plane_input`.
         let units = app.session.document().units();
         let (grid, _) = crate::transform_tool::snap_step(&cam, g.pivot, size, units);
-        Snap {
-            grid: Some(grid),
-            plate: None,
-            ..Snap::default()
-        }
+        crate::transform_tool::grid_snap(grid)
     };
-    let min_size = mm(app);
+    // The smallest box: one field step at this zoom (a few points on
+    // screen), not a fixed length.
+    let min_size = {
+        let scale = app.scale_ctx();
+        crate::widgets::length_field::scrub_step(&scale).in_doc(scale.doc)
+    };
     match input.pointer {
         Some(ToolPointer::Start { from, at }) => {
             if let Some(k) = face_hit(app, from) {

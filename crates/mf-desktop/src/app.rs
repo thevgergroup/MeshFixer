@@ -446,11 +446,6 @@ pub struct MeshFixerApp {
     /// The Sculpt panel's "Show sculpt changes" overlay (off by default):
     /// tints vertices by how far they've moved since the tool was opened.
     pub sculpt_show_changes: bool,
-    /// The radius panel's typed-unit field while it has focus (ADR-0006
-    /// rule 1b: "3 mm" and the like): `None` shows the live "≈ X at this
-    /// zoom" readout instead. Mirrors [`crate::transform_tool::TransformTool::editing`]'s
-    /// pattern — the text a person is typing, not yet committed.
-    pub sculpt_radius_text: Option<String>,
     /// The active object's mesh as it was when Sculpt was opened (the
     /// "Show sculpt changes" overlay's reference point): `None` outside
     /// Sculpt. Reset whenever the active object changes while Sculpt
@@ -926,7 +921,6 @@ impl MeshFixerApp {
             sculpt_pending: None,
             sculpt_hover: None,
             sculpt_show_changes: false,
-            sculpt_radius_text: None,
             sculpt_baseline: None,
             solid: Default::default(),
             parts: Default::default(),
@@ -1027,13 +1021,15 @@ impl MeshFixerApp {
     }
 
     /// The [`mf_units::ScaleCtx`] a panel's `length_field`/`length_slider`
-    /// uses (consolidation plan C15, units-audit.md §6.5): the document's
-    /// unit as both doc and display (the app has no separate
-    /// display-unit preference yet), and `bbox_diag` from the active
-    /// object so `length_slider`'s range is bbox-relative. No live
-    /// camera is threaded through here (panel fields aren't a viewport
-    /// drag), so `world_per_pt` is `None` and the scrub step falls back
-    /// to the document scale.
+    /// uses (consolidation plan C15/C17, units-audit.md §6.4-6.5): the
+    /// document's unit as both doc and display (the app has no separate
+    /// display-unit preference yet), `bbox_diag` from the active object
+    /// so bbox-relative defaults and `length_slider`'s range follow the
+    /// model, and `world_per_pt` at the camera's target from the live
+    /// view, so a label scrub steps by a `nice_step` that is a few points
+    /// on screen at the current zoom (millimetres on a framed 0.156 m
+    /// bunny, never 0.5 m). Without a camera yet it is `None` and the
+    /// step falls back to the document scale.
     pub fn scale_ctx(&self) -> mf_units::ScaleCtx {
         let doc = self.session.document().units();
         let bbox_diag = self
@@ -1041,11 +1037,19 @@ impl MeshFixerApp {
             .and_then(|m| m.bounding_box())
             .map(|b| b.diagonal())
             .unwrap_or(0.0);
+        let world_per_pt = self
+            .camera
+            .zip(self.viewport.last_rect)
+            .map(|(cam, rect)| {
+                let depth = (cam.target - cam.eye()).length();
+                2.0 * depth * (cam.fov_y * 0.5).tan() / f64::from(rect.height()).max(1.0)
+            })
+            .filter(|w| w.is_finite() && *w > 0.0);
         mf_units::ScaleCtx {
             doc,
             display: doc,
             bbox_diag,
-            world_per_pt: None,
+            world_per_pt,
         }
     }
 
@@ -1204,7 +1208,11 @@ impl MeshFixerApp {
         let Some(current) = self.session.document().object(id).map(|o| o.transform) else {
             return; // the object was removed (e.g. the import was undone)
         };
-        let scaled = transform_tool::scale_linear(&current, factor);
+        // A uniform scale of the linear part; the translation stays.
+        let mut scaled = current;
+        for v in &mut scaled[0..9] {
+            *v *= factor;
+        }
         self.active = Some(id);
         self.commit_transform(id, scaled, "Scale to fit plate".into());
     }
@@ -5346,7 +5354,7 @@ impl MeshFixerApp {
     /// fixed default spacing without a live camera/viewport yet (the
     /// first frame, before either is set).
     fn plate(&self) -> mf_render::Plate {
-        let mm = transform_tool::mm_per(self.session.document().units());
+        let mm = self.session.document().units().mm_per();
         let d = mf_render::Plate::default();
         let grid_mm = self
             .camera

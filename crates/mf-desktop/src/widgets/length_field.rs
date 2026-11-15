@@ -96,6 +96,31 @@ pub fn length_field(
     value: &mut Length,
     opts: &LengthFieldOpts<'_>,
 ) -> egui::Response {
+    field(ui, id, value, opts, None, FIELD_WIDTH_PT)
+}
+
+/// A [`length_field`] for a row of several (a point's X, Y and Z): the
+/// short `opts.label` ("X") is shown and scrubbed, `accessible` ("Split
+/// point X") names the text box, and the box is `width` points wide.
+pub fn length_field_named(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut Length,
+    opts: &LengthFieldOpts<'_>,
+    accessible: &str,
+    width: f32,
+) -> egui::Response {
+    field(ui, id, value, opts, Some(accessible), width)
+}
+
+fn field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut Length,
+    opts: &LengthFieldOpts<'_>,
+    accessible: Option<&str>,
+    width: f32,
+) -> egui::Response {
     let state_id = id.with("length_field");
     let mut state: FieldState = ui.data(|d| d.get_temp(state_id)).unwrap_or_default(); // allow-swallow: no state yet is a fresh field
     let edit_id = id.with("text");
@@ -132,9 +157,20 @@ pub fn length_field(
             let edit = ui.add(
                 egui::TextEdit::singleline(&mut state.text)
                     .id(edit_id)
-                    .desired_width(FIELD_WIDTH_PT),
+                    .desired_width(width),
             );
-            let edit = edit.labelled_by(label.id);
+            let edit = match accessible {
+                None => edit.labelled_by(label.id),
+                Some(name) => {
+                    let text = state.text.clone();
+                    edit.widget_info(|| {
+                        let mut info = egui::WidgetInfo::text_edit(true, "", &text, "");
+                        info.label = Some(name.to_owned());
+                        info
+                    });
+                    edit
+                }
+            };
             if edit.changed() {
                 state.error = None;
             }
@@ -166,6 +202,51 @@ pub fn length_field(
     let mut response = inner.inner;
     if committed {
         response.mark_changed();
+    }
+    response
+}
+
+/// The text box width for one of `n` [`length_field_named`]s side by
+/// side in `ui`'s remaining width (each with a one-letter label), never
+/// wider than a lone field's.
+pub fn row_field_width(ui: &egui::Ui, n: usize) -> f32 {
+    let n = n.max(1) as f32;
+    let gap = ui.spacing().item_spacing.x;
+    let label = 12.0 + gap;
+    ((ui.available_width() - gap * (n - 1.0)) / n - label).clamp(40.0, FIELD_WIDTH_PT)
+}
+
+/// No limit either way: for a position (a split point, a box centre),
+/// where any coordinate is valid.
+pub const UNBOUNDED: (Length, Length) = (
+    Length::new(f64::NEG_INFINITY, Unit::Millimeter),
+    Length::new(f64::INFINITY, Unit::Millimeter),
+);
+
+/// A [`length_field`] over a value the tool keeps in document units
+/// because a gizmo drags it too (Split's plane point, the print-volume
+/// box): the field shows and parses it as a [`Length`] in the document's
+/// unit, and only here, at the widget, is the committed length written
+/// back as document units — the panel itself never converts. `row`
+/// makes it one of a row ([`length_field_named`]'s accessible name and
+/// width). Returns the field's response (`changed()` on a commit).
+pub fn doc_length_field(
+    ui: &mut egui::Ui,
+    id: egui::Id,
+    value: &mut f64,
+    opts: &LengthFieldOpts<'_>,
+    row: Option<(&str, f32)>,
+) -> egui::Response {
+    let doc = opts.scale.doc;
+    let mut length = Length::new(*value, doc);
+    let response = match row {
+        None => length_field(ui, id, &mut length, opts),
+        Some((accessible, width)) => {
+            length_field_named(ui, id, &mut length, opts, accessible, width)
+        }
+    };
+    if response.changed() {
+        *value = length.in_doc(doc);
     }
     response
 }

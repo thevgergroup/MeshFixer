@@ -738,7 +738,7 @@ fn hollow_shows_thin_parts_and_cuts_a_placed_drain_hole() {
         mf_desktop::hollow_tool::thin_layer(h.state()).is_some(),
         "the cap is outlined as left solid"
     );
-    h.get_by_label("Parts thinner than 4 mm were left solid");
+    h.get_by_label("Parts thinner than 4.00 mm were left solid");
     still(&mut h, "3-thin-parts");
 
     // A placed hole on the ball.
@@ -1613,7 +1613,7 @@ fn split_bounded_disc_over_one_region_only() {
     h.state_mut().split.plane[9] = -40.0;
     h.state_mut().split.bound = true;
     h.state_mut().split.bound_shape = "disc".into();
-    h.state_mut().split.bound_width = 40.0;
+    h.state_mut().split.bound_width = Some(mf_units::Length::new(40.0, Unit::Millimeter));
     settle(&mut h);
     let names = cut_with_keep(&mut h, "Both");
     assert_eq!(names, ["lobes (top)", "lobes (bottom)"], "{names:?}");
@@ -1662,7 +1662,7 @@ fn split_bound_crossing_a_region_is_refused() {
     h.state_mut().split.plane[9] = -25.0;
     h.state_mut().split.bound = true;
     h.state_mut().split.bound_shape = "disc".into();
-    h.state_mut().split.bound_width = 20.0;
+    h.state_mut().split.bound_width = Some(mf_units::Length::new(20.0, Unit::Millimeter));
     settle(&mut h);
     let history = history_len(&h);
     scroll_and_click(&mut h, "Cut");
@@ -3720,8 +3720,8 @@ fn uc3_hinged_box_through_the_gui() {
     h.get_by_label("Hollow").click();
     settle(&mut h);
     let box_id = id_of(&h, "box");
-    h.state_mut().hollow.wall = Some(3.0);
-    h.state_mut().hollow.detail = Some(1.0);
+    h.state_mut().hollow.wall = Some(mf_units::Length::new(3.0, Unit::Millimeter));
+    h.state_mut().hollow.detail = Some(mf_units::Length::new(1.0, Unit::Millimeter));
     settle(&mut h);
     wait_until(&mut h, "the hollow preview", |a| {
         mf_desktop::hollow_tool::preview_render(a, box_id).is_some()
@@ -3745,7 +3745,7 @@ fn uc3_hinged_box_through_the_gui() {
     h.get_by_label("Split").click();
     settle(&mut h);
     h.state_mut().split.plane[11] = 32.0;
-    h.state_mut().split.gap = 0.4;
+    h.state_mut().split.gap = mf_units::Length::new(0.4, Unit::Millimeter);
     settle(&mut h);
     let history = history_len(&h);
     let names = cut_with_keep(&mut h, "Both");
@@ -4201,7 +4201,8 @@ mod hollow_acceptance {
         let out = run_hollow(h, name, "Auto");
         let holes = holes_found(&before, &out, [0.0, 0.0, -1.0]);
         assert!(!holes.is_empty(), "{name}: Auto cut no drain hole");
-        let diameter = h.state().hollow.diameter;
+        let doc = h.state().session.document().units();
+        let diameter = h.state().hollow.diameter.unwrap().in_doc(doc);
         check(
             &format!("{name}, auto drain holes"),
             &before,
@@ -4530,7 +4531,7 @@ mod unit_parity {
         let mut h = cube_doc(20.0, unit, doc_units_per_mm);
         h.get_by_label("Make solid").click();
         settle(&mut h);
-        h.state_mut().solid.cell = Some(cell_mm * doc_units_per_mm);
+        h.state_mut().solid.cell = Some(mf_units::Length::new(cell_mm * doc_units_per_mm, unit));
         let history = history_len(&h);
         h.get_by_label("Make it solid").click();
         wait_until(&mut h, "make solid", |a| {
@@ -4605,7 +4606,7 @@ mod unit_parity {
         let mut h = cube_doc(20.0, unit, doc_units_per_mm);
         h.get_by_label("Split").click();
         settle(&mut h);
-        h.state_mut().split.gap = gap_mm * doc_units_per_mm;
+        h.state_mut().split.gap = mf_units::Length::new(gap_mm * doc_units_per_mm, unit);
         let history = history_len(&h);
         scroll_and_click(&mut h, "Cut");
         wait_until(&mut h, "the cut", |a| {

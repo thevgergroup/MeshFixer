@@ -330,6 +330,22 @@ impl Intent<'static> {
     }
 }
 
+/// The spec default of `op_id`'s length param `name`, with its spec
+/// unit: print intent (a hollow wall, a drain hole) comes from the spec's
+/// physical `unit: mm` default (units-audit §6.4), never a literal
+/// length in the panel. `None` when the op, the param, a float default
+/// or a fixed length unit is missing.
+pub fn spec_length_default(op_id: &str, name: &str) -> Option<mf_units::Length> {
+    let spec = mf_spec::builtin::get(op_id)?;
+    let p = spec.parameters.iter().find(|p| p.name == name)?;
+    match (&p.kind, &p.unit) {
+        (mf_spec::ParamKind::Float { default, .. }, mf_spec::ParamUnit::Length(unit)) => {
+            Some(mf_units::Length::new(*default, *unit))
+        }
+        _ => None,
+    }
+}
+
 /// `v` as a spec `vec3`'s text form, `x,y,z`.
 pub fn vec3_text(v: [f64; 3]) -> String {
     format!("{},{},{}", v[0], v[1], v[2])

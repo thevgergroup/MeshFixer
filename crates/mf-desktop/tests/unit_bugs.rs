@@ -201,7 +201,7 @@ fn history_details_use_document_unit() {
         settle(&mut h);
         // A physical 3 mm wall, off the spec's 2 mm default, in this
         // document's own unit.
-        h.state_mut().hollow.wall = Some(wall_in(unit));
+        h.state_mut().hollow.wall = Some(mf_units::Length::new(wall_in(unit), unit));
         panel_button(&h, "Hollow").click();
         wait_until(&mut h, "the hollow", |a| a.busy.is_none());
         settle(&mut h);

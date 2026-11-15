@@ -273,18 +273,6 @@ pub fn gizmo(pivot: DVec3, mode: GizmoMode) -> Gizmo {
     }
 }
 
-/// Millimetres per document unit (the build plate is sized in mm).
-pub fn mm_per(unit: Unit) -> f64 {
-    match unit {
-        Unit::Micron => 0.001,
-        Unit::Millimeter => 1.0,
-        Unit::Centimeter => 10.0,
-        Unit::Inch => 25.4,
-        Unit::Foot => 304.8,
-        Unit::Meter => 1000.0,
-    }
-}
-
 /// The smallest a zoom-adaptive grid step's on-screen size is let fall
 /// (screen points): below this a step reads as "not really a grid"
 /// (ADR-0006 rule 3: "at least about 8 pt"). Matches the plate snap's
@@ -313,9 +301,28 @@ pub fn snap_step(
     view: (f64, f64),
     unit: Unit,
 ) -> (f64, f64) {
-    let mm = mm_per(unit);
+    let mm = mf_units::Length::new(1.0, unit).mm();
     let step_mm = mf_render::adaptive_grid_mm(cam, pivot, view, mm, MIN_SNAP_PX);
     (step_mm / mm, step_mm)
+}
+
+/// The angle snap every gizmo uses, degrees (not a length).
+pub const ANGLE_SNAP_DEG: f64 = 15.0;
+/// The scale snap every gizmo uses, a fraction (not a length).
+pub const SCALE_SNAP_STEP: f64 = 0.1;
+
+/// A gizmo snap on a `grid` step in document units (from [`snap_step`]),
+/// with the shared angle and scale steps and no plate snap: what Split's
+/// plane and print-volume box gizmos drag with. Spelled out rather than
+/// `..Snap::default()`, whose grid is a fixed document-unit step
+/// (ADR-0006 rule 3).
+pub fn grid_snap(grid: f64) -> mf_render::Snap {
+    mf_render::Snap {
+        grid: Some(grid),
+        angle_deg: Some(ANGLE_SNAP_DEG),
+        scale_step: Some(SCALE_SNAP_STEP),
+        plate: None,
+    }
 }
 
 /// The tool hint's snap clause ("snap 1 mm", "snap 0.5 mm"): `step_mm` as
@@ -323,22 +330,6 @@ pub fn snap_step(
 /// reads with no trailing zeros either.
 pub fn snap_hint(step_mm: f64) -> String {
     format!("snap {} mm", field_text(step_mm))
-}
-
-/// `transform`'s linear part scaled by `factor` (its translation is
-/// left alone): a generator's mesh is built in mm (every library shape
-/// and connector, D16/D20), so a 12-value placement transform meant for
-/// one must scale its linear part by document-units-per-mm
-/// (`1.0 / mm_per(unit)`) before `object.add_shape` places it, or the
-/// mesh lands at its literal mm size in document units (1000x too big
-/// on a metre document). A part's own transform (its mesh baked at
-/// final size already) is never scaled this way.
-pub fn scale_linear(transform: &[f64; 12], factor: f64) -> [f64; 12] {
-    let mut m = *transform;
-    for v in &mut m[0..9] {
-        *v *= factor;
-    }
-    m
 }
 
 #[cfg(test)]

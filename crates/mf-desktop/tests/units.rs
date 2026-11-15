@@ -162,7 +162,7 @@ fn unit_prompt_preselects_metres_for_the_archaeopteryx_scale() {
     import_at_the_suggested_unit(&mut h, Duration::from_secs(30));
     assert_eq!(h.state().session.document().units(), Unit::Meter);
     // Measurements read in the chosen unit.
-    h.get_by_label("0.500 × 0.400 × 0.300 m");
+    h.get_by_label("0.500 m × 0.400 m × 0.300 m");
 }
 
 /// Esc (or Cancel) in the dialog imports nothing.

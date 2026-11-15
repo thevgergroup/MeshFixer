@@ -712,7 +712,7 @@ fn the_counterpart_is_flattened_onto_the_same_place_as_the_footprint() {
 
     let a = h.state();
     let joint = a.split_flow.open_joint().unwrap().clone();
-    let scale = mf_desktop::split_flow::mm(a);
+    let scale = mf_desktop::split_flow::doc_units_per_millimetre(a);
     let parts = mf_operations::placed_parts(&joint.frame, &p, scale).unwrap();
     let solid = joint.solid();
     let counterpart = parts

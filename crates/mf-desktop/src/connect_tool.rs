@@ -693,6 +693,7 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
     let gap_mm = joint.frame.gap / doc_units_per_millimetre(app);
     let spec = mf_parts::find_generator(&p.connector).map(|g| g.spec());
     let options = crate::shape_panel::text_options(app);
+    let scale = app.scale_ctx();
     let mut removed = false;
     widgets::card(ui, |ui| {
         ui.label(
@@ -730,6 +731,7 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
                     live: true,
                     idle: true,
                     text_options: &options,
+                    scale: &scale,
                 },
             )
         {
