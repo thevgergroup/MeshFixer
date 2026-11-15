@@ -118,16 +118,27 @@ impl Plate {
         }
     }
 
-    /// "Fits your Prusa MK4 plate" / "Fits a 220 × 220 × 250 mm plate"
+    /// "Fits your Prusa MK4 plate" / "Fits a 250 mm plate"
     /// with none — the actual numbers, read off `self`, rather than a
     /// second copy of [`default_plate_mm`]'s own values that could drift
     /// from them.
     fn fits_label(&self) -> String {
+        format!("Fits {}", self.words())
+    }
+
+    /// The plate in words, the one phrasing every label uses: "your
+    /// Prusa MK4 plate", "a 250 mm plate" (a cube), or "a 220 × 220 ×
+    /// 250 mm plate".
+    fn words(&self) -> String {
         match &self.name {
-            Some(name) => format!("Fits your {name} plate"),
+            Some(name) => format!("your {name} plate"),
             None => {
                 let [x, y, z] = self.volume_mm;
-                format!("Fits a {x:.0} × {y:.0} × {z:.0} mm plate")
+                if x == y && y == z {
+                    format!("a {x:.0} mm plate")
+                } else {
+                    format!("a {x:.0} × {y:.0} × {z:.0} mm plate")
+                }
             }
         }
     }
@@ -497,10 +508,7 @@ fn option_row(prompt: &UnitPrompt, unit: Unit) -> String {
 /// The "Scale to fit plate" row's label, shown only when nothing fits:
 /// the unit it imports at, and the plate it scales down to.
 fn scale_to_fit_row(prompt: &UnitPrompt) -> String {
-    let plate_words = prompt.plate.name.as_deref().map_or_else(
-        || "a 250 mm plate".to_string(),
-        |n| format!("your {n} plate"),
-    );
+    let plate_words = prompt.plate.words();
     format!(
         "Scale to fit plate — import at {} and scale down to 90% of {plate_words}",
         unit_name(prompt.choice).to_lowercase()
@@ -701,11 +709,15 @@ mod tests {
             volume_mm: [250.0, 210.0, 220.0],
         };
         assert_eq!(p.fits_label(), "Fits your Prusa MK4 plate");
-        let none = plate(default_plate_mm());
-        let [x, y, z] = default_plate_mm();
+        // The default plate is the owner's 250 mm cube, named by its side.
         assert_eq!(
-            none.fits_label(),
-            format!("Fits a {x:.0} × {y:.0} × {z:.0} mm plate")
+            plate(default_plate_mm()).fits_label(),
+            "Fits a 250 mm plate"
+        );
+        // A plate that isn't a cube is named by all three sides.
+        assert_eq!(
+            plate([220.0, 220.0, 250.0]).fits_label(),
+            "Fits a 220 × 220 × 250 mm plate"
         );
     }
 
