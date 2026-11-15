@@ -5,13 +5,19 @@
 //! the target keeps its id, name and transform, and the tool is removed
 //! unless `keep_tool` is set.
 //!
-//! Every refusal is an [`OpError::Failed`] whose code is in the copy table
-//! ([`refusal_copy`]): a plain-language reason and the next action.
+//! Every refusal is an [`OpError::Refused`] whose code is declared in
+//! `specs/operations/mesh.boolean.yaml` (ADR-0010, consolidation plan
+//! C14); the copy table below ([`refusal_copy`]) is kept for
+//! `combine.rs`'s `refuse_naming`, which names the object at fault
+//! before the same plain-language words.
+
+use std::collections::BTreeMap;
 
 use mf_boolean::{BoolOp, BooleanError, Kernel, ManifoldCpp, boolean, operand_in_frame};
 use mf_geometry::Mesh;
 use mf_spec::Params;
 
+use crate::refusal::RefusalArg;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
     Target, needs_document, unsupported_target,
@@ -97,12 +103,20 @@ pub fn refusal_copy(code: &str) -> Option<(&'static str, &'static str)> {
     })
 }
 
+/// Builds the [`OpError::Refused`] for `code` (through the one registry
+/// helper, [`crate::refusal::refuse`]), composing the copy table's own
+/// "what"/"next" words with `detail` (a face count, a kernel's own
+/// message) exactly as the pre-registry text did, as the one `detail`
+/// argument its `specs/operations/mesh.boolean.yaml` message fills in.
 fn refuse(code: &'static str, detail: String) -> OpError {
     let message = match refusal_copy(code) {
         Some((what, next)) => format!("{what} ({detail}). {next}."),
         None => detail,
     };
-    OpError::Failed { code, message }
+    crate::refusal::refuse(
+        code,
+        BTreeMap::from([("detail", RefusalArg::Text(message))]),
+    )
 }
 
 impl Operation for Boolean {

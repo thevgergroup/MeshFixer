@@ -139,6 +139,13 @@ pub fn preview_work(
     let outcome = match hollow::hollow_shell(&req.mesh, req.key.wall, req.key.detail, ctx) {
         Err(mf_operations::OpError::Cancelled) => return Err(Cancelled),
         Err(mf_operations::OpError::Failed { code, message }) => Err((code.to_owned(), message)),
+        // ADR-0010, consolidation plan C14: a thin adapter rendering a
+        // declared refusal the same (code, message) shape this panel
+        // used before the registry existed; routing it to the panel
+        // through the registry's own RefusalCard is C16's job.
+        Err(mf_operations::OpError::Refused { code, args }) => {
+            Err((code.to_owned(), mf_operations::refusal::render_args(&args)))
+        }
         Err(e) => Err(("invalid_parameter".to_owned(), e.to_string())),
         Ok(shell) => {
             ctx.checkpoint()?;

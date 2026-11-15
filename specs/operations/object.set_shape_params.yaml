@@ -28,3 +28,78 @@ runtime:
 # delta, so a newly queued set_shape_params may merge into the one
 # already waiting (same target), latest params winning.
 coalesce: absolute
+# ADR-0010, consolidation plan C14: as object.add_shape's, naming the
+# target whose recipe refused.
+refusals:
+  - code: unknown_generator
+    message: refusal.unknown_generator
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: generator_version
+    message: refusal.generator_version
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: unknown_part
+    message: refusal.unknown_part
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: moving_parts_fused
+    message: refusal.moving_parts_fused
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: too_few_knuckles
+    message: refusal.too_few_knuckles
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: pin_too_wide
+    message: refusal.pin_too_wide
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: leaf_too_thick
+    message: refusal.leaf_too_thick
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: hinge_too_short
+    message: refusal.hinge_too_short
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text
+  - code: leaf_failed
+    message: refusal.leaf_failed
+    next: none
+    args:
+      - name: name
+        kind: text
+      - name: detail
+        kind: text

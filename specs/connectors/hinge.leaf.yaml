@@ -89,3 +89,43 @@ effects: [geometry_changes]
 runtime:
   cancellable: false
   progress: false
+# ADR-0010, consolidation plan C14: every refusal hinge.leaf can
+# return, through the one registry helper (crate::refusal::refuse).
+# Surfaced to a command through object.add_shape or
+# object.set_shape_params (which declare them too, since that's where
+# a desktop refusal card reads the op id from); declared here as well
+# so the generator's own spec is a complete, self-standing record.
+refusals:
+  - code: moving_parts_fused
+    message: refusal.moving_parts_fused
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: too_few_knuckles
+    message: refusal.too_few_knuckles
+    next: none
+  - code: pin_too_wide
+    message: refusal.pin_too_wide
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: leaf_too_thick
+    message: refusal.leaf_too_thick
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: hinge_too_short
+    message: refusal.hinge_too_short
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: leaf_failed
+    message: refusal.leaf_failed
+    next: none
+    args:
+      - name: detail
+        kind: text

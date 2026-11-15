@@ -297,7 +297,7 @@ fn op_outcome(e: &OpError, timed_out: bool, wall_s: f64) -> Outcome {
     }
     let code = match e {
         OpError::Spec(_) => "invalid_parameters".to_string(),
-        OpError::Failed { code, .. } => code.to_string(),
+        OpError::Failed { code, .. } | OpError::Refused { code, .. } => code.to_string(),
         OpError::Cancelled => "cancelled".to_string(),
     };
     Outcome::Refused {

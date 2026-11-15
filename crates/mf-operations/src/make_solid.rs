@@ -54,8 +54,15 @@ pub const STAGES: [&str; 4] = [
 pub const TRADE_OFF: &str =
     "Rebuilds the surface as one closed solid; fine detail smaller than the cell size is lost.";
 
+/// Builds the [`OpError::Refused`] for `code` (ADR-0010, through the one
+/// registry helper), with `message` — already plain-language text — as
+/// the `detail` argument `specs/operations/mesh.make_solid.yaml`'s
+/// message fills in.
 fn failed(code: &'static str, message: String) -> OpError {
-    OpError::Failed { code, message }
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([("detail", crate::refusal::RefusalArg::Text(message))]),
+    )
 }
 
 /// A regular grid of points `h` apart from `origin`, `n` along each axis

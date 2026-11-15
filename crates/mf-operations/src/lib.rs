@@ -13,6 +13,7 @@ pub use mf_units::Unit;
 mod add_part;
 mod affine;
 mod align;
+pub mod refusal;
 pub use align::Align;
 pub mod blend;
 mod boolean;
@@ -281,12 +282,40 @@ pub(crate) fn unsupported_target(op: &str, target: &Target) -> OpError {
 pub enum OpError {
     #[error(transparent)]
     Spec(#[from] SpecError),
+    /// A genuine internal error: a malformed parameter, an invariant
+    /// the caller broke, a kernel bug — never a declared refusal
+    /// (ADR-0010). Constructed only at the sites on
+    /// `tests/refusal_registry.rs`'s reviewed allow-list; everything a
+    /// spec declares in `refusals:` is [`OpError::Refused`] instead,
+    /// built through [`refusal::refuse`].
     #[error("{code}: {message}")]
     Failed { code: &'static str, message: String },
+    /// A declared refusal (ADR-0010, consolidation plan C14): `code` is
+    /// one of the operation's spec's `refusals:` entries, and `args`
+    /// are its typed arguments (a length is [`mf_units::Length`], never
+    /// a bare number or a pre-formatted string). Built only through
+    /// [`refusal::refuse`]/[`refusal::refuse_plain`] — the one registry
+    /// helper, never constructed directly outside `refusal.rs`.
+    #[error("{code}: {}", refusal::render_args(args))]
+    Refused {
+        code: &'static str,
+        args: std::collections::BTreeMap<&'static str, refusal::RefusalArg>,
+    },
     /// The run was cancelled through its [`RunContext`]; nothing was
     /// produced (MF-CMD-006).
     #[error("cancelled by the user")]
     Cancelled,
+}
+
+impl OpError {
+    /// This error's code, where it has one (every variant but
+    /// [`OpError::Spec`] and [`OpError::Cancelled`]).
+    pub fn code(&self) -> Option<&'static str> {
+        match self {
+            OpError::Failed { code, .. } | OpError::Refused { code, .. } => Some(code),
+            OpError::Spec(_) | OpError::Cancelled => None,
+        }
+    }
 }
 
 impl From<Cancelled> for OpError {

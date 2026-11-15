@@ -187,3 +187,81 @@ effects: [geometry_changes, topology_changes, creates_objects]
 runtime:
   cancellable: true
   progress: true
+# ADR-0010, consolidation plan C14: every refusal mesh.split_plane can
+# return, through the one registry helper (crate::refusal::refuse).
+# missing_target and singular_transform are malformed-invocation
+# codes, so they stay OpError::Failed, on the registry lint's
+# allow-list.
+refusals:
+  - code: invalid_mesh
+    message: refusal.split_invalid_mesh
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: operand_not_closed
+    message: refusal.split_operand_not_closed
+    next: repair
+    args:
+      - name: detail
+        kind: text
+  - code: plane_misses_object
+    message: refusal.plane_misses_object
+    next: move_plane
+    args:
+      - name: detail
+        kind: text
+  - code: split_section_self_intersects
+    message: refusal.split_section_self_intersects
+    next: run_make_solid
+    args:
+      - name: "x"
+        kind: text
+      - name: "y"
+        kind: text
+      - name: "z"
+        kind: text
+      - name: detail
+        kind: text
+  - code: split_section_degenerate
+    message: refusal.split_section_degenerate
+    next: move_plane
+    args:
+      - name: "x"
+        kind: text
+      - name: "y"
+        kind: text
+      - name: "z"
+        kind: text
+      - name: detail
+        kind: text
+  - code: invalid_plane
+    message: refusal.invalid_plane
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: split_region_crosses_bound
+    message: refusal.split_region_crosses_bound
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: dowel_too_short
+    message: refusal.dowel_too_short
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: dowel_too_thin
+    message: refusal.dowel_too_thin
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: section_too_thin
+    message: refusal.section_too_thin
+    next: none
+    args:
+      - name: detail
+        kind: text

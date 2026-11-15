@@ -314,7 +314,8 @@ fn hollow_placed_hole_on_a_thin_part_is_refused_by_name() {
             ("hole_points", &points),
         ],
     ) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "hole_misses_cavity", "{message}");
             assert!(message.contains("thicker part"), "{message}");
         }
@@ -326,7 +327,7 @@ fn hollow_placed_hole_on_a_thin_part_is_refused_by_name() {
 #[test]
 fn hollow_refuses_by_name() {
     let code = |r: Result<(Mesh, serde_json::Value), OpError>| match r {
-        Err(OpError::Failed { code, .. }) => code,
+        Err(OpError::Refused { code, .. }) => code,
         Err(e) => panic!("{e}"),
         Ok(_) => panic!("should be refused"),
     };
@@ -361,7 +362,8 @@ fn hollow_refuses_by_name() {
         &ball(),
         &[("wall_thickness", "2"), ("inner_detail", "0.01")],
     ) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "grid_too_large");
             assert!(message.contains("Use a larger cell size"), "{message}");
         }
@@ -1035,7 +1037,7 @@ fn hollow_drain_holes_none_explicit_matches_the_default() {
 
 fn code_of(e: &OpError) -> &'static str {
     match e {
-        OpError::Failed { code, .. } => code,
+        OpError::Failed { code, .. } | OpError::Refused { code, .. } => code,
         other => panic!("expected a refusal, got {other:?}"),
     }
 }

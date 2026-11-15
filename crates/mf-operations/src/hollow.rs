@@ -99,8 +99,15 @@ pub const TRADE_OFF: &str = "Thinner walls save more material but are weaker; pa
 /// The drain-hole modes, as the spec's `drain_holes` choice.
 pub const DRAIN_MODES: [&str; 3] = ["none", "auto", "placed"];
 
+/// Builds the [`OpError::Refused`] for `code` (ADR-0010, through the one
+/// registry helper), with `message` — already plain-language text — as
+/// the `detail` argument `specs/operations/mesh.hollow.yaml`'s message
+/// fills in.
 fn failed(code: &'static str, message: String) -> OpError {
-    OpError::Failed { code, message }
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([("detail", crate::refusal::RefusalArg::Text(message))]),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -2537,11 +2544,11 @@ fn placed_holes(
                 return Err(failed(
                     "hole_misses_cavity",
                     format!(
-                        "Drain hole {} at ({:.2}, {:.2}, {:.2}) doesn't reach the hollow inside: the object is solid there. Move it to a thicker part.",
+                        "Drain hole {} at ({}, {}, {}) doesn't reach the hollow inside: the object is solid there. Move it to a thicker part.",
                         i + 1,
-                        p[0],
-                        p[1],
-                        p[2]
+                        mf_spec::format_length(p[0]),
+                        mf_spec::format_length(p[1]),
+                        mf_spec::format_length(p[2])
                     ),
                 ));
             }
@@ -2661,9 +2668,15 @@ fn cut_holes(
     Ok((a.mesh, a.provenance, rows))
 }
 
+/// A drain hole's generator refusal (`shape.teardrop_cylinder` and
+/// similar), through the one registry helper (ADR-0010): as
+/// `shapes.rs`'s `generator_error`.
 fn part_error(e: mf_parts::ConnectorError) -> OpError {
     let mf_parts::ConnectorError::Failed { code, message } = e;
-    OpError::Failed { code, message }
+    crate::refusal::refuse(
+        code,
+        std::collections::BTreeMap::from([("detail", crate::refusal::RefusalArg::Text(message))]),
+    )
 }
 
 // ---------------------------------------------------------------------
@@ -3101,7 +3114,7 @@ mod ripple_tests {
         let refused = |extra_passes: usize| -> bool {
             let shell = hollow_shell_passes(&input, 2.0, 0.5, extra_passes, &ctx).unwrap();
             let result = placed_holes(&shell, &[sample], 3.0, &ctx);
-            matches!(&result, Err(OpError::Failed { code, .. }) if *code == "hole_misses_cavity")
+            matches!(&result, Err(OpError::Refused { code, .. }) if *code == "hole_misses_cavity")
         };
         assert!(
             refused(RIPPLE_SMOOTHING_PASSES),

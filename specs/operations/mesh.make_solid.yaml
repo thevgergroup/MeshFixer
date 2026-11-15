@@ -37,3 +37,42 @@ effects: [geometry_changes, topology_changes]
 runtime:
   cancellable: true
   progress: true
+# ADR-0010, consolidation plan C14: every refusal mesh.make_solid can
+# return, through the one registry helper (crate::refusal::refuse).
+refusals:
+  - code: region_not_supported
+    message: refusal.region_not_supported_make_solid
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: invalid_parameter
+    message: refusal.make_solid_invalid_parameter
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: empty
+    message: refusal.empty
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: grid_too_large
+    message: refusal.grid_too_large
+    next: use_larger_cell
+    args:
+      - name: detail
+        kind: text
+  - code: result_empty
+    message: refusal.result_empty_make_solid
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: result_not_valid
+    message: refusal.result_not_valid
+    next: none
+    args:
+      - name: detail
+        kind: text

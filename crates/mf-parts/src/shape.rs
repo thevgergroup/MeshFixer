@@ -267,6 +267,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
             progress: false,
         },
         coalesce: Coalesce::Never,
+        refusals: Vec::new(),
     }
 }
 

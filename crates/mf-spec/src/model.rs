@@ -96,6 +96,69 @@ impl ParamUnit {
     }
 }
 
+/// What a refused run should offer next (ADR-0010), a closed set picked
+/// from the next actions already in use: [`Next::Repair`] and
+/// [`Next::RunMakeSolid`] are the two buttons `shape_tools.rs`'s
+/// `next_action` already shows; [`Next::UseLargerCell`] and
+/// [`Next::MovePlane`] are the actions Make solid's, Hollow's and
+/// Split's refusal prose already names in words ("use a larger cell
+/// size", "move the plane"); [`Next::Undo`] is for a refusal whose only
+/// way forward is undoing the step that led to it; [`Next::None`] is a
+/// refusal with nothing more specific to suggest.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalNext {
+    Repair,
+    RunMakeSolid,
+    UseLargerCell,
+    MovePlane,
+    Undo,
+    None,
+}
+
+/// The type of a refusal's named argument (ADR-0010: a length is typed
+/// as [`mf_units::Length`] rather than a pre-formatted string, so
+/// `format_length` — not a hard-coded `"mm"` or `{:.3}` — renders it).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RefusalArgKind {
+    /// A length, carried as `mf_units::Length` (a value and its own
+    /// unit, generators are mm-internal, D16): never a bare number.
+    Length,
+    /// A whole count (a face count, a point count).
+    Count,
+    /// Free text: a name, a code, a word already in plain language.
+    Text,
+}
+
+/// One named argument a refusal's message id fills (a `{name}`
+/// placeholder in the catalogue).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusalArgSpec {
+    pub name: String,
+    pub kind: RefusalArgKind,
+}
+
+/// A declared refusal code (ADR-0010, consolidation plan C14): every
+/// code an operation can return appears here, with the i18n message id
+/// its text comes from, its typed arguments, and a [`RefusalNext`] from
+/// the closed set. Declaring a code here is what
+/// `every_refusal_code_is_declared` (mf-operations) and
+/// `every_declared_refusal_has_a_message_and_next` (mf-spec) check
+/// against.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RefusalSpec {
+    pub code: String,
+    /// A message id in mf-desktop's i18n catalogue (under `refusal.`),
+    /// the same split as `history_label`: `mf-spec` carries only the
+    /// id, `mf-desktop` carries the English (and later, translated)
+    /// text.
+    pub message: String,
+    pub next: RefusalNext,
+    #[serde(default)]
+    pub args: Vec<RefusalArgSpec>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationSpec {
     pub id: String,
@@ -137,6 +200,11 @@ pub struct OperationSpec {
     /// recipe), where the queued one fully supersedes the one before it.
     #[serde(default)]
     pub coalesce: Coalesce,
+    /// Every refusal code this operation can return (ADR-0010,
+    /// consolidation plan C14). Optional, so a spec with no refusals
+    /// (or written before this field existed) still validates.
+    #[serde(default)]
+    pub refusals: Vec<RefusalSpec>,
 }
 
 /// See [`OperationSpec::coalesce`].
@@ -538,6 +606,13 @@ impl OperationSpec {
 
     pub fn parameter(&self, name: &str) -> Option<&ParamSpec> {
         self.parameters.iter().find(|p| p.name == name)
+    }
+
+    /// This operation's declared refusal for `code`, or `None` if it
+    /// isn't in `refusals:` (ADR-0010; checked by
+    /// `every_refusal_code_is_declared`, mf-operations).
+    pub fn refusal(&self, code: &str) -> Option<&RefusalSpec> {
+        self.refusals.iter().find(|r| r.code == code)
     }
 
     /// Fill every parameter the caller didn't set whose spec says

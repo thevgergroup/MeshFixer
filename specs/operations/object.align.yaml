@@ -44,3 +44,16 @@ effects: [transform_changes]
 runtime:
   cancellable: true
   progress: false
+# ADR-0010, consolidation plan C14: object.align's declared refusals.
+# leaders/mode are malformed-invocation codes (the panel never sends
+# them), so they stay OpError::Failed, on the registry lint's allow-list.
+refusals:
+  - code: too_few_objects
+    message: refusal.too_few_objects
+    next: none
+  - code: empty_object
+    message: refusal.empty_object
+    next: none
+    args:
+      - name: name
+        kind: text

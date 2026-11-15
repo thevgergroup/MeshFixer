@@ -13,11 +13,16 @@ use mf_parts::GeneratorRecord;
 use mf_spec::Params;
 
 use crate::affine::determinant;
+use crate::refusal::RefusalArg;
 use crate::{
     ChangeObject, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
     RunContext, Target, needs_document, scale_mesh, unsupported_target,
 };
 
+/// A malformed invocation (bad JSON, a mismatched member/recipe count):
+/// never one of `object.add_shape`'s, `object.set_shape_params`'s,
+/// `object.attach`'s or `object.move_group`'s declared refusals. On the
+/// `OpError::Failed` allow-list, `docs/failed-refusals.allow`.
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     OpError::Failed {
         code,
@@ -25,9 +30,21 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
     }
 }
 
+/// A generator's refusal (`leaf_hinge.rs` and every other connector/shape
+/// generator, consolidation plan C14), through the one registry helper:
+/// its own plain-language message becomes the `detail` argument the
+/// generator's code's message fills in. A generator refuses through
+/// [`mf_parts::ConnectorError`], which carries only pre-formatted text
+/// (no typed args yet); a future generator that wants a typed `Length`
+/// argument constructs [`OpError::Refused`] directly through
+/// [`crate::refusal::refuse`], same as `leaf_hinge.rs`'s own codes do
+/// once migrated.
 fn generator_error(e: mf_parts::ConnectorError) -> OpError {
     match e {
-        mf_parts::ConnectorError::Failed { code, message } => failed(code, message),
+        mf_parts::ConnectorError::Failed { code, message } => crate::refusal::refuse(
+            code,
+            std::collections::BTreeMap::from([("detail", RefusalArg::Text(message))]),
+        ),
     }
 }
 
@@ -249,9 +266,13 @@ impl Operation for SetShapeParams {
                 return Err(unsupported_target(self.id(), &input.target));
             }
             let fresh = mf_parts::regenerate(record, ctx).map_err(|e| match e {
-                mf_parts::ConnectorError::Failed { code, message } => {
-                    failed(code, format!("'{}': {message}", input.name))
-                }
+                mf_parts::ConnectorError::Failed { code, message } => crate::refusal::refuse(
+                    code,
+                    std::collections::BTreeMap::from([
+                        ("name", RefusalArg::Text(input.name.to_owned())),
+                        ("detail", RefusalArg::Text(message)),
+                    ]),
+                ),
             })?;
             // As `AddShape`: the regenerated mesh is mm (D16), scaled
             // into the document's unit here (consolidation plan C12).
@@ -444,7 +465,7 @@ pub(crate) fn attach(
                 .map_or_else(|| input.mesh.clone(), |r| r.mesh.clone())
         };
         let (am, bm) = (mesh_of(0, job.a.1), mesh_of(1, b.1));
-        measured = crate::check_moving_gap((&am, job.a.1), (&bm, b.1), job.gap, ctx)?;
+        measured = crate::check_moving_gap((&am, job.a.1), (&bm, b.1), job.gap, doc.unit, ctx)?;
     }
     for (name, mesh, transform) in loose {
         changes.push(ObjectChange::Create {

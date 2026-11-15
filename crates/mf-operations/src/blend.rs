@@ -12,14 +12,20 @@ use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use mf_geometry::{Bvh, FaceId, Mesh, Provenance, Sources, VertexId};
 
+use crate::refusal::RefusalArg;
 use crate::sculpt::remesh_band;
 use crate::{FairStyle, OpError, RunContext, fair_region};
 
-fn refuse(code: &'static str, message: &str) -> OpError {
-    OpError::Failed {
+/// Builds the [`OpError::Refused`] for `code` (ADR-0010, through the one
+/// registry helper), with `detail` as the `detail` argument its
+/// `specs/operations/mesh.boolean.yaml` message fills in (`mesh.blend`
+/// has no spec of its own: it runs only inside `mesh.boolean`'s union,
+/// so its codes are declared there).
+fn refuse(code: &'static str, detail: &str) -> OpError {
+    crate::refusal::refuse(
         code,
-        message: message.into(),
-    }
+        std::collections::BTreeMap::from([("detail", RefusalArg::Text(detail.to_owned()))]),
+    )
 }
 
 /// `second` (from `first`'s output) composed onto `first` (from a base):
