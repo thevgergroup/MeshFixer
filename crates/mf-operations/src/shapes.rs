@@ -15,7 +15,7 @@ use mf_spec::Params;
 use crate::affine::determinant;
 use crate::{
     ChangeObject, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
-    RunContext, Target, needs_document, unsupported_target,
+    RunContext, Target, needs_document, scale_mesh, unsupported_target,
 };
 
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
@@ -122,7 +122,7 @@ impl Operation for AddShape {
         &self,
         _inputs: &[OperandInput],
         params: &Params,
-        _doc: &DocContext,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let transform = params.get_affine("transform")?;
@@ -149,6 +149,12 @@ impl Operation for AddShape {
             }
             let group = s.group.as_deref().unwrap_or(common_group);
             let mesh = mf_parts::regenerate(&s.generator, ctx).map_err(generator_error)?;
+            // The generator built `mesh` in mm (D16): scale it into the
+            // document's own unit here, the one place that does
+            // (consolidation plan C12), so the desktop never has to
+            // pre-scale the placement transform.
+            let mesh = scale_mesh(mesh, doc.mm_to_doc())
+                .map_err(|e| failed("invalid_shapes", format!("can't scale '{}': {e}", s.name)))?;
             let provenance = created(&mesh);
             changes.push(ObjectChange::Create {
                 name: s.name.clone(),
@@ -221,7 +227,7 @@ impl Operation for SetShapeParams {
         &self,
         inputs: &[OperandInput],
         params: &Params,
-        _doc: &DocContext,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let records: Vec<GeneratorRecord> = serde_json::from_str(params.get_text("generators")?)
@@ -246,6 +252,14 @@ impl Operation for SetShapeParams {
                 mf_parts::ConnectorError::Failed { code, message } => {
                     failed(code, format!("'{}': {message}", input.name))
                 }
+            })?;
+            // As `AddShape`: the regenerated mesh is mm (D16), scaled
+            // into the document's unit here (consolidation plan C12).
+            let fresh = scale_mesh(fresh, doc.mm_to_doc()).map_err(|e| {
+                failed(
+                    "invalid_generators",
+                    format!("can't scale '{}': {e}", input.name),
+                )
             })?;
             let (mesh, provenance) = replace(input.mesh, &fresh)?;
             changes.push(ObjectChange::Geometry {
@@ -315,9 +329,14 @@ pub(crate) struct AttachJob<'a> {
 /// folded into their target slots in one step ([`crate::apply_parts`]),
 /// each member removed, each loose generated part created; then the
 /// moving-parts gap check. Returns the changes and the measured gap.
+/// `doc` scales a generator's own mm-internal output (D16) into the
+/// document's unit (consolidation plan C12); member objects' meshes are
+/// already in document units (they were placed, and scaled, when they
+/// were created) and are never scaled again here.
 pub(crate) fn attach(
     job: &AttachJob,
     inputs: &[OperandInput],
+    doc: &DocContext,
     ctx: &RunContext,
 ) -> Result<(Vec<ObjectChange>, Option<f64>), OpError> {
     use std::borrow::Cow;
@@ -363,17 +382,26 @@ pub(crate) fn attach(
             .generate(&params, &mf_parts::GenContext::new(ctx))
             .map_err(generator_error)?;
         for part in made {
+            // The generator's own mesh is mm (D16): scale it into the
+            // document's unit here, the one place that does for a
+            // generated member (consolidation plan C12).
+            let mesh = scale_mesh(part.mesh, doc.mm_to_doc()).map_err(|e| {
+                failed(
+                    "generator_failed",
+                    format!("'{}': can't scale its part: {e}", g.generator.id),
+                )
+            })?;
             let host = match part.attach_to {
                 mf_parts::TargetSlot::A => 0,
                 mf_parts::TargetSlot::B => 1,
                 mf_parts::TargetSlot::Neither => {
-                    loose.push((part.name, part.mesh, g.transform));
+                    loose.push((part.name, mesh, g.transform));
                     continue;
                 }
             };
             parts.push(crate::PartIn {
                 name: part.name.to_owned(),
-                mesh: Cow::Owned(part.mesh),
+                mesh: Cow::Owned(mesh),
                 transform: g.transform,
                 role: part.role,
                 host,
@@ -462,7 +490,7 @@ impl Operation for Attach {
         &self,
         inputs: &[OperandInput],
         params: &Params,
-        _doc: &DocContext,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let roles: Vec<AttachMember> = serde_json::from_str(params.get_text("members")?)
@@ -496,7 +524,7 @@ impl Operation for Attach {
             gap: params.get_float("gap")?,
             always_measure: false,
         };
-        let (changes, measured) = attach(&job, inputs, ctx)?;
+        let (changes, measured) = attach(&job, inputs, doc, ctx)?;
         Ok(DocOutput {
             report: serde_json::json!({
                 "attached": members.len() + job.generated.len(),

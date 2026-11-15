@@ -54,7 +54,7 @@ impl Operation for ConnectorJoin {
         &self,
         inputs: &[OperandInput],
         params: &Params,
-        _doc: &DocContext,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let [target, side_a, side_b] = inputs else {
@@ -108,7 +108,7 @@ impl Operation for ConnectorJoin {
             gap,
             always_measure: true,
         };
-        let (mut changes, measured) = attach(&job, inputs, ctx)?;
+        let (mut changes, measured) = attach(&job, inputs, doc, ctx)?;
         // Loose parts are named after the connector object, not side A.
         for c in &mut changes {
             if let crate::ObjectChange::Create { name, .. } = c

@@ -299,11 +299,10 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         }
     };
     let group = new_group_id(app, id);
-    // The connector's own mesh is generated in mm (D16/D20): scale the
-    // placement transform's linear part by document-units-per-mm, or
-    // it lands at its literal mm size in document units.
-    let mm = 1.0 / crate::transform_tool::mm_per(app.session.document().units());
-    let placed_transform = crate::transform_tool::scale_linear(&transform, mm);
+    // The connector's own mesh is generated in mm (D16/D20);
+    // `object.add_shape` itself scales it by the document's unit
+    // (consolidation plan C12), so the placement transform goes through
+    // unscaled, never doubled up.
     let params = BTreeMap::from([
         (
             "shapes".to_owned(),
@@ -311,7 +310,7 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         ),
         (
             "transform".to_owned(),
-            placed_transform
+            transform
                 .iter()
                 .map(|v| v.to_string())
                 .collect::<Vec<_>>()

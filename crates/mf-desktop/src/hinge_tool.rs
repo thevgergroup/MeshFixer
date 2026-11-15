@@ -222,18 +222,16 @@ pub fn place_hinge(
     for c in 0..3 {
         frame[9 + c] += frame[c] * (centre - length / 2.0);
     }
-    // The hinge's own mesh is generated in mm (D16/D20): scale the
-    // frame's linear part (an orthonormal basis, scale 1) by
-    // document-units-per-mm, or it lands at its literal mm size in
-    // document units.
-    let mm = 1.0 / crate::transform_tool::mm_per(app.session.document().units());
-    let scaled_frame = crate::transform_tool::scale_linear(&frame, mm);
+    // The hinge's own mesh is generated in mm (D16/D20);
+    // `object.add_shape` itself scales it by the document's unit
+    // (consolidation plan C12), so the frame goes through unscaled,
+    // never doubled up.
     let json = serde_json::to_string(&params).unwrap_or_default(); // allow-swallow: Params is plain data; serializing it can't fail
     let members = match crate::connector_tool::group_members(
         HINGE,
         &t!("hinge.name"),
         &json,
-        &scaled_frame,
+        &frame,
         Some((a, b)),
     ) {
         Ok(m) => m,
@@ -254,7 +252,7 @@ pub fn place_hinge(
                 ),
                 (
                     "transform".to_owned(),
-                    scaled_frame.map(|v| v.to_string()).join(","),
+                    frame.map(|v| v.to_string()).join(","),
                 ),
                 ("group".to_owned(), group),
             ]),
