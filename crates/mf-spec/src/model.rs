@@ -544,19 +544,19 @@ impl OperationSpec {
 /// on a metre document (the owner's bug — Make solid's refusal saying
 /// "at least 0.000" for a genuinely positive cell size). Whole numbers
 /// from 100 up drop the decimals; smaller ones get enough to keep three
-/// significant figures. No unit suffix: operations never see which
-/// unit the document is in (D20 keeps them working purely in document
-/// units), so a message built from this reads "at least 0.00025" —
-/// the frontend's own words around it name the unit, as every other
-/// length in its panels does.
+/// significant figures, trimming any insignificant trailing zeros. No
+/// unit suffix: operations never see which unit the document is in
+/// (D20 keeps them working purely in document units), so a message
+/// built from this reads "at least 0.00025" — the frontend's own words
+/// around it name the unit, as every other length in its panels does.
+///
+/// A thin delegation to `mf_units::significant_figures` (consolidation
+/// plan C03, ADR-0006): the same unitless, 3-significant-figure core
+/// every length/area/volume formatter in the app now shares, called
+/// with no `Unit` because this function's own contract (D20) is that it
+/// never has one.
 pub fn format_length(v: f64) -> String {
-    let a = v.abs();
-    let decimals = if !a.is_finite() || a == 0.0 || a >= 100.0 {
-        0
-    } else {
-        (2 - a.log10().floor() as i32).max(0) as usize
-    };
-    format!("{v:.decimals$}")
+    mf_units::significant_figures(v, 3)
 }
 
 /// How many document units make up one millimetre. The document's own

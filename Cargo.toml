@@ -14,6 +14,7 @@ repository = "https://github.com/thevgergroup/MeshFixer"
 [workspace.dependencies]
 mf-geometry = { path = "crates/mf-geometry" }
 mf-fixtures = { path = "crates/mf-fixtures" }
+mf-units = { path = "crates/mf-units" }
 mf-io = { path = "crates/mf-io" }
 mf-spec = { path = "crates/mf-spec" }
 mf-operations = { path = "crates/mf-operations" }

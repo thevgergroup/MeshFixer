@@ -1341,15 +1341,6 @@ pub struct PlateSnap {
     pub within_pt: f64,
 }
 
-/// The 1-2-5 sequence a zoom-adaptive grid step is chosen from (millimetres),
-/// spanning a 0.001 mm micron-model floor to a 5 m whole-building ceiling —
-/// wide enough that [`adaptive_grid_mm`] always finds a step whose on-screen
-/// size clears `min_px`, however far zoomed in or out the camera is.
-const STEP_SEQUENCE_MM: [f64; 20] = [
-    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0, 50.0, 100.0,
-    200.0, 500.0, 1000.0, 5000.0,
-];
-
 /// A grid step (millimetres, from the 1-2-5 sequence) sized so it is at
 /// least `min_px` screen points at `cam`'s current zoom, measured at
 /// `pivot` (MF-OBJ-002: a fixed 1-document-unit grid snapped every drag on
@@ -1360,9 +1351,13 @@ const STEP_SEQUENCE_MM: [f64; 20] = [
 /// regardless of the document's own units, then the caller converts it
 /// back to document units for [`Snap::grid`].
 ///
-/// Falls back to the sequence's own largest step if even that still
-/// projects under `min_px` (an extreme zoom-out, or a degenerate camera):
-/// snapping then does less than asked rather than silently vanishing.
+/// A thin delegation to [`mf_units::nice_step`] (consolidation plan C03,
+/// ADR-0006) for the 1-2-5 sequence lookup itself; this function's own
+/// job is turning a camera and a pivot into the `world_per_pt` that
+/// `nice_step` needs. Falls back to the sequence's own largest step if
+/// even that still projects under `min_px` (an extreme zoom-out, or a
+/// degenerate camera): snapping then does less than asked rather than
+/// silently vanishing.
 pub fn adaptive_grid_mm(
     cam: &OrbitCamera,
     pivot: DVec3,
@@ -1395,14 +1390,17 @@ pub fn adaptive_grid_mm(
     let px_per_mm = projected_length_px(cam, pivot, view, pivot, right, one_mm_in_units)
         .filter(|px| *px > 1e-9)
         .unwrap_or(0.0);
-    if px_per_mm <= 0.0 {
-        return STEP_SEQUENCE_MM[STEP_SEQUENCE_MM.len() - 1];
-    }
-    STEP_SEQUENCE_MM
-        .iter()
-        .copied()
-        .find(|&mm| mm * px_per_mm >= min_px)
-        .unwrap_or(STEP_SEQUENCE_MM[STEP_SEQUENCE_MM.len() - 1])
+    // A degenerate projection (a camera that can't see the probe at all)
+    // can't be expressed as a finite `world_per_pt`; the coarsest step
+    // in the sequence is the same documented fallback `nice_step` itself
+    // uses for an ordinary zoomed-out-too-far case, so reuse it directly
+    // rather than inventing a second fallback path.
+    let world_per_pt = if px_per_mm > 0.0 {
+        1.0 / px_per_mm
+    } else {
+        f64::INFINITY
+    };
+    mf_units::nice_step(world_per_pt, min_px, mf_units::Unit::Millimeter).value
 }
 
 fn round_to_step(value: f64, step: f64) -> f64 {
