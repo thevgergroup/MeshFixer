@@ -1124,22 +1124,27 @@ pub fn count(n: usize, noun: &str) -> String {
 }
 
 /// A length to three significant figures (whole numbers from 100 up):
-/// the one formatter every panel's caption uses (`mf_spec::format_length`,
-/// the same rule the engine's own refusal messages use, D20 — so "at
-/// least 0.000" never reaches a person, in a panel or in a refusal).
+/// the one formatter every panel's caption uses, now `mf_units`'s own
+/// unitless core (`significant_figures`, consolidation plan C11) rather
+/// than a second copy of it — the same rule the engine's own refusal
+/// messages use via `mf_spec::format_length` (D20: ops have no `Unit` in
+/// scope), so "at least 0.000" never reaches a person, in a panel or in
+/// a refusal. Callers combine this with [`unit_symbol`] themselves
+/// because `v` here is already a document-unit value and `units` the
+/// document's own unit — composing "{measure(v)} {unit_symbol(units)}"
+/// is the same physical length [`mf_units::format_length`] would show,
+/// just without its automatic unit-stepping (callers that want that,
+/// such as an area that could round to "0" in the document's unit, call
+/// `mf_units::format_length`/`format_area`/`format_volume` directly).
 pub fn measure(v: f64) -> String {
-    mf_spec::format_length(v)
+    mf_units::significant_figures(v, 3)
 }
 
+/// `unit`'s display symbol ("mm", "m", …), delegating to `mf_units`
+/// (consolidation plan C11) so there is one table of unit symbols, not
+/// a second copy kept here.
 pub fn unit_symbol(units: Unit) -> &'static str {
-    match units {
-        Unit::Micron => "µm",
-        Unit::Millimeter => "mm",
-        Unit::Centimeter => "cm",
-        Unit::Inch => "in",
-        Unit::Foot => "ft",
-        Unit::Meter => "m",
-    }
+    units.symbol()
 }
 
 /// The plain-language name of running `op_id` on a target of `kind` with

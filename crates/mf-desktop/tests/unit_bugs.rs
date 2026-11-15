@@ -128,7 +128,6 @@ fn last_details(h: &Harness<'_, MeshFixerApp>) -> String {
 /// the physically correct label, never "0.002 mm" (the recorded
 /// doc-unit value, 0.002, relabelled with the spec's literal "mm").
 #[test]
-#[ignore = "red: C11"]
 fn history_details_for_a_hollow_wall_on_a_metres_document_reads_physical_millimetres() {
     require_gpu!(
         "history_details_for_a_hollow_wall_on_a_metres_document_reads_physical_millimetres"
@@ -158,4 +157,78 @@ fn history_details_for_a_hollow_wall_on_a_metres_document_reads_physical_millime
         "History Details showed the owner's exact bug, the doc-unit \
          value 0.002 relabelled \"mm\": {details:?}"
     );
+}
+
+/// As the test above, but across the three document units the owner's
+/// bug class spans (consolidation plan C11's own enforcement test,
+/// `history_details_use_document_unit`): millimetres, metres and
+/// inches. A physically 20 mm cube's default Hollow wall (2 mm) must
+/// always read in the *document's* unit, through `mf_units::format_length`,
+/// never the spec's own literal "mm" relabelling a doc-unit float — the
+/// bug is the same on every unit, not only metres (a millimetres
+/// document happens to make the recorded value and the physical value
+/// numerically equal, 2.0 == 2.0, so it alone would never catch a
+/// mislabelling bug; metres and inches do, since the recorded value and
+/// the millimetre figure then differ).
+#[test]
+fn history_details_use_document_unit() {
+    require_gpu!("history_details_use_document_unit");
+    // A 20 mm cube's side length, expressed in each document's own
+    // unit, so every case models the same physical cube. The wall
+    // thickness is set to a physical 3 mm, off the spec's 2 mm default
+    // (so History Details always shows it: `history_details_of` hides
+    // any parameter left at its default). `forbidden` is what the
+    // owner's bug would have printed: the recorded doc-unit wall value
+    // (3 mm converted into `unit`), relabelled with the spec's own
+    // literal "mm" rather than converted and labelled with `unit`. On a
+    // millimetres document that recorded value is 3.0, the same number
+    // the correct "3.00 mm" uses, so it alone could never show the bug;
+    // metres and inches can, because the recorded value and the correct
+    // millimetre figure then differ.
+    let side_in = |unit: Unit| 20.0 / unit.mm_per();
+    let wall_in = |unit: Unit| 3.0 / unit.mm_per();
+    for (unit, forbidden) in [
+        (Unit::Millimeter, "0.00300 mm"),
+        (Unit::Meter, "0.003 mm"),
+        (Unit::Inch, "0.118 mm"),
+    ] {
+        let mut h = opened_at(
+            vec![("cube", mf_fixtures::cube(side_in(unit)), at([0.0; 3]))],
+            unit,
+        );
+        assert_eq!(h.state().session.document().units(), unit);
+        h.get_by_label("Hollow").click();
+        settle(&mut h);
+        // A physical 3 mm wall, off the spec's 2 mm default, in this
+        // document's own unit.
+        h.state_mut().hollow.wall = Some(wall_in(unit));
+        panel_button(&h, "Hollow").click();
+        wait_until(&mut h, "the hollow", |a| a.busy.is_none());
+        settle(&mut h);
+        assert!(
+            h.state().refusal.is_none(),
+            "{unit:?}: {:?}",
+            h.state().refusal
+        );
+        let details = last_details(&h);
+        // The recorded doc-unit value, mislabelled with the spec's own
+        // "mm" instead of converted and labelled with the document's
+        // unit, never appears (the owner's exact bug, generalised to
+        // every unit, not only metres).
+        assert!(
+            !details.contains(forbidden),
+            "{unit:?}: History Details showed a doc-unit value \
+             mislabelled \"mm\" instead of the document's own unit: \
+             got {details:?}"
+        );
+        // And the physically correct "2 mm" wall reads in the
+        // document's own unit symbol, not a bare number with no unit
+        // or the wrong one.
+        let symbol = unit.symbol();
+        assert!(
+            details.contains(symbol),
+            "{unit:?}: History Details for the wall thickness should \
+             show the document's own unit {symbol:?}: got {details:?}"
+        );
+    }
 }
