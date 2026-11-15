@@ -221,7 +221,7 @@ fn rapid_strokes_are_all_recorded() {
 /// rs:778`, `refusal_card_for(app, ui, "mesh.hollow")`) has nothing to
 /// show.
 #[test]
-#[ignore = "red: C04"]
+#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_hollow() {
     require_gpu!("refusal_reaches_issuing_panel_hollow");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
@@ -274,7 +274,7 @@ fn refusal_reaches_issuing_panel_hollow() {
 /// `ops_of` (`align_tool.rs:687`'s `refusal_card_for(app, ui, "object.
 /// align")` only ever sees a preview refusal, never Apply's).
 #[test]
-#[ignore = "red: C04"]
+#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_align() {
     require_gpu!("refusal_reaches_issuing_panel_align");
     let mut h = opened(vec![
@@ -337,7 +337,7 @@ fn refusal_reaches_issuing_panel_align() {
 /// routing half: the refusal must at least reach `app.refusal`, not
 /// `app.error`.
 #[test]
-#[ignore = "red: C04"]
+#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_sculpt() {
     require_gpu!("refusal_reaches_issuing_panel_sculpt");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
@@ -401,7 +401,7 @@ fn refusal_reaches_issuing_panel_sculpt() {
 /// undeclared (defaults to empty), so the refusal falls through to
 /// `app.error`; `repair_panel` has no refusal card at all.
 #[test]
-#[ignore = "red: C04"]
+#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_repair() {
     require_gpu!("refusal_reaches_issuing_panel_repair");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
