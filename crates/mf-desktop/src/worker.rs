@@ -1204,12 +1204,18 @@ pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Messa
         m.transform_vector3(local).normalize_or_zero().to_array()
     };
     let point_obj = world_to_object(request.plane_point);
-    let normal_obj = {
-        let m = mf_render::model_matrix(&request.transform).inverse();
-        m.transform_vector3(glam::DVec3::from(request.plane_normal))
-            .normalize_or_zero()
-            .to_array()
-    };
+    // The plane's normal must go to object space the same way Apply's
+    // own `mf_operations::split::normal_to_object` does: `M·n`, `M`
+    // being `request.transform`'s (object→world) linear part, never
+    // that transform's inverse applied as if the normal were a point
+    // (wrong under a non-uniform scale: split_parity.rs's
+    // `split_preview_regions_equal_apply_regions`).
+    let normal_obj = glam::DVec3::from(mf_geometry::affine::world_normal_to_object(
+        &request.transform,
+        request.plane_normal,
+    ))
+    .normalize_or_zero()
+    .to_array();
     let plane = Plane {
         point: point_obj,
         normal: normal_obj,

@@ -35,6 +35,27 @@ pub struct OperationSpec {
     pub postconditions: Vec<String>,
     pub effects: Vec<String>,
     pub runtime: RuntimeSpec,
+    /// Whether the command queue may merge a newly queued invocation of
+    /// this op into the one already waiting behind the running command
+    /// (ADR-0009): `Never` (the default) keeps every queued invocation
+    /// as its own undo step — right for a delta command (a sculpt
+    /// stroke, a fill), where coalescing silently drops work the owner
+    /// did. `Absolute` merges two queued invocations with the same key
+    /// (same op, same target) into one, latest params winning — right
+    /// only for a command whose params are the whole resulting state
+    /// (`object.set_transform`'s placement, `object.set_shape_params`'s
+    /// recipe), where the queued one fully supersedes the one before it.
+    #[serde(default)]
+    pub coalesce: Coalesce,
+}
+
+/// See [`OperationSpec::coalesce`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Coalesce {
+    #[default]
+    Never,
+    Absolute,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

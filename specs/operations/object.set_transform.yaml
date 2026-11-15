@@ -25,3 +25,7 @@ effects: [transform_changes]
 runtime:
   cancellable: true
   progress: false
+# ADR-0009: the transform is the whole resulting placement, not a delta,
+# so a newly queued set_transform may merge into the one already
+# waiting (same target), latest params winning.
+coalesce: absolute

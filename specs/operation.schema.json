@@ -78,6 +78,10 @@
         "cancellable": { "type": "boolean" },
         "progress": { "type": "boolean" }
       }
+    },
+    "coalesce": {
+      "enum": ["absolute", "never"],
+      "$comment": "ADR-0009: whether the command queue may merge a newly queued invocation of this op into the one already waiting, same op and target, latest params winning. Defaults to never (every queued invocation is its own undo step); only an op whose params are the whole resulting state (object.set_transform, object.set_shape_params) declares absolute."
     }
   }
 }

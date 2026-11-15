@@ -2217,17 +2217,24 @@ impl MeshFixerApp {
     /// point every command (a tool's Apply, a slider or drag commit, an
     /// auto re-aim, `move_group`...) goes through: with a command already
     /// running, `inv` is queued instead of raced against it (in order;
-    /// coalesced with the last queued command when it has the same op
-    /// and target, latest params winning), and run once the running one's
-    /// result has been handled (`drain_pending_invocation`). This is what
-    /// keeps two app-issued commands from ever preparing against the same
-    /// base and committing out of order (owner-reported "document changed
-    /// while the command ran").
+    /// coalesced with the last queued command only when that command's
+    /// own spec declares `coalesce: absolute` (ADR-0009) and the key —
+    /// same op, same target — matches, latest params winning), and run
+    /// once the running one's result has been handled
+    /// (`drain_pending_invocation`). This is what keeps two app-issued
+    /// commands from ever preparing against the same base and
+    /// committing out of order (owner-reported "document changed while
+    /// the command ran"), without silently dropping a delta command
+    /// (`mesh.sculpt_stroke`'s default `coalesce: never`): three quick
+    /// strokes queued behind a running one are three undo steps, not
+    /// fewer.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
         if self.busy.is_some() {
+            let coalesces = mf_spec::builtin::get(&inv.op_id)
+                .is_some_and(|spec| spec.coalesce == mf_spec::Coalesce::Absolute);
             match self.pending_invocation.back_mut() {
                 Some((queued, queued_label))
-                    if queued.op_id == inv.op_id && queued.target == inv.target =>
+                    if coalesces && queued.op_id == inv.op_id && queued.target == inv.target =>
                 {
                     *queued = inv;
                     *queued_label = label;
@@ -2847,6 +2854,17 @@ impl MeshFixerApp {
                     _ => None,
                 };
                 let is_new_revision = matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
+                // A refused, cancelled or no-op placement command leaves
+                // nothing to open Transform on: drop the pending
+                // placement right here rather than letting the frame
+                // loop's drain (`pending_open_transform.take()`) act on
+                // it later with no way to tell the refusal apart from a
+                // commit (the owner-reported connector bug: a refused
+                // `object.add_shape` still opened Transform on the scan
+                // and recorded it as the placed connector).
+                if !is_new_revision {
+                    self.pending_open_transform = None;
+                }
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(match placed {

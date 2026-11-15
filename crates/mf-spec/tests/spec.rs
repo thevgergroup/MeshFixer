@@ -49,6 +49,34 @@ fn every_built_in_spec_has_a_history_label() {
     }
 }
 
+/// Every registered operation spec declares its coalescing (ADR-0009):
+/// `Coalesce::Never` by default (so a delta command — a sculpt stroke,
+/// a fill — queued behind a running one keeps its own undo step rather
+/// than being merged away), `Coalesce::Absolute` only for a command
+/// whose params are the whole resulting state (`object.set_transform`'s
+/// placement, `object.set_shape_params`'s recipe), where a newly queued
+/// invocation fully supersedes the one already waiting. This is a
+/// closed, named list rather than "anything not Never": a future spec
+/// that wants to coalesce must be added here deliberately, so the
+/// contract stays reviewed rather than silently widening.
+#[test]
+fn every_spec_declares_coalescing() {
+    use mf_spec::Coalesce;
+    const ABSOLUTE: &[&str] = &["object.set_transform", "object.set_shape_params"];
+    for spec in builtin::specs() {
+        let expected = if ABSOLUTE.contains(&spec.id.as_str()) {
+            Coalesce::Absolute
+        } else {
+            Coalesce::Never
+        };
+        assert_eq!(
+            spec.coalesce, expected,
+            "{} declares {:?}, expected {:?}",
+            spec.id, spec.coalesce, expected
+        );
+    }
+}
+
 #[test]
 fn defaults_filled() {
     let spec = builtin::get("mesh.remove_small_components").unwrap();

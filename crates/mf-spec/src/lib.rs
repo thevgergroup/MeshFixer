@@ -10,7 +10,7 @@ mod model;
 mod params;
 
 pub use model::{
-    FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec, RuntimeSpec,
-    TargetSpec, format_length,
+    Coalesce, FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec,
+    RuntimeSpec, TargetSpec, format_length,
 };
 pub use params::{FaceList, ParamValue, Params, SpecError};

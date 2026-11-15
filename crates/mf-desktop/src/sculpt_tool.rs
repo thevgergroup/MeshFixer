@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 use eframe::egui::{self, RichText};
 use glam::DVec3;
 use mf_command::ObjectId;
-use mf_geometry::Mesh;
+use mf_geometry::{Bvh, Mesh};
 use mf_operations::sculpt::{BrushKind, BrushParams, DabSample, Falloff, SculptIndex, StrokeState};
 use mf_render::{MeshVertices, OrbitCamera};
 use mf_spec::{ParamValue, Params};
@@ -93,6 +93,14 @@ impl Default for SculptSettings {
 pub struct SculptStroke {
     pub object: ObjectId,
     state: StrokeState,
+    /// The BVH `begin_stroke` picked the first dab against (tolerant,
+    /// so it can be one revision behind the document): kept for every
+    /// later dab in this same stroke, rather than re-querying
+    /// `app.picking_bvh`, so a stroke that started slightly stale stays
+    /// internally consistent throughout (the document itself never
+    /// changes mid-stroke, so this never goes *more* stale than it
+    /// started).
+    bvh: std::sync::Arc<Bvh>,
     samples: Vec<DabSample>,
     /// The vertices `render.gpu` was last synced to (this stroke's own
     /// running copy: not the object's displayed `RenderMesh`, which keeps
@@ -170,8 +178,15 @@ fn claims(app: &MeshFixerApp) -> Option<Claims> {
         return Some(Box::new(|_| true) as Claims);
     }
     let id = app.active?;
-    let bvh = app.picking_bvh(id)?;
     let mesh = app.active_mesh()?.clone();
+    // The current revision's BVH if it's ready, `None` if a commit just
+    // invalidated it and the rebuild hasn't landed yet (ADR-0009's
+    // pick/hover lane): the closure below falls back to a brute-force
+    // walk over `mesh` itself rather than waiting it out or picking
+    // against a stale revision, so a rapid second stroke, fired before
+    // the rebuild lands, still finds the mesh's true current surface
+    // under the cursor (`rapid_strokes_are_all_recorded`).
+    let bvh = app.picking_bvh(id);
     let cam = app.camera?;
     let rect = app.viewport.last_rect?;
     let transform = app.shown_transform(id).unwrap_or_else(|| {
@@ -186,7 +201,11 @@ fn claims(app: &MeshFixerApp) -> Option<Claims> {
     Some(Box::new(move |px: (f64, f64)| {
         let (origin, dir) = cam.ray(cam.target, size, px);
         let model = mf_render::model_matrix(&transform);
-        let Some((face, _)) = bvh.ray_pick(&mesh, origin, dir, &model) else {
+        let hit = match &bvh {
+            Some(bvh) => bvh.ray_pick(&mesh, origin, dir, &model),
+            None => mf_render::ray_pick(&mesh, &model, origin, dir),
+        };
+        let Some((face, _)) = hit else {
             return false;
         };
         let Some(corners) = mesh.face(face) else {
@@ -221,11 +240,12 @@ fn barycentric(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> [f64; 3] {
     [1.0 - v - w, v, w]
 }
 
-/// Where a screen point lands on object `id`'s current surface: a dab
-/// sample on `mesh` (a point on a face, barycentric) and the hit point in
-/// world space. `None` off the surface, or before the object has a
-/// picking BVH to search against (Sculpt reuses it rather than building
-/// its own: see the module docs).
+/// Where a screen point lands on `mesh`'s surface: a dab sample (a point
+/// on a face, barycentric) and the hit point in world space. `bvh`, if
+/// given, must be the one `mesh` was built for; `None` falls back to a
+/// brute-force walk over `mesh` itself (ADR-0009's pick/hover lane: a
+/// commit can leave the cached BVH a real rebuild away). `None` off the
+/// surface.
 ///
 /// `Bvh::ray_pick` finds the nearest crossing of either winding (the
 /// general picking contract every tool shares — `occluded`'s own tests
@@ -241,11 +261,11 @@ fn barycentric(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> [f64; 3] {
 /// must never become a place a *new* stroke can start from.
 fn surface_point(
     app: &MeshFixerApp,
-    id: ObjectId,
     mesh: &Mesh,
+    bvh: Option<&Bvh>,
+    id: ObjectId,
     px: (f64, f64),
 ) -> Option<(DabSample, DVec3)> {
-    let bvh = app.picking_bvh(id)?;
     let cam = app.camera?;
     let rect = app.viewport.last_rect?;
     let size = (rect.width() as f64, rect.height() as f64);
@@ -258,7 +278,10 @@ fn surface_point(
         .shown_transform(id)
         .or_else(|| app.session.document().object(id).map(|o| o.transform))?;
     let model = mf_render::model_matrix(&transform);
-    let (face, t) = bvh.ray_pick(mesh, origin, dir, &model)?;
+    let (face, t) = match bvh {
+        Some(bvh) => bvh.ray_pick(mesh, origin, dir, &model),
+        None => mf_render::ray_pick(mesh, &model, origin, dir),
+    }?;
     let world = DVec3::from(origin) + DVec3::from(dir) * t;
     let local = model.inverse().transform_point3(world);
     let corners = mesh.face(face)?;
@@ -450,10 +473,28 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     let Some(mesh) = app.active_mesh().cloned() else {
         return;
     };
-    let Some((dab, world)) = surface_point(app, id, &mesh, px) else {
-        return;
+    // The current revision's BVH if it's ready, or build this stroke's
+    // own on the spot if a commit just invalidated the cached one and
+    // its rebuild hasn't landed yet (ADR-0009's pick/hover lane): never
+    // waits out the background rebuild, and never picks against a
+    // stale revision's geometry, so a rapid second stroke fired before
+    // the rebuild lands still finds the mesh's true current surface
+    // (`rapid_strokes_are_all_recorded`). The per-stroke cost of
+    // building one here (O(n log n), same work `SculptIndex::build`
+    // always does) is paid at most once per missed rebuild, not every
+    // frame — `claims`'s own brute-force fallback is what covers the
+    // frames before the press.
+    let ctx = mf_runtime::RunContext::none();
+    let bvh = match app.picking_bvh(id) {
+        Some(bvh) => bvh,
+        None => {
+            let Ok(built) = mf_geometry::Bvh::build(&mesh, &ctx) else {
+                return;
+            };
+            std::sync::Arc::new(built)
+        }
     };
-    let Some(bvh) = app.picking_bvh(id) else {
+    let Some((dab, world)) = surface_point(app, &mesh, Some(&bvh), id, px) else {
         return;
     };
     let transform = app.shown_transform(id).unwrap_or_else(|| {
@@ -477,7 +518,7 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     else {
         return;
     };
-    let index = SculptIndex::from_bvh(bvh);
+    let index = SculptIndex::from_bvh(bvh.clone());
     let mut state = StrokeState::new(&mesh, index, brush);
     let ctx = mf_runtime::RunContext::none();
     let Ok(_) = state.apply(&dab, &ctx) else {
@@ -498,6 +539,7 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     app.sculpt_stroke = Some(SculptStroke {
         object: id,
         state,
+        bvh,
         samples: vec![dab],
         vertices,
         render,
@@ -552,7 +594,7 @@ fn continue_stroke(app: &mut MeshFixerApp, px: (f64, f64)) {
     };
     let result = (|| {
         let mesh = stroke.state.preview_mesh();
-        let (dab, world) = surface_point(app, stroke.object, &mesh, px)?;
+        let (dab, world) = surface_point(app, &mesh, Some(&stroke.bvh), stroke.object, px)?;
         if let Some(last) = stroke.last_dab
             && (world - last).length() < DAB_SPACING * stroke.radius_world
         {
@@ -740,7 +782,12 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     let Some(mesh) = app.active_mesh().cloned() else {
         return;
     };
-    let Some((_, world)) = surface_point(app, id, &mesh, px) else {
+    // `picking_bvh` can briefly be `None` right after a commit
+    // invalidates it (ADR-0009's pick/hover lane): `surface_point`'s
+    // own brute-force fallback means the cursor ring doesn't flicker
+    // out for the rebuild.
+    let bvh = app.picking_bvh(id);
+    let Some((_, world)) = surface_point(app, &mesh, bvh.as_deref(), id, px) else {
         return;
     };
     // Live each frame (not fixed to a stroke): the ring must track the
@@ -800,9 +847,12 @@ fn brush_radius_preview_world(app: &MeshFixerApp) -> Option<f64> {
     let rect = app.viewport.last_rect?;
     let depth_point = app
         .active
-        .zip(app.active_mesh().cloned())
+        .and_then(|id| Some((id, app.active_mesh()?.clone())))
         .zip(app.sculpt_hover)
-        .and_then(|((id, mesh), px)| surface_point(app, id, &mesh, px).map(|(_, world)| world))
+        .and_then(|((id, mesh), px)| {
+            let bvh = app.picking_bvh(id);
+            surface_point(app, &mesh, bvh.as_deref(), id, px).map(|(_, world)| world)
+        })
         .unwrap_or(cam.target);
     Some(world_radius_at(
         &cam,

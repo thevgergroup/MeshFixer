@@ -21,7 +21,9 @@
 
 use mf_geometry::Mesh;
 use mf_runtime::RunContext;
-use mf_spec::{OperationSpec, ParamKind, ParamSpec, ParamValue, Params, RuntimeSpec, TargetSpec};
+use mf_spec::{
+    Coalesce, OperationSpec, ParamKind, ParamSpec, ParamValue, Params, RuntimeSpec, TargetSpec,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::connector::ConnectorError;
@@ -262,6 +264,7 @@ pub fn spec_of(id: &str, summary: &str, params: Vec<P>) -> OperationSpec {
             cancellable: false,
             progress: false,
         },
+        coalesce: Coalesce::Never,
     }
 }
 

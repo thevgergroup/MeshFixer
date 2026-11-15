@@ -156,6 +156,49 @@ fn release(h: &mut Harness<'_, MeshFixerApp>, at: egui::Pos2) {
     h.step();
 }
 
+/// Three (press, release) screen-point pairs, one per quick stroke in
+/// `rapid_strokes_are_all_recorded`, each a distinct point on the
+/// 10 mm ball's own surface (centred at world `[0, 0, 10]`), within 75°
+/// of its pole — comfortably on the visible front hemisphere, so every
+/// press is guaranteed to land regardless of a fixed screen-pixel
+/// offset walking off the rendered silhouette (an earlier version of
+/// this test, `top + (dx, 0)` for `dx` in `[0, 40, 80]` screen points,
+/// walked the third press ~80 px past the rendered ball and missed it
+/// entirely — confirmed at the engine level, `Bvh::ray_pick`/
+/// `mf_render::ray_pick` both returning `None` for that exact ray).
+///
+/// Each stroke spans 20° of latitude, starting 5° off the exact pole
+/// (a UV sphere's pole is a single degenerate fan vertex). This width,
+/// together with the test's own widened brush radius (see
+/// `rapid_strokes_are_all_recorded`), reliably crosses enough ring
+/// vertices (`uv_sphere`'s rings are 7.5° apart) to move some on every
+/// stroke: with the panel's *default* brush radius (comparable to one
+/// ring's own vertex spacing on this mesh), whether a dab's barycentric
+/// point happens to fall near a vertex or near a face's centre is a
+/// coin flip, and a dab that gathers zero vertices within radius is a
+/// real, legitimate no-op (`mesh.sculpt_stroke`'s own report:
+/// `moved_vertices: 0`) rather than a miss — confirmed directly with an
+/// earlier, default-radius version of this test, where the 2nd and 3rd
+/// strokes landed on real, distinct, ring-crossing points on the ball
+/// and still moved nothing.
+fn sculpt_stroke_points(h: &Harness<'_, MeshFixerApp>) -> Vec<(egui::Pos2, egui::Pos2)> {
+    const CENTER: [f64; 2] = [0.0, 10.0]; // ball centre, (x, z)
+    const RADIUS: f64 = 10.0;
+
+    [(5.0_f64, 25.0_f64), (30.0, 50.0), (55.0, 75.0)]
+        .into_iter()
+        .map(|(press_deg, release_deg)| {
+            let point_at = |deg: f64| {
+                let theta = deg.to_radians();
+                let x = CENTER[0] + RADIUS * theta.sin();
+                let z = CENTER[1] + RADIUS * theta.cos();
+                pick_point(h, [x, 0.0, z])
+            };
+            (point_at(press_deg), point_at(release_deg))
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------
 // Queue semantics: rapid sculpt strokes while busy.
 // ---------------------------------------------------------------------
@@ -164,34 +207,56 @@ fn release(h: &mut Harness<'_, MeshFixerApp>, at: egui::Pos2) {
 /// the previous one's `mesh.sculpt_stroke` command to land (`app.busy`
 /// still `Some`), must give three undo steps: each stroke is a delta on
 /// the live mesh, not an absolute setting the next one should replace.
-/// `run_invocation`'s queue today coalesces any command with the same
-/// `op_id`/`target`, so the middle stroke (whichever one is still
-/// queued when the next drag starts) is silently overwritten, and only
-/// two history rows land.
+/// `run_invocation`'s queue coalescing is fixed (C04: `coalesce:
+/// absolute | never`, declared per spec, `mesh.sculpt_stroke` defaults
+/// to `never`) and verified directly by `mf-spec`'s
+/// `every_spec_declares_coalescing`.
+///
+/// Each press/release point is a world-space point on the ball's own
+/// surface (projected to screen points via `pick_point`), not a fixed
+/// pixel offset from the first one — see `sculpt_stroke_points`'s own
+/// doc comment for why, and for why the brush radius is widened here
+/// before any stroke (a bigger radius makes "some vertex moves" robust
+/// to exactly where a dab's barycentric point falls in its face,
+/// rather than requiring it be near a vertex).
+///
+/// The first stroke's drag samples many dabs along its path (a long,
+/// slow real-world stroke), unlike the next two's single-dab taps:
+/// replaying that many samples on the worker measurably outlasts
+/// strokes 2 and 3's own press-to-release, so they're genuinely queued
+/// behind the first one while it's still running, not just dispatched
+/// back-to-back once it has already finished — without this, the test
+/// never actually exercises `run_invocation`'s queueing/coalescing
+/// decision at all (confirmed directly: with only quick, single-dab
+/// strokes throughout, `busy` was always back to `None` before the
+/// next press, so nothing was ever queued, and the test passed even
+/// with the pre-C04 unconditional-coalescing logic restored). With
+/// that logic restored here (temporarily, in the working tree — not
+/// via `git stash`), this test reliably fails (stroke 2's queued
+/// invocation gets overwritten by stroke 3's, losing it: two undo
+/// steps instead of three); with the real fix, it reliably passes.
 #[test]
-#[ignore = "red: C04"]
 fn rapid_strokes_are_all_recorded() {
     require_gpu!("rapid_strokes_are_all_recorded");
-    let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
+    let dense_ball = mf_fixtures::scaled(&mf_fixtures::uv_sphere(200, 260), 10.0);
+    let mut h = opened(vec![("ball", dense_ball, at([0.0, 0.0, 10.0]))]);
     h.get_by_label("Sculpt").click();
     settle(&mut h);
     assert_eq!(h.state().active_tool, "sculpt");
+    h.state_mut().sculpt.radius_pt = 120.0;
 
     let history = h.state().session.history_labels().len();
-    let top = pick_point(&h, [0.0, 0.0, 20.0]);
 
     // Three short strokes, each started and released well before the
     // previous one's command has returned from the worker pool (no
     // `wait_until`/`settle` between them): the real-world "quick
-    // strokes" the owner reported.
-    for dx in [0.0_f32, 40.0, 80.0] {
-        drag(
-            &mut h,
-            top + egui::vec2(dx, 0.0),
-            top + egui::vec2(dx + 20.0, 0.0),
-            4,
-        );
-        release(&mut h, top + egui::vec2(dx + 20.0, 0.0));
+    // strokes" the owner reported. Each stroke's press/release points
+    // are distinct world-space points on the ball's surface near its
+    // pole, so all three are guaranteed to land on the mesh.
+    for (i, (press, release_at)) in sculpt_stroke_points(&h).into_iter().enumerate() {
+        let steps = if i == 0 { 2000 } else { 1 };
+        drag(&mut h, press, release_at, steps);
+        release(&mut h, release_at);
     }
 
     wait_until(&mut h, "every queued stroke to land", |a| {
@@ -469,7 +534,6 @@ fn refusal_reaches_issuing_panel_repair() {
 /// add_shape` (`shapes: "[]"`, `nothing_to_add`) standing in for a
 /// placement the fit/collision logic would have refused for real.
 #[test]
-#[ignore = "red: C04"]
 fn refused_connector_does_not_open_transform() {
     require_gpu!("refused_connector_does_not_open_transform");
     let mut h = opened(vec![("scan", ball(), at([0.0, 0.0, 10.0]))]);

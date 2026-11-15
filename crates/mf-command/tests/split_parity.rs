@@ -1,73 +1,41 @@
 #![allow(clippy::unwrap_used)] // tests may panic on failure
 
-//! C02 red test: under a non-uniform scale, Split's region preview and
-//! Split's Apply compute the cut plane's object-space normal two
-//! different ways (architecture-review.md §4, "the world→object normal
-//! is computed three different ways for the same Split plane").
+//! C02 red test, fixed by C04: under a non-uniform scale, Split's
+//! region preview and Split's Apply used to compute the cut plane's
+//! object-space normal two different ways (architecture-review.md §4,
+//! "the world→object normal is computed three different ways for the
+//! same Split plane").
 //!
 //! - Apply (`mf-operations/src/split/mod.rs:146`, `normal_to_object`):
 //!   `M·n`, the transform's own linear part (row-major 3x4, D7) applied
 //!   directly to the world normal.
-//! - The region preview (`mf-desktop/src/split_flow.rs:529-535`,
-//!   `compute_region_preview`): `M⁻¹·n`, the *inverse* transform's
-//!   linear part applied to the world normal. The comment there says
-//!   this "matches a uniform-scale/rotation transform exactly and is
-//!   close enough... under a non-uniform one" — this test is the "not
-//!   close enough" case.
+//! - The region preview (`mf-desktop/src/split_flow.rs`,
+//!   `compute_region_preview`) used to compute `M⁻¹·n`, the *inverse*
+//!   transform's linear part applied to the world normal — wrong under
+//!   a non-uniform scale. It now goes through
+//!   `mf_geometry::affine::world_normal_to_object` (the same `M·n`
+//!   Apply's own `normal_to_object` computes), so the two agree by
+//!   construction.
 //!
-//! Both helpers below are byte-for-byte copies of the production code
-//! (not a reimplementation from the doc comment's math), so a fix that
-//! changes the real formula is caught here too.
-//!
-//! Fixed by: C04 (switches the region preview to the op's own `M·n`).
+//! `preview_object_normal` below is a byte-for-byte copy of the fixed
+//! production code's normal computation (not a reimplementation from
+//! the doc comment's math), so a regression that reintroduces the old
+//! `M⁻¹·n` formula is caught here too.
 
 use glam::DVec3;
 use mf_boolean::{Plane, Side, cut_half};
 use mf_fixtures::cube;
 use mf_runtime::RunContext;
 
-/// Verbatim from `mf-desktop/src/split_flow.rs`'s `linear_and_translation`.
-fn linear_and_translation(t: &[f64; 12]) -> (glam::DMat3, DVec3) {
-    (
-        glam::DMat3::from_cols(
-            DVec3::new(t[0], t[1], t[2]),
-            DVec3::new(t[3], t[4], t[5]),
-            DVec3::new(t[6], t[7], t[8]),
-        ),
-        DVec3::new(t[9], t[10], t[11]),
-    )
-}
-
-/// Verbatim from `mf-desktop/src/split_flow.rs`'s `inverse_transform`.
-fn inverse_transform(t: &[f64; 12]) -> Option<[f64; 12]> {
-    let (l, tr) = linear_and_translation(t);
-    if l.determinant().abs() < 1e-18 {
-        return None;
-    }
-    let inv = l.inverse();
-    let it = -(inv * tr);
-    Some([
-        inv.x_axis.x,
-        inv.y_axis.x,
-        inv.z_axis.x,
-        inv.x_axis.y,
-        inv.y_axis.y,
-        inv.z_axis.y,
-        inv.x_axis.z,
-        inv.y_axis.z,
-        inv.z_axis.z,
-        it.x,
-        it.y,
-        it.z,
-    ])
-}
-
-/// The region preview's object-space normal (`split_flow.rs:529-535`):
-/// `M⁻¹·n`, via the inverse transform's linear part.
+/// The region preview's object-space normal, as fixed
+/// (`split_flow.rs`'s `compute_region_preview`): the same
+/// `mf_geometry::affine::world_normal_to_object` (`M·n`) Apply's own
+/// `normal_to_object` is built on.
 fn preview_object_normal(transform: &[f64; 12], world_normal: DVec3) -> DVec3 {
-    let inv = inverse_transform(transform).expect("transform is invertible in this test");
-    let (linear, _translation) = linear_and_translation(&inv);
-    linear * world_normal
+    DVec3::from(mf_geometry::affine::world_normal_to_object(
+        transform,
+        world_normal.to_array(),
+    ))
 }
 
 /// Verbatim from `mf-operations/src/split/mod.rs`'s `normal_to_object`:
@@ -107,22 +75,46 @@ fn non_uniform_transform() -> [f64; 12] {
     t
 }
 
-/// Under non-uniform scale, the region preview's object-space normal
-/// and Apply's own differ by tens of degrees (not a rounding
-/// difference): a sanity check on the transform chosen above, before
-/// trusting the mesh-level assertion that follows.
+/// The pre-fix region preview's object-space normal (`M⁻¹·n`, via the
+/// inverse transform's linear part): kept here, named as the historical
+/// bug rather than called `preview_object_normal`, purely to show the
+/// transform below is a strong enough test case — it must still differ
+/// from Apply's own `M·n` by tens of degrees, or the sanity check this
+/// feeds would be vacuous.
+fn buggy_inverse_normal(t: &[f64; 12], world_normal: DVec3) -> DVec3 {
+    let m = glam::DMat3::from_cols(
+        DVec3::new(t[0], t[1], t[2]),
+        DVec3::new(t[3], t[4], t[5]),
+        DVec3::new(t[6], t[7], t[8]),
+    );
+    m.inverse() * world_normal
+}
+
+/// Under non-uniform scale, the old, buggy inverse-based normal and
+/// Apply's own differ by tens of degrees (not a rounding difference): a
+/// sanity check on the transform chosen above, confirming it's strong
+/// enough to have exposed the bug `split_preview_regions_equal_apply_
+/// regions` guards against. The region preview itself (`preview_
+/// object_normal`) no longer uses this formula — it now equals Apply's
+/// by construction, which is exactly the fix.
 #[test]
 fn preview_and_apply_normals_diverge_under_non_uniform_scale() {
     let t = non_uniform_transform();
     let world_normal = DVec3::new(1.0, 1.0, 1.0).normalize();
-    let preview = preview_object_normal(&t, world_normal).normalize();
+    let buggy = buggy_inverse_normal(&t, world_normal).normalize();
     let apply = DVec3::from(apply_object_normal(&t, world_normal.to_array())).normalize();
-    let angle_deg = preview.dot(apply).clamp(-1.0, 1.0).acos().to_degrees();
+    let angle_deg = buggy.dot(apply).clamp(-1.0, 1.0).acos().to_degrees();
     assert!(
         angle_deg > 10.0,
         "the chosen transform should make the two normals genuinely different \
          (got {angle_deg} degrees apart); strengthen the scale or rotation if this ever \
          shrinks back near zero"
+    );
+    let preview = preview_object_normal(&t, world_normal).normalize();
+    assert!(
+        preview.dot(apply) > 0.999_999,
+        "the fixed region preview must equal Apply's own normal exactly (both go through \
+         mf_geometry::affine::world_normal_to_object), not just coincidentally agree"
     );
 }
 
@@ -134,7 +126,6 @@ fn preview_and_apply_normals_diverge_under_non_uniform_scale() {
 /// user sees: the ticked/outlined region in the panel is not the solid
 /// Apply actually produces.
 #[test]
-#[ignore = "red: C04"]
 fn split_preview_regions_equal_apply_regions() {
     let mesh = cube(10.0);
     let t = non_uniform_transform();

@@ -530,13 +530,17 @@ fn compute_region_preview(
     let (linear, translation) = linear_and_translation(&inv);
     let object_point = linear * point + translation;
     let (inv_linear, _) = linear_and_translation(transform);
-    // A world normal `n_w` becomes `M^T n_w` in object space when `M`
-    // is object→world's linear part (the same identity `mf_operations::
-    // split::normal_to_object` uses): using `inv`'s linear part
-    // directly (rather than transposing the forward one) matches a
-    // uniform-scale/rotation transform exactly and is close enough for
-    // this preview under a non-uniform one.
-    let object_normal = linear * normal;
+    // The world normal must go to object space the same way Apply's own
+    // `mf_operations::split::normal_to_object` does: `M·n`, `M` being
+    // `transform`'s (object→world) linear part, never `inv`'s linear
+    // part applied as if the normal were a point. The two only agree
+    // under a uniform scale or a pure rotation; split_parity.rs's
+    // `split_preview_regions_equal_apply_regions` catches the
+    // divergence under a non-uniform one.
+    let object_normal = DVec3::from(mf_geometry::affine::world_normal_to_object(
+        transform,
+        normal.to_array(),
+    ));
     let plane = mf_boolean::Plane {
         point: object_point.to_array(),
         normal: object_normal.to_array(),
