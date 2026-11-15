@@ -6,6 +6,96 @@ use mf_io::threemf::Unit;
 
 use crate::params::{ParamValue, Params, SpecError};
 
+/// What kind of quantity a parameter's value is, and so how it is
+/// converted and shown (ADR-0006 rule 1, consolidation plan C05).
+/// Replaces the old free-text `unit: Option<String>`, which let a spec
+/// declare `cm` or `in` and have it silently pass through
+/// [`OperationSpec::to_document_units`] unconverted (that function only
+/// ever matched the literal string `"mm"`) — and let `box_min`/
+/// `box_max`-style params, already in document units, go undeclared
+/// and be mistaken for something needing conversion.
+///
+/// - `Length(unit)`: a length (or a length vec3, such as a point or
+///   offset) given in `unit`. [`OperationSpec::to_document_units`]
+///   converts it to the document's unit. `unit` is almost always
+///   [`Unit::Millimeter`] (generators are mm-internal, D16), but is
+///   typed so a spec could declare another source unit if it ever
+///   needed to.
+/// - `Document`: already in document/world units (a point already
+///   placed in the scene, an absolute transform's translation, a joint
+///   gap read back from the document). Never converted.
+/// - `Angle`: degrees. Never converted by [`OperationSpec::to_document_units`]
+///   (an angle has no length unit to convert from).
+/// - `Percent`: a percentage (0-100). Never converted.
+/// - `None`: not a quantity with a unit (a count, a choice, a flag, a
+///   direction vec3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ParamUnit {
+    Length(Unit),
+    Document,
+    Angle,
+    Percent,
+    #[default]
+    None,
+}
+
+impl ParamUnit {
+    /// Parses a spec's `unit:` string into a typed [`ParamUnit`]. `None`
+    /// (the key absent) means [`ParamUnit::None`]. Any other string that
+    /// isn't recognised is a load-time error (ADR-0006 rule 6: a length
+    /// param with no unit, or a typo'd one, is a bug caught at spec
+    /// load, not silently passed through as "no conversion"). Public so
+    /// a spec built in Rust rather than YAML (`mf-parts`'s generator
+    /// specs, `shape::spec_of`) can turn the same vocabulary of unit
+    /// symbols into a `ParamUnit` without its own, second copy of this
+    /// mapping.
+    pub fn parse(s: Option<&str>) -> Result<ParamUnit, String> {
+        Ok(match s {
+            None => ParamUnit::None,
+            Some("document") => ParamUnit::Document,
+            Some("deg") => ParamUnit::Angle,
+            Some("%") => ParamUnit::Percent,
+            Some(sym) => match Unit::parse_symbol(sym) {
+                Some(unit) => ParamUnit::Length(unit),
+                None => {
+                    return Err(format!(
+                        "unit '{sym}' isn't mm, cm, m, in, ft, deg, % or document"
+                    ));
+                }
+            },
+        })
+    }
+
+    /// The spec string this came from, the inverse of [`Self::parse`]
+    /// (round-tripped through [`RawParam`] on save).
+    fn to_raw(self) -> Option<String> {
+        match self {
+            ParamUnit::None => None,
+            ParamUnit::Document => Some("document".into()),
+            ParamUnit::Angle => Some("deg".into()),
+            ParamUnit::Percent => Some("%".into()),
+            ParamUnit::Length(unit) => Some(unit.symbol().into()),
+        }
+    }
+
+    /// The spec-style symbol a desktop panel matches on to choose its
+    /// own display suffix (`"mm"`, `"cm"`, `"m"`, `"in"`, `"ft"`,
+    /// `"deg"`, `"%"`), or `None` for a quantity with no symbol
+    /// (`Document`, `None`). This is [`Self::to_raw`] without the
+    /// `String` allocation, kept distinct so a reader can't be mistaken
+    /// for the spec's own (de)serialisation; existing desktop call
+    /// sites matched the old raw `unit: Option<String>` this way
+    /// (`Some("mm") => ...`), so this keeps them compiling unchanged.
+    pub fn symbol(self) -> Option<&'static str> {
+        match self {
+            ParamUnit::Length(unit) => Some(unit.symbol()),
+            ParamUnit::Angle => Some("deg"),
+            ParamUnit::Percent => Some("%"),
+            ParamUnit::Document | ParamUnit::None => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OperationSpec {
     pub id: String,
@@ -115,7 +205,7 @@ pub struct RuntimeSpec {
 pub struct ParamSpec {
     pub name: String,
     pub kind: ParamKind,
-    pub unit: Option<String>,
+    pub unit: ParamUnit,
     /// Where a frontend takes this parameter's default from instead of
     /// `default`, when the caller didn't set it (D20): `fit.<field>` of
     /// the active print fit profile. See [`OperationSpec::fill_defaults`].
@@ -362,10 +452,12 @@ impl TryFrom<RawParam> for ParamSpec {
         {
             return Err(format!("fit_role '{role}' isn't one of {FIT_ROLES:?}"));
         }
+        let unit = ParamUnit::parse(r.unit.as_deref())
+            .map_err(|reason| format!("parameter '{}': {reason}", r.name))?;
         Ok(ParamSpec {
             name: r.name,
             kind,
-            unit: r.unit,
+            unit,
             default_from: r.default_from,
             fit_role: r.fit_role,
             description: r.description,
@@ -417,7 +509,7 @@ impl From<ParamSpec> for RawParam {
             min,
             max,
             values,
-            unit: p.unit,
+            unit: p.unit.to_raw(),
             default_from: p.default_from,
             fit_role: p.fit_role,
             description: p.description,
@@ -521,56 +613,24 @@ impl OperationSpec {
     /// a direction vec3 has no `unit` and is left alone). Other
     /// parameter kinds are never marked `unit: mm` and are untouched.
     pub fn to_document_units(&self, params: &mut Params, unit: Unit) {
-        let mm_per_unit = millimetres_per(unit);
         for p in &self.parameters {
-            if p.unit.as_deref() != Some("mm") {
+            let ParamUnit::Length(source) = p.unit else {
+                // `Document` (already in document units), `Angle`,
+                // `Percent` and `None` never convert here.
                 continue;
-            }
+            };
             match params.0.get_mut(&p.name) {
-                Some(ParamValue::Float(v)) => *v *= mm_per_unit,
+                Some(ParamValue::Float(v)) => {
+                    *v = mf_units::Length::new(*v, source).in_doc(unit);
+                }
                 Some(ParamValue::Vec3(v)) => {
                     for c in v.iter_mut() {
-                        *c *= mm_per_unit;
+                        *c = mf_units::Length::new(*c, source).in_doc(unit);
                     }
                 }
                 _ => {}
             }
         }
-    }
-}
-
-/// A length in document units, to three significant figures: never
-/// "0.000" the way a plain `{:.3}` would print a sub-millimetre value
-/// on a metre document (the owner's bug — Make solid's refusal saying
-/// "at least 0.000" for a genuinely positive cell size). Whole numbers
-/// from 100 up drop the decimals; smaller ones get enough to keep three
-/// significant figures, trimming any insignificant trailing zeros. No
-/// unit suffix: operations never see which unit the document is in
-/// (D20 keeps them working purely in document units), so a message
-/// built from this reads "at least 0.00025" — the frontend's own words
-/// around it name the unit, as every other length in its panels does.
-///
-/// A thin delegation to `mf_units::significant_figures` (consolidation
-/// plan C03, ADR-0006): the same unitless, 3-significant-figure core
-/// every length/area/volume formatter in the app now shares, called
-/// with no `Unit` because this function's own contract (D20) is that it
-/// never has one.
-pub fn format_length(v: f64) -> String {
-    mf_units::significant_figures(v, 3)
-}
-
-/// How many document units make up one millimetre. The document's own
-/// numbers are in `unit`, so a length given in mm is multiplied by this
-/// to land in document units (a metre document: 1 mm = 0.001 document
-/// units).
-fn millimetres_per(unit: Unit) -> f64 {
-    match unit {
-        Unit::Micron => 1000.0,
-        Unit::Millimeter => 1.0,
-        Unit::Centimeter => 0.1,
-        Unit::Meter => 0.001,
-        Unit::Inch => 1.0 / 25.4,
-        Unit::Foot => 1.0 / 304.8,
     }
 }
 
@@ -587,9 +647,21 @@ impl ParamSpec {
                 .parse()
                 .map(ParamValue::Int)
                 .map_err(|_| invalid("expected an integer")),
-            ParamKind::Float { .. } => match text.trim().parse::<f64>() {
-                Ok(f) if f.is_finite() => Ok(ParamValue::Float(f)),
-                _ => Err(invalid("expected a finite number")),
+            // A `Length(unit)` param accepts a bare number (meaning
+            // `unit`, same as before) or a unit-suffixed/expression
+            // length, "10 in" or "5 cm + 2 mm" (ADR-0006 rule 1b,
+            // consolidation plan C05), through the one shared parser
+            // (`mf_units::parse_length`), converted to the param's own
+            // declared `unit` so the stored value's meaning never
+            // depends on what a caller happened to type.
+            ParamKind::Float { .. } => match self.unit {
+                ParamUnit::Length(unit) => mf_units::parse_length(text, unit)
+                    .map(|len| ParamValue::Float(len.value))
+                    .map_err(|e| invalid(&e.to_string())),
+                _ => match text.trim().parse::<f64>() {
+                    Ok(f) if f.is_finite() => Ok(ParamValue::Float(f)),
+                    _ => Err(invalid("expected a finite number")),
+                },
             },
             ParamKind::Bool { .. } => match text.trim() {
                 "true" => Ok(ParamValue::Bool(true)),

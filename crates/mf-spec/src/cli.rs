@@ -30,7 +30,7 @@ pub fn to_command(spec: &OperationSpec) -> Command {
         };
         let unit = p
             .unit
-            .as_deref()
+            .symbol()
             .map(|u| format!(", unit: {u}"))
             // allow-swallow: no unit means no help suffix
             .unwrap_or_default();

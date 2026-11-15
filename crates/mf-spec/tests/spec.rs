@@ -182,6 +182,77 @@ fn float_params_roundtrip_exactly_through_json() {
     }
 }
 
+/// ADR-0006 rule 6 / UA §6.6.1: every parameter whose name reads as a
+/// length (the vocabulary below) must declare a [`mf_spec::ParamUnit`]
+/// other than `None` — `Length(unit)` for a generator-space length
+/// converted at prepare time, or `Document` for one already in
+/// world/document units (a placed point, an absolute transform's
+/// translation, a joint gap read back from the document). This is what
+/// stops a spec unit of `cm` or `in` being silently left unconverted
+/// (the old `to_document_units` only ever matched the literal string
+/// `"mm"`, so anything else just passed through), and stops a
+/// `box_min`/`box_max`-style param — already in document units — being
+/// mistaken for mm and converted a second time.
+///
+/// The vocabulary and the allow-list are both reviewed, closed lists:
+/// a new parameter whose name matches but genuinely isn't a length
+/// (like `hole_points`, a `samples`-typed list of placed points encoded
+/// as `face,b0,b1,b2,pressure`, not a float/vec3 a unit could attach
+/// to) must be added to the allow-list by name, with its kind checked
+/// here, rather than silently passing because this test's string match
+/// missed it.
+#[test]
+fn every_length_param_declares_a_unit() {
+    const VOCABULARY: &[&str] = &[
+        "radius",
+        "diameter",
+        "width",
+        "height",
+        "depth",
+        "length",
+        "gap",
+        "clearance",
+        "wall",
+        "thickness",
+        "size",
+        "offset",
+        "point",
+        "spacing",
+    ];
+    /// (op id, param name): reviewed exceptions whose name matches the
+    /// vocabulary but isn't a length value a `ParamUnit` could convert.
+    const ALLOW: &[(&str, &str)] = &[
+        // A `samples`-typed list of placed points (face id + barycentric
+        // weights + pressure), not a float/vec3 length.
+        ("mesh.hollow", "hole_points"),
+    ];
+    let matches_vocabulary = |name: &str| {
+        VOCABULARY.iter().any(|w| name.contains(w))
+            || name.starts_with("min_")
+            || name.starts_with("plate_")
+    };
+    for spec in builtin::specs() {
+        for p in &spec.parameters {
+            if !matches_vocabulary(&p.name) {
+                continue;
+            }
+            if ALLOW.contains(&(spec.id.as_str(), p.name.as_str())) {
+                continue;
+            }
+            assert!(
+                !matches!(p.unit, mf_spec::ParamUnit::None),
+                "{}'s '{}' looks like a length (matches the UA \u{a7}6.6.1 vocabulary) but \
+                 declares no unit; give it `unit: mm` (or another ParamUnit::Length symbol) \
+                 if it's a generator-space length, `unit: document` if it's already in \
+                 document/world units, or add it to this test's allow-list by name with a \
+                 stated reason if it genuinely isn't a length",
+                spec.id,
+                p.name
+            );
+        }
+    }
+}
+
 /// A `choice` parameter (MF-OP-002 fill styles): one of a listed set of
 /// words, its default filled in, anything else rejected by name.
 #[test]

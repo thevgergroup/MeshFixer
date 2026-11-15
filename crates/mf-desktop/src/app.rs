@@ -6765,7 +6765,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
                 format!(
                     "{}: {}",
                     param_label(op_id, &p.name),
-                    summarize_value(value, p.unit.as_deref())
+                    summarize_value(value, p.unit.symbol())
                 )
             })
         })
