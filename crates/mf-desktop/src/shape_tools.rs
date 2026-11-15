@@ -15,7 +15,10 @@ use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 use crate::MeshFixerApp;
 use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
-use crate::widgets::{self, Kind};
+use mf_units::{Length, Unit};
+
+use crate::widgets::length_field::UNBOUNDED;
+use crate::widgets::{self, Kind, LengthFieldOpts, doc_length_field, length_field, length_slider};
 use crate::{icons, t, theme};
 
 pub const SPLIT: &str = "split";
@@ -39,7 +42,8 @@ pub struct SplitState {
     pub hover: Option<Handle>,
     /// "both", "above" or "below".
     pub keep: String,
-    pub gap: f64,
+    /// The gap left at the cut: print intent (a kerf), a typed length.
+    pub gap: Length,
     /// The targets ([`MeshFixerApp::selected_objects`]), each with its own
     /// transform at the time, the plane was last placed for (owner
     /// 2026-11-11: centred on the whole selection, not just the active
@@ -70,12 +74,14 @@ pub struct SplitState {
     pub bound: bool,
     /// "disc" or "rect".
     pub bound_shape: String,
-    /// The bound's diameter (disc) or width (rect), document units
-    /// (converted to mm when the invocation is built, D20).
-    pub bound_width: f64,
-    /// The bound's height (rect only), document units (converted to mm
-    /// when the invocation is built, D20).
-    pub bound_height: f64,
+    /// The bound's diameter (disc) or width (rect), as typed; `None`
+    /// until set, meaning half the selection's bounding-box diagonal
+    /// ([`bound_size`]: geometry resolution follows the model, ADR-0006
+    /// rule 3, never a literal 100 document units).
+    pub bound_width: Option<Length>,
+    /// The bound's height (rect only), as typed; `None` as for
+    /// `bound_width`.
+    pub bound_height: Option<Length>,
 }
 
 impl Default for SplitState {
@@ -86,15 +92,15 @@ impl Default for SplitState {
             drag: None,
             hover: None,
             keep: "both".into(),
-            gap: 0.0,
+            gap: Length::new(0.0, Unit::Millimeter),
             placed_for: None,
             section: true,
             cap: true,
             unticked_regions: std::collections::HashMap::new(),
             bound: false,
             bound_shape: "disc".into(),
-            bound_width: 100.0,
-            bound_height: 100.0,
+            bound_width: None,
+            bound_height: None,
         }
     }
 }
@@ -222,8 +228,11 @@ pub struct PegPreviewKey {
 /// the offset, and whether to keep the surface where the grid puts it.
 #[derive(Debug, Clone, Default)]
 pub struct SolidState {
-    pub cell: Option<f64>,
-    pub offset: f64,
+    /// The cell size as typed (or the automatic diagonal/256); `None`
+    /// until the object's default is set.
+    pub cell: Option<Length>,
+    /// Grow (positive) or shrink (negative), as typed.
+    pub offset: Option<Length>,
     pub smooth: bool,
     pub for_object: Option<ObjectId>,
 }
@@ -406,7 +415,7 @@ fn split_plane_misses_selection(app: &MeshFixerApp) -> bool {
     }
     let point = app.split.point();
     let normal = app.split.normal();
-    let gap = app.split.gap;
+    let gap = app.split.gap.in_doc(app.session.document().units());
     selected.iter().all(|&id| {
         world_bounds(app, id)
             .is_some_and(|(lo, hi)| plane_misses_world_box(point, normal, gap, lo, hi))
@@ -423,7 +432,7 @@ pub(crate) fn unselected_objects_the_plane_crosses(app: &MeshFixerApp) -> Vec<St
     let selected = app.selected_objects();
     let point = app.split.point();
     let normal = app.split.normal();
-    let gap = app.split.gap;
+    let gap = app.split.gap.in_doc(app.session.document().units());
     app.session
         .document()
         .objects()
@@ -647,11 +656,7 @@ pub(crate) fn plane_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInpu
         // metre-scale bunny to zero (1 document unit there is 1000 mm).
         let units = app.session.document().units();
         let (grid, _) = crate::transform_tool::snap_step(&cam, g.pivot, view, units);
-        Snap {
-            grid: Some(grid),
-            plate: None,
-            ..Snap::default()
-        }
+        crate::transform_tool::grid_snap(grid)
     };
     match input.pointer {
         Some(ToolPointer::Start { from, at }) => {
@@ -798,7 +803,6 @@ pub(crate) fn open_model_card(app: &mut MeshFixerApp, ui: &mut egui::Ui) -> bool
 /// and tilt), the section view, which parts to keep and the gap.
 pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     place_plane(app, false);
-    let units = crate::defects::unit_symbol(app.session.document().units());
     // Before Apply can ever refuse it: the plane misses or grazes
     // (owner 2026-11-11, "Also"). `plane_miss_warning` re-checks every
     // frame the gizmo moves, so dragging the plane into the model clears
@@ -844,21 +848,25 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         app.split.drag = None;
     }
     // Typed point and tilt.
-    section(ui, &t!("split.section.point", unit = units));
+    // The point: length fields (ADR-0006 rule 1) that scrub in a
+    // `nice_step` at this zoom (millimetres on the framed 0.156 m bunny,
+    // where the old fixed 0.5-unit drag moved it 0.5 m per point).
+    section(ui, &t!("split.section.point"));
+    let lengths = app.scale_ctx();
     let mut p = app.split.point();
     let mut changed = false;
     ui.horizontal(|ui| {
+        let width = crate::widgets::length_field::row_field_width(ui, 3);
         for (axis, v) in [(0usize, &mut p.x), (1, &mut p.y), (2, &mut p.z)] {
-            let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][axis];
-            ui.label(
-                RichText::new(crate::transform_tool::AXIS_NAMES[axis])
-                    .size(theme::TYPE_CAPTION)
-                    .color(color),
-            );
-            let r = ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2));
-            let name = format!("Split point {}", crate::transform_tool::AXIS_NAMES[axis]);
-            r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name));
-            changed |= r.changed();
+            let short = crate::transform_tool::AXIS_NAMES[axis];
+            let name = format!("Split point {short}");
+            let opts = LengthFieldOpts {
+                range: UNBOUNDED,
+                scale: &lengths,
+                label: short,
+            };
+            let id = egui::Id::unique(("split point", axis));
+            changed |= doc_length_field(ui, id, v, &opts, Some((&name, width))).changed();
         }
     });
     section(ui, &t!("split.section.tilt"));
@@ -874,9 +882,9 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             let r = ui.add(
                 egui::DragValue::new(v)
                     .speed(1.0)
-                    .range(-180.0..=180.0)
+                    .range(TILT_RANGE_DEG)
                     .suffix("°")
-                    .max_decimals(1),
+                    .fixed_decimals(1),
             );
             let name = format!("Tilt about {}", crate::transform_tool::AXIS_NAMES[axis]);
             r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, &name));
@@ -922,24 +930,49 @@ pub(crate) fn slice_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     if let (Some(i), _) = widgets::segmented_colored(ui, &options, current) {
         app.split.keep = keeps[i].0.into();
     }
-    section(ui, &t!("split.section.gap", unit = units));
-    ui.add(
-        egui::Slider::new(&mut app.split.gap, 0.0..=5.0)
-            .suffix(format!(" {units}"))
-            .max_decimals(2),
-    )
-    .on_hover_text(t!("split.gap_help"));
+    section(ui, &t!("split.section.gap"));
+    let opts = LengthFieldOpts {
+        range: (Length::new(0.0, Unit::Millimeter), UNBOUNDED.1),
+        scale: &lengths,
+        label: &t!("split.gap"),
+    };
+    length_field(ui, egui::Id::unique("split gap"), &mut app.split.gap, &opts)
+        .on_hover_text(t!("split.gap_help"));
     ui.add_space(theme::SPACE_XS);
     ui.checkbox(&mut app.split.cap, t!("split.cap"))
         .on_hover_text(t!("split.cap_help"));
-    region_and_bound_controls(app, ui, units);
+    region_and_bound_controls(app, ui);
+}
+
+/// A tilt about X or Y, degrees: a full turn either way (an angle, not a
+/// length, so not a `length_field`).
+const TILT_RANGE_DEG: std::ops::RangeInclusive<f64> = -180.0..=180.0;
+
+/// The bounded cut's width (or diameter) and height: as typed, or half
+/// the selection's bounding-box diagonal until set (geometry resolution
+/// from the model, units-audit §6.4).
+pub fn bound_size(app: &MeshFixerApp) -> (Length, Length) {
+    let doc = app.session.document().units();
+    let auto = || {
+        let diag = app
+            .selected_objects()
+            .into_iter()
+            .filter_map(|id| world_bounds(app, id))
+            .reduce(|(a, b), (c, d)| (a.min(c), b.max(d)))
+            .map_or(0.0, |(lo, hi)| (hi - lo).length());
+        Length::new(diag / 2.0, doc)
+    };
+    (
+        app.split.bound_width.unwrap_or_else(auto),
+        app.split.bound_height.unwrap_or_else(auto),
+    )
 }
 
 /// Phase 1b: the cross-section region checklist (only shown for a
 /// single selected object, and only when the plane makes more than one
 /// region) and the bounded cut area's "Limit to area" toggle with its
 /// shape and size controls.
-fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &str) {
+fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     section(ui, &t!("split.regions"));
     let selected = app.selected_objects();
     if selected.len() > 1 {
@@ -991,33 +1024,39 @@ fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &
         if let (Some(i), _) = widgets::segmented(ui, &options, current) {
             app.split.bound_shape = if i == 0 { "disc" } else { "rect" }.into();
         }
+        let lengths = app.scale_ctx();
+        let (mut width, mut height) = bound_size(app);
         let width_label = if app.split.bound_shape == "rect" {
-            crate::i18n::tr("split.bound.width", &[("unit", units.to_owned())])
+            t!("split.bound.width")
         } else {
-            crate::i18n::tr("split.bound.diameter", &[("unit", units.to_owned())])
+            t!("split.bound.diameter")
         };
-        ui.horizontal(|ui| {
-            ui.label(width_label);
-            ui.add(
-                egui::DragValue::new(&mut app.split.bound_width)
-                    .speed(1.0)
-                    .range(0.0..=f64::MAX)
-                    .max_decimals(2),
-            );
-        });
+        let positive = (Length::new(0.0, Unit::Millimeter), UNBOUNDED.1);
+        let opts = LengthFieldOpts {
+            range: positive,
+            scale: &lengths,
+            label: &width_label,
+        };
+        if length_field(ui, egui::Id::unique("split bound width"), &mut width, &opts).changed() {
+            app.split.bound_width = Some(width);
+        }
         if app.split.bound_shape == "rect" {
-            ui.horizontal(|ui| {
-                ui.label(crate::i18n::tr(
-                    "split.bound.height",
-                    &[("unit", units.to_owned())],
-                ));
-                ui.add(
-                    egui::DragValue::new(&mut app.split.bound_height)
-                        .speed(1.0)
-                        .range(0.0..=f64::MAX)
-                        .max_decimals(2),
-                );
-            });
+            let label = t!("split.bound.height");
+            let opts = LengthFieldOpts {
+                range: positive,
+                scale: &lengths,
+                label: &label,
+            };
+            if length_field(
+                ui,
+                egui::Id::unique("split bound height"),
+                &mut height,
+                &opts,
+            )
+            .changed()
+            {
+                app.split.bound_height = Some(height);
+            }
         }
     }
 }
@@ -1171,59 +1210,78 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
 fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     refusal_card(app, ui, "mesh.make_solid");
-    let units = crate::defects::unit_symbol(app.session.document().units());
+    let doc = app.session.document().units();
     let Some(id) = app.active else { return };
     let Some((lo, hi)) = world_bounds(app, id) else {
         widgets::caption(ui, "Measuring the object…");
         return;
     };
     let diag = (hi - lo).length().max(1e-9);
-    // As the operation chooses by default: 1/256 of the diagonal.
-    let auto = diag / 256.0;
+    // Geometry resolution from the model (units-audit §6.4), as the
+    // operation chooses by default: 1/256 of the diagonal.
+    let auto = Length::new(diag / 256.0, doc);
     if app.solid.for_object != Some(id) || app.solid.cell.is_none() {
         app.solid = SolidState {
             cell: Some(auto),
-            offset: 0.0,
+            offset: Some(Length::new(0.0, doc)),
             smooth: false,
             for_object: Some(id),
         };
     }
     widgets::body(ui, t!("solid.what"));
-    section(ui, &t!("solid.section.cell", unit = units));
+    section(ui, &t!("solid.section.cell"));
+    let lengths = app.scale_ctx();
+    // allow-swallow: set just above whenever it is None
     let mut cell = app.solid.cell.unwrap_or(auto);
-    ui.scope(|ui| {
-        ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
-        let r = ui.add(
-            egui::Slider::new(&mut cell, diag / 1024.0..=diag / 32.0)
-                .logarithmic(true)
-                .suffix(format!(" {units}"))
-                .max_decimals(3),
-        );
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Cell size"));
-    });
-    app.solid.cell = Some(cell);
+    let cell_label = t!("solid.cell");
+    let opts = LengthFieldOpts {
+        range: (
+            Length::new(diag / 1024.0, doc),
+            Length::new(diag / 32.0, doc),
+        ),
+        scale: &lengths,
+        label: &cell_label,
+    };
+    // The field holds the Length itself: an untouched cell is never
+    // re-read through its display text, so a 0.6 mm cell on a metres
+    // document stays 0.6 mm (it used to round to 0.001 m).
+    if length_slider(ui, egui::Id::unique("make solid cell"), &mut cell, &opts).changed() {
+        app.solid.cell = Some(cell);
+    }
     // The trade-off, in plain words, with the size it implies.
-    let dims = (hi - lo) / cell;
+    let cell_doc = cell.in_doc(doc);
+    let dims = (hi - lo) / cell_doc;
     let points = (dims.x.max(1.0) + 3.0) * (dims.y.max(1.0) + 3.0) * (dims.z.max(1.0) + 3.0);
     widgets::caption(
         ui,
         t!(
             "solid.tradeoff",
-            cell = crate::defects::measure(cell),
-            unit = units
+            cell = crate::widgets::length_field::display_text(cell, &lengths)
         ),
     );
     if points > 40_000_000.0 {
         widgets::caption(ui, t!("solid.too_fine"));
     }
-    section(ui, &t!("solid.section.offset", unit = units));
-    ui.add(
-        egui::DragValue::new(&mut app.solid.offset)
-            .speed(0.05)
-            .suffix(format!(" {units}"))
-            .max_decimals(2),
+    section(ui, &t!("solid.section.offset"));
+    // allow-swallow: set with the cell above
+    let mut offset = app.solid.offset.unwrap_or(Length::new(0.0, doc));
+    let offset_label = t!("solid.offset");
+    let opts = LengthFieldOpts {
+        range: UNBOUNDED,
+        scale: &lengths,
+        label: &offset_label,
+    };
+    if length_field(
+        ui,
+        egui::Id::unique("make solid offset"),
+        &mut offset,
+        &opts,
     )
-    .on_hover_text(t!("solid.offset_help"));
+    .on_hover_text(t!("solid.offset_help"))
+    .changed()
+    {
+        app.solid.offset = Some(offset);
+    }
     ui.add_space(theme::SPACE_XS);
     ui.checkbox(&mut app.solid.smooth, t!("solid.smooth"))
         .on_hover_text(t!("solid.smooth_help"));
@@ -1240,15 +1298,13 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
-        // `cell` and `app.solid.offset` are document units (the panel's
-        // own slider and field), handed over as lengths in that unit:
+        // `cell` and `offset` are typed lengths (the panel's own fields):
         // `Session::prepare` alone converts them (the owner's bug: a
         // 0.001 m cell size once reached `prepare` as 0.000001 on a
         // metre document, converted twice).
-        let doc = app.session.document().units();
         let intent = Intent::op("mesh.make_solid")
-            .set("cell_size", mf_units::Length::new(cell, doc))
-            .set("offset", mf_units::Length::new(app.solid.offset, doc))
+            .set("cell_size", cell)
+            .set("offset", offset)
             .param("preserve_sharp", !app.solid.smooth);
         run(app, intent, t!("solid.apply"));
     }
@@ -1315,26 +1371,26 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
             }
         }
         // The bounded cut plane (Phase 1b): the disc or rectangle,
-        // translucent, centred on the plane's point. `bound_width` and
-        // `bound_height` are document units, same as `point` (the
-        // panel's own fields, labelled with the document's unit
-        // symbol): no scale factor needed here, only when building the
-        // `mm`-unit invocation parameter (D20).
+        // translucent, centred on the plane's point, at
+        // [`bound_size`] read in document units (as `point` is).
         if app.split.bound && app.active_mesh().is_some() {
+            let doc = app.session.document().units();
+            let (width, height) = bound_size(app);
+            let (width, height) = (width.in_doc(doc), height.in_doc(doc));
             let point = app.split.point();
             let normal = app.split.normal();
             let u = normal.any_orthonormal_vector();
             let v = normal.cross(u);
             let pts: Vec<egui::Pos2> = match app.split.bound_shape.as_str() {
                 "rect" => {
-                    let (hw, hh) = (app.split.bound_width / 2.0, app.split.bound_height / 2.0);
+                    let (hw, hh) = (width / 2.0, height / 2.0);
                     [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
                         .into_iter()
                         .filter_map(|(x, y)| at(point + u * x + v * y))
                         .collect()
                 }
                 _ => {
-                    let r = app.split.bound_width / 2.0;
+                    let r = width / 2.0;
                     (0..48)
                         .filter_map(|i| {
                             let a = std::f64::consts::TAU * i as f64 / 48.0;

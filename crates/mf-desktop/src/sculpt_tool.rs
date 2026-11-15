@@ -148,7 +148,6 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_close: |app, close| {
             end_stroke(app, close);
             app.sculpt_baseline = None;
-            app.sculpt_radius_text = None;
         },
         ..T::new(
             SCULPT,
@@ -911,50 +910,51 @@ fn brush_radius_preview_world(app: &MeshFixerApp) -> Option<f64> {
     ))
 }
 
-/// The radius panel's typed-unit field (ADR-0006 rule 1b): a bare text
-/// box below the pt slider that parses through [`mf_units::parse_length`]
-/// ("3 mm", "0.25\"", a bare number meaning the document's unit) and sets
-/// `app.sculpt.radius_pt` to whatever screen-points value reads as that
-/// length at the current zoom ([`radius_pt_for_world`]'s own inverse
-/// math, inlined here since it needs the live depth point, not a fixed
-/// world position a test passes in). Invalid input shows an inline error
-/// and leaves `radius_pt` exactly as it was — never silently replaced
-/// with 0 — matching [`crate::tool_panels::transform_field`]'s own
-/// commit-on-Enter pattern.
+/// The brush radius's on-screen size range, points (screen-relative,
+/// as Meshmixer's own brush: not a length in document units).
+const RADIUS_PT_RANGE: std::ops::RangeInclusive<f64> = 5.0..=200.0;
+/// Brush strength, a fraction.
+const STRENGTH_RANGE: std::ops::RangeInclusive<f64> = 0.0..=1.0;
+/// Dynamic detail, a fraction of the brush radius.
+const DETAIL_RANGE: std::ops::RangeInclusive<f64> = 0.05..=1.0;
+
+/// The radius panel's length field (ADR-0006 rule 1b, `widgets::length_field`):
+/// the brush's real size at this zoom ("3 mm", "0.25\"", a bare number
+/// meaning the document's unit, an expression), shown through
+/// `format_length`. Committing a length sets `app.sculpt.radius_pt` to the
+/// screen-points value that reads as it at the live depth point
+/// ([`radius_pt_for_world`]'s own inverse math); invalid input shows the
+/// field's inline error and leaves `radius_pt` exactly as it was. No
+/// camera yet (the tool just opened): no field, rather than a made-up size.
 fn radius_typed_field(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let (Some(cam), Some(rect)) = (app.camera, app.viewport.last_rect) else {
+        return;
+    };
     let doc = app.session.document().units();
-    let id = egui::Id::unique("sculpt radius typed field");
-    let mut text = app.sculpt_radius_text.clone().unwrap_or_else(|| {
-        brush_radius_preview_world(app)
-            .map(|world| mf_units::format_length(world, doc))
-            // allow-swallow: no camera yet (the tool just opened, before the first frame's render); the field starts blank rather than showing a made-up size.
-            .unwrap_or_default()
-    });
-    let r = ui.add(
-        egui::TextEdit::singleline(&mut text)
-            .id(id)
-            .hint_text(t!("sculpt.section.radius.typed.hint")),
-    );
-    if r.has_focus() {
-        app.sculpt_radius_text = Some(text.clone());
-    } else if app.sculpt_radius_text.is_some() {
-        app.sculpt_radius_text = None;
-    }
-    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-        match mf_units::parse_length(&text, doc) {
-            Ok(length) => {
-                if let (Some(cam), Some(rect)) = (app.camera, app.viewport.last_rect) {
-                    let depth_point = radius_preview_depth_point(app, &cam);
-                    let world_per_pt =
-                        world_per_pt_at(&cam, rect.height() as f64, depth_point).max(1e-12);
-                    app.sculpt.radius_pt = (length.in_doc(doc) / world_per_pt).clamp(5.0, 200.0);
-                }
-            }
-            Err(_) => {
-                app.status = Some(t!("sculpt.section.radius.typed.error", text = text.clone()));
-            }
-        }
-        app.sculpt_radius_text = None;
+    let depth_point = radius_preview_depth_point(app, &cam);
+    let scale = scale_ctx_at(&cam, rect.height() as f64, depth_point, doc);
+    // allow-swallow: `scale_ctx_at` always sets `world_per_pt`.
+    let world_per_pt = scale.world_per_pt.unwrap_or(0.0).max(1e-12);
+    let mut length = mf_units::Length::new(app.sculpt.radius_pt * world_per_pt, doc);
+    let label = t!("sculpt.radius_size");
+    let opts = widgets::LengthFieldOpts {
+        range: (
+            mf_units::Length::new(RADIUS_PT_RANGE.start() * world_per_pt, doc),
+            mf_units::Length::new(RADIUS_PT_RANGE.end() * world_per_pt, doc),
+        ),
+        scale: &scale,
+        label: &label,
+    };
+    if widgets::length_field(
+        ui,
+        egui::Id::unique("sculpt radius typed field"),
+        &mut length,
+        &opts,
+    )
+    .changed()
+    {
+        app.sculpt.radius_pt = (length.in_doc(doc) / world_per_pt)
+            .clamp(*RADIUS_PT_RANGE.start(), *RADIUS_PT_RANGE.end());
     }
 }
 
@@ -983,10 +983,10 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
     section(ui, &t!("sculpt.section.radius"));
     ui.add(
-        egui::Slider::new(&mut app.sculpt.radius_pt, 5.0..=200.0)
+        egui::Slider::new(&mut app.sculpt.radius_pt, RADIUS_PT_RANGE)
             .logarithmic(true)
             .suffix(" pt")
-            .max_decimals(1),
+            .fixed_decimals(1),
     );
     if let Some(world) = brush_radius_preview_world(app) {
         let doc = app.session.document().units();
@@ -1001,7 +1001,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     radius_typed_field(app, ui);
 
     section(ui, &t!("sculpt.section.strength"));
-    ui.add(egui::Slider::new(&mut app.sculpt.strength, 0.0..=1.0).max_decimals(2));
+    ui.add(egui::Slider::new(&mut app.sculpt.strength, STRENGTH_RANGE).fixed_decimals(2));
 
     section(ui, &t!("sculpt.section.falloff"));
     let labels: Vec<String> = FALLOFFS.iter().map(|&f| falloff_label(f)).collect();
@@ -1041,7 +1041,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.checkbox(&mut app.sculpt.detail_on, t!("sculpt.detail"))
         .on_hover_text(t!("sculpt.detail.tip"));
     if app.sculpt.detail_on {
-        ui.add(egui::Slider::new(&mut app.sculpt.detail, 0.05..=1.0).max_decimals(2));
+        ui.add(egui::Slider::new(&mut app.sculpt.detail, DETAIL_RANGE).fixed_decimals(2));
     }
 
     section(ui, &t!("sculpt.section.overlay"));

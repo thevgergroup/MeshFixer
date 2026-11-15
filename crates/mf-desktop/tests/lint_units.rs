@@ -22,28 +22,10 @@
 
 use std::path::{Path, PathBuf};
 
-/// `(file, pattern, task that removes it)`. Must reach empty (C17).
-const ALLOWED: &[(&str, &str, &str)] = &[
-    // C17: panel migration B (Sculpt, Split, shape tools, Transform,
-    // Hollow).
-    ("hollow_tool.rs", "mm_per(", "C17"),
-    ("hollow_tool.rs", "literal-range", "C17"),
-    ("hollow_tool.rs", ".max_decimals(", "C17"),
-    ("sculpt_tool.rs", "literal-range", "C17"),
-    ("sculpt_tool.rs", ".max_decimals(", "C17"),
-    ("shape_panel.rs", ".max_decimals(", "C17"),
-    ("shape_tools.rs", "Snap::default()", "C17"),
-    ("shape_tools.rs", "literal-range", "C17"),
-    ("shape_tools.rs", ".max_decimals(", "C17"),
-    ("split_flow.rs", "mm_per(", "C17"),
-    ("split_flow.rs", "mm(app)", "C17"),
-    ("split_flow.rs", "Snap::default()", "C17"),
-    ("split_flow.rs", "literal-range", "C17"),
-    ("split_flow.rs", ".max_decimals(", "C17"),
-    ("transform_tool.rs", "mm_per(", "C17"),
-    // The definition only; its one caller is app.rs's unit rescale.
-    ("transform_tool.rs", "scale_linear(", "C17"),
-];
+/// `(file, pattern, task that removes it)`. Empty since C17 migrated
+/// the last panels: a new entry needs a reviewed reason and the task that
+/// removes it.
+const ALLOWED: &[(&str, &str, &str)] = &[];
 
 /// The plain-text patterns, matched outside `//` comments.
 const PATTERNS: &[&str] = &[

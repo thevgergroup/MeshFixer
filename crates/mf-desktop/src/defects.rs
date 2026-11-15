@@ -1140,6 +1140,19 @@ pub fn measure(v: f64) -> String {
     mf_units::significant_figures(v, 3)
 }
 
+/// Inspect's surface area row: `area` (document units²) through the one
+/// formatter, with its unit ("1.20 mm²", never a bare "0.0000").
+pub fn area_text(area: Option<f64>, units: Unit) -> String {
+    area.map_or("too large".into(), |a| mf_units::format_area(a, units))
+}
+
+/// Inspect's volume row, as [`area_text`] ("8.00 cm³").
+pub fn volume_text(volume: Option<f64>, units: Unit) -> String {
+    volume.map_or("— (not closed)".into(), |v| {
+        mf_units::format_volume(v, units)
+    })
+}
+
 /// `unit`'s display symbol ("mm", "m", …), delegating to `mf_units`
 /// (consolidation plan C11) so there is one table of unit symbols, not
 /// a second copy kept here.

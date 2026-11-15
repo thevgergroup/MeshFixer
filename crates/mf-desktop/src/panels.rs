@@ -361,12 +361,15 @@ fn stats_text(app: &MeshFixerApp) -> Option<String> {
     let a = app.current_analysis()?;
     let tris = count(a.diagnostics.triangle_count, "triangle");
     let size = a.defects.world_size?;
-    let u = crate::defects::unit_symbol(app.session.document().units());
-    let m = crate::defects::measure;
+    // Each side through the one formatter with its unit (ADR-0006 rule
+    // 4): a 20 mm part on a metres document reads "20.0 mm", not
+    // "0.0200 m".
+    let u = app.session.document().units();
+    let m = |v: f64| mf_units::format_length(v, u);
     Some(t!(
         "status.stats",
         tris = tris,
-        size = format!("{} × {} × {} {u}", m(size[0]), m(size[1]), m(size[2]))
+        size = format!("{} × {} × {}", m(size[0]), m(size[1]), m(size[2]))
     ))
 }
 

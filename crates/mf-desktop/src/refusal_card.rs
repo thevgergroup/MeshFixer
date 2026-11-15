@@ -179,12 +179,12 @@ fn follow(app: &mut MeshFixerApp, op_id: &str, next: RefusalNext) {
                 // has a value to make larger (the field's own range
                 // clamps it when drawn).
                 if let Some(d) = app.hollow.detail.as_mut() {
-                    *d *= 2.0;
+                    d.value *= 2.0;
                 }
             }
             _ => {
                 if let Some(c) = app.solid.cell.as_mut() {
-                    *c *= 2.0;
+                    c.value *= 2.0;
                 }
                 app.open_rail_tool(crate::shape_tools::MAKE_SOLID);
             }

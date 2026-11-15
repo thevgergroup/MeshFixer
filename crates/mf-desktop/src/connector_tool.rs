@@ -483,6 +483,7 @@ fn library_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: &str, name: &str
         .filter(|n| !quick.contains(n))
         .collect();
     let options = crate::shape_panel::text_options(app);
+    let scale = app.scale_ctx();
     let idle = app.busy.is_none();
     let entry = app
         .connectors
@@ -511,6 +512,7 @@ fn library_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: &str, name: &str
                 live: true,
                 idle,
                 text_options: &options,
+                scale: &scale,
             },
         ) {
             entry.0.insert(k, v);
