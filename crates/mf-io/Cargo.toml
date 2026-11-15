@@ -10,6 +10,7 @@ workspace = true
 
 [dependencies]
 mf-runtime.workspace = true
+mf-units.workspace = true
 zip.workspace = true
 quick-xml.workspace = true
 rayon.workspace = true

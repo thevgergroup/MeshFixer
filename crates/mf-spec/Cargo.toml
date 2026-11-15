@@ -24,6 +24,7 @@ serde-saphyr.workspace = true
 clap.workspace = true
 thiserror.workspace = true
 mf-io.workspace = true
+mf-units.workspace = true
 
 [dev-dependencies]
 jsonschema.workspace = true

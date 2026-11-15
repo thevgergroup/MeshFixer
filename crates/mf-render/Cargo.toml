@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 mf-geometry.workspace = true
 mf-runtime.workspace = true
+mf-units.workspace = true
 mf-metrics.workspace = true
 rayon.workspace = true
 wgpu.workspace = true

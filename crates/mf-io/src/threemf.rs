@@ -8,46 +8,43 @@ use std::io::{Cursor, Read, Write};
 use mf_geometry::{Material, Mesh, NO_MATERIAL};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
-use serde::{Deserialize, Serialize};
 
 use mf_runtime::{RunContext, TICK_INTERVAL};
 
 use crate::{IoError, Limits, PARSE_FROM, READING, significant_digits};
 
-/// 3MF model units. 3MF defaults to millimetres.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum Unit {
-    Micron,
-    #[default]
-    Millimeter,
-    Centimeter,
-    Inch,
-    Foot,
-    Meter,
+/// 3MF model units. 3MF defaults to millimetres. `Unit` itself now lives
+/// in `mf-units` (consolidation plan C03, ADR-0006), a leaf crate with
+/// no `mf-*` dependencies, so every crate that needs a unit can depend
+/// on it without depending on 3MF parsing; this re-export keeps every
+/// existing `mf_io::threemf::Unit` import compiling unchanged. Only the
+/// 3MF attribute string mapping (`from_attr`/`as_attr`), which is 3MF's
+/// own concern and nobody else's, stays here.
+pub use mf_units::Unit;
+
+/// Parses the 3MF `unit` attribute's value ("millimeter", "meter", ...).
+fn unit_from_attr(s: &str) -> Option<Unit> {
+    Some(match s {
+        "micron" => Unit::Micron,
+        "millimeter" => Unit::Millimeter,
+        "centimeter" => Unit::Centimeter,
+        "inch" => Unit::Inch,
+        "foot" => Unit::Foot,
+        "meter" => Unit::Meter,
+        _ => return None,
+    })
 }
 
-impl Unit {
-    fn from_attr(s: &str) -> Option<Unit> {
-        Some(match s {
-            "micron" => Unit::Micron,
-            "millimeter" => Unit::Millimeter,
-            "centimeter" => Unit::Centimeter,
-            "inch" => Unit::Inch,
-            "foot" => Unit::Foot,
-            "meter" => Unit::Meter,
-            _ => return None,
-        })
-    }
-
-    fn as_attr(&self) -> &'static str {
-        match self {
-            Unit::Micron => "micron",
-            Unit::Millimeter => "millimeter",
-            Unit::Centimeter => "centimeter",
-            Unit::Inch => "inch",
-            Unit::Foot => "foot",
-            Unit::Meter => "meter",
-        }
+/// The 3MF `unit` attribute's value for `unit` ("millimeter", "meter",
+/// ...).
+fn unit_as_attr(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Micron => "micron",
+        Unit::Millimeter => "millimeter",
+        Unit::Centimeter => "centimeter",
+        Unit::Inch => "inch",
+        Unit::Foot => "foot",
+        Unit::Meter => "meter",
     }
 }
 
@@ -496,7 +493,7 @@ pub fn read_with_limits(
                         ));
                     }
                     if let Some(u) = attr(&e, "unit").map_err(parse_err)? {
-                        unit = Unit::from_attr(&u)
+                        unit = unit_from_attr(&u)
                             .ok_or_else(|| parse_err(format!("unknown 3MF unit '{u}'")))?;
                     }
                 }
@@ -844,7 +841,7 @@ pub fn write_filtering_empty(model: &Model) -> Result<(Vec<u8>, Vec<String>), St
         let _ = write!(xml, " xmlns:meshfixer=\"{MESHFIXER_NS}\"");
     }
     // allow-swallow: writing to a String can't fail
-    let _ = writeln!(xml, " unit=\"{}\">", model.unit.as_attr());
+    let _ = writeln!(xml, " unit=\"{}\">", unit_as_attr(model.unit));
     for (name, value) in &model.metadata {
         // allow-swallow: writing to a String can't fail
         let _ = writeln!(
