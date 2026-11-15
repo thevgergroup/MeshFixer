@@ -97,6 +97,35 @@ pub struct DocContext {
     pub unit: Unit,
 }
 
+impl DocContext {
+    /// Document units per millimetre: generators build mm meshes (D16),
+    /// so a generator's output is scaled by this before it's placed by a
+    /// doc-unit transform (consolidation plan C10, C12).
+    pub fn mm_to_doc(&self) -> f64 {
+        1.0 / self.unit.mm_per()
+    }
+}
+
+/// Scales `mesh`'s positions by `factor` uniformly, leaving its topology
+/// untouched: the one place a generator's mm-internal mesh (D16) becomes
+/// document-unit geometry, shared by every op that places a generator
+/// (`object.add_part`, `object.add_shape`, `object.set_shape_params`,
+/// `object.attach`, `connector.join` and `split.place_connectors`;
+/// consolidation plan C10, C12). `factor` is [`DocContext::mm_to_doc`]
+/// for a generator's own output; 1.0 is a no-op (`add_part`'s mm-doc
+/// documents, say).
+pub(crate) fn scale_mesh(mesh: Mesh, factor: f64) -> Result<Mesh, mf_geometry::GeometryError> {
+    if factor == 1.0 {
+        return Ok(mesh);
+    }
+    let (positions, triangles) = mesh.to_arrays();
+    let positions = positions
+        .into_iter()
+        .map(|p| p.map(|c| c * factor))
+        .collect();
+    Mesh::new(positions, triangles)
+}
+
 /// One operand of a command, as an operation sees it (D6,
 /// MF-P1-CMD-001). Operand 0 is the command's target; the rest follow in
 /// the order the spec's `operands:` list names them (an absent optional

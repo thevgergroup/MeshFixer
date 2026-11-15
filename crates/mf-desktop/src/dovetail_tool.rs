@@ -284,8 +284,11 @@ pub fn place_on_joint(app: &mut MeshFixerApp, j: usize) {
     } else {
         [1.0, 0.0]
     };
-    let scale = crate::split_flow::mm(app);
     let angle = dir[1].atan2(dir[0]);
+    // `object.add_shape` scales the generator's own mm mesh itself
+    // (consolidation plan C12), so the frame is built at scale 1 here
+    // (rotation and position only), never pre-scaled by `mm`, or the
+    // mesh would be scaled twice.
     let frame = mf_operations::placement_to_world(
         &joint.frame,
         &mf_operations::Placement {
@@ -295,7 +298,7 @@ pub fn place_on_joint(app: &mut MeshFixerApp, j: usize) {
             angle: angle.to_degrees(),
             params: BTreeMap::new(),
         },
-        scale,
+        1.0,
     );
     let rows = [
         frame.x_axis.x,

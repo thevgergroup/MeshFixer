@@ -1,5 +1,5 @@
 id: split.place_connectors
-version: 1
+version: 2
 summary: Add every connector placed on a cut's joint in one command - holes, pockets, pegs, tails and loose dowels - from the connector registry.
 history_label: history.label.split.place_connectors
 geometry_kinds: [mesh]
@@ -43,12 +43,6 @@ parameters:
     type: text
     default: "[]"
     description: "The connectors, as JSON: a list of {connector (a joint.* id), on (a or b, the side it was placed on), at ([u, v] in document units), angle (degrees), params (the connector's own parameters, mm)}"
-  - name: mm
-    type: float
-    default: 1.0
-    min: 0.0
-    unit: mm
-    description: "One millimetre in document units (filled in by the unit conversion at prepare time; leave at 1): the connectors are generated in mm and scaled by this"
   - name: min_wall
     type: float
     default: 1.5

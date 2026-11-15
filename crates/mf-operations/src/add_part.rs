@@ -14,7 +14,7 @@ use mf_spec::Params;
 use crate::affine::determinant;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document,
+    Target, needs_document, scale_mesh,
 };
 
 pub struct AddPart;
@@ -24,20 +24,6 @@ fn failed(code: &'static str, message: impl Into<String>) -> OpError {
         code,
         message: message.into(),
     }
-}
-
-/// Scales `mesh`'s positions by `factor` uniformly, leaving its topology
-/// untouched.
-fn scale_mesh(mesh: Mesh, factor: f64) -> Result<Mesh, mf_geometry::GeometryError> {
-    if factor == 1.0 {
-        return Ok(mesh);
-    }
-    let (positions, triangles) = mesh.to_arrays();
-    let positions = positions
-        .into_iter()
-        .map(|p| p.map(|c| c * factor))
-        .collect();
-    Mesh::new(positions, triangles)
 }
 
 /// The library a command reads: built-ins and the user's parts folder.
@@ -112,7 +98,7 @@ impl Operation for AddPart {
         // `LibraryPart::mesh` always returns millimetres (D16): scale into
         // the placing document's own unit (consolidation plan C10), so a
         // 10 mm part in a metres document lands at 0.01 doc units, not 10.
-        let mesh = scale_mesh(mesh, 1.0 / doc.unit.mm_per())
+        let mesh = scale_mesh(mesh, doc.mm_to_doc())
             .map_err(|e| failed("part_unreadable", format!("can't scale the part: {e}")))?;
         let provenance = Provenance {
             created_faces: mesh.faces().map(|(f, _)| (f, Sources::default())).collect(),
