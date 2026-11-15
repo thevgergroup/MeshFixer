@@ -1460,3 +1460,54 @@ fn owner_combine_then_split_at_the_default_plane_keep_top() {
     let err = String::from_utf8_lossy(&o.stderr);
     assert!(err.contains("scan (top)"), "{err}");
 }
+
+/// Owner-reported unit bug (consolidation plan C01, units-audit.md
+/// mf-cli/src/main.rs:669, :1499): `meshfixer run ... -o out.stl` on a
+/// metres document ignores the document's unit and writes the raw
+/// doc-unit coordinates to the STL bytes. A 10 mm cube modelled at 0.01
+/// doc units in a metres 3MF must export an STL that measures 10 mm
+/// across each edge (what every slicer assumes), not 0.01. Fixed by C06
+/// ("Unit-honest IO in mf-io and mf-cli").
+#[test]
+#[ignore = "red: C06"]
+fn cli_stl_export_from_a_metres_document_writes_millimetre_bytes() {
+    use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
+
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("in.3mf");
+    let model = Model {
+        metadata: Default::default(),
+        unit: Unit::Meter,
+        objects: vec![ModelObject {
+            metadata: Default::default(),
+            name: "cube".into(),
+            // 0.01 doc units across == 10 mm, in a metres document.
+            mesh: cube(0.01),
+            transform: IDENTITY,
+        }],
+    };
+    mf_io::write_model_path(&model, &input).unwrap();
+    let out = dir.path().join("out.stl");
+    let o = meshfixer(&[
+        "run",
+        input.to_str().unwrap(),
+        "-o",
+        out.to_str().unwrap(),
+        "--op",
+        "mesh.remove_small_components",
+        "--param",
+        "max_triangles=1",
+        "--param",
+        "max_relative_size=0.0001",
+    ]);
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let exported = mf_io::read_path(&out).unwrap().mesh;
+    let bbox = exported.bounding_box().unwrap();
+    let extent = bbox.max[0] - bbox.min[0];
+    assert!(
+        (extent - 10.0).abs() < 1e-3,
+        "the exported STL bytes should measure ~10 mm across (a slicer's \
+         assumption), but measured {extent} (bbox {bbox:?}): the CLI wrote \
+         the document's raw 0.01, 1000x too small"
+    );
+}
