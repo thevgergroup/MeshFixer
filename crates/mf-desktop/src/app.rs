@@ -2914,7 +2914,7 @@ impl MeshFixerApp {
                     })) if crate::shape_tools::op_of(self.active_tool).is_some()
                         || self.last_invocation_op.is_some() =>
                     {
-                        let message = mf_operations::refusal::render_args(&args);
+                        let message = mf_operations::refusal::render_message(&args);
                         self.status = Some(format!("Nothing was changed: {message}"));
                         let op_id = crate::shape_tools::op_of(self.active_tool)
                             .or(self.last_invocation_op)

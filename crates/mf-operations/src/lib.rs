@@ -296,7 +296,7 @@ pub enum OpError {
     /// a bare number or a pre-formatted string). Built only through
     /// [`refusal::refuse`]/[`refusal::refuse_plain`] — the one registry
     /// helper, never constructed directly outside `refusal.rs`.
-    #[error("{code}: {}", refusal::render_args(args))]
+    #[error("{code}: {}", refusal::render_message(args))]
     Refused {
         code: &'static str,
         args: std::collections::BTreeMap<&'static str, refusal::RefusalArg>,

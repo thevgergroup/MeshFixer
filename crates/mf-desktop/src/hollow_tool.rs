@@ -143,9 +143,10 @@ pub fn preview_work(
         // declared refusal the same (code, message) shape this panel
         // used before the registry existed; routing it to the panel
         // through the registry's own RefusalCard is C16's job.
-        Err(mf_operations::OpError::Refused { code, args }) => {
-            Err((code.to_owned(), mf_operations::refusal::render_args(&args)))
-        }
+        Err(mf_operations::OpError::Refused { code, args }) => Err((
+            code.to_owned(),
+            mf_operations::refusal::render_message(&args),
+        )),
         Err(e) => Err(("invalid_parameter".to_owned(), e.to_string())),
         Ok(shell) => {
             ctx.checkpoint()?;

@@ -59,6 +59,30 @@ pub fn refuse_plain(code: &'static str) -> OpError {
     refuse(code, BTreeMap::new())
 }
 
+/// The sentence a person reads for a refusal: `'<object>': <detail>`
+/// when the refusal names an object, else `<detail>`. Arguments other
+/// than `object` and `detail` (typed values with no sentence around them
+/// yet) follow as `name: value`. This is the one rendering every
+/// frontend shows until the i18n catalogue renders refusals itself
+/// (consolidation plan C16); [`render_args`] is the debugging form.
+pub fn render_message(args: &BTreeMap<&'static str, RefusalArg>) -> String {
+    let rest = args
+        .iter()
+        .filter(|(name, _)| !matches!(**name, "object" | "detail"))
+        .map(|(name, value)| format!("{name}: {value}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let body = match (args.get("detail"), rest.is_empty()) {
+        (Some(detail), true) => detail.to_string(),
+        (Some(detail), false) => format!("{detail} ({rest})"),
+        (None, _) => rest,
+    };
+    match args.get("object") {
+        Some(object) => format!("'{object}': {body}"),
+        None => body,
+    }
+}
+
 /// A plain-English rendering of a refusal's arguments, `"name: value,
 /// name: value"` — used by [`OpError`]'s `Display` (the CLI's and the
 /// generic fallback's text) and by tests. Sorted by name ([`BTreeMap`]'s
@@ -68,4 +92,30 @@ pub fn render_args(args: &BTreeMap<&'static str, RefusalArg>) -> String {
         .map(|(name, value)| format!("{name}: {value}"))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod render_message_tests {
+    use super::*;
+
+    #[test]
+    fn a_refusal_naming_an_object_reads_as_a_sentence() {
+        let args = BTreeMap::from([
+            ("object", RefusalArg::Text("tangle".into())),
+            (
+                "detail",
+                RefusalArg::Text("This part overlaps itself.".into()),
+            ),
+        ]);
+        assert_eq!(
+            render_message(&args),
+            "'tangle': This part overlaps itself."
+        );
+    }
+
+    #[test]
+    fn a_refusal_without_an_object_is_its_detail() {
+        let args = BTreeMap::from([("detail", RefusalArg::Text("Nothing would be left.".into()))]);
+        assert_eq!(render_message(&args), "Nothing would be left.");
+    }
 }
