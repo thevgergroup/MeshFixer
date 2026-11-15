@@ -16,7 +16,9 @@ use mf_boolean::{
 use mf_document::ObjectId;
 use mf_fixtures::{cube, merge, scaled, translated, uv_sphere};
 use mf_geometry::{FaceId, Mesh, inspect};
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 use mf_runtime::JobPool;
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -56,6 +58,7 @@ fn run(
             },
         ],
         &params,
+        &DocContext::default(),
         ctx,
     )
 }

@@ -73,8 +73,8 @@ use rayon::prelude::*;
 
 use crate::make_solid::{Grid, corner, crossings, march_cells, nearest_face, taubin};
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    affine, needs_document,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, affine, needs_document,
 };
 
 pub struct Hollow;
@@ -2703,6 +2703,7 @@ impl Operation for Hollow {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -2712,6 +2713,7 @@ impl Operation for Hollow {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = inputs.first().ok_or_else(|| OpError::Failed {

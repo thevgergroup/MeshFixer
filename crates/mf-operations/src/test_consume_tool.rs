@@ -11,8 +11,8 @@ use mf_geometry::{Mesh, Provenance, Sources};
 use mf_spec::Params;
 
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 pub struct TestConsumeTool;
@@ -84,6 +84,7 @@ impl Operation for TestConsumeTool {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -93,6 +94,7 @@ impl Operation for TestConsumeTool {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let bad_source = params.get_bool("bad_source")?;

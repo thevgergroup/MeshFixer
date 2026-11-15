@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 
 use mf_fixtures::{cube, merge, translated, uv_sphere};
 use mf_geometry::Mesh;
-use mf_operations::{RemovalPreview, RunContext, Target, find, removal_preview};
+use mf_operations::{DocContext, RemovalPreview, RunContext, Target, find, removal_preview};
 use mf_spec::{Params, builtin};
 
 fn params(pairs: &[(&str, &str)]) -> Params {
@@ -35,7 +35,13 @@ fn default_run(mesh: &Mesh) -> (u64, u64, RemovalPreview) {
     let p = params(&[]);
     let op = find("mesh.remove_small_components").unwrap();
     let out = op
-        .execute(mesh, &Target::WholeObject, &p, &RunContext::none())
+        .execute(
+            mesh,
+            &Target::WholeObject,
+            &p,
+            &DocContext::default(),
+            &RunContext::none(),
+        )
         .unwrap();
     let preview = removal_preview(&sizes(mesh), &p).unwrap();
     (
@@ -66,7 +72,13 @@ fn relative_size_keeps_parts_comparable_to_the_main_body() {
     let p = params(&[("max_triangles", "1000")]);
     let op = find("mesh.remove_small_components").unwrap();
     let out = op
-        .execute(&mesh, &Target::WholeObject, &p, &RunContext::none())
+        .execute(
+            &mesh,
+            &Target::WholeObject,
+            &p,
+            &DocContext::default(),
+            &RunContext::none(),
+        )
         .unwrap();
     assert_eq!(out.report["removed_components"], 5, "only the specks");
     assert_eq!(out.report["removed_triangles"], 60);
@@ -75,7 +87,13 @@ fn relative_size_keeps_parts_comparable_to_the_main_body() {
     // At 100% the relative limit is off: the part goes too.
     let p = params(&[("max_triangles", "1000"), ("max_relative_size", "100")]);
     let out = op
-        .execute(&mesh, &Target::WholeObject, &p, &RunContext::none())
+        .execute(
+            &mesh,
+            &Target::WholeObject,
+            &p,
+            &DocContext::default(),
+            &RunContext::none(),
+        )
         .unwrap();
     assert_eq!(out.report["removed_components"], 6);
 }
@@ -136,6 +154,7 @@ fn version_1_records_replay_without_the_relative_limit() {
             &body_specks_and_part(),
             &Target::WholeObject,
             &old,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();
@@ -215,7 +234,13 @@ fn the_indexed_preview_agrees_with_the_run() {
                     ("keep_largest", keep),
                 ]);
                 let out = op
-                    .execute(&mesh, &Target::WholeObject, &p, &RunContext::none())
+                    .execute(
+                        &mesh,
+                        &Target::WholeObject,
+                        &p,
+                        &DocContext::default(),
+                        &RunContext::none(),
+                    )
                     .unwrap();
                 let preview =
                     index.preview(max.parse().unwrap(), rel.parse().unwrap(), keep == "true");

@@ -10,7 +10,9 @@ use mf_document::ObjectId;
 use mf_fixtures::{cube, translated};
 use mf_geometry::{Bvh, inspect, minimum_distance};
 use mf_io::threemf::IDENTITY;
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 use mf_parts::Generator;
 use mf_parts::connectors::clasp::SnapClasp;
 use mf_spec::Params;
@@ -90,6 +92,7 @@ fn join(
             },
         ],
         &params,
+        &DocContext::default(),
         &RunContext::none(),
     )
 }
@@ -330,6 +333,7 @@ fn attach_with_generated_parts_is_connector_join() {
                 },
             ],
             &spec.validate(&raw).unwrap(),
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();

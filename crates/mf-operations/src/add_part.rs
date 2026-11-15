@@ -13,8 +13,8 @@ use mf_spec::Params;
 
 use crate::affine::determinant;
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document,
 };
 
 pub struct AddPart;
@@ -49,6 +49,7 @@ impl Operation for AddPart {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -58,6 +59,7 @@ impl Operation for AddPart {
         &self,
         _inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let id = params.get_text("part_id")?;

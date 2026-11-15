@@ -72,7 +72,7 @@
     },
     "preconditions": { "type": "array", "items": { "type": "string" } },
     "postconditions": { "type": "array", "items": { "type": "string" } },
-    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements", "transform_changes", "removes_objects", "creates_objects", "renames_objects"] } },
+    "effects": { "type": "array", "items": { "enum": ["read_only", "geometry_changes", "topology_changes", "renumbers_elements", "transform_changes", "removes_objects", "creates_objects", "renames_objects", "unit_changes"] } },
     "runtime": {
       "type": "object",
       "additionalProperties": false,

@@ -14,8 +14,8 @@ use mf_spec::Params;
 
 use crate::affine::determinant;
 use crate::{
-    ChangeObject, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document, unsupported_target,
+    ChangeObject, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
+    RunContext, Target, needs_document, unsupported_target,
 };
 
 fn failed(code: &'static str, message: impl Into<String>) -> OpError {
@@ -112,6 +112,7 @@ impl Operation for AddShape {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -121,6 +122,7 @@ impl Operation for AddShape {
         &self,
         _inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let transform = params.get_affine("transform")?;
@@ -209,6 +211,7 @@ impl Operation for SetShapeParams {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -218,6 +221,7 @@ impl Operation for SetShapeParams {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let records: Vec<GeneratorRecord> = serde_json::from_str(params.get_text("generators")?)
@@ -448,6 +452,7 @@ impl Operation for Attach {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -457,6 +462,7 @@ impl Operation for Attach {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let roles: Vec<AttachMember> = serde_json::from_str(params.get_text("members")?)
@@ -526,6 +532,7 @@ impl Operation for MoveGroup {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -535,6 +542,7 @@ impl Operation for MoveGroup {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let transforms: Vec<[f64; 12]> = serde_json::from_str(params.get_text("transforms")?)

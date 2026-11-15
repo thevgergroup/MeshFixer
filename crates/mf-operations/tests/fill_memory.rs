@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 
 use mf_geometry::Mesh;
 use mf_metrics::{CountingAlloc, measure};
-use mf_operations::{RunContext, Target, find};
+use mf_operations::{DocContext, RunContext, Target, find};
 
 #[global_allocator]
 static ALLOC: CountingAlloc = CountingAlloc;
@@ -50,8 +50,14 @@ fn many_max_size_holes_fill_within_the_memory_budget() {
         .unwrap();
     let (out, phase) = measure("fill", || {
         pool.install(|| {
-            op.execute(&mesh, &Target::WholeObject, &params, &RunContext::none())
-                .unwrap()
+            op.execute(
+                &mesh,
+                &Target::WholeObject,
+                &params,
+                &DocContext::default(),
+                &RunContext::none(),
+            )
+            .unwrap()
         })
     });
     assert_eq!(out.report["filled_loops"].as_array().unwrap().len(), HOLES);

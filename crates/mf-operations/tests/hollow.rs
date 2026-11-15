@@ -12,7 +12,9 @@ use std::collections::BTreeMap;
 use mf_document::ObjectId;
 use mf_fixtures::{cube, scaled, uv_sphere};
 use mf_geometry::{Bvh, FaceId, Mesh, inspect};
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 use mf_runtime::JobPool;
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
@@ -39,6 +41,7 @@ fn run_at(
             target: Target::WholeObject,
         }],
         &spec.validate(&raw).unwrap(),
+        &DocContext::default(),
         ctx,
     )
 }
@@ -502,6 +505,7 @@ fn split_sphere_cap_at(radius: f64, at: f64, rings: u32, segments: u32) -> (Mesh
                 target: Target::WholeObject,
             }],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();

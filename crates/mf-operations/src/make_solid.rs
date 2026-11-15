@@ -35,7 +35,7 @@ use mf_runtime::Cancelled;
 use mf_spec::Params;
 use rayon::prelude::*;
 
-use crate::{OpError, OpOutput, Operation, RunContext, Target};
+use crate::{DocContext, OpError, OpOutput, Operation, RunContext, Target};
 
 pub struct MakeSolid;
 
@@ -94,6 +94,7 @@ impl Operation for MakeSolid {
         input: &Mesh,
         target: &Target,
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<OpOutput, OpError> {
         if *target != Target::WholeObject {

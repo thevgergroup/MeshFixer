@@ -11,7 +11,9 @@ use mf_document::ObjectId;
 use mf_fixtures::{cube, merge, rotation_translation, scaled, translated, uv_sphere};
 use mf_geometry::{FaceId, Mesh};
 use mf_io::threemf::IDENTITY;
-use mf_operations::{DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find};
+use mf_operations::{
+    DocContext, DocOutput, ObjectChange, OpError, OperandInput, RunContext, Target, find,
+};
 
 fn split_with(
     mesh: &Mesh,
@@ -34,6 +36,7 @@ fn split_with(
             target: Target::WholeObject,
         }],
         &params,
+        &DocContext::default(),
         &RunContext::none(),
     )
 }
@@ -800,6 +803,7 @@ fn version_3_log_upgrades_to_todays_defaults() {
                 target: Target::WholeObject,
             }],
             &old,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();

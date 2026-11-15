@@ -476,6 +476,14 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hint.first_use.dismiss", "Dismiss hint"),
     ("history.empty", "No history yet"),
     ("history.label.connector.join", "Joined connector to {name}"),
+    (
+        "history.label.document.reinterpret_units",
+        "Reinterpreted {name}'s units",
+    ),
+    (
+        "history.label.document.scale_units",
+        "Scaled {name} to new units",
+    ),
     // A generator's own spec (a shape or connector's parameter schema,
     // crate mf-parts): never shown by this id. The command recorded is
     // always object.add_shape, object.set_shape_params or

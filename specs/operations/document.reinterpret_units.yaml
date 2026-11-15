@@ -1,0 +1,24 @@
+id: document.reinterpret_units
+version: 1
+summary: "Relabel the document's unit without changing any coordinate (Inspect's Reinterpret: the numbers were in X, not Y)."
+history_label: history.label.document.reinterpret_units
+geometry_kinds: [mesh]
+target:
+  whole_object: true
+  kinds: []
+parameters:
+  - name: unit
+    type: choice
+    values: [um, mm, cm, m, in, ft]
+    default: mm
+    description: "The document's new unit. No object's transform or geometry changes; only the label (and so every length's physical meaning) does."
+preconditions:
+  - the document has at least one object
+postconditions:
+  - the document's unit is exactly the given unit
+  - every object's transform and geometry is bit-for-bit unchanged
+  - nothing changes (no revision) if the unit is already exactly this
+effects: [unit_changes]
+runtime:
+  cancellable: false
+  progress: false

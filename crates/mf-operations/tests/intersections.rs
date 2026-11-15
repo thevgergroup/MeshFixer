@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 use mf_document::ObjectId;
 use mf_fixtures::{cube, merge, translated};
 use mf_geometry::Mesh;
-use mf_operations::{OperandInput, RunContext, Target, find};
+use mf_operations::{DocContext, OperandInput, RunContext, Target, find};
 
 const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
 
@@ -37,6 +37,7 @@ fn intersections_with_another_object_and_with_itself() {
         .execute_doc(
             &[input(&a, 1, IDENTITY), input(&b, 2, at)],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();
@@ -49,6 +50,7 @@ fn intersections_with_another_object_and_with_itself() {
         .execute_doc(
             &[input(&a, 1, IDENTITY), input(&b, 2, at)],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();
@@ -59,12 +61,18 @@ fn intersections_with_another_object_and_with_itself() {
         .execute_doc(
             &[input(&crossing, 1, IDENTITY)],
             &params,
+            &DocContext::default(),
             &RunContext::none(),
         )
         .unwrap();
     assert!(own.report["pair_count"].as_u64().unwrap() > 0);
     let clean = op
-        .execute_doc(&[input(&a, 1, IDENTITY)], &params, &RunContext::none())
+        .execute_doc(
+            &[input(&a, 1, IDENTITY)],
+            &params,
+            &DocContext::default(),
+            &RunContext::none(),
+        )
         .unwrap();
     assert_eq!(clean.report["pair_count"], 0);
 }

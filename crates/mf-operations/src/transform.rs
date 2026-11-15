@@ -11,8 +11,8 @@ use mf_geometry::Mesh;
 use mf_spec::Params;
 
 use crate::{
-    DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext, Target,
-    needs_document, unsupported_target,
+    DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
+    Target, needs_document, unsupported_target,
 };
 
 /// The progress stage of [`world_min_z_with`].
@@ -144,6 +144,7 @@ impl Operation for SetTransform {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -153,6 +154,7 @@ impl Operation for SetTransform {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = whole_object(self.id(), inputs)?;
@@ -193,6 +195,7 @@ impl Operation for DropToPlate {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -202,6 +205,7 @@ impl Operation for DropToPlate {
         &self,
         inputs: &[OperandInput],
         _params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = whole_object(self.id(), inputs)?;
@@ -276,6 +280,7 @@ impl Operation for Rename {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -285,6 +290,7 @@ impl Operation for Rename {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = whole_object(self.id(), inputs)?;
@@ -327,6 +333,7 @@ impl Operation for Delete {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -336,6 +343,7 @@ impl Operation for Delete {
         &self,
         inputs: &[OperandInput],
         _params: &Params,
+        _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = whole_object(self.id(), inputs)?;
@@ -366,6 +374,7 @@ impl Operation for ArrangeOnPlate {
         _: &Mesh,
         _: &Target,
         _: &Params,
+        _: &DocContext,
         _: &RunContext,
     ) -> Result<OpOutput, OpError> {
         Err(needs_document(self.id()))
@@ -379,9 +388,10 @@ impl Operation for ArrangeOnPlate {
         &self,
         inputs: &[OperandInput],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        self.execute_scene(inputs, &[], params, ctx)
+        self.execute_scene(inputs, &[], params, doc, ctx)
     }
 
     fn execute_scene(
@@ -389,6 +399,7 @@ impl Operation for ArrangeOnPlate {
         inputs: &[OperandInput],
         scene: &[crate::SceneObject],
         params: &Params,
+        doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
         let target = whole_object(self.id(), inputs)?;
@@ -426,6 +437,7 @@ impl Operation for ArrangeOnPlate {
                 ..target.clone()
             }],
             params,
+            doc,
             ctx,
         )?;
         let transform = dropped
@@ -474,6 +486,7 @@ mod tests {
                 target: Target::WholeObject,
             }],
             &Params::default(),
+            &DocContext::default(),
             &RunContext::none(),
         )
     }
