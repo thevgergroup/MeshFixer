@@ -111,9 +111,14 @@ pub fn replay(dir: &Path) -> Result<ReplayReport, LogError> {
                 }
                 let mut obj = model.objects.swap_remove(part);
                 obj.name = name;
+                // STL/OBJ declare no unit (`ImportedModel.unit` is `None`);
+                // read as millimetres, matching `Session::import_model`'s
+                // default so a replay re-derives the same unit the
+                // original import did.
+                let unit = model.unit.unwrap_or(mf_io::threemf::Unit::Millimeter);
                 // The recorded id, not the next free one: an abandoned
                 // branch may have used ids before this import (review I-A).
-                session.import_object_as(obj, model.unit, model.source, part, object)?;
+                session.import_object_as(obj, unit, model.source, part, object)?;
             }
             Event::SetOpenings { object, ids, label } => {
                 if !session.set_openings(object, ids, label) {

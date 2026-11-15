@@ -142,7 +142,12 @@ impl From<Cancelled> for IoError {
 #[derive(Debug, Clone)]
 pub struct ImportedModel {
     pub objects: Vec<threemf::ModelObject>,
-    pub unit: threemf::Unit,
+    /// The source file's own unit, if it declares one. 3MF always does
+    /// (`Some`). STL and OBJ never do (consolidation plan C06,
+    /// units-audit.md §3): `None` means "undeclared", not "millimetres" —
+    /// callers that need a concrete unit (importing into a document,
+    /// `--units`) choose one explicitly instead of a silent default.
+    pub unit: Option<threemf::Unit>,
     pub source: SourceInfo,
     pub warnings: Vec<String>,
     /// The model's own `<metadata>` ([`threemf::Model::metadata`]): empty
@@ -188,7 +193,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             let (mesh, precision, warnings) = obj::read_with(text, ctx)?;
             (
                 single(mesh),
-                threemf::Unit::Millimeter,
+                None,
                 precision,
                 Format::Obj,
                 warnings,
@@ -205,7 +210,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             };
             (
                 single(mesh),
-                threemf::Unit::Millimeter,
+                None,
                 precision,
                 format,
                 warnings,
@@ -220,7 +225,7 @@ pub fn read_model_with(path: &Path, ctx: &RunContext) -> Result<ImportedModel, I
             };
             (
                 model.objects,
-                model.unit,
+                Some(model.unit),
                 precision,
                 Format::ThreeMf,
                 warnings,
@@ -385,8 +390,12 @@ pub fn transform_mesh(
 }
 
 /// Export `mesh`, never leaving a partial file behind. `unit` is the
-/// document's unit; STL and OBJ don't record one, but a 3MF export writes
-/// it (MF-ISSUE-035) instead of hard-coding millimetres.
+/// document's unit. A 3MF export writes it as the model's own unit
+/// (MF-ISSUE-035). STL and OBJ have no unit of their own, so by the slicer
+/// convention they get millimetre coordinates: if `unit` isn't already
+/// `Millimeter`, the mesh is scaled before writing (consolidation plan
+/// C06). Use [`write_path_keep_doc_unit`] to write the raw doc-unit
+/// coordinates instead.
 ///
 /// The file is encoded in memory, re-parsed to verify it, written to a temp
 /// file in the same directory, flushed to disk, and renamed over `path`.
@@ -398,6 +407,20 @@ pub fn write_path(
     unit: threemf::Unit,
 ) -> Result<(), IoError> {
     write_path_with(mesh, path, format, unit, &RunContext::none())
+}
+
+/// As [`write_path`], but a unitless (STL/OBJ) export writes `unit`'s raw
+/// doc-unit coordinates rather than converting to millimetres. There is no
+/// cancellable `_with` variant: callers who need one can scale the mesh
+/// themselves (see [`write_path_with`]'s conversion) and call
+/// [`write_path_with`] with `Unit::Millimeter`.
+pub fn write_path_keep_doc_unit(
+    mesh: &Mesh,
+    path: &Path,
+    format: Format,
+    unit: threemf::Unit,
+) -> Result<(), IoError> {
+    write_path_with_opts(mesh, path, format, unit, true, &RunContext::none())
 }
 
 /// Progress stage of [`write_path_with`] and [`write_model_path_with`]:
@@ -417,12 +440,44 @@ pub fn write_path_with(
     unit: threemf::Unit,
     ctx: &RunContext,
 ) -> Result<(), IoError> {
+    write_path_with_opts(mesh, path, format, unit, false, ctx)
+}
+
+/// As [`write_path_with`], with `keep_doc_unit` true meaning "write a
+/// unitless (STL/OBJ) export's raw doc-unit coordinates", false meaning
+/// "convert to millimetres first" (the slicer convention, and the
+/// default every public entry point above uses).
+fn write_path_with_opts(
+    mesh: &Mesh,
+    path: &Path,
+    format: Format,
+    unit: threemf::Unit,
+    keep_doc_unit: bool,
+    ctx: &RunContext,
+) -> Result<(), IoError> {
     let fail = |reason: String| IoError::Export {
         path: path.to_owned(),
         reason,
     };
     ctx.progress.report(WRITING, 0.0);
     ctx.checkpoint()?;
+    // STL and OBJ carry no unit: write millimetres (what every slicer
+    // assumes) unless the caller asked to keep the document's raw
+    // coordinates. A 3MF records `unit` itself, so its coordinates are
+    // never rescaled here.
+    let scaled = if !keep_doc_unit
+        && matches!(format, Format::StlBinary | Format::StlAscii | Format::Obj)
+        && unit != threemf::Unit::Millimeter
+    {
+        let factor = unit.mm_per();
+        let scale = [
+            factor, 0.0, 0.0, 0.0, factor, 0.0, 0.0, 0.0, factor, 0.0, 0.0, 0.0,
+        ];
+        Some(transform_mesh(mesh, &scale, ctx)?)
+    } else {
+        None
+    };
+    let mesh = scaled.as_ref().unwrap_or(mesh);
     let bytes = match format {
         Format::StlBinary => stl::write_binary(mesh).map_err(fail)?,
         Format::StlAscii => stl::write_ascii(mesh).into_bytes(),

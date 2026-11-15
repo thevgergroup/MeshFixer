@@ -169,7 +169,7 @@ fn model_of(name: &str, mesh: Mesh) -> ImportedModel {
             mesh,
             transform: mf_io::threemf::IDENTITY,
         }],
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: Some(mf_io::threemf::Unit::Millimeter),
         source: SourceInfo {
             path: format!("{name}.obj").into(),
             content_hash: ContentHash([0; 32]),

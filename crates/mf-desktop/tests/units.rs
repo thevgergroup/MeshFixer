@@ -222,7 +222,7 @@ fn exported_3mf_carries_the_chosen_unit() {
     });
     assert_eq!(h.state().error, None);
     let back = mf_io::read_model(&out).unwrap();
-    assert_eq!(back.unit, Unit::Meter);
+    assert_eq!(back.unit, Some(Unit::Meter));
 }
 
 /// Without the prompt (tests, scripted use), a unitless file reads as

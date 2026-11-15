@@ -96,7 +96,7 @@ fn model(objects: Vec<(&str, Mesh)>) -> ImportedModel {
                 transform: IDENTITY,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "design.3mf".into(),
             content_hash: ContentHash([0; 32]),

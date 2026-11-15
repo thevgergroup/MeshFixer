@@ -25,7 +25,7 @@ fn model(mesh: Mesh) -> ImportedModel {
             mesh,
             transform: mf_io::threemf::IDENTITY,
         }],
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: Some(mf_io::threemf::Unit::Millimeter),
         source: SourceInfo {
             path: "sphere.stl".into(),
             content_hash: ContentHash([0; 32]),

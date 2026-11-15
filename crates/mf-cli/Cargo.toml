@@ -16,6 +16,7 @@ workspace = true
 mf-selection.workspace = true
 mf-geometry.workspace = true
 mf-io.workspace = true
+mf-units.workspace = true
 mf-spec.workspace = true
 mf-parts.workspace = true
 mf-command.workspace = true

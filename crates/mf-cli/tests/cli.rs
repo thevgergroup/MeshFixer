@@ -936,8 +936,73 @@ fn units_flag_sets_the_unit_written_to_3mf() {
     assert!(!stderr.contains("no units"), "{stderr}");
     assert_eq!(
         mf_io::read_model(&out).unwrap().unit,
-        mf_io::threemf::Unit::Meter
+        Some(mf_io::threemf::Unit::Meter)
     );
+}
+
+/// `--units` is parsed by `mf_units::Unit::parse_symbol` (consolidation
+/// plan C06), not a second, CLI-only unit table: every symbol and alias it
+/// accepts must work here, not just the four mf-cli used to hard-code
+/// (mm, cm, m, in).
+#[test]
+fn cli_units_accepts_every_unit() {
+    for (symbol, want) in [
+        ("mm", mf_io::threemf::Unit::Millimeter),
+        ("cm", mf_io::threemf::Unit::Centimeter),
+        ("m", mf_io::threemf::Unit::Meter),
+        ("in", mf_io::threemf::Unit::Inch),
+        ("\"", mf_io::threemf::Unit::Inch),
+        ("ft", mf_io::threemf::Unit::Foot),
+        ("'", mf_io::threemf::Unit::Foot),
+        ("µm", mf_io::threemf::Unit::Micron),
+        ("um", mf_io::threemf::Unit::Micron),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let input = damaged(dir.path());
+        let out = dir.path().join("out.3mf");
+        let r = meshfixer(&[
+            "remove-small-components",
+            &input,
+            "-o",
+            out.to_str().unwrap(),
+            "--units",
+            symbol,
+        ]);
+        assert!(
+            r.status.success(),
+            "--units {symbol}: {}",
+            String::from_utf8_lossy(&r.stderr)
+        );
+        assert_eq!(
+            mf_io::read_model(&out).unwrap().unit,
+            Some(want),
+            "--units {symbol}"
+        );
+    }
+}
+
+/// An unrecognised `--units` value is a usage error naming the value, not
+/// a panic or a silent default.
+#[test]
+fn cli_units_rejects_an_unknown_symbol() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = damaged(dir.path());
+    let out = dir.path().join("out.3mf");
+    let r = meshfixer(&[
+        "remove-small-components",
+        &input,
+        "-o",
+        out.to_str().unwrap(),
+        "--units",
+        "furlongs",
+    ]);
+    assert_eq!(
+        r.status.code(),
+        Some(2),
+        "{}",
+        String::from_utf8_lossy(&r.stderr)
+    );
+    assert!(String::from_utf8_lossy(&r.stderr).contains("furlongs"));
 }
 
 /// Without `--units`, a unitless input is read as millimetres, and the
@@ -964,7 +1029,7 @@ fn unitless_input_without_units_is_read_as_millimetres_with_a_warning() {
     );
     assert_eq!(
         mf_io::read_model(&out).unwrap().unit,
-        mf_io::threemf::Unit::Millimeter
+        Some(mf_io::threemf::Unit::Millimeter)
     );
 }
 
@@ -1469,7 +1534,6 @@ fn owner_combine_then_split_at_the_default_plane_keep_top() {
 /// across each edge (what every slicer assumes), not 0.01. Fixed by C06
 /// ("Unit-honest IO in mf-io and mf-cli").
 #[test]
-#[ignore = "red: C06"]
 fn cli_stl_export_from_a_metres_document_writes_millimetre_bytes() {
     use mf_io::threemf::{IDENTITY, Model, ModelObject, Unit};
 

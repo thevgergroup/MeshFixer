@@ -18,7 +18,6 @@ use mf_io::{Format, read_path, write_path};
 /// across. Exporting it to STL must write millimetre coordinates (10.0),
 /// which any slicer assumes, not the raw doc-unit numbers (0.01).
 #[test]
-#[ignore = "red: C06"]
 fn stl_export_from_a_metres_document_writes_millimetre_coordinates() {
     let dir = tempfile::tempdir().unwrap();
     // A cube 0.01 doc units across == 10 mm, if the document is metres.
@@ -46,7 +45,6 @@ fn stl_export_from_a_metres_document_writes_millimetre_coordinates() {
 
 /// Same bug, OBJ path.
 #[test]
-#[ignore = "red: C06"]
 fn obj_export_from_a_metres_document_writes_millimetre_coordinates() {
     let dir = tempfile::tempdir().unwrap();
     let mesh = cube(0.01);

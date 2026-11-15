@@ -99,7 +99,7 @@ fn opened(
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "connectors.3mf".into(),
             content_hash: ContentHash([0; 32]),

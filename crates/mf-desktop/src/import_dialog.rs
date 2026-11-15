@@ -219,7 +219,7 @@ impl UnitPrompt {
     /// The model, with the chosen unit.
     pub(crate) fn into_model(self) -> ImportedModel {
         let mut model = self.model;
-        model.unit = self.choice;
+        model.unit = Some(self.choice);
         model
     }
 
@@ -441,7 +441,7 @@ mod tests {
         // Scaling to fit brings it to 90% of the plate on every axis.
         let model = mf_io::ImportedModel {
             objects: Vec::new(),
-            unit: Unit::Millimeter,
+            unit: None,
             source: mf_io::SourceInfo {
                 path: "p.stl".into(),
                 content_hash: mf_geometry::ContentHash([0; 32]),

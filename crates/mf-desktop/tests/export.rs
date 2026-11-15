@@ -53,7 +53,7 @@ fn opened(mesh: Mesh, transform: [f64; 12]) -> Harness<'static, MeshFixerApp> {
             mesh,
             transform,
         }],
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "placed.3mf".into(),
             content_hash: ContentHash([0; 32]),

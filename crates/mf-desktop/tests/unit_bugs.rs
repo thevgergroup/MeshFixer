@@ -86,7 +86,7 @@ fn opened_at(objects: Vec<(&str, Mesh, [f64; 12])>, unit: Unit) -> Harness<'stat
                 transform,
             })
             .collect(),
-        unit,
+        unit: Some(unit),
         source: SourceInfo {
             path: "unit-bugs.3mf".into(),
             content_hash: ContentHash([0; 32]),

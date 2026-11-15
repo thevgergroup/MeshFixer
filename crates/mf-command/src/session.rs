@@ -808,11 +808,16 @@ impl Session {
     pub fn import_model(&mut self, model: ImportedModel) -> (Vec<ObjectId>, Vec<String>) {
         let mut warnings = model.warnings;
         let first_import = self.document().objects().is_empty();
-        if !first_import && self.document().units() != model.unit {
+        // STL/OBJ declare no unit (mf-io's `ImportedModel.unit` is `None`);
+        // until a caller says otherwise (the CLI's `--units`, the desktop's
+        // import dialog), they're read as millimetres, as they always have
+        // been (C07 owns teaching this path to convert cross-unit imports).
+        let unit = model.unit.unwrap_or(mf_io::threemf::Unit::Millimeter);
+        if !first_import && self.document().units() != unit {
             warnings.push(format!(
                 "{} uses {:?} but the document uses {:?}; coordinates are not converted",
                 model.source.path.display(),
-                model.unit,
+                unit,
                 self.document().units()
             ));
         }
@@ -896,7 +901,7 @@ impl Session {
             .into_iter()
             .enumerate()
             .map(|(part, o)| {
-                let units = first_import.then_some(model.unit);
+                let units = first_import.then_some(unit);
                 let mut properties = mf_document::properties_from_metadata(&o.metadata);
                 let attach = mf_operations::shapes::ATTACH_TO;
                 if let Some(to) = properties.get(attach).cloned() {

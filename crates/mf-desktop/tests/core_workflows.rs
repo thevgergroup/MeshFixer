@@ -124,7 +124,7 @@ fn opened_with_units(
                 transform,
             })
             .collect(),
-        unit,
+        unit: Some(unit),
         source: SourceInfo {
             path: "core-workflows.3mf".into(),
             content_hash: ContentHash([0; 32]),

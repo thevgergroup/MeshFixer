@@ -163,23 +163,28 @@ fn input_arg() -> Arg {
 }
 
 /// `--units`: what a unitless input's (STL, OBJ) numbers measure
-/// (MF-ISSUE-045). Without it they're read as millimetres, with a warning.
+/// (MF-ISSUE-045, consolidation plan C06). Without it they're read as
+/// millimetres, with a warning. Parsed by [`mf_units::Unit::parse_symbol`]
+/// (the one unit parser, ADR-0006), not a second CLI-only table: every
+/// symbol it accepts works here, including `ft`, `µm`/`um`, `"` and `'`.
 fn units_arg() -> Arg {
     Arg::new("units")
         .long("units")
-        .value_parser(["mm", "cm", "m", "in"])
-        .help("Units of an STL or OBJ input (default: mm, with a warning)")
+        .value_parser(|s: &str| {
+            mf_units::Unit::parse_symbol(s)
+                .map(|_| s.to_owned())
+                .ok_or_else(|| {
+                    format!("'{s}' isn't a unit symbol (try mm, cm, m, in, ft, µm, \", or ')")
+                })
+        })
+        .help("Units of an STL or OBJ input (default: mm, with a warning): mm, cm, m, in, ft, µm")
 }
 
 /// The unit `--units` names, if given.
 fn units_of(m: &ArgMatches) -> Option<mf_io::threemf::Unit> {
-    use mf_io::threemf::Unit;
-    m.get_one::<String>("units").map(|u| match u.as_str() {
-        "cm" => Unit::Centimeter,
-        "m" => Unit::Meter,
-        "in" => Unit::Inch,
-        "mm" => Unit::Millimeter,
-        other => unreachable!("--units only accepts mm, cm, m or in, not {other}"),
+    m.get_one::<String>("units").map(|u| {
+        mf_units::Unit::parse_symbol(u)
+            .unwrap_or_else(|| unreachable!("units_arg's value_parser already validated {u:?}"))
     })
 }
 
@@ -558,9 +563,9 @@ fn open(
     }
     let mut model = metrics.record("import", || mf_io::read_model_with(path, ctx))?;
     match units {
-        Some(u) => model.unit = u,
+        Some(u) => model.unit = Some(u),
         None if unitless => eprintln!(
-            "warning: {} has no units; read as millimetres (use --units mm|cm|m|in to say otherwise)",
+            "warning: {} has no units; read as millimetres (use --units to say otherwise)",
             path.display()
         ),
         None => {}

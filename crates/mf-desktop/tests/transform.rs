@@ -836,7 +836,7 @@ fn big_model(transform: [f64; 12]) -> mf_io::ImportedModel {
             mesh,
             transform,
         }],
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: mf_io::SourceInfo {
             path: "big.stl".into(),
             content_hash: mf_geometry::ContentHash([0; 32]),

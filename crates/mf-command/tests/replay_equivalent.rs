@@ -185,7 +185,10 @@ fn record_the_jittered_fixture() {
     let mut model = mf_io::read_model(&source).unwrap();
     let mut s = Session::new();
     let obj = model.objects.swap_remove(0);
-    let id = s.import_object(obj, model.unit, model.source, 0);
+    // The STL above declares no unit; read as millimetres, as
+    // `Session::import_model` defaults (C06).
+    let unit = model.unit.unwrap_or(mf_io::threemf::Unit::Millimeter);
+    let id = s.import_object(obj, unit, model.source, 0);
     let open_loops = |s: &Session| -> Vec<u32> {
         let doc = s.document();
         let m = doc.object(id).unwrap().mesh().unwrap();

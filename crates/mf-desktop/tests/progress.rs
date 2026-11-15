@@ -78,7 +78,7 @@ fn big_model() -> ImportedModel {
             mesh: big_mesh(),
             transform: mf_io::threemf::IDENTITY,
         }],
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: None,
         source: SourceInfo {
             path: "big.stl".into(),
             content_hash: ContentHash([0; 32]),

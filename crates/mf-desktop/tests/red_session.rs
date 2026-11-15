@@ -94,7 +94,7 @@ fn opened(objects: Vec<(&str, Mesh, [f64; 12])>) -> Harness<'static, MeshFixerAp
                 transform,
             })
             .collect(),
-        unit: Unit::Millimeter,
+        unit: Some(Unit::Millimeter),
         source: SourceInfo {
             path: "red_session.3mf".into(),
             content_hash: ContentHash([0; 32]),

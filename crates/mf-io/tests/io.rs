@@ -368,7 +368,7 @@ fn export_applies_the_objects_transform_and_threemf_takes_the_document_unit() {
     let p3 = dir.path().join("out.3mf");
     mf_io::write_path(&mesh, &p3, Format::ThreeMf, mf_io::threemf::Unit::Inch).unwrap();
     let model = read_model(&p3).unwrap();
-    assert_eq!(model.unit, mf_io::threemf::Unit::Inch);
+    assert_eq!(model.unit, Some(mf_io::threemf::Unit::Inch));
 }
 
 /// M4 final review I3: applying an object's transform for an STL/OBJ export

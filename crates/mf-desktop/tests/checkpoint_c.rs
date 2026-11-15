@@ -566,7 +566,7 @@ fn model_of(name: &str, mesh: Mesh) -> mf_io::ImportedModel {
             mesh,
             transform: mf_io::threemf::IDENTITY,
         }],
-        unit: mf_io::threemf::Unit::Millimeter,
+        unit: Some(mf_io::threemf::Unit::Millimeter),
         source: mf_io::SourceInfo {
             path: format!("{name}.obj").into(),
             content_hash: mf_geometry::ContentHash([0; 32]),
