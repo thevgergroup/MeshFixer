@@ -2085,11 +2085,18 @@ fn sculpt_inflate_stroke_leaves_the_cap_untouched_with_stay_on_surface() {
     settle(&mut h);
     assert!(h.state().sculpt.stay_on_surface, "on by default");
     h.state_mut().sculpt.strength = 1.0;
-    h.state_mut().sculpt.radius = 6.0;
 
     // A dab well away from the cap, on the curved surface (the ball's
     // equator, facing the camera).
     let dab = facing_point(&h, [0.0, 0.0, 20.0], 20.0);
+    let dab_world = {
+        let cam = h.state().camera.unwrap();
+        let center = DVec3::new(0.0, 0.0, 20.0);
+        let to_eye = (cam.eye() - center).normalize();
+        (center + to_eye * (20.0 * 0.8)).to_array()
+    };
+    h.state_mut().sculpt.radius_pt =
+        mf_desktop::sculpt_tool::radius_pt_for_world(h.state(), dab_world, 6.0).unwrap();
     let before_mesh = h.state().active_mesh().unwrap().clone();
     h.event(egui::Event::PointerMoved(dab));
     h.event(egui::Event::PointerButton {
@@ -2128,6 +2135,166 @@ fn sculpt_inflate_stroke_leaves_the_cap_untouched_with_stay_on_surface() {
     assert_eq!(
         cap_before, cap_after,
         "\"stay on this surface\" must never move the cap's own faces"
+    );
+}
+
+// ---------------------------------------------------------------------
+// Sculpt: the brush radius is screen-relative (owner bug 2026-11-14):
+// the default radius must stay a small local patch regardless of the
+// document's units, on a metre-scale scan and on a millimetre-scale
+// primitive. Before the fix, the panel's "5" was read as 5 *document
+// units*, which is 5 m on the Stanford bunny (imported in metres) —
+// enough to move all 34,978 of its vertices in one stroke.
+// ---------------------------------------------------------------------
+
+/// Half of `bb`'s shortest side: a radius [`facing_point`] can use that
+/// always lands inside the box along every axis, so the sampled dab
+/// stays on the mesh's own surface rather than drifting past its
+/// silhouette (unlike `bb.diagonal() * 0.5`, which overshoots on
+/// anything that isn't a cube).
+fn inscribed_radius(bb: &Aabb) -> f64 {
+    (0..3)
+        .map(|k| (bb.max[k] - bb.min[k]) * 0.5)
+        .fold(f64::MAX, f64::min)
+}
+
+/// How many of `before`'s live vertices moved (by more than `eps`) in
+/// `after`, as a fraction of `before`'s vertex count. Compared by
+/// `VertexId` (stable across one stroke, which only moves vertices,
+/// never renumbers them unless dynamic detail is on — off here).
+fn fraction_of_vertices_moved(before: &Mesh, after: &Mesh, eps: f64) -> f64 {
+    let moved = before
+        .vertices()
+        .filter(|&(id, p)| match after.position(id) {
+            Some(q) => {
+                let d2 = (0..3).map(|k| (p[k] - q[k]).powi(2)).sum::<f64>();
+                d2.sqrt() > eps
+            }
+            // Gone in `after`: dynamic detail would explain this, but it's
+            // off by default, so this never happens in these tests.
+            None => true,
+        })
+        .count();
+    moved as f64 / before.vertex_count().max(1) as f64
+}
+
+/// One Inflate stroke at the panel's default settings, dragged a short
+/// distance on the active object's camera-facing surface near
+/// `center`/`radius` (world space): the mesh before and after.
+fn one_default_inflate_stroke(
+    h: &mut Harness<'_, MeshFixerApp>,
+    center: [f64; 3],
+    radius: f64,
+) -> (Mesh, Mesh) {
+    h.get_by_label("Sculpt").click();
+    settle(h);
+    assert_eq!(
+        h.state().sculpt.brush,
+        mf_operations::sculpt::BrushKind::Inflate,
+        "Inflate is the default brush"
+    );
+    let before_mesh = h.state().active_mesh().unwrap().clone();
+    let dab = facing_point(h, center, radius);
+    h.event(egui::Event::PointerMoved(dab));
+    h.event(egui::Event::PointerButton {
+        pos: dab,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    let to = dab + egui::vec2(15.0, 0.0);
+    for i in 1..=6 {
+        let p = dab + (to - dab) * (i as f32 / 6.0);
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+    }
+    wait_until(h, "a dab recorded", |a| {
+        a.sculpt_stroke.as_ref().is_some_and(|s| s.dab_count() > 0)
+    });
+    h.event(egui::Event::PointerButton {
+        pos: to,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    wait_until(h, "the stroke to commit", |a| {
+        a.sculpt_stroke.is_none() && a.busy.is_none()
+    });
+    settle(h);
+    let after_mesh = h.state().active_mesh().unwrap().clone();
+    (before_mesh, after_mesh)
+}
+
+/// The owner's exact repro: open the Stanford bunny (imported in
+/// metres, ~0.156 m across), choose Sculpt, Inflate (the default
+/// brush), and drag one stroke. At the panel's default radius, the
+/// stroke must move only a local patch — under 5% of the bunny's
+/// 34,978 vertices — never the whole model.
+#[test]
+fn sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres() {
+    require_gpu!("sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres");
+    let Some(path) = mf_fixtures::real::path(
+        "stanford-bunny.obj",
+        "sculpt_inflate_stroke_moves_only_a_local_patch_on_the_bunny_in_metres",
+    ) else {
+        return;
+    };
+    let model = mf_io::read_model(&path).unwrap();
+    let bunny = model.objects.into_iter().next().unwrap().mesh;
+    let bb = bunny.bounding_box().unwrap();
+    assert!(
+        bb.diagonal() < 1.0,
+        "the raw bunny should be metre-scale, got diagonal {}",
+        bb.diagonal()
+    );
+    let vertex_count = bunny.vertex_count();
+    let mut h = opened_with_units(vec![("bunny", bunny, at([0.0, 0.0, 0.0]))], Unit::Meter);
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+
+    let (before_mesh, after_mesh) =
+        one_default_inflate_stroke(&mut h, bb.center(), inscribed_radius(&bb));
+    assert!(
+        !Mesh::ptr_eq(&before_mesh, &after_mesh),
+        "the stroke must change the mesh"
+    );
+    let fraction = fraction_of_vertices_moved(&before_mesh, &after_mesh, 1e-9);
+    assert!(
+        fraction < 0.05,
+        "one Inflate stroke at the default radius moved {:.1}% of {vertex_count} vertices \
+         (expected under 5%, a local patch): the radius must be screen-relative, not \
+         5 document units (5 m on this document)",
+        fraction * 100.0,
+    );
+}
+
+/// The same check on a millimetre-scale model (a ~50 mm sphere): the
+/// default radius must still read as a small local patch there too, so
+/// the fix is screen-relative rather than merely "assume metres".
+#[test]
+fn sculpt_inflate_stroke_moves_only_a_local_patch_on_a_small_mm_model() {
+    require_gpu!("sculpt_inflate_stroke_moves_only_a_local_patch_on_a_small_mm_model");
+    // Fine enough that even a few-millimetre brush radius clearly
+    // displaces some vertices (unlike `ball`'s coarse 32x48 sphere,
+    // where a handful of millimetres can fall between vertices and
+    // move none at all — not what this test is probing).
+    let sphere = mf_fixtures::scaled(&mf_fixtures::uv_sphere(96, 144), 25.0); // ~50 mm across
+    let vertex_count = sphere.vertex_count();
+    let bb = sphere.bounding_box().unwrap();
+    let mut h = opened(vec![("ball", sphere, at([0.0, 0.0, 0.0]))]);
+
+    let (before_mesh, after_mesh) =
+        one_default_inflate_stroke(&mut h, bb.center(), inscribed_radius(&bb));
+    assert!(
+        !Mesh::ptr_eq(&before_mesh, &after_mesh),
+        "the stroke must change the mesh"
+    );
+    let fraction = fraction_of_vertices_moved(&before_mesh, &after_mesh, 1e-9);
+    assert!(
+        fraction < 0.20,
+        "one Inflate stroke at the default radius moved {:.1}% of {vertex_count} vertices \
+         on a 50 mm model (expected under 20%)",
+        fraction * 100.0,
     );
 }
 
