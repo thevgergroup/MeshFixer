@@ -91,6 +91,47 @@ fn nice_step_clears_the_minimum_screen_size() {
     }
 }
 
+/// Consolidation plan C09: every snap step is `nice_step(world_per_pt, 8
+/// pt, display)`, at any zoom (1e-3 to 1e3 document units per screen
+/// point — a model so close one point spans a thousandth of a unit, to
+/// one so far out a point spans a thousand), on an mm, m or in document.
+/// The step must always be from the 1-2-5 sequence and clear 8pt on
+/// screen (the "a fixed 1-document-unit grid snaps every drag to zero on
+/// a metre-scale model" bug, MF-OBJ-002, generalised across every scale
+/// and unit rather than pinned to one document).
+#[test]
+fn snap_step_is_8pt_at_any_zoom() {
+    let zooms = [1e-3, 1e-2, 1e-1, 1.0, 1e1, 1e2, 1e3];
+    let docs = [Unit::Millimeter, Unit::Meter, Unit::Inch];
+    for doc in docs {
+        for &doc_units_per_pt in &zooms {
+            let ctx = ScaleCtx {
+                doc,
+                display: doc,
+                bbox_diag: 1.0,
+                world_per_pt: Some(doc_units_per_pt),
+            };
+            let step = nice_step(ctx.mm_per_pt(), 8.0, ctx.display);
+            let px = step.mm() / ctx.mm_per_pt();
+            assert!(
+                px >= 8.0 - 1e-6 || step.mm() == 5000.0,
+                "{doc:?} at {doc_units_per_pt} doc units/pt: step {step:?} only clears {px} pt"
+            );
+            let allowed = [
+                0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0, 5.0, 10.0, 20.0,
+                50.0, 100.0, 200.0, 500.0, 1000.0, 5000.0,
+            ];
+            let step_mm = step.mm();
+            assert!(
+                allowed
+                    .iter()
+                    .any(|&a| (a - step_mm).abs() < step_mm * 1e-9 + 1e-12),
+                "{doc:?} at {doc_units_per_pt} doc units/pt: step {step:?} not in the 1-2-5 sequence"
+            );
+        }
+    }
+}
+
 #[test]
 fn nice_step_respects_the_display_unit() {
     let step_mm = nice_step(1.0, 8.0, Unit::Millimeter);

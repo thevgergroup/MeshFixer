@@ -878,9 +878,14 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("sculpt.section.falloff", "Falloff"),
     ("sculpt.section.overlay", "Overlay"),
     ("sculpt.section.radius", "Radius"),
+    ("sculpt.section.radius.approx", "≈ {size} at this zoom"),
     (
-        "sculpt.section.radius.approx",
-        "≈ {size} {unit} at this zoom",
+        "sculpt.section.radius.typed.error",
+        "\"{text}\" isn't a length; nothing changed",
+    ),
+    (
+        "sculpt.section.radius.typed.hint",
+        "or type a size, e.g. \"3 mm\"",
     ),
     ("sculpt.section.strength", "Strength"),
     ("sculpt.section.symmetry", "Symmetry"),

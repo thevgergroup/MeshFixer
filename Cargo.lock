@@ -2788,6 +2788,7 @@ dependencies = [
  "mf-runtime",
  "mf-selection",
  "mf-spec",
+ "mf-units",
  "rfd",
  "serde_json",
  "sysinfo",

@@ -438,6 +438,11 @@ pub struct MeshFixerApp {
     /// The Sculpt panel's "Show sculpt changes" overlay (off by default):
     /// tints vertices by how far they've moved since the tool was opened.
     pub sculpt_show_changes: bool,
+    /// The radius panel's typed-unit field while it has focus (ADR-0006
+    /// rule 1b: "3 mm" and the like): `None` shows the live "≈ X at this
+    /// zoom" readout instead. Mirrors [`crate::transform_tool::TransformTool::editing`]'s
+    /// pattern — the text a person is typing, not yet committed.
+    pub sculpt_radius_text: Option<String>,
     /// The active object's mesh as it was when Sculpt was opened (the
     /// "Show sculpt changes" overlay's reference point): `None` outside
     /// Sculpt. Reset whenever the active object changes while Sculpt
@@ -908,6 +913,7 @@ impl MeshFixerApp {
             sculpt_pending: None,
             sculpt_hover: None,
             sculpt_show_changes: false,
+            sculpt_radius_text: None,
             sculpt_baseline: None,
             solid: Default::default(),
             parts: Default::default(),
@@ -5267,14 +5273,41 @@ impl MeshFixerApp {
         format!(" · {}", transform_tool::snap_hint(step_mm))
     }
 
-    /// The build plate, sized in the document's units.
+    /// The build plate, sized in the document's units. The plate's own
+    /// physical size (`size_mm`) is fixed — it's a real print bed's
+    /// dimensions, not something zoom should change — but its grid-line
+    /// spacing is zoom-adaptive (consolidation plan C09), through the
+    /// same [`mf_units::nice_step`] every gizmo snap now uses
+    /// ([`transform_tool::snap_step`]): a fixed 10 mm grid reads as
+    /// nothing at all zoomed far out on a large part, and as visual
+    /// noise zoomed in close on a small one (ADR-0006 rule 3: "grid and
+    /// cell sizes derive from the bounding box", "a literal length
+    /// constant in document units is a bug"). `major_mm` is always 5
+    /// minor steps, so the major/minor ratio stays the one the owner
+    /// tuned (10 mm minor, 50 mm major) at every zoom. Falls back to the
+    /// fixed default spacing without a live camera/viewport yet (the
+    /// first frame, before either is set).
     fn plate(&self) -> mf_render::Plate {
         let mm = transform_tool::mm_per(self.session.document().units());
         let d = mf_render::Plate::default();
+        let grid_mm = self
+            .camera
+            .zip(self.viewport.last_rect)
+            .map(|(cam, rect)| {
+                let view = (rect.width() as f64, rect.height() as f64);
+                mf_render::adaptive_grid_mm(
+                    &cam,
+                    glam::DVec3::ZERO,
+                    view,
+                    mm,
+                    transform_tool::MIN_SNAP_PX,
+                )
+            })
+            .unwrap_or(d.grid_mm);
         mf_render::Plate {
             size_mm: d.size_mm.map(|v| v / mm),
-            grid_mm: d.grid_mm / mm,
-            major_mm: d.major_mm / mm,
+            grid_mm: grid_mm / mm,
+            major_mm: grid_mm * 5.0 / mm,
         }
     }
 

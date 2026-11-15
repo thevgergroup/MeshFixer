@@ -1309,8 +1309,17 @@ fn apply_plate_snap(drag: &Drag, translate: DVec3, plate: PlateSnap) -> DVec3 {
     }
 }
 
-/// Snapping configuration for a drag. Defaults are a 1mm grid, 15 degrees,
-/// steps of 0.1, and 8pt from the plate.
+/// Snapping configuration for a drag. Defaults are 15 degrees, steps of
+/// 0.1, and 8pt from the plate — no world-unit grid (ADR-0006 rule 3: "a
+/// literal length constant in document units is a bug"). A fixed 1
+/// document-unit grid used to live here (`grid: Some(1.0)`), which on a
+/// metre-scale document was 1000 mm: every drag snapped to zero (the
+/// owner's stanford-bunny report, MF-OBJ-002). There is no document-unit
+/// default a gizmo tool could fall back to that would be correct at
+/// every scale, so callers that want a grid must compute one themselves
+/// (consolidation plan C09), typically through
+/// [`mf_units::nice_step`]/[`adaptive_grid_mm`], and set `grid` to
+/// `Some(..)` explicitly.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Snap {
     pub grid: Option<f64>,
@@ -1322,7 +1331,7 @@ pub struct Snap {
 impl Default for Snap {
     fn default() -> Snap {
         Snap {
-            grid: Some(1.0),
+            grid: None,
             angle_deg: Some(15.0),
             scale_step: Some(0.1),
             plate: Some(PlateSnap {

@@ -148,6 +148,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_close: |app, close| {
             end_stroke(app, close);
             app.sculpt_baseline = None;
+            app.sculpt_radius_text = None;
         },
         ..T::new(
             SCULPT,
@@ -513,7 +514,13 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     // The brush's world-space radius, fixed for this whole stroke
     // (like `pivot`/`view_dir` below): the cursor's depth on the
     // surface right now, at the panel's screen-points radius.
-    let radius_world = world_radius_at(&cam, rect.height() as f64, world, settings.radius_pt);
+    let radius_world = world_radius_at(
+        &cam,
+        rect.height() as f64,
+        world,
+        settings.radius_pt,
+        app.session.document().units(),
+    );
     let Some(brush) = brush_params(cam.view_dir(), &settings, &transform, world, radius_world)
     else {
         return;
@@ -548,23 +555,64 @@ fn begin_stroke(app: &mut MeshFixerApp) {
     });
 }
 
-/// The world-space radius `radius_pt` screen points reads as at `world`
-/// (a point on the surface, typically the dab under the cursor), from
-/// `cam` and the viewport's `view_height_pt` — screen-relative sizing,
-/// as Meshmixer's own brush does: the same angular size on screen,
-/// whatever the document's units or the model's scale, converted fresh
+/// How many document units of world space one screen point covers at
+/// `world`'s own depth (not the camera's distance to its orbit target,
+/// which can be well in front of or behind the surface) — the same
+/// quantity [`mf_units::ScaleCtx::world_per_pt`] names, computed fresh
 /// from the camera each time this is called (once per stroke, at the
-/// cursor's own depth on the surface, not the camera's distance to its
-/// orbit target, which can be well in front of or behind the surface).
+/// cursor's own depth on the surface).
 ///
-/// `view_height_pt` and `radius_pt` are the same unit throughout this
-/// module (egui's logical points): the viewport rect and the camera's
-/// own `ray`/`screen_position` already work in points, not physical
-/// pixels, so no `pixels_per_point` conversion belongs here.
-fn world_radius_at(cam: &OrbitCamera, view_height_pt: f64, world: DVec3, radius_pt: f64) -> f64 {
+/// `view_height_pt` is in egui's logical points, like the viewport rect
+/// and the camera's own `ray`/`screen_position`, so no `pixels_per_point`
+/// conversion belongs here.
+fn world_per_pt_at(cam: &OrbitCamera, view_height_pt: f64, world: DVec3) -> f64 {
     let depth = (world - cam.eye()).length();
-    let world_per_pt = 2.0 * depth * (cam.fov_y * 0.5).tan() / view_height_pt.max(1.0);
-    world_per_pt * radius_pt
+    2.0 * depth * (cam.fov_y * 0.5).tan() / view_height_pt.max(1.0)
+}
+
+/// A [`mf_units::ScaleCtx`] for `doc` (the document's own unit) at
+/// `world`'s depth under `cam`, `view_height_pt` tall: the shared scale
+/// facts the brush radius (and its "≈ 4.2 mm at this zoom" label) are
+/// computed from, rather than a sculpt-local helper (consolidation plan
+/// C08). `display` is kept the same as `doc` (the app has no separate
+/// display-unit preference yet); `bbox_diag` is left 0 — nothing here
+/// needs a bbox-relative default.
+fn scale_ctx_at(
+    cam: &OrbitCamera,
+    view_height_pt: f64,
+    world: DVec3,
+    doc: mf_units::Unit,
+) -> mf_units::ScaleCtx {
+    mf_units::ScaleCtx {
+        doc,
+        display: doc,
+        bbox_diag: 0.0,
+        world_per_pt: Some(world_per_pt_at(cam, view_height_pt, world)),
+    }
+}
+
+/// The world-space (document-unit) radius `radius_pt` screen points
+/// reads as at `world` (a point on the surface, typically the dab under
+/// the cursor), from `cam` and the viewport's `view_height_pt` —
+/// screen-relative sizing, as Meshmixer's own brush does: the same
+/// angular size on screen, whatever the document's units or the model's
+/// scale. Goes through [`mf_units::ScaleCtx::world_per_pt`]
+/// (consolidation plan C08), not a sculpt-local conversion: it names
+/// document units of world space per screen point, so `radius_pt` of
+/// them is the brush's radius in document units directly. `doc` doesn't
+/// affect the result (`world_per_pt` means the same thing whatever the
+/// document's unit is); it's threaded through only so this shares
+/// [`scale_ctx_at`] with [`radius_pt_for_world`] and the panel's label.
+fn world_radius_at(
+    cam: &OrbitCamera,
+    view_height_pt: f64,
+    world: DVec3,
+    radius_pt: f64,
+    doc: mf_units::Unit,
+) -> f64 {
+    let ctx = scale_ctx_at(cam, view_height_pt, world, doc);
+    // allow-swallow: `world_per_pt` is always `Some` from `scale_ctx_at`, which never returns `None`.
+    ctx.world_per_pt.unwrap_or(0.0) * radius_pt
 }
 
 /// Test support: the panel's `radius_pt` that reads as `world_radius`
@@ -578,8 +626,13 @@ fn world_radius_at(cam: &OrbitCamera, view_height_pt: f64, world: DVec3, radius_
 pub fn radius_pt_for_world(app: &MeshFixerApp, world: [f64; 3], world_radius: f64) -> Option<f64> {
     let cam = app.camera?;
     let rect = app.viewport.last_rect?;
-    let depth = (DVec3::from(world) - cam.eye()).length();
-    let world_per_pt = 2.0 * depth * (cam.fov_y * 0.5).tan() / (rect.height() as f64).max(1.0);
+    let ctx = scale_ctx_at(
+        &cam,
+        rect.height() as f64,
+        DVec3::from(world),
+        app.session.document().units(),
+    );
+    let world_per_pt = ctx.world_per_pt?;
     if world_per_pt <= 0.0 || !world_per_pt.is_finite() {
         return None;
     }
@@ -793,7 +846,13 @@ pub fn cursor_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     // Live each frame (not fixed to a stroke): the ring must track the
     // cursor's own depth on the surface as the camera orbits or zooms,
     // same as the real stroke's own radius would if one started here.
-    let radius_world = world_radius_at(&cam, rect.height() as f64, world, app.sculpt.radius_pt);
+    let radius_world = world_radius_at(
+        &cam,
+        rect.height() as f64,
+        world,
+        app.sculpt.radius_pt,
+        app.session.document().units(),
+    );
     let view = (rect.width() as f64, rect.height() as f64);
     let normal = DVec3::from(cam.ray(cam.target, view, px).1) * -1.0;
     let u = normal.any_orthonormal_vector();
@@ -834,37 +893,90 @@ fn section(ui: &mut egui::Ui, text: &str) {
     ui.add_space(2.0);
 }
 
-/// The brush panel's "≈ 4.2 mm at this zoom" readout: `app.sculpt.radius_pt`
-/// converted to a world-space (document units) length, at the cursor's
-/// own depth on the surface while it's hovering the active object, or
-/// (not hovering, or nothing to hit) the camera's distance to its own
-/// orbit target — a reasonable stand-in depth so the panel still shows
-/// *something* while the pointer is off the viewport, rather than
-/// blanking the label. `None` only without a camera at all (the tool
-/// just opened, before the first frame's render).
-fn brush_radius_preview_world(app: &MeshFixerApp) -> Option<f64> {
-    let cam = app.camera?;
-    let rect = app.viewport.last_rect?;
-    let depth_point = app
-        .active
+/// The depth point the radius panel's readout and typed field both
+/// convert at: the cursor's own depth on the surface while it's
+/// hovering the active object, or (not hovering, or nothing to hit) the
+/// camera's distance to its own orbit target — a reasonable stand-in
+/// depth so the panel still shows *something* while the pointer is off
+/// the viewport, rather than blanking. `None` only without a camera at
+/// all (the tool just opened, before the first frame's render).
+fn radius_preview_depth_point(app: &MeshFixerApp, cam: &OrbitCamera) -> DVec3 {
+    app.active
         .and_then(|id| Some((id, app.active_mesh()?.clone())))
         .zip(app.sculpt_hover)
         .and_then(|((id, mesh), px)| {
             let bvh = app.picking_bvh(id);
             surface_point(app, &mesh, bvh.as_deref(), id, px).map(|(_, world)| world)
         })
-        .unwrap_or(cam.target);
+        .unwrap_or(cam.target)
+}
+
+/// The brush panel's "≈ 4.2 mm at this zoom" readout: `app.sculpt.radius_pt`
+/// converted to a world-space (document units) length, at
+/// [`radius_preview_depth_point`]. `None` only without a camera at all
+/// (the tool just opened, before the first frame's render).
+fn brush_radius_preview_world(app: &MeshFixerApp) -> Option<f64> {
+    let cam = app.camera?;
+    let rect = app.viewport.last_rect?;
+    let depth_point = radius_preview_depth_point(app, &cam);
     Some(world_radius_at(
         &cam,
         rect.height() as f64,
         depth_point,
         app.sculpt.radius_pt,
+        app.session.document().units(),
     ))
+}
+
+/// The radius panel's typed-unit field (ADR-0006 rule 1b): a bare text
+/// box below the pt slider that parses through [`mf_units::parse_length`]
+/// ("3 mm", "0.25\"", a bare number meaning the document's unit) and sets
+/// `app.sculpt.radius_pt` to whatever screen-points value reads as that
+/// length at the current zoom ([`radius_pt_for_world`]'s own inverse
+/// math, inlined here since it needs the live depth point, not a fixed
+/// world position a test passes in). Invalid input shows an inline error
+/// and leaves `radius_pt` exactly as it was — never silently replaced
+/// with 0 — matching [`crate::tool_panels::transform_field`]'s own
+/// commit-on-Enter pattern.
+fn radius_typed_field(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let doc = app.session.document().units();
+    let id = egui::Id::unique("sculpt radius typed field");
+    let mut text = app.sculpt_radius_text.clone().unwrap_or_else(|| {
+        brush_radius_preview_world(app)
+            .map(|world| mf_units::format_length(world, doc))
+            // allow-swallow: no camera yet (the tool just opened, before the first frame's render); the field starts blank rather than showing a made-up size.
+            .unwrap_or_default()
+    });
+    let r = ui.add(
+        egui::TextEdit::singleline(&mut text)
+            .id(id)
+            .hint_text(t!("sculpt.section.radius.typed.hint")),
+    );
+    if r.has_focus() {
+        app.sculpt_radius_text = Some(text.clone());
+    } else if app.sculpt_radius_text.is_some() {
+        app.sculpt_radius_text = None;
+    }
+    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+        match mf_units::parse_length(&text, doc) {
+            Ok(length) => {
+                if let (Some(cam), Some(rect)) = (app.camera, app.viewport.last_rect) {
+                    let depth_point = radius_preview_depth_point(app, &cam);
+                    let world_per_pt =
+                        world_per_pt_at(&cam, rect.height() as f64, depth_point).max(1e-12);
+                    app.sculpt.radius_pt = (length.in_doc(doc) / world_per_pt).clamp(5.0, 200.0);
+                }
+            }
+            Err(_) => {
+                app.status = Some(t!("sculpt.section.radius.typed.error", text = text.clone()));
+            }
+        }
+        app.sculpt_radius_text = None;
+    }
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     widgets::body(ui, t!("sculpt.help"));
-    let units = crate::defects::unit_symbol(app.session.document().units());
 
     section(ui, &t!("sculpt.section.brush"));
     ui.horizontal_wrapped(|ui| {
@@ -893,15 +1005,16 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .max_decimals(1),
     );
     if let Some(world) = brush_radius_preview_world(app) {
+        let doc = app.session.document().units();
         widgets::body(
             ui,
             t!(
                 "sculpt.section.radius.approx",
-                size = mf_spec::format_length(world),
-                unit = units
+                size = mf_units::format_length(world, doc)
             ),
         );
     }
+    radius_typed_field(app, ui);
 
     section(ui, &t!("sculpt.section.strength"));
     ui.add(egui::Slider::new(&mut app.sculpt.strength, 0.0..=1.0).max_decimals(2));
@@ -1051,11 +1164,12 @@ mod tests {
         let world = cam.target;
         let view_height_pt = 1000.0;
         let radius_pt = 40.0;
-        let at_1x = world_radius_at(&cam, view_height_pt, world, radius_pt);
+        let doc = mf_units::Unit::Millimeter;
+        let at_1x = world_radius_at(&cam, view_height_pt, world, radius_pt, doc);
 
         let mut zoomed_in = cam;
         zoomed_in.distance *= 0.5; // 2x zoom: half the distance to the target
-        let at_2x = world_radius_at(&zoomed_in, view_height_pt, world, radius_pt);
+        let at_2x = world_radius_at(&zoomed_in, view_height_pt, world, radius_pt, doc);
 
         assert!(at_1x > 0.0, "{at_1x}");
         assert!(

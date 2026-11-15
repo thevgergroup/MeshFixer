@@ -289,8 +289,11 @@ pub fn mm_per(unit: Unit) -> f64 {
 /// (screen points): below this a step reads as "not really a grid"
 /// (ADR-0006 rule 3: "at least about 8 pt"). Matches the plate snap's
 /// own 8pt catch distance ([`mf_render::PlateSnap::within_pt`]), a
-/// separate, pre-existing feature this isn't replacing.
-const MIN_SNAP_PX: f64 = 8.0;
+/// separate, pre-existing feature this isn't replacing. `pub(crate)` so
+/// `app::MeshFixerApp::plate`'s own zoom-adaptive grid-line spacing
+/// shares this one constant too, rather than a second "8.0" literal
+/// (consolidation plan C09: "delete duplicate step logic").
+pub(crate) const MIN_SNAP_PX: f64 = 8.0;
 
 /// The one shared snap step every gizmo tool calls (ADR-0006 rule 3: "no
 /// tool should have its own snap constant") — the Transform gizmo, Split's
