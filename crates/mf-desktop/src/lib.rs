@@ -20,6 +20,7 @@ pub mod metrics;
 mod panels;
 pub mod part_thumbs;
 pub mod parts_tool;
+pub mod refusal_card;
 pub mod sculpt_tool;
 pub mod shape_panel;
 pub mod shape_tools;

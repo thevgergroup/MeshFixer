@@ -675,7 +675,7 @@ fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::shape_tools::refusal_card_for(app, ui, "object.align");
+    crate::refusal_card::show_for(app, ui, "object.align");
     let selected = app.selected_objects();
     if selected.len() < 2 {
         widgets::body(ui, t!("align.select_more"));

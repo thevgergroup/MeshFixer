@@ -22,51 +22,10 @@ pub const SPLIT: &str = "split";
 pub const COMBINE: &str = "combine";
 pub const MAKE_SOLID: &str = "make_solid";
 
-/// The operation a Shape tool runs (its refusals show in its panel).
-pub fn op_of(tool: &str) -> Option<&'static str> {
-    match tool {
-        SPLIT => Some("mesh.split_plane"),
-        COMBINE => Some("mesh.combine"),
-        MAKE_SOLID => Some("mesh.make_solid"),
-        _ => None,
-    }
-}
-
-/// As [`op_of`], for a tool whose panel can run more than one operation
-/// (Parts: placing with `object.add_part`, then Join to scan with
-/// `mesh.boolean`; Connectors: placing, then Merge with
-/// `connector.join`): every op id whose refusal that tool's panel knows
-/// how to show, in the order its own `refusal_card_for` calls check
-/// them.
-pub(crate) fn ops_of(tool: &str) -> &'static [&'static str] {
-    match tool {
-        crate::parts_tool::PARTS => &[
-            "object.add_part",
-            "object.add_shape",
-            "mesh.boolean",
-            "mesh.combine",
-        ],
-        crate::connector_tool::CONNECTORS => &[
-            "object.add_part",
-            "object.add_shape",
-            "connector.join",
-            "object.attach",
-            "object.set_shape_params",
-        ],
-        crate::connect_tool::CONNECT => &["split.place_connectors", "object.add_shape"],
-        crate::tool_panels::SELECT | crate::transform_tool::ID => &["object.set_shape_params"],
-        _ => &[],
-    }
-}
-
-/// A refusal from an operation, shown in its tool's panel in plain words,
-/// with the next action as a button where there is one.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Refusal {
-    pub op_id: String,
-    pub code: String,
-    pub message: String,
-}
+/// The one refusal type and card live in `refusal_card` (C16); these
+/// names stay for the panels that build or show one by op id.
+pub use crate::refusal_card::Refusal;
+pub(crate) use crate::refusal_card::show_for as refusal_card_for;
 
 /// Split's state: the cut plane (as a placement: its translation is a
 /// point on the plane, its linear part turns +Z onto the plane's normal),
@@ -478,52 +437,10 @@ pub(crate) fn unselected_objects_the_plane_crosses(app: &MeshFixerApp) -> Vec<St
         .collect()
 }
 
-/// The refusal card: what went wrong in plain words, and the next action
-/// as a button where there is one. Returns true if it was shown.
+/// The refusal card for `op_id` in a Shape tool's panel (C16's
+/// `RefusalCard`). Returns true if it was shown.
 fn refusal_card(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
     refusal_card_for(app, ui, op_id)
-}
-
-/// As [`refusal_card`], for another tool's panel (Parts, Connectors):
-/// shows `app.refusal` when it names `op_id`, with the same plain-
-/// language card and next action every tool's panel uses.
-pub(crate) fn refusal_card_for(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
-    let Some(r) = app.refusal.clone().filter(|r| r.op_id == op_id) else {
-        return false;
-    };
-    show_refusal(app, ui, &r.code, &r.message);
-    true
-}
-
-fn show_refusal(app: &mut MeshFixerApp, ui: &mut egui::Ui, code: &str, message: &str) {
-    widgets::card(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.label(
-                RichText::new(icons::WARNING)
-                    .font(icons::font(theme::ICON_SIZE))
-                    .color(theme::TEXT),
-            );
-            ui.label(RichText::new(t!("refusal.title")).color(theme::TEXT_STRONG));
-        });
-        widgets::body(ui, message);
-        widgets::caption(ui, format!("({code})"));
-        ui.add_space(theme::SPACE_XS);
-        let next = next_action(code).map(|n| match n {
-            Next::Repair => (
-                icons::REPAIR,
-                t!("refusal.repair"),
-                crate::tool_panels::REPAIR,
-            ),
-            Next::MakeSolid => (icons::MAKE_SOLID, t!("refusal.make_solid"), MAKE_SOLID),
-        });
-        if let Some((icon, label, tool)) = next
-            && widgets::wide_button(ui, Kind::Secondary, Some(icon), &label).clicked()
-        {
-            app.refusal = None;
-            app.open_rail_tool(tool);
-        }
-    });
-    ui.add_space(theme::SPACE_S);
 }
 
 /// The live "the plane misses the model" warning, shown in the preview
@@ -554,31 +471,6 @@ pub(crate) fn plane_miss_warning(app: &MeshFixerApp, ui: &mut egui::Ui) {
         widgets::body(ui, &message);
     });
     ui.add_space(theme::SPACE_S);
-}
-
-enum Next {
-    Repair,
-    MakeSolid,
-}
-
-/// The next action a refusal code points to, as a button.
-fn next_action(code: &str) -> Option<Next> {
-    match code {
-        "operand_not_closed"
-        | "tool_not_closed"
-        | "opening_not_covered"
-        | "opening_too_large_for_join"
-        | "open_input" => Some(Next::Repair),
-        "operand_overlaps_itself"
-        | "non_manifold_input"
-        | "inconsistent_input"
-        | "inside_out_input"
-        | "section_self_intersects"
-        | "window_degenerate"
-        | "split_section_self_intersects"
-        | "result_self_intersects" => Some(Next::MakeSolid),
-        _ => None,
-    }
 }
 
 /// Run `intent` on the active object, on the job pool (progress and
@@ -892,7 +784,12 @@ fn surface_click_point(
 pub(crate) fn open_model_card(app: &mut MeshFixerApp, ui: &mut egui::Ui) -> bool {
     let open = active_closed(app) == Some(false);
     if open {
-        show_refusal(app, ui, "operand_not_closed", &t!("split.refuse_open"));
+        let r = Refusal {
+            op_id: "mesh.split_plane".to_owned(),
+            code: "operand_not_closed".to_owned(),
+            message: t!("split.refuse_open"),
+        };
+        crate::refusal_card::RefusalCard::new(&r).show(app, ui);
     }
     open
 }

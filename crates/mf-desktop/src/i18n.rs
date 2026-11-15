@@ -856,6 +856,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("refusal.make_solid", "Run Make solid first"),
     ("refusal.make_solid_invalid_parameter", "{detail}"),
     ("refusal.missing_generator", "{detail}"),
+    ("refusal.move_plane", "Move the plane"),
     (
         "refusal.moving_parts_fused",
         "'{a}' and '{b}' would print fused ({measured} apart where they meet, at least \
@@ -937,8 +938,10 @@ static CATALOGUE: &[(&str, &str)] = &[
         "refusal.tool_not_closed",
         "The tool isn't a closed solid ({detail})",
     ),
+    ("refusal.undo", "Undo the last step"),
     ("refusal.unknown_generator", "{detail}"),
     ("refusal.unknown_part", "{detail}"),
+    ("refusal.use_larger_cell", "Use a larger cell size"),
     (
         "refusal.window_degenerate",
         "The model's surface near the tool is too thin to cut cleanly ({detail})",

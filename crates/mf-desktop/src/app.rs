@@ -298,6 +298,14 @@ pub enum PendingPlacement {
     },
 }
 
+/// A command the app sent to a worker (or queued), with the tool that
+/// issued it (C16: its refusal is routed to that tool's panel).
+struct Issued {
+    inv: Invocation,
+    label: String,
+    by: &'static str,
+}
+
 pub struct MeshFixerApp {
     pub session: Session,
     pub active: Option<ObjectId>,
@@ -482,13 +490,6 @@ pub struct MeshFixerApp {
     /// asynchronous (the job pool), so none of that can happen inside
     /// the call that starts it.
     pub pending_open_transform: Option<PendingPlacement>,
-    /// The op id [`Self::run_invocation`] just started, so a refusal
-    /// `Message::Completed` carries back (which doesn't otherwise name
-    /// the op that failed) can still be shown by a tool whose panel
-    /// runs more than one operation (Parts, Connectors:
-    /// `shape_tools::ops_of`), not just the one-op-per-tool
-    /// `shape_tools::op_of` tools.
-    last_invocation_op: Option<&'static str>,
     /// The command [`Self::run_invocation`] actually sent to a worker
     /// (its label, for the status/error text), kept so that if it comes
     /// back `StaleInput` only because this app's own next queued command
@@ -496,8 +497,11 @@ pub struct MeshFixerApp {
     /// revision and re-run (I5 single-queue fix): operations are
     /// deterministic, so replaying ours against our own later revision
     /// is always safe, and the error is shown only when the document's
-    /// own content makes the command invalid.
-    in_flight_invocation: Option<(Invocation, String)>,
+    /// own content makes the command invalid. It also records the tool
+    /// that issued it (the active tool when it was asked for, C16): its
+    /// refusal goes to that tool's panel, never to whichever tool
+    /// happens to be open when the result lands.
+    in_flight_invocation: Option<Issued>,
     /// Later commands asked for while one is already running, in order,
     /// run one at a time once the running one finishes. A command for
     /// the same op and target as the *last* queued one replaces it
@@ -505,10 +509,14 @@ pub struct MeshFixerApp {
     /// ones), so rapid edits leave one pending step, not a backlog; any
     /// other command queues behind it and is never dropped (final
     /// review I2: a single overwritten slot lost queued edits silently).
-    pending_invocation: std::collections::VecDeque<(Invocation, String)>,
+    pending_invocation: std::collections::VecDeque<Issued>,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
     pub refusal: Option<crate::shape_tools::Refusal>,
+    /// The tool that issued the command `refusal` came back from (C16),
+    /// kept with the refusal it belongs to: a refusal a panel built
+    /// itself has no issuer and isn't matched by a stale one.
+    refusal_issuer: Option<(crate::shape_tools::Refusal, &'static str)>,
     /// The UI's context, for background work that asks for a frame.
     egui_ctx: Option<egui::Context>,
     /// A placement committed from the Transform tool, drawn until its
@@ -928,10 +936,10 @@ impl MeshFixerApp {
             pending_reorient: None,
             pending_scale_to_fit: None,
             pending_open_transform: None,
-            last_invocation_op: None,
             in_flight_invocation: None,
             pending_invocation: std::collections::VecDeque::new(),
             refusal: None,
+            refusal_issuer: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
             pending_status: None,
@@ -2281,50 +2289,74 @@ impl MeshFixerApp {
     /// strokes queued behind a running one are three undo steps, not
     /// fewer.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        let issued = Issued {
+            inv,
+            label,
+            by: self.active_tool,
+        };
         if self.busy.is_some() {
+            let inv = &issued.inv;
             let coalesces = mf_spec::builtin::get(&inv.op_id)
                 .is_some_and(|spec| spec.coalesce == mf_spec::Coalesce::Absolute);
             match self.pending_invocation.back_mut() {
-                Some((queued, queued_label))
-                    if coalesces && queued.op_id == inv.op_id && queued.target == inv.target =>
+                Some(queued)
+                    if coalesces
+                        && queued.inv.op_id == inv.op_id
+                        && queued.inv.target == inv.target =>
                 {
-                    *queued = inv;
-                    *queued_label = label;
+                    *queued = issued;
                 }
-                _ => self.pending_invocation.push_back((inv, label)),
+                _ => self.pending_invocation.push_back(issued),
             }
             return;
         }
-        self.start_invocation(inv, label);
+        self.start_invocation(issued);
     }
 
     /// Actually prepares and starts `inv`: only called with no command
     /// running, either straight from [`Self::run_invocation`] or when
     /// draining the one queued command.
-    fn start_invocation(&mut self, inv: Invocation, label: String) {
-        // Interned against the known op-sets for `ops_of`'s panels
-        // (Parts, Connectors): `Invocation::op_id` is an owned `String`
-        // (it comes from a spec id built at runtime in general), but
-        // every id this matches is one of a small set of `&'static
-        // str`s, so a failure the job pool reports back can still name
-        // which op it was without `Message::Completed` itself carrying
-        // the id on its `Err` path.
-        self.last_invocation_op = crate::shape_tools::ops_of(self.active_tool)
-            .iter()
-            .copied()
-            .find(|&id| id == inv.op_id);
-        match self.session.prepare(inv.clone()) {
+    fn start_invocation(&mut self, issued: Issued) {
+        match self.session.prepare(issued.inv.clone()) {
             Ok(prepared) => {
-                self.in_flight_invocation = Some((inv, label.clone()));
-                let run = self.start_job(format!("{label}…"), true);
+                let run = self.start_job(format!("{}…", issued.label), true);
+                self.in_flight_invocation = Some(issued);
                 self.workers.run(prepared, run);
+            }
+            Err(CommandError::Operation(e)) if self.route_refusal(&issued, &e) => {
+                self.in_flight_invocation = None;
             }
             Err(e) => {
                 self.in_flight_invocation = None;
                 self.error = Some(format!(
-                    "{label} can't run: {e}. Change the settings and Apply again."
+                    "{} can't run: {e}. Change the settings and Apply again.",
+                    issued.label
                 ))
             }
+        }
+    }
+
+    /// Sends `e`, the refusal of the command `issued`, to the panel of
+    /// the tool that issued it (ADR-0010, C16): `app.refusal`, rendered
+    /// by `RefusalCard`, never the generic error bar. False when `e`
+    /// isn't a refusal (a cancellation, a spec error).
+    fn route_refusal(&mut self, issued: &Issued, e: &mf_operations::OpError) -> bool {
+        let Some(r) = crate::refusal_card::Refusal::from_op_error(&issued.inv.op_id, e) else {
+            return false;
+        };
+        self.status = Some(format!("Nothing was changed: {}", r.message));
+        self.refusal_issuer = Some((r.clone(), issued.by));
+        self.refusal = Some(r);
+        true
+    }
+
+    /// The tool that issued the command the shown refusal came back from,
+    /// if it came back from one (C16): its panel is the only one that
+    /// shows it.
+    pub fn refusal_issuer(&self) -> Option<&'static str> {
+        match (&self.refusal, &self.refusal_issuer) {
+            (Some(r), Some((issued, by))) if r == issued => Some(by),
+            _ => None,
         }
     }
 
@@ -2337,8 +2369,8 @@ impl MeshFixerApp {
         if self.busy.is_some() {
             return;
         }
-        if let Some((inv, label)) = self.pending_invocation.pop_front() {
-            self.start_invocation(inv, label);
+        if let Some(issued) = self.pending_invocation.pop_front() {
+            self.start_invocation(issued);
         }
     }
 
@@ -2354,15 +2386,15 @@ impl MeshFixerApp {
         let CommandError::StaleInput { actual, .. } = e else {
             return false;
         };
-        let Some((inv, label)) = self.in_flight_invocation.take() else {
-            return false;
-        };
         if self.session.current().0 != *actual {
             // Not (or no longer) at the revision the failure named: don't
             // guess at a moving target.
             return false;
         }
-        self.start_invocation(inv, label);
+        let Some(issued) = self.in_flight_invocation.take() else {
+            return false;
+        };
+        self.start_invocation(issued);
         true
     }
 
@@ -2880,7 +2912,7 @@ impl MeshFixerApp {
                 {
                     return;
                 }
-                self.in_flight_invocation = None;
+                let issued = self.in_flight_invocation.take();
                 // The Transform tool's placement is the document's now (or
                 // wasn't committed): stop drawing it over the document's.
                 self.preview = None;
@@ -2940,46 +2972,14 @@ impl MeshFixerApp {
                         self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
-                    // The Shape tools' (and Parts'/Connectors') refusals
-                    // show in their panel, in plain words with the next
-                    // action. A thin adapter (ADR-0010, consolidation
-                    // plan C14): `Refused` renders the same (code,
-                    // message) shape `Failed` did before the registry
-                    // existed; routing it through the registry's own
-                    // RefusalCard, with its typed `next`, is C16's job.
-                    Err(CommandError::Operation(mf_operations::OpError::Failed {
-                        code,
-                        message,
-                    })) if crate::shape_tools::op_of(self.active_tool).is_some()
-                        || self.last_invocation_op.is_some() =>
-                    {
-                        self.status = Some(format!("Nothing was changed: {message}"));
-                        let op_id = crate::shape_tools::op_of(self.active_tool)
-                            .or(self.last_invocation_op)
-                            .expect("checked above");
-                        self.refusal = Some(crate::shape_tools::Refusal {
-                            op_id: op_id.to_owned(),
-                            code: code.to_owned(),
-                            message,
-                        });
-                    }
-                    Err(CommandError::Operation(mf_operations::OpError::Refused {
-                        code,
-                        args,
-                    })) if crate::shape_tools::op_of(self.active_tool).is_some()
-                        || self.last_invocation_op.is_some() =>
-                    {
-                        let message = mf_operations::refusal::render_message(&args);
-                        self.status = Some(format!("Nothing was changed: {message}"));
-                        let op_id = crate::shape_tools::op_of(self.active_tool)
-                            .or(self.last_invocation_op)
-                            .expect("checked above");
-                        self.refusal = Some(crate::shape_tools::Refusal {
-                            op_id: op_id.to_owned(),
-                            code: code.to_owned(),
-                            message,
-                        });
-                    }
+                    // Every operation's refusal goes to the panel of the
+                    // tool that issued the command (ADR-0010, C16), as a
+                    // RefusalCard: never the raw "code: message" in the
+                    // error bar.
+                    Err(CommandError::Operation(e))
+                        if issued
+                            .as_ref()
+                            .is_some_and(|issued| self.route_refusal(issued, &e)) => {}
                     Err(e) => {
                         self.error = Some(format!(
                             "The operation failed: {e}. Nothing was changed; try other settings \

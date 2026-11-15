@@ -20,8 +20,11 @@
 //!   record nothing placed.
 //!
 //! Fixed by: C04 (queue coalescing becomes a declared `coalesce:` spec
-//! field, and the Connector arm gets the same guard the Part arm has).
-//! Each Apply-refusal-routing test is also fixed by C04 per the plan.
+//! field, and the Connector arm gets the same guard the Part arm has)
+//! and C16 (the refusal-routing tests: a refusal goes to the tool that
+//! issued the invocation, recorded when it starts, and the per-tool
+//! `op_of`/`ops_of` tables are gone; `no_refusal_reaches_app_error`).
+//! The per-test docs below describe the pre-C16 failure.
 
 use std::time::{Duration, Instant};
 
@@ -286,7 +289,6 @@ fn rapid_strokes_are_all_recorded() {
 /// rs:778`, `refusal_card_for(app, ui, "mesh.hollow")`) has nothing to
 /// show.
 #[test]
-#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_hollow() {
     require_gpu!("refusal_reaches_issuing_panel_hollow");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
@@ -339,7 +341,6 @@ fn refusal_reaches_issuing_panel_hollow() {
 /// `ops_of` (`align_tool.rs:687`'s `refusal_card_for(app, ui, "object.
 /// align")` only ever sees a preview refusal, never Apply's).
 #[test]
-#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_align() {
     require_gpu!("refusal_reaches_issuing_panel_align");
     let mut h = opened(vec![
@@ -402,7 +403,6 @@ fn refusal_reaches_issuing_panel_align() {
 /// routing half: the refusal must at least reach `app.refusal`, not
 /// `app.error`.
 #[test]
-#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_sculpt() {
     require_gpu!("refusal_reaches_issuing_panel_sculpt");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
@@ -466,7 +466,6 @@ fn refusal_reaches_issuing_panel_sculpt() {
 /// undeclared (defaults to empty), so the refusal falls through to
 /// `app.error`; `repair_panel` has no refusal card at all.
 #[test]
-#[ignore = "red: C16"]
 fn refusal_reaches_issuing_panel_repair() {
     require_gpu!("refusal_reaches_issuing_panel_repair");
     let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
@@ -513,6 +512,77 @@ fn refusal_reaches_issuing_panel_repair() {
         h.state().error.is_none(),
         "a refusal that reaches its panel must not also set the generic app.error: {:?}",
         h.state().error
+    );
+}
+
+/// A declared refusal (`mesh.hollow`'s `invalid_parameter`) issued by
+/// Hollow lands after the user has already moved on to another tool
+/// (Sculpt): it still goes to Hollow, the tool that issued it (C16:
+/// recorded on the invocation, never looked up from the open tool), and
+/// never to the generic error bar, raw or otherwise.
+#[test]
+fn no_refusal_reaches_app_error() {
+    require_gpu!("no_refusal_reaches_app_error");
+    let mut h = opened(vec![("ball", ball(), at([0.0, 0.0, 10.0]))]);
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "hollow");
+    let id = h.state().active.expect("Hollow needs an active object");
+
+    h.state_mut().refusal = None;
+    h.state_mut().error = None;
+    h.state_mut().run_invocation(
+        Invocation {
+            op_id: "mesh.hollow".into(),
+            target: id,
+            selection: None,
+            operands: Vec::new(),
+            raw_params: std::collections::BTreeMap::from([
+                ("wall_thickness".to_owned(), "0".to_owned()),
+                ("inner_detail".to_owned(), "0".to_owned()),
+                ("drain_holes".to_owned(), "none".to_owned()),
+                ("hole_diameter".to_owned(), "3".to_owned()),
+                ("hole_count".to_owned(), "1".to_owned()),
+                ("hole_profile".to_owned(), "round".to_owned()),
+                ("open_through".to_owned(), "false".to_owned()),
+            ]),
+        },
+        "Hollow".into(),
+    );
+    // Before the result is handled (that happens in a frame), the user
+    // opens another tool.
+    h.state_mut().open_rail_tool("sculpt");
+    assert_eq!(h.state().active_tool, "sculpt");
+    wait_until(&mut h, "the refused Apply to land", |a| a.busy.is_none());
+    settle(&mut h);
+
+    let refusal = h.state().refusal.clone();
+    assert_eq!(
+        refusal.as_ref().map(|r| r.op_id.as_str()),
+        Some("mesh.hollow"),
+        "the refusal must reach app.refusal: {refusal:?} / {:?}",
+        h.state().error,
+    );
+    assert_eq!(
+        h.state().refusal_issuer(),
+        Some("hollow"),
+        "the refusal belongs to the tool that issued it, not the open one"
+    );
+    assert!(
+        h.state().error.is_none(),
+        "no refusal reaches the generic error bar: {:?}",
+        h.state().error
+    );
+    let r = refusal.unwrap();
+    assert!(
+        !r.message.contains(&r.code),
+        "the sentence is plain words, not the raw `code: message`: {}",
+        r.message
+    );
+    // Sculpt's panel doesn't show another tool's refusal.
+    assert!(
+        h.query_by_label("This can't be done yet").is_none(),
+        "the open tool's panel must not show Hollow's refusal"
     );
 }
 

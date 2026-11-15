@@ -959,6 +959,7 @@ fn radius_typed_field(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    crate::refusal_card::show_issued(app, ui);
     widgets::body(ui, t!("sculpt.help"));
 
     section(ui, &t!("sculpt.section.brush"));

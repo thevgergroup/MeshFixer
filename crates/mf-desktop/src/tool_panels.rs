@@ -1460,6 +1460,7 @@ fn transform_field(
 /// selected in the Browser or the view shows the same way, with its
 /// operation.
 fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    crate::refusal_card::show_issued(app, ui);
     let defect_target = app.current_inspected().is_some()
         || app.current_selection().is_some_and(|s| {
             app.current_analysis()
