@@ -707,14 +707,10 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
                 let key: Vec<(ObjectId, [f64; 12])> = app
                     .selected_objects()
                     .iter()
-                    .map(|&id| {
-                        let t = app
-                            .session
-                            .document()
-                            .object(id)
-                            .map(|o| o.transform)
-                            .unwrap_or_default();
-                        (id, t)
+                    .filter_map(|&id| {
+                        // A selected id with no object contributes nothing to the key.
+                        let t = app.session.document().object(id)?.transform;
+                        Some((id, t))
                     })
                     .collect();
                 app.split_flow.volume.placed_for = Some(key);
@@ -1334,14 +1330,10 @@ pub fn place_box(app: &mut MeshFixerApp, force: bool) {
     }
     let key: Vec<(ObjectId, [f64; 12])> = selected
         .iter()
-        .map(|&id| {
-            let t = app
-                .session
-                .document()
-                .object(id)
-                .map(|o| o.transform)
-                .unwrap_or_default();
-            (id, app.shown_transform(id).unwrap_or(t))
+        .filter_map(|&id| {
+            // A selected id with no object contributes nothing to the key.
+            let t = app.session.document().object(id)?.transform;
+            Some((id, app.shown_transform(id).unwrap_or(t)))
         })
         .collect();
     if !force && app.split_flow.volume.placed_for.as_deref() == Some(key.as_slice()) {
