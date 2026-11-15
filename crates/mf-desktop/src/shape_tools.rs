@@ -7,14 +7,13 @@
 //! refusals with the next action as a button, and the job pool's progress
 //! and Cancel (the status bar).
 
-use std::collections::BTreeMap;
-
 use eframe::egui::{self, RichText};
 use glam::DVec3;
-use mf_command::{Invocation, ObjectId};
+use mf_command::ObjectId;
 use mf_render::{Gizmo, GizmoMode, Handle, Snap};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
@@ -582,39 +581,17 @@ fn next_action(code: &str) -> Option<Next> {
     }
 }
 
-/// Run `op_id` on the active object with `params` (and `operands`), on
-/// the job pool (progress and Cancel in the status bar).
-fn run(
-    app: &mut MeshFixerApp,
-    op_id: &str,
-    label: String,
-    params: BTreeMap<String, String>,
-    operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
-) {
+/// Run `intent` on the active object, on the job pool (progress and
+/// Cancel in the status bar).
+fn run(app: &mut MeshFixerApp, intent: Intent<'_>, label: String) {
     let Some(target) = app.active else { return };
-    run_on(app, target, op_id, label, params, operands);
+    run_on(app, target, intent, label);
 }
 
 /// As [`run`], on `target` rather than the active object.
-fn run_on(
-    app: &mut MeshFixerApp,
-    target: ObjectId,
-    op_id: &str,
-    label: String,
-    params: BTreeMap<String, String>,
-    operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
-) {
+fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: String) {
     app.refusal = None;
-    app.run_invocation(
-        Invocation {
-            op_id: op_id.into(),
-            target,
-            selection: None,
-            operands,
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent.on(target), label);
 }
 
 // ---------------------------------------------------------------------
@@ -1249,21 +1226,15 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .clicked()
         && let Some((&first, others)) = solids.split_first()
     {
-        let operands = others
-            .iter()
-            .map(|&id| ("solids".to_owned(), id, None))
-            .chain(holes.iter().map(|&id| ("holes".to_owned(), id, None)))
-            .collect();
-        let params =
-            BTreeMap::from([("keep_holes".to_owned(), app.combine.keep_holes.to_string())]);
-        run_on(
-            app,
-            first,
-            "mesh.combine",
-            t!("combine.apply"),
-            params,
-            operands,
-        );
+        let intent = Intent::op("mesh.combine")
+            .operands(
+                others
+                    .iter()
+                    .map(|&id| ("solids".to_owned(), id, None))
+                    .chain(holes.iter().map(|&id| ("holes".to_owned(), id, None))),
+            )
+            .param("keep_holes", app.combine.keep_holes);
+        run_on(app, first, intent, t!("combine.apply"));
     }
     ui.add_space(theme::SPACE_S);
     egui::CollapsingHeader::new(t!("combine.more"))
@@ -1281,15 +1252,10 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .inner
                 .clicked()
             {
-                let params = BTreeMap::from([("operation".to_owned(), "intersect".to_owned())]);
-                run_on(
-                    app,
-                    selected[0],
-                    "mesh.boolean",
-                    t!("combine.intersect"),
-                    params,
-                    vec![("tool".to_owned(), selected[1], None)],
-                );
+                let intent = Intent::op("mesh.boolean")
+                    .operand("tool", selected[1], None)
+                    .param("operation", "intersect");
+                run_on(app, selected[0], intent, t!("combine.intersect"));
             }
             widgets::caption(
                 ui,
@@ -1377,26 +1343,17 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
-        // `cell_size` and `offset` are `unit: mm` params (D20): `cell`
-        // and `app.solid.offset` are document units (the panel's own
-        // slider and field, labelled in `units`), so cross to mm here,
-        // once, or `Session::prepare`'s single mm-to-document
-        // conversion runs on an already-document-units number (the
-        // owner's bug: a 0.001 m cell size reaching `prepare` as
-        // 0.000001 on a metre document).
-        let mm = crate::transform_tool::mm_per(app.session.document().units());
-        let params = BTreeMap::from([
-            ("cell_size".to_owned(), (cell * mm).to_string()),
-            ("offset".to_owned(), (app.solid.offset * mm).to_string()),
-            ("preserve_sharp".to_owned(), (!app.solid.smooth).to_string()),
-        ]);
-        run(
-            app,
-            "mesh.make_solid",
-            t!("solid.apply"),
-            params,
-            Vec::new(),
-        );
+        // `cell` and `app.solid.offset` are document units (the panel's
+        // own slider and field), handed over as lengths in that unit:
+        // `Session::prepare` alone converts them (the owner's bug: a
+        // 0.001 m cell size once reached `prepare` as 0.000001 on a
+        // metre document, converted twice).
+        let doc = app.session.document().units();
+        let intent = Intent::op("mesh.make_solid")
+            .set("cell_size", mf_units::Length::new(cell, doc))
+            .set("offset", mf_units::Length::new(app.solid.offset, doc))
+            .param("preserve_sharp", !app.solid.smooth);
+        run(app, intent, t!("solid.apply"));
     }
 }
 

@@ -32,8 +32,10 @@ use eframe::egui;
 use glam::DMat4;
 use mf_command::ObjectId;
 use mf_parts::{Compensation, FitCheck, FitClass, FitClasses, MachineProfile, MachineProfiles};
+use mf_units::{Length, Unit};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, RegisterError, Shell, Tool as T};
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
@@ -169,25 +171,9 @@ fn connector_library(app: &MeshFixerApp) -> mf_parts::Library {
     mf_parts::Library::load(dir.as_deref(), &ctx).0
 }
 
-fn run_on(
-    app: &mut MeshFixerApp,
-    target: ObjectId,
-    op_id: &str,
-    label: String,
-    params: BTreeMap<String, String>,
-    operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
-) {
+fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: String) {
     app.refusal = None;
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: op_id.into(),
-            target,
-            selection: None,
-            operands,
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent.on(target), label);
 }
 
 /// `id`'s connector parameters, fully resolved and validated against
@@ -303,29 +289,11 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
     // `object.add_shape` itself scales it by the document's unit
     // (consolidation plan C12), so the placement transform goes through
     // unscaled, never doubled up.
-    let params = BTreeMap::from([
-        (
-            "shapes".to_owned(),
-            mf_operations::shapes::shapes_param(&shapes),
-        ),
-        (
-            "transform".to_owned(),
-            transform
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
-        ("group".to_owned(), group.clone()),
-    ]);
-    run_on(
-        app,
-        scan,
-        "object.add_shape",
-        t!("connectors.apply", name = name),
-        params,
-        Vec::new(),
-    );
+    let intent = Intent::op("object.add_shape")
+        .param("shapes", mf_operations::shapes::shapes_param(&shapes))
+        .param("transform", crate::intent::affine_text(&transform))
+        .param("group", &group);
+    run_on(app, scan, intent, t!("connectors.apply", name = name));
     if app.busy.is_some() {
         app.pending_open_transform = Some(crate::app::PendingPlacement::Connector {
             connector_id: id.to_owned(),
@@ -439,22 +407,14 @@ pub(crate) fn attach_group(
     if members.is_empty() {
         return;
     }
-    let mut operands = vec![("side_b".to_owned(), b, None)];
-    operands.extend(members.iter().map(|&m| ("members".to_owned(), m, None)));
-    run_on(
-        app,
-        a,
-        "object.attach",
-        label,
-        BTreeMap::from([
-            (
-                "members".to_owned(),
-                mf_operations::shapes::attach_param(&roles),
-            ),
-            ("gap".to_owned(), gap.max(0.0).to_string()),
-        ]),
-        operands,
-    );
+    // `gap` is the generator's own moving gap: a physical size in mm
+    // (generators are mm-internal, D16), said so on the `Intent`.
+    let intent = Intent::op("object.attach")
+        .operand("side_b", b, None)
+        .operands(members.iter().map(|&m| ("members".to_owned(), m, None)))
+        .param("members", mf_operations::shapes::attach_param(&roles))
+        .set("gap", Length::new(gap.max(0.0), Unit::Millimeter));
+    run_on(app, a, intent, label);
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {

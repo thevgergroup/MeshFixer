@@ -10,7 +10,6 @@
 //! the parts left solid because they're thinner than twice the wall
 //! outlined in `THIN_WALL`. Placed drain holes are clicked on the surface.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,6 +21,7 @@ use mf_operations::hollow;
 use mf_runtime::{Cancelled, RunContext};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
 use crate::tools::LegendRow;
 use crate::viewport::{ToolPointer, ViewLayer};
@@ -1027,27 +1027,22 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .iter()
             .map(|p| format!("{},{},{},{},0", p.face.0, p.bary[0], p.bary[1], p.bary[2]))
             .collect();
-        // `wall_thickness`, `inner_detail` and `hole_diameter` are
-        // `unit: mm` params (D20): `wall`, `s.detail` and `s.diameter`
-        // are document units (the panel's own sliders and fields), so
-        // cross to mm here, once, or `Session::prepare`'s single
-        // mm-to-document conversion runs on an already-document-units
-        // number.
-        let mm = mm_per(app);
-        let mut params = BTreeMap::from([
-            ("wall_thickness".to_owned(), (wall * mm).to_string()),
-            (
-                "inner_detail".to_owned(),
-                (s.detail.unwrap_or(0.0) * mm).to_string(),
-            ),
-            ("drain_holes".to_owned(), s.drain.clone()),
-            ("hole_diameter".to_owned(), (s.diameter * mm).to_string()),
-            ("hole_count".to_owned(), s.count.to_string()),
-            ("hole_profile".to_owned(), s.profile.clone()),
-            ("open_through".to_owned(), s.open_through.to_string()),
-        ]);
+        // `wall`, `s.detail` and `s.diameter` are document units (the
+        // panel's own sliders and fields), handed over as lengths in that
+        // unit: `Session::prepare` alone converts them.
+        let doc = app.session.document().units();
+        let len = |v: f64| mf_units::Length::new(v, doc);
+        let mut intent = Intent::op("mesh.hollow")
+            .on(id)
+            .set("wall_thickness", len(wall))
+            .set("inner_detail", len(s.detail.unwrap_or(0.0)))
+            .param("drain_holes", &s.drain)
+            .set("hole_diameter", len(s.diameter))
+            .param("hole_count", s.count)
+            .param("hole_profile", &s.profile)
+            .param("open_through", s.open_through);
         if s.drain == "placed" {
-            params.insert("hole_points".to_owned(), points.join(";"));
+            intent = intent.param("hole_points", points.join(";"));
         }
         if s.open_through
             && let Some(r) = &s.picked_region
@@ -1058,19 +1053,10 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .map(|f| f.0.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            params.insert("open_through_faces".to_owned(), faces);
+            intent = intent.param("open_through_faces", faces);
         }
         app.refusal = None;
-        app.run_invocation(
-            mf_command::Invocation {
-                op_id: "mesh.hollow".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: params,
-            },
-            t!("hollow.apply"),
-        );
+        app.run_intent(intent, t!("hollow.apply"));
     }
 }
 

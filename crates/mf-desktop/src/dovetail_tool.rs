@@ -30,6 +30,7 @@ use mf_parts::GeneratorRecord;
 use mf_parts::connectors::dovetail_slide::{exits_piece, extended_length};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
 
@@ -221,26 +222,12 @@ pub fn place_dovetail(
     };
     let group = crate::connector_tool::new_group_id(app, DOVETAIL);
     app.refusal = None;
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: "object.add_shape".into(),
-            target: a,
-            selection: None,
-            operands: Vec::new(),
-            raw_params: BTreeMap::from([
-                (
-                    "shapes".to_owned(),
-                    mf_operations::shapes::shapes_param(&members),
-                ),
-                (
-                    "transform".to_owned(),
-                    frame.map(|v| v.to_string()).join(","),
-                ),
-                ("group".to_owned(), group),
-            ]),
-        },
-        t!("dovetail.place"),
-    );
+    let intent = Intent::op("object.add_shape")
+        .on(a)
+        .param("shapes", mf_operations::shapes::shapes_param(&members))
+        .param("transform", crate::intent::affine_text(&frame))
+        .param("group", group);
+    app.run_intent(intent, t!("dovetail.place"));
 }
 
 fn refuse(app: &mut MeshFixerApp, code: &str, message: String) {

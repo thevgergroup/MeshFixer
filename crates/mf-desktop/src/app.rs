@@ -1547,20 +1547,11 @@ impl MeshFixerApp {
         }
         let mut params = self.params_for(&tool.op_id).clone();
         params.extend(tool.fixed.clone());
-        let raw_params = params
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect();
-        self.run_invocation(
-            Invocation {
-                operands: Vec::new(),
-                selection: tool.selection.clone(),
-                op_id: tool.op_id.clone(),
-                target,
-                raw_params,
-            },
-            tool.label.clone(),
-        );
+        let intent = crate::intent::Intent::op(&tool.op_id)
+            .on(target)
+            .selection(tool.selection.clone())
+            .values(&params);
+        self.run_intent(intent, tool.label.clone());
     }
 
     /// The history breadcrumb: the current path from the first import, then
@@ -2747,14 +2738,8 @@ impl MeshFixerApp {
         if self.busy.is_some() || self.is_locked(id) {
             return;
         }
-        self.run_invocation(
-            Invocation {
-                op_id: "object.delete".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: BTreeMap::new(),
-            },
+        self.run_intent(
+            crate::intent::Intent::op("object.delete").on(id),
             "Delete object".into(),
         );
     }
@@ -2775,14 +2760,10 @@ impl MeshFixerApp {
         {
             return;
         }
-        self.run_invocation(
-            Invocation {
-                op_id: "object.rename".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: BTreeMap::from([("name".to_owned(), trimmed.to_owned())]),
-            },
+        self.run_intent(
+            crate::intent::Intent::op("object.rename")
+                .on(id)
+                .param("name", trimmed),
             "Rename object".into(),
         );
     }
@@ -5559,20 +5540,14 @@ impl MeshFixerApp {
         let ids: Vec<ObjectId> = members.iter().map(|(m, _)| *m).collect();
         self.preview = Some((object, transform));
         self.pending_status = Some(status.to_owned());
-        self.run_invocation(
-            Invocation {
-                op_id: "object.move_group".into(),
-                target: ids[0],
-                selection: None,
-                operands: ids[1..]
-                    .iter()
-                    .map(|&o| ("target".to_owned(), o, None))
-                    .collect(),
-                raw_params: BTreeMap::from([(
-                    "transforms".to_owned(),
+        self.run_intent(
+            crate::intent::Intent::op("object.move_group")
+                .on(ids[0])
+                .operands(ids[1..].iter().map(|&o| ("target".to_owned(), o, None)))
+                .set_doc(
+                    "transforms",
                     mf_operations::shapes::transforms_param(&transforms),
-                )]),
-            },
+                ),
             "Move group".into(),
         );
         if self.busy.is_none() {
@@ -7265,21 +7240,16 @@ mod tests {
         let id = ids[0];
 
         let cut = session
-            .execute(mf_command::Invocation {
-                op_id: "mesh.split_plane".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: [
-                    ("plane_point", "0,0,2.0"),
-                    ("plane_normal", "0,0,1"),
-                    ("keep", "above"),
-                    ("cap", "true"),
-                ]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            })
+            .execute(
+                crate::intent::Intent::op("mesh.split_plane")
+                    .on(id)
+                    .set_point("plane_point", [0.0, 0.0, 2.0], mf_units::Unit::Millimeter)
+                    .param("plane_normal", "0,0,1")
+                    .param("keep", "above")
+                    .param("cap", true)
+                    .build()
+                    .unwrap(),
+            )
             .unwrap();
         let mf_command::CommitOutcome::NewRevision { report } = cut else {
             panic!("expected a new revision");
@@ -7298,21 +7268,22 @@ mod tests {
         let faces_param = cap_faces.join(",");
 
         session
-            .execute(mf_command::Invocation {
-                op_id: "mesh.hollow".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: [
-                    ("wall_thickness", "2"),
-                    ("inner_detail", "0.5"),
-                    ("open_through", "true"),
-                    ("open_through_faces", faces_param.as_str()),
-                ]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            })
+            .execute(
+                crate::intent::Intent::op("mesh.hollow")
+                    .on(id)
+                    .set(
+                        "wall_thickness",
+                        mf_units::Length::new(2.0, mf_units::Unit::Millimeter),
+                    )
+                    .set(
+                        "inner_detail",
+                        mf_units::Length::new(0.5, mf_units::Unit::Millimeter),
+                    )
+                    .param("open_through", true)
+                    .param("open_through_faces", &faces_param)
+                    .build()
+                    .unwrap(),
+            )
             .unwrap();
 
         let node = session.node(session.current()).unwrap();
