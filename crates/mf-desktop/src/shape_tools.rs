@@ -1076,14 +1076,21 @@ fn region_and_bound_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, units: &
             let Some(&id) = selected.first() else {
                 return;
             };
+            // `r.area_mm2` is already a document-units² value (despite
+            // its name: `split_flow::compute_region_preview` computes
+            // it from the object-space cut outline, in whatever unit
+            // the document is in), so it goes through
+            // `mf_units::format_area` and the document's own unit,
+            // never a fixed-decimal `{:.0}` next to the unit symbol
+            // (consolidation plan C11: "Areas show '0 m²'" — a small
+            // region's area rounded away before the unit was even
+            // picked).
+            let doc_unit = app.session.document().units();
             for r in &regions {
                 let mut ticked = r.ticked;
                 let label = crate::i18n::tr(
                     "split.region.area",
-                    &[
-                        ("area", format!("{:.0}", r.area_mm2)),
-                        ("unit", units.to_owned()),
-                    ],
+                    &[("area", mf_units::format_area(r.area_mm2, doc_unit))],
                 );
                 if ui.checkbox(&mut ticked, label).changed() {
                     let set = app.split.unticked_regions.entry(id).or_default();

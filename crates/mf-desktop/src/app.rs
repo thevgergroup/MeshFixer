@@ -5009,6 +5009,7 @@ impl MeshFixerApp {
             allowance: key.allowance,
             count: key.count,
             min_wall: key.min_wall,
+            unit: self.session.document().units(),
         });
     }
 
@@ -6585,7 +6586,10 @@ fn catalogue_history_label(
             // allow-swallow: a label only: an unreadable wall value falls back to the spec default
             let wall = rec.params.get_float("wall_thickness").unwrap_or(2.0);
             let open = rec.params.get_bool("open_through").unwrap_or(false);
-            let wall_text = format!("{} mm", crate::defects::measure(wall));
+            // `wall` is already a document-unit value (ADR-0006 rule 2):
+            // on a metres document the spec's own "mm" was wrongly taken
+            // as the shown unit (consolidation plan C11).
+            let wall_text = mf_units::format_length(wall, node.document.units());
             if open {
                 crate::t!(
                     "history.label.mesh.hollow.open",
@@ -6755,13 +6759,19 @@ fn plural_s(n: usize) -> &'static str {
 /// connector list) are left out: they'd only repeat it.
 fn history_details(node: &mf_command::RevisionNode) -> String {
     node.record.as_ref().map_or_else(String::new, |rec| {
-        history_details_of(&rec.op_id, &rec.params)
+        history_details_of(&rec.op_id, &rec.params, node.document.units())
     })
 }
 
 /// [`history_details`], from an op id and its parameters directly (so it
-/// can be tested without a whole revision).
-fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
+/// can be tested without a whole revision). `unit` is the *document's*
+/// unit (consolidation plan C11): every recorded length parameter is
+/// already a document-unit value (`Session::prepare`'s one conversion
+/// boundary, ADR-0006 rule 2), never the spec's own declared unit
+/// (almost always mm, D16) — labelling a 0.002 doc-unit value "mm" on a
+/// metres document was the owner's exact bug ("History Details shows
+/// '0.00200 mm' for a 2 mm wall on a metres doc").
+fn history_details_of(op_id: &str, params: &mf_spec::Params, unit: mf_io::threemf::Unit) -> String {
     let Some(spec) = mf_spec::builtin::get(op_id) else {
         return String::new();
     };
@@ -6798,7 +6808,7 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
                 format!(
                     "{}: {}",
                     param_label(op_id, &p.name),
-                    summarize_value(value, p.unit.symbol())
+                    summarize_value(value, p.unit, unit)
                 )
             })
         })
@@ -6811,22 +6821,35 @@ fn history_details_of(op_id: &str, params: &mf_spec::Params) -> String {
 /// Details section (I5, owner 2026-11-13: a raw dump — a `faces` list of
 /// hundreds of ids, an `affine`'s 12 numbers, a bare float with no unit —
 /// is not for people). Never longer than one line.
-fn summarize_value(value: &ParamValue, unit: Option<&str>) -> String {
+///
+/// `value` is always already in *document* units when `param_unit` is
+/// [`mf_spec::ParamUnit::Length`] (`Session::prepare`'s one conversion
+/// boundary, ADR-0006 rule 2: a recorded length parameter is never left
+/// in the spec's own declared unit, almost always mm, D16). `doc_unit`
+/// is the document's unit, the only one ever shown; it goes through
+/// [`mf_units::format_length`] rather than a literal `"mm"` suffix, the
+/// owner's exact bug (consolidation plan C11: "History Details shows
+/// '0.00200 mm' for a 2 mm wall on a metres doc").
+fn summarize_value(
+    value: &ParamValue,
+    param_unit: mf_spec::ParamUnit,
+    doc_unit: mf_io::threemf::Unit,
+) -> String {
     match value {
         ParamValue::Faces(l) => crate::defects::count(l.faces.len(), "face"),
         ParamValue::Samples(s) => crate::defects::count(s.len(), "dab"),
-        ParamValue::Affine(m) => summarize_affine(m),
-        ParamValue::Float(f) if unit == Some("mm") => {
-            format!("{} mm", crate::defects::measure(*f))
+        ParamValue::Affine(m) => summarize_affine(m, doc_unit),
+        ParamValue::Float(f) if matches!(param_unit, mf_spec::ParamUnit::Length(_)) => {
+            mf_units::format_length(*f, doc_unit)
         }
-        ParamValue::Float(f) if unit == Some("%") => {
+        ParamValue::Float(f) if matches!(param_unit, mf_spec::ParamUnit::Percent) => {
             format!("{}%", crate::defects::measure(*f))
         }
-        ParamValue::Vec3(v) if unit == Some("mm") => format!(
-            "{}, {}, {} mm",
-            crate::defects::measure(v[0]),
-            crate::defects::measure(v[1]),
-            crate::defects::measure(v[2])
+        ParamValue::Vec3(v) if matches!(param_unit, mf_spec::ParamUnit::Length(_)) => format!(
+            "{}, {}, {}",
+            mf_units::format_length(v[0], doc_unit),
+            mf_units::format_length(v[1], doc_unit),
+            mf_units::format_length(v[2], doc_unit)
         ),
         other => other.to_string(),
     }
@@ -6836,13 +6859,16 @@ fn summarize_value(value: &ParamValue, unit: Option<&str>) -> String {
 /// each left out when it's the identity (a mesh.combine's default
 /// placement, say "moved 10, 0, 0 mm" with no rotation or scale said).
 /// A sheared transform (no clean rotate/scale split) just says so.
-fn summarize_affine(m: &[f64; 12]) -> String {
+/// `doc_unit` is the document's unit: the translation is a recorded,
+/// already-doc-unit value, shown through [`mf_units::format_length`]
+/// rather than a literal `"mm"` (consolidation plan C11).
+fn summarize_affine(m: &[f64; 12], doc_unit: mf_io::threemf::Unit) -> String {
     let fmt3 = |v: glam::DVec3| {
         format!(
             "{}, {}, {}",
-            crate::defects::measure(v.x),
-            crate::defects::measure(v.y),
-            crate::defects::measure(v.z)
+            mf_units::significant_figures(v.x, 3),
+            mf_units::significant_figures(v.y, 3),
+            mf_units::significant_figures(v.z, 3)
         )
     };
     match mf_render::decompose(m) {
@@ -6853,7 +6879,7 @@ fn summarize_affine(m: &[f64; 12]) -> String {
         } => {
             let mut parts = Vec::new();
             if translate.length() > 1e-9 {
-                parts.push(format!("moved {} mm", fmt3(translate)));
+                parts.push(format!("moved {} {}", fmt3(translate), doc_unit.symbol()));
             }
             if rotate_deg_xyz.length() > 1e-9 {
                 parts.push(format!("rotated {}°", fmt3(rotate_deg_xyz)));
@@ -7059,14 +7085,22 @@ mod tests {
             .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
             .collect();
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert_eq!(details, "", "every parameter is at its default: {details}");
 
         let mut raw = raw;
         raw.insert("hole_diameter".into(), "7.5".into());
         raw.insert("cut_gap".into(), "0.4".into());
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert!(
             !details.contains("Hole diameter"),
             "pegs is none: hole_diameter doesn't apply: {details}"
@@ -7087,7 +7121,11 @@ mod tests {
         raw.insert("pegs".into(), "dowels".into());
         raw.insert("hole_diameter".into(), "7.5".into());
         let params = spec.validate(&raw).unwrap();
-        let details = history_details_of("mesh.split_plane", &params);
+        let details = history_details_of(
+            "mesh.split_plane",
+            &params,
+            mf_io::threemf::Unit::Millimeter,
+        );
         assert!(details.contains("Hole diameter: 7.5"), "{details}");
         assert!(details.contains("Pegs: dowels"), "{details}");
     }
@@ -7106,7 +7144,14 @@ mod tests {
         let mut raw = raw;
         raw.insert("transform".into(), "1,0,0,0,1,0,0,0,1,12,0,0".into());
         let params = spec.validate(&raw).unwrap();
-        assert_eq!(history_details_of("object.set_transform", &params), "");
+        assert_eq!(
+            history_details_of(
+                "object.set_transform",
+                &params,
+                mf_io::threemf::Unit::Millimeter
+            ),
+            ""
+        );
 
         let spec = mf_spec::builtin::get("split.place_connectors").unwrap();
         let raw: BTreeMap<String, String> = spec
@@ -7115,7 +7160,14 @@ mod tests {
             .map(|p| (p.name.clone(), p.kind.default_value().to_string()))
             .collect();
         let params = spec.validate(&raw).unwrap();
-        assert!(!history_details_of("split.place_connectors", &params).contains("connectors"));
+        assert!(
+            !history_details_of(
+                "split.place_connectors",
+                &params,
+                mf_io::threemf::Unit::Millimeter
+            )
+            .contains("connectors")
+        );
     }
 
     /// Every registered operation spec's `history_label` resolves in the

@@ -1071,7 +1071,11 @@ static CATALOGUE: &[(&str, &str)] = &[
         "split.refuse_open",
         "The model has holes; cutting needs a closed model. Fill the holes in Repair, then split.",
     ),
-    ("split.region.area", "{area} {unit}²"),
+    // `{area}` already carries its own unit and `²` (`mf_units::format_area`,
+    // consolidation plan C11: this used to be a bare `{:.0}` of a
+    // document-units² value next to the unit's *symbol*, so a small
+    // region on a metres document rounded to "0 m²").
+    ("split.region.area", "{area}"),
     ("split.regions", "Cross-section regions"),
     (
         "split.regions_help",
