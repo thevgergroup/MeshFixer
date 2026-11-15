@@ -2791,6 +2791,7 @@ dependencies = [
  "mf-spec",
  "mf-units",
  "rfd",
+ "serde",
  "serde_json",
  "sysinfo",
  "tempfile",

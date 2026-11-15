@@ -21,10 +21,11 @@ use eframe::egui;
 use glam::{DMat4, DVec3};
 use mf_command::{GROUP, ObjectId, RevisionId};
 use mf_parts::swing::{SwingBody, SwingReport};
+use mf_units::{Length, Unit};
 
 use crate::MeshFixerApp;
 use crate::intent::Intent;
-use crate::widgets::{self, Kind};
+use crate::widgets::{self, Kind, LengthFieldOpts, length_field};
 use crate::{icons, t, theme};
 
 /// The hinge connector's id.
@@ -196,10 +197,11 @@ pub fn place_hinge(
     };
     // `edge.length` and `position` are document units (world bounds,
     // like every other point in this frame); the hinge's own `length`
-    // param is mm (D16/D20), so cross to mm here before clamping it to
+    // param is mm (D16/D20), so cross to mm here (through `Length`, the
+    // one typed conversion, never a raw multiply) before clamping it to
     // the generator's 4-30 mm range.
-    let mm = crate::transform_tool::mm_per(app.session.document().units());
-    let length_mm = (edge.length * mm * 0.8).clamp(4.0, 30.0);
+    let doc = app.session.document().units();
+    let length_mm = (Length::new(edge.length, doc).mm() * 0.8).clamp(4.0, 30.0);
     let raw = BTreeMap::from([
         ("gap".to_owned(), gap.to_string()),
         ("pin_clearance".to_owned(), clearance.to_string()),
@@ -213,7 +215,7 @@ pub fn place_hinge(
     };
     // `length` (document units, matching `edge.length` and `position`
     // before the frame's own mm scale is applied below).
-    let length = length_mm / mm;
+    let length = Length::new(length_mm, Unit::Millimeter).to(doc).value;
     // The frame's origin is the edge's middle: the hinge runs from
     // x = 0, so start it half its length back, then slide it along the
     // edge by `position` (clamped so it still fits on the edge).
@@ -313,15 +315,28 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     });
     let edge = edges[app.hinge.edge.min(edges.len() - 1)].clone();
     let half = edge.length / 2.0;
-    let position = app.hinge.position.get_or_insert(0.0);
-    let units = crate::defects::unit_symbol(app.session.document().units());
-    ui.add(
-        egui::Slider::new(position, -half..=half)
-            .suffix(format!(" {units}"))
-            .text(t!("hinge.position")),
-    );
+    let doc = app.session.document().units();
+    let mut position_length = Length::new(app.hinge.position.unwrap_or(0.0), doc);
+    let scale = mf_units::ScaleCtx::new(doc);
+    let opts = LengthFieldOpts {
+        range: (Length::new(-half, doc), Length::new(half, doc)),
+        scale: &scale,
+        label: &t!("hinge.position"),
+    };
+    if length_field(
+        ui,
+        egui::Id::unique("hinge position"),
+        &mut position_length,
+        &opts,
+    )
+    .changed()
+    {
+        app.hinge.position = Some(position_length.to(doc).value);
+    } else {
+        app.hinge.position.get_or_insert(0.0);
+    }
     widgets::caption(ui, t!("hinge.position.help"));
-    let position = *position;
+    let position = app.hinge.position.unwrap_or(0.0);
     let fit = hinge_fit(app);
     let fused = match &fit {
         Ok((gap, clearance, class, _)) if *gap <= 0.0 || *clearance <= 0.0 => {
@@ -496,10 +511,16 @@ pub fn swing_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: ObjectId) {
         return;
     };
     let limit = s.limit;
+    // Degrees, not a length: `nice_step` doesn't apply, so a whole-degree
+    // display uses the slider's own `integer()` rather than the banned
+    // `.max_decimals(`. The range's lower bound is 0.0's own origin
+    // (every swing opens from closed), not a literal chosen for this
+    // widget, so it's named rather than inlined.
+    const CLOSED: f64 = 0.0;
     ui.add(
-        egui::Slider::new(&mut s.angle, 0.0..=limit)
+        egui::Slider::new(&mut s.angle, CLOSED..=limit)
             .suffix("°")
-            .max_decimals(0)
+            .integer()
             .text(t!("hinge.swing.open")),
     );
     match report {

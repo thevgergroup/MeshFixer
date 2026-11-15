@@ -688,7 +688,22 @@ static CATALOGUE: &[(&str, &str)] = &[
     ),
     ("inspect.section.counts", "Mesh"),
     ("inspect.section.print", "Printability"),
+    ("inspect.section.units", "Units"),
     ("inspect.section.warnings", "Import warnings"),
+    (
+        "inspect.units.help",
+        "The file's numbers were read as {unit}. If that's wrong, say what they were actually in:",
+    ),
+    ("inspect.units.reinterpret", "Reinterpret"),
+    (
+        "inspect.units.reinterpret.help",
+        "Same numbers, new unit: the model's physical size changes, nothing else does.",
+    ),
+    ("inspect.units.scale", "Scale"),
+    (
+        "inspect.units.scale.help",
+        "Same unit, new physical size: every object is scaled by the ratio between the two units.",
+    ),
     ("inspector.next.repair", "Open Repair"),
     ("inspector.next.transform", "Open Transform"),
     (
@@ -744,7 +759,7 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("panel.back", "Back"),
     ("panel.close", "Close {tool} (Esc)"),
     ("parts.apply", "Add \"{name}\""),
-    ("parts.blend_width_help", "Blend width {unit}"),
+    ("parts.blend_width_help", "Blend width"),
     ("parts.cancel", "Cancel"),
     ("parts.click_help", "Click a part to add it to the model"),
     ("parts.delete", "Delete"),

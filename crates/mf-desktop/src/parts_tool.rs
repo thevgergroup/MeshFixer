@@ -33,11 +33,12 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use mf_command::ObjectId;
 use mf_parts::{Attach, Library, PartKind, SurfaceFrame};
+use mf_units::{Length, Unit};
 
 use crate::MeshFixerApp;
 use crate::intent::Intent;
 use crate::shell::{Availability, Category, RegisterError, Shell, Tool as T};
-use crate::widgets::{self, Kind};
+use crate::widgets::{self, Kind, LengthFieldOpts, length_slider};
 use crate::{icons, t, theme};
 
 pub const PARTS: &str = "parts";
@@ -65,7 +66,7 @@ pub struct PartsState {
     /// offer to act between it and the object it landed on).
     pub placed: Option<PlacedPart>,
     pub join: JoinMode,
-    pub blend_width: f64,
+    pub blend_width: Length,
 }
 
 impl Default for PartsState {
@@ -77,7 +78,7 @@ impl Default for PartsState {
             thumbs: Default::default(),
             placed: None,
             join: JoinMode::KeepSeparate,
-            blend_width: 2.0,
+            blend_width: Length::new(2.0, Unit::Millimeter),
         }
     }
 }
@@ -801,7 +802,6 @@ fn dialog(app: &mut MeshFixerApp, ctx: &egui::Context) {
 }
 
 fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
-    let units = crate::defects::unit_symbol(app.session.document().units());
     widgets::section(ui, &t!("parts.section.join"));
     let open_stamp = app
         .session
@@ -838,12 +838,21 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
         app.parts.join = modes[i].0;
     }
     if app.parts.join == JoinMode::Blend {
-        ui.add(
-            egui::Slider::new(&mut app.parts.blend_width, 0.0..=20.0)
-                .suffix(format!(" {units}"))
-                .max_decimals(2),
+        let scale = app.scale_ctx();
+        let opts = LengthFieldOpts {
+            range: (
+                Length::new(0.0, Unit::Millimeter),
+                Length::new(20.0, Unit::Millimeter),
+            ),
+            scale: &scale,
+            label: &t!("parts.blend_width_help"),
+        };
+        length_slider(
+            ui,
+            egui::Id::unique("parts blend width"),
+            &mut app.parts.blend_width,
+            &opts,
         );
-        widgets::caption(ui, t!("parts.blend_width_help", unit = units.to_owned()));
     }
     ui.add_space(theme::SPACE_S);
     let can = app.busy.is_none() && app.parts.join != JoinMode::KeepSeparate;
@@ -888,17 +897,13 @@ pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, lab
             run_on(app, placed.scan, intent, label);
         }
         JoinMode::Blend => {
-            // `app.parts.blend_width` is document units (the panel's own
-            // slider), handed over as a length in that unit:
-            // `Session::prepare` alone converts it.
-            let doc = app.session.document().units();
+            // `app.parts.blend_width` is a typed `Length` exactly as
+            // typed in the field (ADR-0006 rule 2): `Session::prepare`
+            // alone converts it to document units.
             let intent = Intent::op("mesh.boolean")
                 .operand("tool", placed.part, None)
                 .param("operation", "union")
-                .set(
-                    "blend_width",
-                    mf_units::Length::new(app.parts.blend_width, doc),
-                );
+                .set("blend_width", app.parts.blend_width);
             run_on(app, placed.scan, intent, label);
         }
     }

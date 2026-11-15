@@ -8,6 +8,7 @@ use eframe::egui::{self, RichText};
 use mf_command::ObjectId;
 use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
+use mf_units::Unit;
 
 use crate::app::{MeshFixerApp, NarrowFocus, Tool, TreeItem};
 use crate::defects::{
@@ -2151,6 +2152,7 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     for (label, term, value) in rows {
         stat_row(ui, label, term, &value);
     }
+    inspect_units_section(app, ui);
     if !app.warnings.is_empty() {
         section(ui, &t!("inspect.section.warnings"));
         egui::CollapsingHeader::new(format!(
@@ -2164,6 +2166,120 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             }
         });
     }
+}
+
+/// Inspect's Units control (import-units-brief.md, "Fix it afterwards"):
+/// a unit picker and the two document-wide actions, each the recorded
+/// command of the same name (consolidation plan C07) and so undoable
+/// like any other command.
+///
+/// - **Reinterpret** (`document.reinterpret_units`): the numbers were
+///   in the picked unit, not the document's own; only the document's
+///   unit label changes, so the same coordinates now mean a different
+///   physical size. Needs at least one object (any one does: the op
+///   only reads the document's own unit).
+/// - **Scale** (`document.scale_units`): the document keeps its own
+///   unit, but every object's transform is scaled by the ratio between
+///   the picked unit and the document's, so the physical size becomes
+///   what it would have been had the numbers actually been in the
+///   picked unit. Targets every object (`unit: document` reads this as
+///   `many: true`).
+fn inspect_units_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(first) = app.session.document().objects().first().map(|o| o.id) else {
+        return;
+    };
+    let doc_unit = app.session.document().units();
+    let picked = app.inspect_units.unwrap_or(doc_unit);
+    section(ui, &t!("inspect.section.units"));
+    widgets::caption(
+        ui,
+        t!(
+            "inspect.units.help",
+            unit = crate::defects::unit_symbol(doc_unit)
+        ),
+    );
+    egui::ComboBox::from_id_salt("inspect units picker")
+        .selected_text(crate::import_dialog::unit_name(picked))
+        .show_ui(ui, |ui| {
+            for unit in Unit::ALL {
+                if ui
+                    .selectable_label(picked == unit, crate::import_dialog::unit_name(unit))
+                    .clicked()
+                {
+                    app.inspect_units = Some(unit);
+                }
+            }
+        });
+    let idle = app.busy.is_none();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled_ui(idle, |ui| {
+                widgets::button(
+                    ui,
+                    Kind::Secondary,
+                    None,
+                    &t!("inspect.units.reinterpret"),
+                    0.0,
+                )
+            })
+            .inner
+            .on_hover_text(t!("inspect.units.reinterpret.help"))
+            .clicked()
+        {
+            reinterpret_units(app, first, picked);
+        }
+        if ui
+            .add_enabled_ui(idle, |ui| {
+                widgets::button(ui, Kind::Secondary, None, &t!("inspect.units.scale"), 0.0)
+            })
+            .inner
+            .on_hover_text(t!("inspect.units.scale.help"))
+            .clicked()
+        {
+            scale_units(app, first, picked);
+        }
+    });
+}
+
+/// `document.reinterpret_units` and `document.scale_units`'s `unit`
+/// param is a plain-ASCII choice (`um|mm|cm|m|in|ft`, matching
+/// [`Unit::parse_symbol`]'s accepted set), not [`Unit::symbol`]'s
+/// display form (`"µm"` for a micron, which the spec's `values:` list
+/// doesn't contain and so would fail validation).
+fn unit_choice_text(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Micron => "um",
+        other => other.symbol(),
+    }
+}
+
+/// Runs `document.reinterpret_units` with `picked` as "the unit the
+/// numbers were actually in".
+fn reinterpret_units(app: &mut MeshFixerApp, target: ObjectId, picked: Unit) {
+    let intent = crate::intent::Intent::op("document.reinterpret_units")
+        .on(target)
+        .param("unit", unit_choice_text(picked));
+    app.run_intent(intent, t!("inspect.units.reinterpret"));
+}
+
+/// Runs `document.scale_units` with `picked`, targeting every object in
+/// the document (the op's own `many: true` target).
+fn scale_units(app: &mut MeshFixerApp, first: ObjectId, picked: Unit) {
+    let rest: Vec<ObjectId> = app
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .filter(|&id| id != first)
+        .collect();
+    let mut intent = crate::intent::Intent::op("document.scale_units")
+        .on(first)
+        .param("unit", unit_choice_text(picked));
+    for id in rest {
+        intent = intent.operand(mf_command::TARGET_OPERAND, id, None);
+    }
+    app.run_intent(intent, t!("inspect.units.scale"));
 }
 
 /// One Inspect row: the label left (never wrapped), the value right

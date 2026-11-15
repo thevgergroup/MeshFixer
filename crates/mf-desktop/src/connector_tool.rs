@@ -37,7 +37,7 @@ use mf_units::{Length, Unit};
 use crate::MeshFixerApp;
 use crate::intent::Intent;
 use crate::shell::{Availability, Category, RegisterError, Shell, Tool as T};
-use crate::widgets::{self, Kind};
+use crate::widgets::{self, Kind, LengthFieldOpts, length_field};
 use crate::{icons, t, theme};
 
 pub const CONNECTORS: &str = "connectors";
@@ -857,6 +857,11 @@ const CUSTOM_PRINT_VOLUME: &str = "Custom";
 /// `shape_tools.rs`) and the W×D×H fields themselves, always editable
 /// (picking a preset is just a shortcut to typing the same numbers).
 /// Returns true if `volume` changed.
+///
+/// A machine's build volume is a physical mm measurement, not a
+/// document-relative value, so its `ScaleCtx` is fixed at mm (both doc
+/// and display) regardless of the open document's own unit — the same
+/// print-intent treatment as a fit class's clearance (UA §6.4).
 fn print_volume_row(ui: &mut egui::Ui, volume: &mut [f64; 3]) -> bool {
     let mut changed = false;
     let current = mf_parts::PRINT_VOLUME_PRESETS
@@ -872,17 +877,33 @@ fn print_volume_row(ui: &mut egui::Ui, volume: &mut [f64; 3]) -> bool {
             }
         }
     });
+    let scale = mf_units::ScaleCtx::new(Unit::Millimeter);
+    let opts = LengthFieldOpts {
+        range: (
+            Length::new(1.0, Unit::Millimeter),
+            Length::new(2000.0, Unit::Millimeter),
+        ),
+        scale: &scale,
+        label: "",
+    };
     ui.horizontal(|ui| {
         for (axis, v) in ["W", "D", "H"].into_iter().zip(volume.iter_mut()) {
-            ui.label(axis);
-            changed |= ui
-                .add(
-                    egui::DragValue::new(v)
-                        .speed(1.0)
-                        .range(1.0..=2000.0)
-                        .suffix(" mm"),
-                )
-                .changed();
+            let mut length = Length::new(*v, Unit::Millimeter);
+            let field_opts = LengthFieldOpts {
+                label: axis,
+                ..opts
+            };
+            if length_field(
+                ui,
+                egui::Id::unique(("print volume", axis)),
+                &mut length,
+                &field_opts,
+            )
+            .changed()
+            {
+                *v = length.mm();
+                changed = true;
+            }
         }
     });
     changed
@@ -916,14 +937,32 @@ fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             if editable {
                 let mut edited = p.clone();
                 let mut changed = false;
+                // Calibration deviations, mm, signed (a boss can need
+                // shrinking as readily as a hole needs widening): the
+                // same fixed-mm `ScaleCtx` as the print volume above.
+                let scale = mf_units::ScaleCtx::new(Unit::Millimeter);
+                let opts = LengthFieldOpts {
+                    range: (
+                        Length::new(-10.0, Unit::Millimeter),
+                        Length::new(10.0, Unit::Millimeter),
+                    ),
+                    scale: &scale,
+                    label: "",
+                };
                 for (field, value, meaning) in p.fields() {
-                    let mut v = value;
-                    ui.horizontal(|ui| {
-                        ui.label(format!("{meaning}:"));
-                        changed |= ui
-                            .add(egui::DragValue::new(&mut v).speed(0.01).suffix(" mm"))
-                            .changed();
-                    });
+                    let mut length = Length::new(value, Unit::Millimeter);
+                    let field_opts = LengthFieldOpts {
+                        label: meaning,
+                        ..opts
+                    };
+                    changed |= length_field(
+                        ui,
+                        egui::Id::unique(("machine profile field", p.name.clone(), field)),
+                        &mut length,
+                        &field_opts,
+                    )
+                    .changed();
+                    let v = length.mm();
                     match field {
                         "outer_xy" => edited.outer_xy = v,
                         "hole_undersize" => edited.hole_undersize = v,
@@ -1007,18 +1046,30 @@ fn fit_classes_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         widgets::card(ui, |ui| {
             widgets::section(ui, &c.name);
             if editable {
-                let mut v = c.clearance;
-                let changed = ui
-                    .horizontal(|ui| {
-                        ui.label(t!("settings.fit_classes.clearance"));
-                        ui.add(egui::DragValue::new(&mut v).speed(0.01).suffix(" mm"))
-                            .changed()
-                    })
-                    .inner;
+                // A fit class's clearance is design intent, mm, never
+                // negative: the same fixed-mm `ScaleCtx` as the machine
+                // profile fields above (UA §6.4, print intent).
+                let scale = mf_units::ScaleCtx::new(Unit::Millimeter);
+                let opts = LengthFieldOpts {
+                    range: (
+                        Length::new(0.0, Unit::Millimeter),
+                        Length::new(10.0, Unit::Millimeter),
+                    ),
+                    scale: &scale,
+                    label: &t!("settings.fit_classes.clearance"),
+                };
+                let mut length = Length::new(c.clearance, Unit::Millimeter);
+                let changed = length_field(
+                    ui,
+                    egui::Id::unique(("fit class clearance", c.name.clone())),
+                    &mut length,
+                    &opts,
+                )
+                .changed();
                 if changed {
                     let edited = FitClass {
                         name: c.name.clone(),
-                        clearance: v,
+                        clearance: length.mm(),
                     };
                     if write_fit_class(&mut classes, edited).is_ok() {
                         let _ = classes.save(&dir); // allow-swallow: a failed save leaves the in-memory edit for this session; the next edit retries the write

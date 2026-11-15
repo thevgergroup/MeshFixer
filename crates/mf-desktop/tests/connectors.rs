@@ -78,6 +78,16 @@ fn still(h: &mut Harness<'_, MeshFixerApp>, scene: &str) {
 fn opened(
     objects: Vec<(&str, Mesh, [f64; 12])>,
 ) -> (Harness<'static, MeshFixerApp>, tempfile::TempDir) {
+    opened_at(objects, Unit::Millimeter)
+}
+
+/// As [`opened`], at a document unit other than millimetres (C15's
+/// per-panel test: a value typed into a `length_field` must reach the
+/// op as the same *physical* size whatever the document's own unit is).
+fn opened_at(
+    objects: Vec<(&str, Mesh, [f64; 12])>,
+    unit: Unit,
+) -> (Harness<'static, MeshFixerApp>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let settings = Settings {
         config_dir: Some(dir.path().to_owned()),
@@ -99,7 +109,7 @@ fn opened(
                 transform,
             })
             .collect(),
-        unit: Some(Unit::Millimeter),
+        unit: Some(unit),
         source: SourceInfo {
             path: "connectors.3mf".into(),
             content_hash: ContentHash([0; 32]),
@@ -514,4 +524,104 @@ fn a_hinge_between_two_objects_swings_and_attaches() {
     let names = objects(&h);
     assert_eq!(names.len(), 3, "body, lid and the pin: {names:?}");
     still(&mut h, "hinge-attached");
+}
+
+/// Consolidation plan C15's per-panel test: a position typed as a
+/// physical 5 mm (`app.hinge.position`, a `length_field`) on a *metres*
+/// document shifts the hinge by exactly 5 mm along the shared edge, not
+/// 5 document units (5 m) and not 5 "doc-unit numbers" silently read as
+/// if they were already metres.
+#[test]
+fn hinge_position_typed_in_millimetres_shifts_by_physical_millimetres() {
+    require_gpu!("hinge_position_typed_in_millimetres_shifts_by_physical_millimetres");
+    // The same box-and-lid fixture as the hinge-between-two-objects
+    // test, scaled by 1/1000 so the same physical sizes (40 mm cube,
+    // 0.4 mm gap) are expressed in a *metres* document.
+    let body = translated(&cube(0.040), [0.0, 0.0, -0.040]);
+    let lid = translated(&mf_fixtures::scaled(&cube(1.0), 0.040), [0.0, 0.0, 0.0004]);
+    let lid = Mesh::new(
+        lid.to_arrays()
+            .0
+            .into_iter()
+            .map(|[x, y, z]| [x, y, 0.0004 + (z - 0.0004) * 0.25])
+            .collect(),
+        lid.to_arrays().1,
+    )
+    .unwrap();
+    let (mut h, _settings_dir) = opened_at(
+        vec![("body", body, IDENTITY), ("lid", lid, IDENTITY)],
+        Unit::Meter,
+    );
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+    let ids: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    let (body_id, lid_id) = (ids[0], ids[1]);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    h.state_mut().hinge.a = Some(body_id);
+    h.state_mut().hinge.b = Some(lid_id);
+    settle(&mut h);
+    scroll_and_click(&mut h, "Use Free running");
+    settle(&mut h);
+    let edges = mf_desktop::hinge_tool::edges(h.state(), body_id, lid_id);
+    assert!(!edges.is_empty(), "the box and lid share a face");
+    let edge = edges[0].clone();
+
+    // At the edge's own middle (the default, `position: None`): every
+    // leaf and pin, so the shifted placement below can be told apart by
+    // name.
+    scroll_and_click(&mut h, "Place hinge");
+    wait_until(&mut h, "the hinge placed", |a| a.busy.is_none());
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let leaf_a_at_middle = |h: &Harness<'_, MeshFixerApp>| {
+        h.state()
+            .session
+            .document()
+            .objects()
+            .iter()
+            .find(|o| o.name.contains("leaf a"))
+            .map(|o| o.transform)
+            .expect("leaf a")
+    };
+    let middle_transform = leaf_a_at_middle(&h);
+
+    // Undo the placement, then place again with the position field
+    // typed as a physical 5 mm (off the edge's own middle).
+    assert!(h.state_mut().session.undo());
+    settle(&mut h);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    h.state_mut().hinge.position = Some(
+        mf_units::Length::new(5.0, mf_units::Unit::Millimeter)
+            .to(Unit::Meter)
+            .value,
+    );
+    settle(&mut h);
+    scroll_and_click(&mut h, "Place hinge");
+    wait_until(&mut h, "the hinge placed", |a| a.busy.is_none());
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let shifted_transform = leaf_a_at_middle(&h);
+
+    // The shift between the two placements, projected onto the edge's
+    // own local x (`edge.frame`'s first three components): exactly
+    // 5 mm (0.005 of this metres document), never 5 document units
+    // (5 m) and never a bare 5 read as if it were already metres.
+    let x = [edge.frame[0], edge.frame[1], edge.frame[2]];
+    let delta: Vec<f64> = (0..3)
+        .map(|c| shifted_transform[9 + c] - middle_transform[9 + c])
+        .collect();
+    let along_x: f64 = (0..3).map(|c| delta[c] * x[c]).sum();
+    assert!(
+        (along_x.abs() - 0.005).abs() < 1e-6,
+        "a 5 mm hinge position on a metres document should shift by \
+         0.005 doc units along the edge, got {along_x} ({delta:?})"
+    );
 }

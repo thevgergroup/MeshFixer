@@ -541,6 +541,11 @@ pub struct MeshFixerApp {
     pub selection: Option<Selection>,
     /// A tangled edge shown in Properties (only while nothing is selected).
     pub inspected: Option<Inspected>,
+    /// Inspect's Units control (import-units-brief.md, "Fix it
+    /// afterwards"): the unit picked for "Reinterpret" or "Scale",
+    /// `None` until the person opens the picker (the document's own
+    /// unit is shown as the field's starting value, not stored here).
+    pub inspect_units: Option<mf_units::Unit>,
     /// What the pointer is over in the tree this frame (outlined in the view).
     pub hover: Option<(ObjectId, OverlayTarget)>,
     /// What the pointer is over in the 3D view (a defect of the active
@@ -943,6 +948,7 @@ impl MeshFixerApp {
             replay_report: None,
             selection: None,
             inspected: None,
+            inspect_units: None,
             hover: None,
             view_hover: None,
             hover_picks: HoverPicks::default(),
@@ -1010,6 +1016,29 @@ impl MeshFixerApp {
         self.active
             .and_then(|id| self.session.document().object(id))
             .and_then(|o| o.mesh())
+    }
+
+    /// The [`mf_units::ScaleCtx`] a panel's `length_field`/`length_slider`
+    /// uses (consolidation plan C15, units-audit.md §6.5): the document's
+    /// unit as both doc and display (the app has no separate
+    /// display-unit preference yet), and `bbox_diag` from the active
+    /// object so `length_slider`'s range is bbox-relative. No live
+    /// camera is threaded through here (panel fields aren't a viewport
+    /// drag), so `world_per_pt` is `None` and the scrub step falls back
+    /// to the document scale.
+    pub fn scale_ctx(&self) -> mf_units::ScaleCtx {
+        let doc = self.session.document().units();
+        let bbox_diag = self
+            .active_mesh()
+            .and_then(|m| m.bounding_box())
+            .map(|b| b.diagonal())
+            .unwrap_or(0.0);
+        mf_units::ScaleCtx {
+            doc,
+            display: doc,
+            bbox_diag,
+            world_per_pt: None,
+        }
     }
 
     pub fn open(&mut self, path: PathBuf) {
@@ -1083,7 +1112,13 @@ impl MeshFixerApp {
                     .then(|| profiles.active_profile());
                 let plate = crate::import_dialog::Plate::from_profile(active);
                 let hint = model.source.exporter_hint.clone();
-                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint));
+                let (memory, memory_err) = crate::import_dialog::import_memory(self);
+                if let Some(e) = memory_err {
+                    self.warnings.push(format!(
+                        "Your remembered import units couldn't be read ({e}); asking fresh."
+                    ));
+                }
+                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint, &memory));
             }
             _ => {
                 model.warnings.push(format!(
@@ -1110,6 +1145,7 @@ impl MeshFixerApp {
             None => {}
             Some((true, scale_to_fit)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
+                    self.remember_import_unit(&prompt);
                     let factor = scale_to_fit.then(|| prompt.scale_to_fit_factor());
                     self.import_model(prompt.into_model());
                     if let (Some(factor), Some(id)) = (factor, self.active) {
@@ -1124,6 +1160,25 @@ impl MeshFixerApp {
                 self.status = Some("Import cancelled: nothing opened".into());
             }
         }
+    }
+
+    /// Records the unit `prompt` was confirmed with (its final
+    /// [`UnitPrompt::choice`], after any dialog edits) against its
+    /// folder and exporter signature, so the next import from either
+    /// preselects it (import-units-brief.md, "Remember choices"). Never
+    /// an error the user sees: a settings directory that can't be
+    /// written just means the next import asks fresh, same as today.
+    fn remember_import_unit(&self, prompt: &UnitPrompt) {
+        let Some(dir) = self.settings_dir() else {
+            return;
+        };
+        let (mut memory, _) = crate::import_dialog::import_memory(self);
+        memory.remember(
+            prompt.folder.as_deref(),
+            prompt.exporter_signature,
+            prompt.choice,
+        );
+        let _ = memory.save(&dir); // allow-swallow: a failed save leaves this import's memory for this session only; the next import retries the write
     }
 
     /// Applies a "Scale to fit plate" import's scaling, once the import

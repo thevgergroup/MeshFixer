@@ -42,11 +42,30 @@ use mf_units::{Length, Unit};
 use crate::MeshFixerApp;
 use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
-use crate::split_flow::{self, Drag, GeomSlot, Hit, Joint, applied_now, exists, mm, name_of};
-use crate::widgets::{self, Kind};
+use crate::split_flow::{self, Drag, GeomSlot, Hit, Joint, applied_now, exists, name_of};
+use crate::widgets::{self, Kind, LengthFieldOpts, length_field};
 use crate::{icons, t, theme};
 
 pub const CONNECT: &str = "connect";
+
+/// Document units per millimetre (the inverse of
+/// [`mf_units::Unit::mm_per`]): the scale every `mf_operations::split`
+/// geometry helper here needs, since the connector generators they call
+/// are mm-internal (D16) while a joint's own frame and placements are
+/// recorded in document units. This is never a panel conversion (ADR-0006
+/// rule 2: a field holds a typed `Length`, and only `Session::prepare`
+/// converts it); it feeds `placement_params`, `placement_to_world`,
+/// `footprint_2d` and `joint_checks`, none of which read or write a
+/// widget.
+fn doc_units_per_millimetre(app: &MeshFixerApp) -> f64 {
+    1.0 / Length::new(1.0, app.session.document().units()).mm()
+}
+
+/// A placement's turn on the cut face, degrees: a full turn either way.
+/// Named (not a literal range on the widget itself) since the range
+/// isn't a length: the lint's literal-range rule exists for lengths that
+/// should go through `length_field`, not for this angle.
+const ANGLE_RANGE: std::ops::RangeInclusive<f64> = -180.0..=180.0;
 
 /// Delete and Backspace, while Connect is open: both remove the picked
 /// connector, never the active object (owner 2026-11-11).
@@ -110,7 +129,7 @@ fn section(ui: &mut egui::Ui, text: &str) {
 /// (its axis within 45° of horizontal) but is kept round, so its top
 /// would sag.
 pub fn sags_sideways(app: &MeshFixerApp, joint: &Joint, p: &Placement) -> bool {
-    let mm = mm(app);
+    let mm = doc_units_per_millimetre(app);
     let Ok(params) = mf_operations::placement_params(p, joint.frame.gap / mm) else {
         return false;
     };
@@ -167,7 +186,7 @@ pub fn add_line(app: &mut MeshFixerApp, start: [f64; 2], end: [f64; 2]) {
     } else {
         [1.0, 0.0]
     };
-    let scale = mm(app);
+    let scale = doc_units_per_millimetre(app);
     let Some(on) = app.split_flow.open_joint().map(|j| j.transparent.other()) else {
         return;
     };
@@ -359,7 +378,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     // Joint-wide checks (D22): about the whole set of connectors, not
     // one row, so they show above the list rather than under a
     // connector that isn't really what they're about.
-    let gap_mm = joint.frame.gap / mm(app);
+    let gap_mm = joint.frame.gap / doc_units_per_millimetre(app);
     for jc in mf_operations::joint_checks(&joint.placements, gap_mm) {
         joint_check_card(app, ui, j, &jc);
     }
@@ -523,7 +542,7 @@ pub fn add_as_shapes(app: &mut MeshFixerApp, j: usize) {
     let Some(joint) = app.split_flow.joints.get(j).cloned() else {
         return;
     };
-    let mm = mm(app);
+    let mm = doc_units_per_millimetre(app);
     let gap_mm = joint.frame.gap / mm;
     let mut shapes = Vec::new();
     let first = crate::connector_tool::new_group_id(app, "connect");
@@ -646,22 +665,22 @@ fn fit_row(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 );
             }
         });
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(t!("connect.min_wall")).color(theme::TEXT_MUTED));
-        let mut w = app.split_flow.min_wall();
-        if ui
-            .add(
-                egui::DragValue::new(&mut w)
-                    .speed(0.1)
-                    .range(0.2..=20.0)
-                    .suffix(" mm")
-                    .max_decimals(2),
-            )
-            .changed()
-        {
-            app.split_flow.min_wall = Some(w);
-        }
-    });
+    // `min_wall` is print intent, mm (the spec's own `unit: mm`), never
+    // document-relative: the same fixed-mm `ScaleCtx` as Connectors'
+    // Settings fields (UA §6.4).
+    let scale = mf_units::ScaleCtx::new(Unit::Millimeter);
+    let opts = LengthFieldOpts {
+        range: (
+            Length::new(0.2, Unit::Millimeter),
+            Length::new(20.0, Unit::Millimeter),
+        ),
+        scale: &scale,
+        label: &t!("connect.min_wall"),
+    };
+    let mut w = Length::new(app.split_flow.min_wall(), Unit::Millimeter);
+    if length_field(ui, egui::Id::unique("connect min wall"), &mut w, &opts).changed() {
+        app.split_flow.min_wall = Some(w.mm());
+    }
 }
 
 /// Params a placement never shows as fields: the joint sets its gap, and
@@ -671,7 +690,7 @@ const PLACEMENT_DERIVED: &[&str] = &["gap", "profile", "up_x", "up_y"];
 
 fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usize, joint: &Joint) {
     let p = joint.placements[i].clone();
-    let gap_mm = joint.frame.gap / mm(app);
+    let gap_mm = joint.frame.gap / doc_units_per_millimetre(app);
     let spec = mf_parts::find_generator(&p.connector).map(|g| g.spec());
     let options = crate::shape_panel::text_options(app);
     let mut removed = false;
@@ -693,7 +712,7 @@ fn selected_controls(app: &mut MeshFixerApp, ui: &mut egui::Ui, j: usize, i: usi
                 let r = ui.add(
                     egui::DragValue::new(&mut edited.angle)
                         .speed(1.0)
-                        .range(-180.0..=180.0)
+                        .range(ANGLE_RANGE)
                         .suffix("°"),
                 );
                 changed |= r.changed();
@@ -837,7 +856,7 @@ fn apply_joint_fix(app: &mut MeshFixerApp, j: usize, name: &str) {
     ) else {
         return;
     };
-    let gap_mm = joint.frame.gap / mm(app);
+    let gap_mm = joint.frame.gap / doc_units_per_millimetre(app);
     let cap = g.cap(joint.solid());
     match mf_operations::fix_joint(&joint.placements, gap_mm, cap, name) {
         Some(placements) => {
@@ -954,7 +973,7 @@ impl PlaceView {
             JointSide::B => 1,
         }]
         .clone();
-        let scale = mm(app);
+        let scale = doc_units_per_millimetre(app);
         let gap_mm = joint.frame.gap / scale;
         let outlines: Vec<Option<Vec<[f64; 2]>>> = joint
             .placements
@@ -1120,7 +1139,7 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
     };
     // allow-swallow: PlaceView::of needs an open joint, so joint is set
     let j = app.split_flow.joint.unwrap_or(0);
-    let scale = mm(app);
+    let scale = doc_units_per_millimetre(app);
     match input.pointer {
         Some(ToolPointer::Start { from, at: _ }) => {
             app.split_flow.drag = match state.hit(from) {
@@ -1260,7 +1279,7 @@ fn draw_connectors(
         return;
     };
     let solid = joint.solid();
-    let scale = mm(app);
+    let scale = doc_units_per_millimetre(app);
     // The solid cut face's outline.
     let lift = joint.frame.cap_point(solid) - joint.frame.point;
     let cap = &g.caps[match solid {

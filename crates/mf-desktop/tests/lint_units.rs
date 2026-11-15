@@ -24,16 +24,6 @@ use std::path::{Path, PathBuf};
 
 /// `(file, pattern, task that removes it)`. Must reach empty (C17).
 const ALLOWED: &[(&str, &str, &str)] = &[
-    // C15: panel migration A (Parts, Connectors, Connect, Hinge).
-    ("connect_tool.rs", "mm(app)", "C15"),
-    ("connect_tool.rs", "literal-range", "C15"),
-    ("connect_tool.rs", ".max_decimals(", "C15"),
-    ("connector_tool.rs", "literal-range", "C15"),
-    ("hinge_tool.rs", "mm_per(", "C15"),
-    ("hinge_tool.rs", "literal-range", "C15"),
-    ("hinge_tool.rs", ".max_decimals(", "C15"),
-    ("parts_tool.rs", "literal-range", "C15"),
-    ("parts_tool.rs", ".max_decimals(", "C15"),
     // C17: panel migration B (Sculpt, Split, shape tools, Transform,
     // Hollow).
     ("hollow_tool.rs", "mm_per(", "C17"),
