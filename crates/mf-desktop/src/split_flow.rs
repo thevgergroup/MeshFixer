@@ -275,8 +275,9 @@ pub struct Flow {
     pub(crate) geom: GeomSlot,
     pub(crate) checks: Option<(ChecksKey, Arc<Vec<Vec<Check>>>)>,
     pub(crate) previews: Option<Previews>,
-    /// The joint whose `split.place_connectors` is running.
-    pub(crate) pending_apply: Option<usize>,
+    /// The joint geometry read's job on the background lane (ADR-0009),
+    /// cancelled when a newer read supersedes it or no joint is open.
+    pub(crate) geom_job: Option<mf_runtime::CancelToken>,
     /// The joint and solid side the camera was last turned to.
     pub(crate) framed: Option<(usize, JointSide)>,
     /// The piece count of the most recent cut, for the status line and
@@ -739,14 +740,19 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
                 app.split_flow.first_new_joint = Some(first);
             }
         }
-        "split.place_connectors" => {
-            if let Some(j) = app.split_flow.pending_apply.take()
-                && let Some(joint) = app.split_flow.joints.get_mut(j)
-            {
-                joint.applied = Some((record.input_revision, record.output_revision));
-            }
-        }
         _ => {}
+    }
+}
+
+/// Joint `j`'s connectors were just applied (the follow-up of its own
+/// `split.place_connectors`, `crate::app::FollowUp::JointApplied`): it
+/// records the revisions before and after.
+pub(crate) fn joint_applied(app: &mut MeshFixerApp, j: usize) {
+    let records = app.session.records_to_current();
+    let Some(record) = records.last() else { return };
+    let applied = (record.input_revision, record.output_revision);
+    if let Some(joint) = app.split_flow.joints.get_mut(j) {
+        joint.applied = Some(applied);
     }
 }
 
@@ -826,6 +832,9 @@ pub fn delete_selected(app: &mut MeshFixerApp) -> bool {
 pub(crate) fn refresh_geometry(app: &mut MeshFixerApp) {
     let Some(j) = app.split_flow.joint else {
         app.split_flow.geom = GeomSlot::Empty;
+        if let Some(job) = app.split_flow.geom_job.take() {
+            job.cancel();
+        }
         return;
     };
     let Some(joint) = app.split_flow.joints.get(j).cloned() else {
@@ -885,53 +894,62 @@ pub(crate) fn refresh_geometry(app: &mut MeshFixerApp) {
     let slot: GeomResult = Arc::new(Mutex::new(None));
     let out = slot.clone();
     let k = key.clone();
-    let repaint = app.repaint_context();
-    std::thread::spawn(move || {
-        let ctx = mf_runtime::RunContext::none();
-        let mut built = Vec::new();
-        for (i, b) in bvhs.into_iter().enumerate() {
-            built.push(match b {
-                Some(b) => Ok(b),
-                None => Bvh::build(&k.meshes[i], &ctx).map(Arc::new),
-            });
-        }
-        let result = (|| -> Result<JointGeom, String> {
-            let ba = built.remove(0).map_err(|_| "cancelled".to_string())?;
-            let bb = built.remove(0).map_err(|_| "cancelled".to_string())?;
-            let caps = [
-                mf_operations::cap_region(
-                    &k.meshes[0],
-                    Some(&ba),
-                    &k.transforms[0],
-                    &k.frame,
-                    JointSide::A,
-                    &ctx,
-                )
-                .map_err(|_| "cancelled".to_string())?,
-                mf_operations::cap_region(
-                    &k.meshes[1],
-                    Some(&bb),
-                    &k.transforms[1],
-                    &k.frame,
-                    JointSide::B,
-                    &ctx,
-                )
-                .map_err(|_| "cancelled".to_string())?,
-            ];
-            Ok(JointGeom {
-                meshes: k.meshes.clone(),
-                transforms: k.transforms,
-                bvhs: [ba, bb],
-                caps,
-            })
-        })();
-        if let Ok(mut s) = out.lock() {
-            *s = Some(result);
-        }
-        if let Some(c) = repaint {
-            c.request_repaint();
-        }
-    });
+    // On the background lane: superseding the previous read, counted by
+    // `settle()`, and a panic is this read's failure, by name.
+    let jobs = app.jobs().clone();
+    jobs.once(
+        &mut app.split_flow.geom_job,
+        move |ctx| {
+            let mut built = Vec::new();
+            for (i, b) in bvhs.into_iter().enumerate() {
+                built.push(match b {
+                    Some(b) => Ok(b),
+                    None => Bvh::build(&k.meshes[i], ctx).map(Arc::new),
+                });
+            }
+            let result = (|| -> Result<JointGeom, String> {
+                let ba = built.remove(0).map_err(|_| "cancelled".to_string())?;
+                let bb = built.remove(0).map_err(|_| "cancelled".to_string())?;
+                let caps = [
+                    mf_operations::cap_region(
+                        &k.meshes[0],
+                        Some(&ba),
+                        &k.transforms[0],
+                        &k.frame,
+                        JointSide::A,
+                        ctx,
+                    )
+                    .map_err(|_| "cancelled".to_string())?,
+                    mf_operations::cap_region(
+                        &k.meshes[1],
+                        Some(&bb),
+                        &k.transforms[1],
+                        &k.frame,
+                        JointSide::B,
+                        ctx,
+                    )
+                    .map_err(|_| "cancelled".to_string())?,
+                ];
+                Ok(JointGeom {
+                    meshes: k.meshes.clone(),
+                    transforms: k.transforms,
+                    bvhs: [ba, bb],
+                    caps,
+                })
+            })();
+            Ok(result)
+        },
+        move |r| {
+            let result = match r {
+                Ok(result) => result,
+                Err(crate::jobs::Failure::Cancelled) => return,
+                Err(crate::jobs::Failure::Panicked(why)) => {
+                    Err(format!("the joint reader stopped unexpectedly: {why}"))
+                }
+            };
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(result);
+        },
+    );
     app.split_flow.geom = GeomSlot::Pending(key, slot);
 }
 

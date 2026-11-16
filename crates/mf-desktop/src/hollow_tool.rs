@@ -315,7 +315,10 @@ fn changed(app: &mut MeshFixerApp) {
 pub fn refresh_preview(app: &mut MeshFixerApp, ctx: &egui::Context) {
     if app.active_tool != HOLLOW {
         app.hollow.preview = None;
-        app.hollow.asked = None;
+        if app.hollow.asked.take().is_some() {
+            // Hollow closed: its preview's work stops too (ADR-0009).
+            app.hollow_worker.cancel();
+        }
         return;
     }
     let Some(id) = app.active else { return };
@@ -358,11 +361,14 @@ pub fn refresh_preview(app: &mut MeshFixerApp, ctx: &egui::Context) {
     }
     let previous = app.active_render();
     app.hollow.asked = Some((key.clone(), mesh.clone()));
-    app.hollow_worker.submit(PreviewRequest {
-        key,
-        mesh,
-        previous,
-    });
+    app.hollow_worker.submit_for(
+        HOLLOW,
+        PreviewRequest {
+            key,
+            mesh,
+            previous,
+        },
+    );
 }
 
 /// A preview came back: kept if it's still the one asked for.

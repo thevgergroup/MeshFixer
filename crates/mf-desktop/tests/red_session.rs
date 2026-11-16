@@ -32,7 +32,7 @@ use eframe::egui;
 use egui_kittest::Harness;
 use egui_kittest::kittest::Queryable;
 use mf_command::{Invocation, ObjectId};
-use mf_desktop::app::PendingPlacement;
+use mf_desktop::app::{FollowUp, PendingPlacement};
 use mf_desktop::{MeshFixerApp, Settings};
 use mf_geometry::{ContentHash, Mesh};
 use mf_io::threemf::{ModelObject, Unit};
@@ -590,8 +590,8 @@ fn no_refusal_reaches_app_error() {
 // A refused connector placement must not open Transform on the scan.
 // ---------------------------------------------------------------------
 
-/// The Connector arm of the pending placement drain (`app.rs`, the
-/// `pending_open_transform` block) has no `new_object != scan` guard,
+/// The Connector arm of the placement follow-up (`app.rs`,
+/// `open_placed`; once the `pending_open_transform` block) has no `new_object != scan` guard,
 /// unlike the Part arm right above it. After a refused placement,
 /// `app.active` is still the scan (nothing new committed), so the
 /// Connector arm records the scan itself as the placed connector and
@@ -599,7 +599,7 @@ fn no_refusal_reaches_app_error() {
 /// prevent.
 ///
 /// This drives the same two steps the real connector placement makes
-/// (`connector_tool.rs::run_on`, then setting `pending_open_transform`
+/// (`connector_tool.rs::run_on`, then attaching its placement follow-up
 /// before the result is known), with a deliberately refused `object.
 /// add_shape` (`shapes: "[]"`, `nothing_to_add`) standing in for a
 /// placement the fit/collision logic would have refused for real.
@@ -625,16 +625,15 @@ fn refused_connector_does_not_open_transform() {
         "Place connector".into(),
     );
     // Exactly what `connector_tool.rs::place` does right after `run_on`:
-    // record the pending placement before the result is known, gated
-    // only on `busy` (never on whether the placement will succeed).
-    if h.state().busy.is_some() {
-        h.state_mut().pending_open_transform = Some(PendingPlacement::Connector {
+    // attach the placement follow-up to that command (ADR-0009) before
+    // its result is known (never on whether the placement will succeed).
+    h.state_mut()
+        .follow_up(FollowUp::Placement(PendingPlacement::Connector {
             connector_id: "thread_m3".into(),
             connector_params_json: "{}".into(),
             gap: 0.2,
             group: "g1".into(),
-        });
-    }
+        }));
 
     wait_until(&mut h, "the refused placement to land", |a| {
         a.busy.is_none()

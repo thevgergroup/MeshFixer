@@ -911,11 +911,8 @@ fn apply_connectors(app: &mut MeshFixerApp, j: usize, label: String) {
         .set("plate_width", mm(plate[0]))
         .set("plate_depth", mm(plate[1]));
     app.refusal = None;
-    app.split_flow.pending_apply = Some(j);
     app.run_intent(intent, label);
-    if app.busy.is_none() {
-        app.split_flow.pending_apply = None;
-    }
+    app.follow_up(crate::app::FollowUp::JointApplied(j));
 }
 
 fn vec3(v: DVec3) -> String {

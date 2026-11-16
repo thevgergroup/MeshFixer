@@ -64,6 +64,20 @@ pub struct Swing {
     pub origin: DVec3,
     pub dir: DVec3,
     pub result: SwingResult,
+    /// The check's job on the background lane (ADR-0009): cancelled when
+    /// a newer check supersedes it or its owner tool closes.
+    pub job: Option<mf_runtime::CancelToken>,
+    /// The tool that was open when the check was asked for.
+    pub owner: &'static str,
+}
+
+impl Swing {
+    /// Stop the check (a newer one supersedes it, or its tool closed).
+    pub fn cancel(&mut self) {
+        if let Some(job) = self.job.take() {
+            job.cancel();
+        }
+    }
 }
 
 /// One edge a hinge can sit on: its name and the hinge frame there (3MF
@@ -443,7 +457,9 @@ pub fn swing_setup(
 /// Starts (or keeps) the swing check for the hinge `id` belongs to.
 fn ensure_swing(app: &mut MeshFixerApp, id: ObjectId) -> bool {
     let Some((group, limit, origin, dir, fixed, moving)) = swing_setup(app, id) else {
-        app.hinge.swing = None;
+        if let Some(mut s) = app.hinge.swing.take() {
+            s.cancel();
+        }
         return false;
     };
     let revision = app.session.current();
@@ -465,16 +481,24 @@ fn ensure_swing(app: &mut MeshFixerApp, id: ObjectId) -> bool {
     let moving_bodies: Vec<SwingBody> = moving.iter().filter_map(|&o| body(o)).collect();
     let result: SwingResult = Arc::new(Mutex::new(None));
     let out = result.clone();
-    let repaint = app.repaint_context();
-    std::thread::spawn(move || {
-        let ctx = mf_runtime::RunContext::none();
-        let r = mf_parts::swing::swing(&fixed, &moving_bodies, origin, dir, limit, 2.0, &ctx)
-            .map_err(|_| "cancelled".to_owned());
-        *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
-        if let Some(c) = repaint {
-            c.request_repaint();
-        }
-    });
+    // On the background lane, superseding the check before it (a newer
+    // revision or group): cancellable, counted by `settle()`, and a panic
+    // ends in an error rather than "checking…" forever (ADR-0009).
+    let mut job = app.hinge.swing.as_mut().and_then(|s| s.job.take());
+    app.jobs().once(
+        &mut job,
+        move |ctx| mf_parts::swing::swing(&fixed, &moving_bodies, origin, dir, limit, 2.0, ctx),
+        move |r| {
+            let r = match r {
+                Ok(report) => Ok(report),
+                Err(crate::jobs::Failure::Cancelled) => return,
+                Err(crate::jobs::Failure::Panicked(why)) => {
+                    Err(t!("hinge.swing.failed", why = why))
+                }
+            };
+            *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(r);
+        },
+    );
     let angle = app
         .hinge
         .swing
@@ -490,6 +514,8 @@ fn ensure_swing(app: &mut MeshFixerApp, id: ObjectId) -> bool {
         origin,
         dir,
         result,
+        job,
+        owner: app.active_tool,
     });
     true
 }

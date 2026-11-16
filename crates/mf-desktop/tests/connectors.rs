@@ -526,6 +526,69 @@ fn a_hinge_between_two_objects_swings_and_attaches() {
     still(&mut h, "hinge-attached");
 }
 
+/// The hinge swing check ends (consolidation plan C19, ADR-0009): it runs
+/// on the background lane, so `settle()` alone (no polling for its
+/// report) waits for it, and it reports; closing the tool it was asked
+/// for in cancels it and drops the preview.
+#[test]
+fn the_hinge_swing_check_terminates_and_settle_waits_for_it() {
+    require_gpu!("the_hinge_swing_check_terminates_and_settle_waits_for_it");
+    let body = translated(&cube(40.0), [0.0, 0.0, -40.0]);
+    let lid = translated(&cube(40.0), [0.0, 0.0, 0.4]);
+    let (mut h, _settings_dir) = opened(vec![("body", body, IDENTITY), ("lid", lid, IDENTITY)]);
+    let ids: Vec<mf_command::ObjectId> = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .collect();
+    let (body_id, lid_id) = (ids[0], ids[1]);
+    h.get_by_label("Connectors").click();
+    settle(&mut h);
+    h.state_mut().hinge.a = Some(body_id);
+    h.state_mut().hinge.b = Some(lid_id);
+    settle(&mut h);
+    scroll_and_click(&mut h, "Use Free running");
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    scroll_and_click(&mut h, "Place hinge");
+    wait_until(&mut h, "the hinge placed", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let leaf_a = h
+        .state()
+        .session
+        .document()
+        .objects()
+        .iter()
+        .find(|o| o.name.contains("leaf a"))
+        .map(|o| o.id)
+        .unwrap();
+    h.get_by_label("Select").click();
+    settle(&mut h);
+    h.state_mut().set_active(leaf_a);
+    // The check is asked for by the selection panel's first frame; then
+    // settle() alone must see it through.
+    h.step();
+    assert!(h.state().hinge.swing.is_some(), "no swing check asked for");
+    settle(&mut h);
+    let report = mf_desktop::hinge_tool::swing_report(h.state());
+    assert!(
+        matches!(report, Some(Ok(_))),
+        "settled with the swing check still \"checking…\": {report:?}"
+    );
+    assert!(h.query_by_label("Checking the swing…").is_none());
+    // Its tool closing (another opening over it) drops it.
+    h.state_mut()
+        .open_rail_tool(mf_desktop::connector_tool::CONNECTORS);
+    h.step();
+    assert_eq!(h.state().previews_owned_by("select"), 0);
+    settle(&mut h);
+}
+
 /// Consolidation plan C15's per-panel test: a position typed as a
 /// physical 5 mm (`app.hinge.position`, a `length_field`) on a *metres*
 /// document shifts the hinge by exactly 5 mm along the shared edge, not

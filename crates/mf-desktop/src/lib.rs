@@ -16,6 +16,7 @@ pub mod i18n;
 pub mod icons;
 pub mod import_dialog;
 pub mod intent;
+pub mod jobs;
 pub mod metrics;
 mod panels;
 pub mod part_thumbs;
