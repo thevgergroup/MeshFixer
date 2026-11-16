@@ -23,12 +23,12 @@ use mf_boolean::{CutError, Plane, Side};
 use mf_geometry::Mesh;
 use mf_spec::Params;
 
-use super::{as_created, failed, normal_to_object, refusal};
-use crate::affine::{apply, inverse};
+use super::{as_created, failed, refusal};
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
     Target, needs_document, unsupported_target,
 };
+use mf_geometry::affine::{apply, inverse, normal_to_object};
 
 pub struct SplitBox;
 

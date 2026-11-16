@@ -6,7 +6,8 @@
 //! "the world→object normal is computed three different ways for the
 //! same Split plane").
 //!
-//! - Apply (`mf-operations/src/split/mod.rs:146`, `normal_to_object`):
+//! - Apply (the Split plan, `mf-operations/src/split/plan.rs`, through
+//!   `mf_geometry::affine::normal_to_object`):
 //!   `M·n`, the transform's own linear part (row-major 3x4, D7) applied
 //!   directly to the world normal.
 //! - The region preview (`mf-desktop/src/split_flow.rs`,
@@ -38,20 +39,17 @@ fn preview_object_normal(transform: &[f64; 12], world_normal: DVec3) -> DVec3 {
     ))
 }
 
-/// Verbatim from `mf-operations/src/split/mod.rs`'s `normal_to_object`:
-/// Apply's own object-space normal, `M·n` from the forward transform.
+/// Apply's own object-space normal, `M·n` from the forward transform:
+/// the Split plan (`mf_operations::plan_split`) computes it with
+/// `mf_geometry::affine::normal_to_object`, the one affine module (C22).
 fn apply_object_normal(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
-    std::array::from_fn(|r| t[3 * r] * n[0] + t[3 * r + 1] * n[1] + t[3 * r + 2] * n[2])
+    mf_geometry::affine::normal_to_object(t, n)
 }
 
-/// `p` placed by the row-major 3x4 transform `t` (D7): `p·M + t`, the
-/// same convention `mf_geometry::affine::apply` uses.
+/// `p` placed by the row-major 3x4 transform `t` (D7), through the one
+/// affine module.
 fn apply_point(t: &[f64; 12], p: DVec3) -> DVec3 {
-    DVec3::new(
-        t[0] * p.x + t[3] * p.y + t[6] * p.z + t[9],
-        t[1] * p.x + t[4] * p.y + t[7] * p.z + t[10],
-        t[2] * p.x + t[5] * p.y + t[8] * p.z + t[11],
-    )
+    DVec3::from(mf_geometry::affine::apply(t, p.to_array()))
 }
 
 /// A 30° rotation about Z, then a strongly non-uniform scale (x1, y4,

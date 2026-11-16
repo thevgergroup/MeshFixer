@@ -11,10 +11,9 @@ use mf_spec::{Params, SpecError};
 pub use mf_units::Unit;
 
 mod add_part;
-mod affine;
 mod align;
 pub mod refusal;
-pub use align::Align;
+pub use align::{Align, AlignPlan, execute as execute_align, plan as plan_align};
 pub mod blend;
 mod boolean;
 mod combine;
@@ -62,8 +61,14 @@ pub use split::joints::{
 pub use split::pegs::{
     HolePlacement, PegError, PegShape, dowel_size, place_holes, pole_of_inaccessibility,
 };
+pub use split::plan::{
+    CutPlan, DovetailPlan, JointPlan, PegPlan, PlannedHole, SplitPlan, TargetPlan,
+    plan as plan_split,
+};
 pub use split::volume::{BOX_FACES, inside_name, outside_name};
-pub use split::{AXIS_ALIGN_DEGREES, SPLIT_STAGES, SideNames, split_names};
+pub use split::{
+    AXIS_ALIGN_DEGREES, SPLIT_STAGES, SideNames, execute as execute_split, split_names,
+};
 pub use transform::{world_min_z, world_min_z_with};
 
 pub use remove_small::{ComponentSizes, RemovalPreview, removal_preview};
@@ -248,7 +253,7 @@ impl SceneObject {
                     bb.min[a]
                 }
             });
-            let w = affine::apply(transform, p);
+            let w = mf_geometry::affine::apply(transform, p);
             for a in 0..3 {
                 lo[a] = lo[a].min(w[a]);
                 hi[a] = hi[a].max(w[a]);

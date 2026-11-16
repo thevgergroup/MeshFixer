@@ -60,7 +60,7 @@ fn world_bounds(input: &OperandInput, ctx: &RunContext) -> Result<Option<Bounds>
                 bb.min[a]
             }
         });
-        let w = crate::affine::apply(&input.transform, p);
+        let w = mf_geometry::affine::apply(&input.transform, p);
         for a in 0..3 {
             lo[a] = lo[a].min(w[a]);
             hi[a] = hi[a].max(w[a]);
@@ -151,183 +151,227 @@ impl Operation for Align {
         _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        // The targets are every input except a trailing `anchor` operand
-        // (an optional, non-`many` operand always lands after every
-        // `many` target, D6).
-        let (anchor_input, targets): (Option<&OperandInput>, &[OperandInput]) =
-            match inputs.iter().position(|i| i.slot == "anchor") {
-                Some(k) => (Some(&inputs[k]), &inputs[..k]),
-                None => (None, inputs),
+        let plan = plan(inputs, params, ctx)?;
+        Ok(execute(&plan))
+    }
+}
+
+/// What `object.align` will do (C22, ADR-0008): every target's world
+/// translation along the axis, decided once. A preview shows these
+/// `transforms` and Apply ([`execute`]) commits exactly them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AlignPlan {
+    /// The axis's name (`x`, `y` or `z`) and the mode, for the report.
+    pub axis: String,
+    pub mode: String,
+    /// Each target's move along the axis (0 for one that stays), in
+    /// target order (the `anchor` operand is never a target here).
+    pub deltas: Vec<f64>,
+    /// Each target's placement after the move.
+    pub transforms: Vec<[f64; 12]>,
+}
+
+/// `object.align`'s plan for `inputs` (the targets, then an optional
+/// trailing `anchor`). A refusal here is Apply's refusal.
+pub fn plan(
+    inputs: &[OperandInput],
+    params: &Params,
+    ctx: &RunContext,
+) -> Result<AlignPlan, OpError> {
+    // The targets are every input except a trailing `anchor` operand
+    // (an optional, non-`many` operand always lands after every
+    // `many` target, D6).
+    let (anchor_input, targets): (Option<&OperandInput>, &[OperandInput]) =
+        match inputs.iter().position(|i| i.slot == "anchor") {
+            Some(k) => (Some(&inputs[k]), &inputs[..k]),
+            None => (None, inputs),
+        };
+    for t in targets.iter().chain(anchor_input) {
+        if t.target != Target::WholeObject {
+            return Err(unsupported_target("object.align", &t.target));
+        }
+    }
+    if targets.len() < 2 {
+        return Err(refuse_plain("too_few_objects"));
+    }
+    ctx.checkpoint()?;
+    let axis = axis_index(params.get_choice("axis")?);
+    let mode = params.get_choice("mode")?.to_owned();
+    let leaders = parse_leaders(params.get_text("leaders")?, targets.len())?;
+
+    let mut boxes: Vec<Option<Box3>> = Vec::with_capacity(targets.len());
+    for t in targets {
+        boxes.push(world_bounds(t, ctx)?.map(|(lo, hi)| Box3 { lo, hi }));
+    }
+    let empty = |name: &str| refuse_object("empty_object", name);
+    for (k, b) in boxes.iter().enumerate() {
+        if b.is_none() && leaders[k].is_none() {
+            return Err(empty(targets[k].name));
+        }
+    }
+
+    // The anchor's bounds (named operand), or the overall bounds of
+    // every target (no anchor): what min/centre/max land translations
+    // on, and what distribute's two extremes leave in place of.
+    let overall = |axis: usize| {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for b in boxes.iter().flatten() {
+            lo = lo.min(b.lo[axis]);
+            hi = hi.max(b.hi[axis]);
+        }
+        (lo, hi)
+    };
+    let anchor_box = match anchor_input {
+        Some(a) => {
+            let (lo, hi) = world_bounds(a, ctx)?.ok_or_else(|| empty(a.name))?;
+            Some(Box3 { lo, hi })
+        }
+        None => None,
+    };
+
+    // One world-axis delta per target that decides its own move
+    // (leaders and ordinary targets); a follower's delta is copied
+    // from its leader afterwards.
+    let mut delta = vec![0.0_f64; targets.len()];
+    match mode.as_str() {
+        "min" | "centre" | "max" => {
+            let target_value = match &anchor_box {
+                Some(b) => match mode.as_str() {
+                    "min" => b.lo[axis],
+                    "max" => b.hi[axis],
+                    _ => b.centre(axis),
+                },
+                None => {
+                    let (lo, hi) = overall(axis);
+                    match mode.as_str() {
+                        "min" => lo,
+                        "max" => hi,
+                        _ => (lo + hi) * 0.5,
+                    }
+                }
             };
-        for t in targets.iter().chain(anchor_input) {
-            if t.target != Target::WholeObject {
-                return Err(unsupported_target(self.id(), &t.target));
-            }
-        }
-        if targets.len() < 2 {
-            return Err(refuse_plain("too_few_objects"));
-        }
-        ctx.checkpoint()?;
-        let axis = axis_index(params.get_choice("axis")?);
-        let mode = params.get_choice("mode")?.to_owned();
-        let leaders = parse_leaders(params.get_text("leaders")?, targets.len())?;
-
-        let mut boxes: Vec<Option<Box3>> = Vec::with_capacity(targets.len());
-        for t in targets {
-            boxes.push(world_bounds(t, ctx)?.map(|(lo, hi)| Box3 { lo, hi }));
-        }
-        let empty = |name: &str| refuse_object("empty_object", name);
-        for (k, b) in boxes.iter().enumerate() {
-            if b.is_none() && leaders[k].is_none() {
-                return Err(empty(targets[k].name));
-            }
-        }
-
-        // The anchor's bounds (named operand), or the overall bounds of
-        // every target (no anchor): what min/centre/max land translations
-        // on, and what distribute's two extremes leave in place of.
-        let overall = |axis: usize| {
-            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
-            for b in boxes.iter().flatten() {
-                lo = lo.min(b.lo[axis]);
-                hi = hi.max(b.hi[axis]);
-            }
-            (lo, hi)
-        };
-        let anchor_box = match anchor_input {
-            Some(a) => {
-                let (lo, hi) = world_bounds(a, ctx)?.ok_or_else(|| empty(a.name))?;
-                Some(Box3 { lo, hi })
-            }
-            None => None,
-        };
-
-        // One world-axis delta per target that decides its own move
-        // (leaders and ordinary targets); a follower's delta is copied
-        // from its leader afterwards.
-        let mut delta = vec![0.0_f64; targets.len()];
-        match mode.as_str() {
-            "min" | "centre" | "max" => {
-                let target_value = match &anchor_box {
-                    Some(b) => match mode.as_str() {
-                        "min" => b.lo[axis],
-                        "max" => b.hi[axis],
-                        _ => b.centre(axis),
-                    },
-                    None => {
-                        let (lo, hi) = overall(axis);
-                        match mode.as_str() {
-                            "min" => lo,
-                            "max" => hi,
-                            _ => (lo + hi) * 0.5,
-                        }
-                    }
+            for (k, b) in boxes.iter().enumerate() {
+                let Some(b) = b else { continue };
+                // The anchor itself (if it's also a target) never
+                // moves: its own value already equals the target
+                // value by construction.
+                let own = match mode.as_str() {
+                    "min" => b.lo[axis],
+                    "max" => b.hi[axis],
+                    _ => b.centre(axis),
                 };
-                for (k, b) in boxes.iter().enumerate() {
-                    let Some(b) = b else { continue };
-                    // The anchor itself (if it's also a target) never
-                    // moves: its own value already equals the target
-                    // value by construction.
-                    let own = match mode.as_str() {
-                        "min" => b.lo[axis],
-                        "max" => b.hi[axis],
-                        _ => b.centre(axis),
-                    };
-                    delta[k] = target_value - own;
-                }
-            }
-            "distribute_gaps" | "distribute_centres" => {
-                // Ordered by the targets' own current position on the
-                // axis (their centre), ties broken by input order so the
-                // result is deterministic (Exact replay).
-                let mut order: Vec<usize> =
-                    (0..targets.len()).filter(|&k| boxes[k].is_some()).collect();
-                order.sort_by(|&a, &b| {
-                    boxes[a]
-                        .as_ref()
-                        .expect("filtered above")
-                        .centre(axis)
-                        .total_cmp(&boxes[b].as_ref().expect("filtered above").centre(axis))
-                        .then(a.cmp(&b))
-                });
-                if order.len() < 2 {
-                    return Err(refuse_plain("too_few_objects"));
-                }
-                let first = order[0];
-                let last = *order.last().expect("at least two");
-                if mode == "distribute_gaps" {
-                    // Equal gaps: the space between the first's max and
-                    // the last's min, split evenly among the objects
-                    // between them (each keeping its own width).
-                    let span_lo = boxes[first].as_ref().expect("filtered").hi[axis];
-                    let span_hi = boxes[last].as_ref().expect("filtered").lo[axis];
-                    let between = &order[1..order.len() - 1];
-                    let widths: f64 = between
-                        .iter()
-                        .map(|&k| {
-                            let b = boxes[k].as_ref().expect("filtered");
-                            b.hi[axis] - b.lo[axis]
-                        })
-                        .sum();
-                    let gap = if between.is_empty() {
-                        0.0
-                    } else {
-                        ((span_hi - span_lo - widths) / (between.len() + 1) as f64).max(0.0)
-                    };
-                    let mut cursor = span_lo + gap;
-                    for &k in between {
-                        let b = boxes[k].as_ref().expect("filtered");
-                        let width = b.hi[axis] - b.lo[axis];
-                        delta[k] = cursor - b.lo[axis];
-                        cursor += width + gap;
-                    }
-                } else {
-                    // Equal centres: the first and last objects' own
-                    // centres bound the run; the rest land on evenly
-                    // spaced centres between them.
-                    let c_lo = boxes[first].as_ref().expect("filtered").centre(axis);
-                    let c_hi = boxes[last].as_ref().expect("filtered").centre(axis);
-                    let between = &order[1..order.len() - 1];
-                    let n = between.len() + 1;
-                    for (i, &k) in between.iter().enumerate() {
-                        let b = boxes[k].as_ref().expect("filtered");
-                        let want = c_lo + (c_hi - c_lo) * (i + 1) as f64 / n as f64;
-                        delta[k] = want - b.centre(axis);
-                    }
-                }
-            }
-            other => {
-                return Err(failed(
-                    "unknown_mode",
-                    format!("'{other}' isn't a known align mode"),
-                ));
+                delta[k] = target_value - own;
             }
         }
-        // Followers copy their leader's delta (the leader has already
-        // been resolved above: `parse_leaders` only allows pointing at
-        // an earlier, non-follower target).
-        for (k, leader) in leaders.iter().enumerate() {
-            if let Some(l) = leader {
-                delta[k] = delta[*l];
-            }
-        }
-
-        let mut changes = Vec::new();
-        for (k, t) in targets.iter().enumerate() {
-            if delta[k] == 0.0 {
-                continue;
-            }
-            let mut transform = t.transform;
-            transform[9 + axis] += delta[k];
-            changes.push(ObjectChange::Transform {
-                operand: k,
-                transform,
+        "distribute_gaps" | "distribute_centres" => {
+            // Ordered by the targets' own current position on the
+            // axis (their centre), ties broken by input order so the
+            // result is deterministic (Exact replay).
+            let mut order: Vec<usize> =
+                (0..targets.len()).filter(|&k| boxes[k].is_some()).collect();
+            order.sort_by(|&a, &b| {
+                boxes[a]
+                    .as_ref()
+                    .expect("filtered above")
+                    .centre(axis)
+                    .total_cmp(&boxes[b].as_ref().expect("filtered above").centre(axis))
+                    .then(a.cmp(&b))
             });
+            if order.len() < 2 {
+                return Err(refuse_plain("too_few_objects"));
+            }
+            let first = order[0];
+            let last = *order.last().expect("at least two");
+            if mode == "distribute_gaps" {
+                // Equal gaps: the space between the first's max and
+                // the last's min, split evenly among the objects
+                // between them (each keeping its own width).
+                let span_lo = boxes[first].as_ref().expect("filtered").hi[axis];
+                let span_hi = boxes[last].as_ref().expect("filtered").lo[axis];
+                let between = &order[1..order.len() - 1];
+                let widths: f64 = between
+                    .iter()
+                    .map(|&k| {
+                        let b = boxes[k].as_ref().expect("filtered");
+                        b.hi[axis] - b.lo[axis]
+                    })
+                    .sum();
+                let gap = if between.is_empty() {
+                    0.0
+                } else {
+                    ((span_hi - span_lo - widths) / (between.len() + 1) as f64).max(0.0)
+                };
+                let mut cursor = span_lo + gap;
+                for &k in between {
+                    let b = boxes[k].as_ref().expect("filtered");
+                    let width = b.hi[axis] - b.lo[axis];
+                    delta[k] = cursor - b.lo[axis];
+                    cursor += width + gap;
+                }
+            } else {
+                // Equal centres: the first and last objects' own
+                // centres bound the run; the rest land on evenly
+                // spaced centres between them.
+                let c_lo = boxes[first].as_ref().expect("filtered").centre(axis);
+                let c_hi = boxes[last].as_ref().expect("filtered").centre(axis);
+                let between = &order[1..order.len() - 1];
+                let n = between.len() + 1;
+                for (i, &k) in between.iter().enumerate() {
+                    let b = boxes[k].as_ref().expect("filtered");
+                    let want = c_lo + (c_hi - c_lo) * (i + 1) as f64 / n as f64;
+                    delta[k] = want - b.centre(axis);
+                }
+            }
         }
-        Ok(DocOutput {
-            report: serde_json::json!({ "moved": changes.len(), "axis": params.get_choice("axis")?, "mode": mode }),
-            changes,
+        other => {
+            return Err(failed(
+                "unknown_mode",
+                format!("'{other}' isn't a known align mode"),
+            ));
+        }
+    }
+    // Followers copy their leader's delta (the leader has already
+    // been resolved above: `parse_leaders` only allows pointing at
+    // an earlier, non-follower target).
+    for (k, leader) in leaders.iter().enumerate() {
+        if let Some(l) = leader {
+            delta[k] = delta[*l];
+        }
+    }
+
+    let transforms = targets
+        .iter()
+        .zip(&delta)
+        .map(|(t, d)| {
+            let mut transform = t.transform;
+            transform[9 + axis] += d;
+            transform
         })
+        .collect();
+    Ok(AlignPlan {
+        axis: params.get_choice("axis")?.to_owned(),
+        mode,
+        deltas: delta,
+        transforms,
+    })
+}
+
+/// Commits `plan`: one transform change per target that moves.
+pub fn execute(plan: &AlignPlan) -> DocOutput {
+    let changes: Vec<ObjectChange> = plan
+        .deltas
+        .iter()
+        .zip(&plan.transforms)
+        .enumerate()
+        .filter(|(_, (d, _))| **d != 0.0)
+        .map(|(k, (_, transform))| ObjectChange::Transform {
+            operand: k,
+            transform: *transform,
+        })
+        .collect();
+    DocOutput {
+        report: serde_json::json!({ "moved": changes.len(), "axis": plan.axis, "mode": plan.mode }),
+        changes,
     }
 }
 

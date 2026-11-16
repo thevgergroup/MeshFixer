@@ -11,11 +11,11 @@ use mf_geometry::{Mesh, Provenance, Sources};
 use mf_parts::Library;
 use mf_spec::Params;
 
-use crate::affine::determinant;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
     Target, needs_document, scale_mesh,
 };
+use mf_geometry::affine::determinant;
 
 pub struct AddPart;
 

@@ -32,24 +32,26 @@
 //!   way from the fit profile.
 
 use glam::DMat4;
-use mf_boolean::{CutError, HalfCut, Plane, Side};
+use mf_boolean::{CutError, HalfCut};
 use mf_geometry::{Bvh, Mesh, Provenance, Sources};
 use mf_parts::{Compensation, FitClass, FitExpectation, MachineProfile, MatingSurfaces, check_fit};
 use mf_spec::Params;
 
-use crate::affine::{apply, apply_linear, inverse};
 use crate::layout::{Footprint, Plate, layout_on_plate};
+use mf_geometry::affine::apply;
 
 pub mod dovetail;
 pub mod joints;
 pub mod pegs;
+pub mod plan;
 pub mod region;
 pub mod volume;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document, unsupported_target,
+    Target, needs_document,
 };
-use pegs::{PegError, PegShape};
+use pegs::PegShape;
+use plan::{CutPlan, PegPlan, SplitPlan, TargetPlan};
 
 /// The stages a split reports, in order.
 pub const SPLIT_STAGES: &[&str] = &[
@@ -140,12 +142,6 @@ pub fn split_names(name: &str, normal: [f64; 3]) -> (String, String) {
 }
 
 pub struct SplitPlane;
-
-/// A world normal in object space: with `x_w = x_o·M + t`, the plane
-/// `n_w·(x_w − p_w) = 0` is `(M n_w)·(x_o − p_o) = 0`.
-fn normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
-    std::array::from_fn(|r| t[3 * r] * n[0] + t[3 * r + 1] * n[1] + t[3 * r + 2] * n[2])
-}
 
 /// A malformed invocation (an unreadable mesh, ADR-0010): never one of
 /// `mesh.split_plane`'s declared refusals, which [`refusal`] builds
@@ -360,114 +356,99 @@ impl Operation for SplitPlane {
         _doc: &DocContext,
         ctx: &RunContext,
     ) -> Result<DocOutput, OpError> {
-        if inputs.is_empty() {
-            return Err(failed(
-                "missing_target",
-                "mesh.split_plane was run with no target",
-            ));
+        let plan = plan::plan(inputs, params, ctx)?;
+        execute(plan, inputs, scene, params, ctx)
+    }
+}
+
+/// With several targets, a refusal or failure names the target it's
+/// about; with one, it's returned as is.
+fn name_target(targets: usize, target: &OperandInput, e: OpError) -> OpError {
+    match e {
+        OpError::Refused { code, mut args } if targets > 1 => {
+            args.insert(
+                "object",
+                crate::refusal::RefusalArg::Text(target.name.to_owned()),
+            );
+            crate::refusal::refuse(code, args)
         }
-        // Each target is cut on its own; dowels made for one are laid out
-        // clear of those made for the ones before it.
-        let mut scene = scene.to_vec();
-        let mut changes = Vec::new();
-        let mut cut = Vec::new();
-        let mut missed = Vec::new();
-        // Each cut's joint (the Split workflow's step 3): the bottom part
-        // (`a`, created) and the top part (`b`, the target), across the
-        // plane, normal from `a` into `b`.
-        let mut joints = Vec::new();
-        let mut created = 0usize;
-        let both = params.get_choice("keep")? == "both";
-        let cap = params.get_bool("cap")?;
-        let normal = params.get_vec3("plane_normal")?;
-        let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-        for (k, target) in inputs.iter().enumerate() {
-            match split_one(k, target, &scene, params, ctx) {
-                Ok(one) => {
-                    // A joint needs a genuine split: `keep: both` can
-                    // still create nothing for this target when the
-                    // plane lies exactly on its surface and one side is
-                    // empty (owner 2026-11-12) — no second piece, so no
-                    // cut face pair to report as a joint. Uncapped (a
-                    // vase or bowl), there's no cap face pair to place
-                    // connectors against either, so no joint either.
-                    let made_a_part = one
-                        .changes
-                        .iter()
-                        .any(|c| matches!(c, ObjectChange::Create { .. }));
-                    if both && len > 0.0 && cap && made_a_part {
-                        joints.push(serde_json::json!({
-                            "a": { "created": created },
-                            "b": { "operand": k },
-                            "point": params.get_vec3("plane_point")?,
-                            "normal": normal.map(|c| c / len),
-                            "gap": params.get_float("cut_gap")?,
-                        }));
-                    }
-                    created += one
-                        .changes
-                        .iter()
-                        .filter(|c| matches!(c, ObjectChange::Create { .. }))
-                        .count();
-                    for c in &one.changes {
-                        if let ObjectChange::Create {
-                            mesh, transform, ..
-                        } = c
-                        {
-                            scene.extend(crate::SceneObject::of(
-                                target.object,
-                                mesh,
-                                transform,
-                                ctx,
-                            )?);
-                        }
-                    }
-                    changes.extend(one.changes);
-                    cut.push(one.report);
-                }
-                // With several targets, one the plane misses is listed,
-                // not refused (unless the plane misses them all).
-                Err(OpError::Refused {
-                    code: "plane_misses_object",
-                    ..
-                }) if inputs.len() > 1 => missed.push(target.name.to_owned()),
-                Err(OpError::Refused { code, mut args }) if inputs.len() > 1 => {
-                    args.insert(
-                        "object",
-                        crate::refusal::RefusalArg::Text(target.name.to_owned()),
-                    );
-                    return Err(crate::refusal::refuse(code, args));
-                }
-                Err(OpError::Failed { code, message }) if inputs.len() > 1 => {
-                    return Err(OpError::Failed {
-                        code,
-                        message: format!("'{}': {message}", target.name),
-                    });
-                }
-                Err(e) => return Err(e),
+        OpError::Failed { code, message } if targets > 1 => OpError::Failed {
+            code,
+            message: format!("'{}': {message}", target.name),
+        },
+        e => e,
+    }
+}
+
+/// Carries out `plan` (from [`plan::plan`] on these same `inputs` and
+/// `params`): the boolean edits for the alignment features, the dowels'
+/// layout, and the changes and report. Nothing the plan decided is
+/// decided again here (ADR-0008).
+pub fn execute(
+    plan: SplitPlan,
+    inputs: &[OperandInput],
+    scene: &[crate::SceneObject],
+    params: &Params,
+    ctx: &RunContext,
+) -> Result<DocOutput, OpError> {
+    // Each target is cut on its own; dowels made for one are laid out
+    // clear of those made for the ones before it.
+    let mut scene = scene.to_vec();
+    let mut changes = Vec::new();
+    let mut cut = Vec::new();
+    let mut missed = Vec::new();
+    // Each cut's joint (the Split workflow's step 3), as planned.
+    let mut joints = Vec::new();
+    for target_plan in plan.targets {
+        let one_plan = match target_plan {
+            TargetPlan::Missed { name, .. } => {
+                missed.push(name);
+                continue;
+            }
+            TargetPlan::Cut(one) => one,
+        };
+        let target = inputs.get(one_plan.operand).ok_or_else(|| {
+            failed(
+                "plan_mismatch",
+                "mesh.split_plane's plan names a target it wasn't given",
+            )
+        })?;
+        if let Some(joint) = &one_plan.joint {
+            joints.push(joint.report());
+        }
+        let one = execute_one(*one_plan, target, &scene, params, ctx)
+            .map_err(|e| name_target(inputs.len(), target, e))?;
+        for c in &one.changes {
+            if let ObjectChange::Create {
+                mesh, transform, ..
+            } = c
+            {
+                scene.extend(crate::SceneObject::of(target.object, mesh, transform, ctx)?);
             }
         }
-        if cut.is_empty() {
-            return Err(refuse(
-                "plane_misses_object",
-                "The cut plane doesn't pass through any of the selected objects (or the gap is \
-                 wider than them). Move the plane so it crosses a model.",
-            ));
-        }
-        // The first cut object's report at the top level (the one-target
-        // shape), then every cut object's and the missed ones.
-        let mut report = cut[0].clone();
-        let parts: Vec<serde_json::Value> = cut
-            .iter()
-            // allow-swallow: each `r` is split_one's own report, which always sets "parts" to an array.
-            .flat_map(|r| r["parts"].as_array().cloned().unwrap_or_default())
-            .collect();
-        report["parts"] = serde_json::Value::Array(parts);
-        report["objects"] = serde_json::Value::Array(cut);
-        report["missed"] = serde_json::json!(missed);
-        report["joints"] = serde_json::Value::Array(joints);
-        Ok(DocOutput { changes, report })
+        changes.extend(one.changes);
+        cut.push(one.report);
     }
+    // The first cut object's report at the top level (the one-target
+    // shape), then every cut object's and the missed ones. The plan
+    // always holds at least one cut (missing every target is refused).
+    let Some(first) = cut.first() else {
+        return Err(failed(
+            "plan_mismatch",
+            "mesh.split_plane's plan cuts no target",
+        ));
+    };
+    let mut report = first.clone();
+    let parts: Vec<serde_json::Value> = cut
+        .iter()
+        // allow-swallow: each `r` is execute_one's own report, which always sets "parts" to an array.
+        .flat_map(|r| r["parts"].as_array().cloned().unwrap_or_default())
+        .collect();
+    report["parts"] = serde_json::Value::Array(parts);
+    report["objects"] = serde_json::Value::Array(cut);
+    report["missed"] = serde_json::json!(missed);
+    report["joints"] = serde_json::Value::Array(joints);
+    Ok(DocOutput { changes, report })
 }
 
 /// One target's split: its changes (operand `k`) and report.
@@ -476,142 +457,38 @@ struct SplitOne {
     report: serde_json::Value,
 }
 
-fn split_one(
-    k: usize,
+fn execute_one(
+    one: CutPlan,
     target: &OperandInput,
     scene: &[crate::SceneObject],
     params: &Params,
     ctx: &RunContext,
 ) -> Result<SplitOne, OpError> {
-    if target.target != Target::WholeObject {
-        return Err(unsupported_target("mesh.split_plane", &target.target));
-    }
-    let point = params.get_vec3("plane_point")?;
-    let normal = params.get_vec3("plane_normal")?;
-    let keep = params.get_choice("keep")?;
-    let gap = params.get_float("cut_gap")?;
-    let pegs = params.get_choice("pegs")?;
-    let cap = params.get_bool("cap")?;
-    // Cross-section picking (Phase 1b): an empty list cuts every region
-    // (today's behaviour); `mf_boolean::cut_half_with_regions` takes the
-    // same "empty/absent means all" convention.
-    let region_faces: Vec<mf_geometry::FaceId> = params
-        .get_faces("regions")?
-        .into_iter()
-        .map(mf_geometry::FaceId)
-        .collect();
-    let regions_filter = (!region_faces.is_empty()).then_some(region_faces);
-    // The bounded cut plane (Phase 1b): width/height are world mm; the
-    // bound itself lives in the plane's own object-space frame, so they
-    // need the same object-units conversion `alignment` uses for hole
-    // sizes.
-    let scale = crate::affine::determinant(&target.transform).abs().cbrt();
-    let scale = if scale > 0.0 && scale.is_finite() {
-        scale
-    } else {
-        1.0
-    };
-    let bound = params.get_bool("bound")?.then(|| {
-        let width = params.get_float("bound_width").unwrap_or(100.0) / scale;
-        let height = params.get_float("bound_height").unwrap_or(100.0) / scale;
-        match params.get_choice("bound_shape").unwrap_or("disc") {
-            "rect" => mf_boolean::Bound::Rect { width, height },
-            _ => mf_boolean::Bound::Disc {
-                radius: width / 2.0,
-            },
-        }
-    });
-    let len = (normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]).sqrt();
-    if len == 0.0 || !len.is_finite() {
-        return Err(refusal(&target.transform, CutError::InvalidPlane));
-    }
-    let inv = inverse(&target.transform).ok_or_else(|| {
-        failed(
-            "singular_transform",
-            "The object's transform flattens it, so the plane can't be placed in it; reset \
-             its transform first.",
-        )
-    })?;
-    ctx.checkpoint()?;
-    // The two cut planes, in world space then object space.
-    let unit = normal.map(|c| c / len);
-    let shifted = |sign: f64| -> [f64; 3] {
-        if gap == 0.0 {
-            point
-        } else {
-            std::array::from_fn(|i| point[i] + sign * unit[i] * gap / 2.0)
-        }
-    };
-    let object_normal = normal_to_object(&target.transform, normal);
-    let plane_above = Plane {
-        point: apply(&inv, shifted(1.0)),
-        normal: object_normal,
-    };
-    let plane_below = Plane {
-        point: apply(&inv, shifted(-1.0)),
-        normal: object_normal,
-    };
-    mf_boolean::check_closed(target.mesh, ctx).map_err(|e| refusal(&target.transform, e))?;
-    // A side genuinely empty because the plane grazes the model's
-    // surface exactly there, with nothing strictly past it (`CutError::
-    // MissesObject { grazed: true }` on just one side), is not a
-    // refusal with `keep: both`: it degrades to keeping only the other
-    // side, the same as if `keep` had asked for it by name, rather than
-    // failing a cut that a plane lying exactly on a face must never be
-    // refused for (owner 2026-11-12). A plane that doesn't touch the
-    // model's surface at all (`grazed: false`) is still a genuine miss;
-    // so is asking for just one side and missing it entirely.
-    let side_or_none = |keep_this: bool, plane: &Plane, side: Side| {
-        keep_this
-            .then(|| {
-                mf_boolean::cut_half_with_regions(
-                    target.mesh,
-                    plane,
-                    side,
-                    cap,
-                    regions_filter.as_deref(),
-                    bound.as_ref(),
-                    ctx,
-                )
-            })
-            .transpose()
-    };
-    let above = match side_or_none(keep != "below", &plane_above, Side::Above) {
-        Ok(above) => above,
-        Err(CutError::MissesObject { grazed: true }) if keep == "both" => None,
-        Err(e) => return Err(refusal(&target.transform, e)),
-    };
-    let below = match side_or_none(keep != "above", &plane_below, Side::Below) {
-        Ok(below) => below,
-        Err(CutError::MissesObject { grazed: true }) if keep == "both" => None,
-        Err(e) => return Err(refusal(&target.transform, e)),
-    };
-    if above.is_none() && below.is_none() {
-        return Err(refusal(
-            &target.transform,
-            CutError::MissesObject { grazed: false },
-        ));
-    }
-    ctx.checkpoint()?;
-    let mut above = above;
-    let mut below = below;
+    let k = one.operand;
+    let regions = one.regions().len();
+    let plane_point_object = one.plane_above.point;
+    let object_normal = one.plane_above.normal;
+    let mut above = one.above;
+    let mut below = one.below;
     let mut created_dowels = Vec::new();
     let mut peg_report = serde_json::Value::Null;
-    if pegs != "none" {
-        let world_n = unit;
+    if let Some(peg_plan) = &one.pegs {
         let out = alignment(
-            params, pegs, target, scene, world_n, &mut above, &mut below, ctx,
+            params,
+            peg_plan,
+            target,
+            scene,
+            one.world_normal,
+            &mut above,
+            &mut below,
+            ctx,
         )?;
         created_dowels = out.0;
         peg_report = out.1;
     }
-    let (top_name, bottom_name) = split_names(target.name, unit);
+    let (top_name, bottom_name) = one.names;
     let mut changes = Vec::new();
     let mut parts = Vec::new();
-    let regions = below
-        .as_ref()
-        .or(above.as_ref())
-        .map_or(0, |p| p.section_regions.len());
     match (above, below) {
         (Some(above), Some(below)) => {
             parts.push(part_report(&top_name, "target", &above));
@@ -679,7 +556,7 @@ fn split_one(
         report: serde_json::json!({
             "parts": parts,
             "section_regions": regions,
-            "plane_point_object": plane_above.point,
+            "plane_point_object": plane_point_object,
             "plane_normal_object": object_normal,
             "pegs": peg_report,
         }),
@@ -757,13 +634,14 @@ fn round_alignment_hole(
     (hole_outline(profile, r, up, 45.0, chord_tol), name)
 }
 
-/// Holes, attached pegs and dowels (D12). Changes the parts in place
-/// (their provenance stays relative to the target's input) and returns the
-/// dowels to create, each with its placement, and a report.
+/// Holes, attached pegs and dowels (D12), where `peg_plan` placed them.
+/// Changes the parts in place (their provenance stays relative to the
+/// target's input) and returns the dowels to create, each with its
+/// placement, and a report.
 #[allow(clippy::too_many_arguments)]
 fn alignment(
     params: &Params,
-    pegs: &str,
+    peg_plan: &PegPlan,
     target: &OperandInput,
     scene: &[crate::SceneObject],
     world_n: [f64; 3],
@@ -771,17 +649,13 @@ fn alignment(
     below: &mut Option<HalfCut>,
     ctx: &RunContext,
 ) -> Result<(Vec<Placed>, serde_json::Value), OpError> {
-    let shape = match params.get_choice("peg_shape")? {
-        "square" => PegShape::Square,
-        "keyed" => PegShape::Keyed,
-        _ => PegShape::Round,
-    };
+    let pegs = peg_plan.kind.as_str();
+    let holes = &peg_plan.holes;
     let hole_profile = params.get_choice("hole_profile")?;
     let mut profile_used: Option<&'static str> = None;
     let d = params.get_float("hole_diameter")?;
     let depth_above = params.get_float("hole_depth_above")?;
     let depth_below = params.get_float("hole_depth_below")?;
-    let count = params.get_int("peg_count")?.max(0) as u32;
     // D20 migration: `peg_clearance` is what sizes the hole and dowel
     // (unchanged, so an old log that only recorded `peg_clearance`
     // replays identically). `fit_clearance` and `machine_tolerance` are
@@ -793,7 +667,6 @@ fn alignment(
     let fit_clearance = params.get_float("fit_clearance")?;
     let machine_tolerance = params.get_float("machine_tolerance")?;
     let allowance = params.get_float("length_allowance")?;
-    let min_wall = params.get_float("min_wall")?;
     let plate = Plate {
         size: [
             params.get_float("plate_width")?,
@@ -801,73 +674,16 @@ fn alignment(
         ],
     };
     let spacing = params.get_float("plate_spacing")?;
-    let (dowel_d, dowel_len) = pegs::dowel_size(d, depth_above, depth_below, clearance, allowance);
-    let attached_len = depth_below - allowance;
-    if (pegs == "dowels" && dowel_len <= 0.0) || (pegs == "attached" && attached_len <= 0.0) {
-        return Err(refuse(
-            "dowel_too_short",
-            "The holes are too shallow for a dowel after the length allowance. Make the holes \
-             deeper.",
-        ));
-    }
-    if dowel_d <= 0.0 || d <= 0.0 {
-        return Err(refuse(
-            "dowel_too_thin",
-            "The hole is no wider than the clearance, so the dowel would have no width. Make \
-             the hole wider.",
-        ));
-    }
+    let dowel_d = peg_plan.dowel_diameter;
+    let dowel_len = peg_plan.dowel_length;
+    let attached_len = peg_plan.attached_length;
     let chord_tol = if clearance > 0.0 {
         clearance / 10.0
     } else {
         d / 1000.0
     };
-    // Object units per world unit (uniform-scale approximation): sizes
-    // compared with the section are in object units.
-    let scale = crate::affine::determinant(&target.transform).abs().cbrt();
-    let scale = if scale > 0.0 && scale.is_finite() {
-        scale
-    } else {
-        1.0
-    };
-    // Placement on one section (the bottom part's, or the top's if only
-    // it is kept).
-    let regions = below
-        .as_ref()
-        .or(above.as_ref())
-        .map(|p| p.section_regions.clone())
-        .unwrap_or_default(); // allow-swallow: no part kept on either side means no section, so no holes
     let dovetail = pegs == "dovetail";
-    let (shape, count) = if dovetail {
-        (PegShape::Round, 1)
-    } else {
-        (shape, count)
-    };
-    let (holes, skipped) = pegs::place_holes(&regions, shape, d / scale, count, min_wall / scale)
-        .map_err(|e| match e {
-        PegError::DoesNotFit {
-            region,
-            widest_fit_mm,
-        } => refuse(
-            "section_too_thin",
-            format!(
-                "Section {} is too thin for a {} hole with a {} wall: the widest hole that fits \
-                 is {}. Use a smaller hole diameter or minimum wall, or Alignment: None.",
-                region + 1,
-                mf_spec::format_length(d),
-                mf_spec::format_length(min_wall),
-                mf_spec::format_length(widest_fit_mm * scale)
-            ),
-        ),
-    })?;
-    ctx.checkpoint()?;
     let over = d + params.get_float("cut_gap")?;
-    // World base points (on the bottom plane, and the top plane) and keys.
-    let frame_below = regions.first().map(|r| r.frame);
-    let frame_above = above
-        .as_ref()
-        .and_then(|p| p.section_regions.first())
-        .map(|r| r.frame);
     let mut tools_below = Vec::new();
     let mut tools_above = Vec::new();
     let mut pegs_above = Vec::new();
@@ -875,51 +691,10 @@ fn alignment(
     // check below: (hole tool mesh, dowel-or-peg mesh at the hole's own
     // clearance). Captured before the boolean consumes the tool meshes.
     let mut fit_pair: Option<(Mesh, Mesh)> = None;
-    for h in &holes {
-        let frame = regions[h.region].frame;
-        let p_obj = frame.to_3d(h.center);
-        let key_obj: [f64; 3] =
-            std::array::from_fn(|i| h.axis[0] * frame.u[i] + h.axis[1] * frame.v[i]);
-        let key = apply_linear(&target.transform, key_obj);
-        let base_below = apply(&target.transform, p_obj);
-        let base_above = match frame_above {
-            Some(fa) if frame_below.is_some() => {
-                apply(&target.transform, fa.to_3d(fa.to_2d(p_obj)))
-            }
-            _ => base_below,
-        };
-        if dovetail {
-            let region = &regions[h.region];
-            let (lo, hi) = region.outer.iter().fold(
-                ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]),
-                |(lo, hi), p| {
-                    (
-                        [lo[0].min(p[0]), lo[1].min(p[1])],
-                        [hi[0].max(p[0]), hi[1].max(p[1])],
-                    )
-                },
-            );
-            let span = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2)).sqrt();
-            let wide = d + 2.0 * depth_below * dovetail::ANGLE_DEGREES.to_radians().tan();
-            let tail_half = dovetail::tail_half_length(
-                region,
-                h.center,
-                h.axis,
-                (wide / 2.0 + min_wall) / scale,
-                span,
-            ) * scale;
-            if tail_half <= 0.0 || depth_below <= allowance {
-                return Err(refuse(
-                    "section_too_thin",
-                    format!(
-                        "Section {} is too small for a {} dovetail {} deep. Use a smaller hole \
-                         diameter or depth, or Alignment: Dowels.",
-                        h.region + 1,
-                        mf_spec::format_length(d),
-                        mf_spec::format_length(depth_below)
-                    ),
-                ));
-            }
+    for planned in holes {
+        let h = &planned.placement;
+        let (key, base_below, base_above) = (planned.key, planned.base_below, planned.base_above);
+        if let Some(fit) = planned.dovetail {
             let (groove, tail) = dovetail::groove_and_tail(
                 base_below,
                 base_above,
@@ -929,8 +704,8 @@ fn alignment(
                 depth_below,
                 clearance,
                 allowance,
-                span * scale,
-                tail_half,
+                fit.groove_half,
+                fit.tail_half,
             );
             tools_below.push(groove);
             pegs_above.push(tail);
@@ -1042,7 +817,7 @@ fn alignment(
     let into_object = |tools: &[Mesh]| -> Result<Mesh, OpError> {
         mf_boolean::operand_in_frame(
             &pegs::merged(tools),
-            &crate::affine::IDENTITY,
+            &mf_geometry::affine::IDENTITY,
             &target.transform,
         )
         .ok_or_else(|| {
@@ -1079,7 +854,8 @@ fn alignment(
     if pegs == "dowels" && !holes.is_empty() {
         let mut meshes = Vec::new();
         let mut prints = Vec::new();
-        for h in &holes {
+        for planned in holes {
+            let h = &planned.placement;
             let profile = pegs::dowel_profile(h.shape, d, clearance, chord_tol);
             let mesh = mf_boolean::primitives::chamfered_dowel(
                 &mf_boolean::primitives::Axis::z_up([0.0, 0.0, 0.0]),
@@ -1087,7 +863,7 @@ fn alignment(
                 dowel_len,
                 1.5 * clearance,
             );
-            prints.push(footprint(&mesh, &crate::affine::IDENTITY).unwrap_or([0.0; 4]));
+            prints.push(footprint(&mesh, &mf_geometry::affine::IDENTITY).unwrap_or([0.0; 4]));
             meshes.push(mesh);
         }
         // Clear of the split object and of everything else on the plate.
@@ -1127,7 +903,7 @@ fn alignment(
             "dowels": report_dowels,
             "off_plate": off_plate,
             "off_plate_message": message,
-            "skipped_regions": skipped,
+            "skipped_regions": peg_plan.skipped_regions,
             "fit_clearance": fit_clearance,
             "machine_tolerance": machine_tolerance,
             "fit_check": fit_report,

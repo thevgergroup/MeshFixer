@@ -1435,7 +1435,7 @@ impl Operation for PlaceConnectors {
                 parts.push(crate::PartIn {
                     name: format!("Connector {} ({})", k + 1, part.role),
                     mesh: std::borrow::Cow::Owned(part.world),
-                    transform: crate::affine::IDENTITY,
+                    transform: mf_geometry::affine::IDENTITY,
                     role: if part.join == JoinKind::Subtract {
                         mf_parts::ShapeRole::Hole
                     } else {
@@ -1492,7 +1492,8 @@ impl Operation for PlaceConnectors {
                 let c = bb.center();
                 let shift = DMat4::from_translation(DVec3::new(-c[0], -c[1], -bb.min[2]));
                 let m = transformed(m, &shift);
-                prints.push(world_footprint(&m, &crate::affine::IDENTITY).unwrap_or([0.0; 4])); // allow-swallow: a dowel always has vertices (checked just above)
+                prints
+                    .push(world_footprint(&m, &mf_geometry::affine::IDENTITY).unwrap_or([0.0; 4])); // allow-swallow: a dowel always has vertices (checked just above)
                 upright.push(m);
             }
             let occupied: Vec<Footprint> = [a, b]

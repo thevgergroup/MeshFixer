@@ -12,12 +12,12 @@ use mf_geometry::{Mesh, Provenance, Sources, VertexId};
 use mf_parts::GeneratorRecord;
 use mf_spec::Params;
 
-use crate::affine::determinant;
 use crate::refusal::RefusalArg;
 use crate::{
     ChangeObject, DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation,
     RunContext, Target, needs_document, scale_mesh, unsupported_target,
 };
+use mf_geometry::affine::determinant;
 
 /// A malformed invocation (bad JSON, a mismatched member/recipe count):
 /// never one of `object.add_shape`'s, `object.set_shape_params`'s,
