@@ -29,3 +29,63 @@ effects: [creates_objects]
 runtime:
   cancellable: true
   progress: false
+# ADR-0010, consolidation plan C14: a shape's own generator can refuse
+# (mf_parts::regenerate's own structural codes, plus a generator's own —
+# hinge.leaf's are declared here; another generator's own code is still
+# a declared OpError::Refused, through the same registry helper, even
+# where this list doesn't yet name it).
+refusals:
+  - code: unknown_generator
+    message: refusal.unknown_generator
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: generator_version
+    message: refusal.generator_version
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: unknown_part
+    message: refusal.unknown_part
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: moving_parts_fused
+    message: refusal.moving_parts_fused
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: too_few_knuckles
+    message: refusal.too_few_knuckles
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: pin_too_wide
+    message: refusal.pin_too_wide
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: leaf_too_thick
+    message: refusal.leaf_too_thick
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: hinge_too_short
+    message: refusal.hinge_too_short
+    next: none
+    args:
+      - name: detail
+        kind: text
+  - code: leaf_failed
+    message: refusal.leaf_failed
+    next: none
+    args:
+      - name: detail
+        kind: text

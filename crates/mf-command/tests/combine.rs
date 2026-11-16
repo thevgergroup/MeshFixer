@@ -151,12 +151,12 @@ fn a_refused_step_names_its_object_and_changes_nothing() {
         .execute(combine(ids[0], &[ids[1]], &[ids[2]]))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("'far hole'"), "{err}");
+    assert!(err.contains("far hole"), "{err}");
     assert_eq!(state(&s), before);
     // Nothing but the target is nothing to combine.
     let err = s
         .execute(combine(ids[0], &[], &[]))
         .unwrap_err()
         .to_string();
-    assert!(err.contains("nothing to join"), "{err}");
+    assert!(err.contains("nothing_to_combine"), "{err}");
 }

@@ -76,6 +76,7 @@ fn result(out: &DocOutput) -> (&Mesh, &Provenance) {
 fn code(r: Result<DocOutput, OpError>) -> (&'static str, String) {
     match r {
         Err(OpError::Failed { code, message }) => (code, message),
+        Err(OpError::Refused { code, args }) => (code, mf_operations::refusal::render_args(&args)),
         Err(e) => panic!("{e}"),
         Ok(o) => panic!("expected a refusal, got {}", o.report),
     }

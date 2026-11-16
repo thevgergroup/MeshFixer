@@ -68,10 +68,17 @@ impl GizmoPalette {
     }
 }
 
-/// The build plate (D9): a grid at world z = 0. The default is 256 x 256
-/// mm with a 10 mm grid, matching a common consumer FDM bed, and a
-/// stronger line every 50 mm ([`crate::Palette::plate_major`]) so the
-/// scale reads at any zoom.
+/// The build plate (D9): a grid at world z = 0, with a stronger line
+/// every `major_mm` ([`crate::Palette::plate_major`]) so the scale reads
+/// at any zoom. [`Plate::default`] is a 256 x 256 mm placeholder with a
+/// 10 mm grid for the first frame, before any camera/viewport or Machine
+/// profile is known (`mf-desktop`'s own `plate()` builds the real one
+/// every frame after that); its size is never the plate a caller should
+/// check a model against — "there is one print volume" (consolidation
+/// plan C18) and it lives in the Machine profile (`mf-parts`), which
+/// this leaf crate doesn't depend on. [`Plate::from_print_volume_mm`] is
+/// how a caller holding a profile's own volume turns it into one of
+/// these, instead of inventing a second size here.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Plate {
     pub size_mm: [f64; 2],
@@ -86,6 +93,23 @@ impl Default for Plate {
             size_mm: [256.0, 256.0],
             grid_mm: 10.0,
             major_mm: 50.0,
+        }
+    }
+}
+
+impl Plate {
+    /// The plate a Machine profile's print volume (X/Y, mm) describes,
+    /// with the given grid spacing (`major_mm`: every this many minor
+    /// lines, 0 for none) — the one place a profile's volume becomes a
+    /// drawn plate, so `size_mm` is never a second, independent literal
+    /// next to the profile's own (consolidation plan C18). Doesn't read
+    /// `mf_parts::MachineProfile` directly (this crate has no mf-*
+    /// dependencies of its own); the caller passes its X/Y in mm.
+    pub fn from_print_volume_mm(volume_xy_mm: [f64; 2], grid_mm: f64, major_mm: f64) -> Plate {
+        Plate {
+            size_mm: volume_xy_mm,
+            grid_mm,
+            major_mm,
         }
     }
 }

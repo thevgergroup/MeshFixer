@@ -1359,6 +1359,46 @@ fn fit_profile(m: &ArgMatches) -> Result<mf_parts::FitProfile, Failure> {
     })
 }
 
+/// The active Machine profile's print volume, mm (consolidation plan
+/// C18): there is one print volume in the app, the Machine profile's
+/// (`mf_parts::MachineProfile::print_volume_mm`), the same one the
+/// desktop's import dialog and render plate read. Without a settings
+/// folder yet, or with it unreadable, the built-in Uncalibrated
+/// profile's own volume, exactly as a fresh desktop install sees it.
+fn print_volume_mm() -> [f64; 3] {
+    let Ok(dir) = mf_parts::dirs::meshfixer_dir() else {
+        return mf_parts::MachineProfile::uncalibrated().print_volume_mm;
+    };
+    match mf_parts::MachineProfiles::load(&dir) {
+        Ok(profiles) => profiles.active_profile().print_volume_mm,
+        Err(_) => mf_parts::MachineProfile::uncalibrated().print_volume_mm,
+    }
+}
+
+/// `mesh.split_box`'s `box_min`/`box_max`, filled from the active Machine
+/// profile's print volume when the caller didn't set them (consolidation
+/// plan C18: the spec's own literal default is a 256-document-unit box,
+/// which is a 256 m box on a metres document — the bug this replaces).
+/// The box sits on the bed in Z and is centred on the origin in X/Y, the
+/// same shape the desktop's Split "Print volume" mode starts from. Runs
+/// once the input's document unit is known (`open`'s result), so the mm
+/// print volume converts to the document's own units exactly once, the
+/// same single boundary every other length crosses (ADR-0006 §6.2); a
+/// caller who passed `--box_min`/`--box_max` is left alone.
+fn fill_box_defaults(op: &str, raw: &mut BTreeMap<String, String>, doc_unit: mf_io::threemf::Unit) {
+    if op != "mesh.split_box" {
+        return;
+    }
+    let volume_mm = print_volume_mm();
+    let to_doc = |mm: f64| mf_units::Length::new(mm, mf_units::Unit::Millimeter).in_doc(doc_unit);
+    let half: Vec<f64> = volume_mm.iter().map(|&mm| to_doc(mm) / 2.0).collect();
+    let full: Vec<f64> = volume_mm.iter().map(|&mm| to_doc(mm)).collect();
+    raw.entry("box_min".to_owned())
+        .or_insert_with(|| format!("{},{},{}", -half[0], -half[1], 0.0));
+    raw.entry("box_max".to_owned())
+        .or_insert_with(|| format!("{},{},{}", half[0], half[1], full[2]));
+}
+
 fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Result<(), Failure> {
     let input = m
         .get_one::<PathBuf>("input")
@@ -1404,11 +1444,14 @@ fn run_sequence(m: &ArgMatches, metrics: &mut Metrics, ctx: &RunContext) -> Resu
     let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();
     for Step {
         op,
-        raw,
+        mut raw,
         operands,
         select,
     } in seq
     {
+        // `box_min`/`box_max` (mesh.split_box): see the matching comment
+        // in `run_operation`.
+        fill_box_defaults(&op, &mut raw, session.document().units());
         let selection = selection_for(&session, id, import, &select)?;
         let operands = operands
             .into_iter()
@@ -1554,6 +1597,11 @@ fn run_operation(
         metrics,
         ctx,
     )?;
+    // `box_min`/`box_max` (mesh.split_box) are `unit: document`, so their
+    // print-volume default can only be filled once the document's own
+    // unit is known (consolidation plan C18); everything else was filled
+    // and checked above, before touching the filesystem.
+    fill_box_defaults(&spec.id, &mut raw_params, session.document().units());
     let selection = selection_for(&session, id, session.current(), &select)?;
     // `--<operand> <index>`: objects in input-file order.
     let objects: Vec<ObjectId> = session.document().objects().iter().map(|o| o.id).collect();

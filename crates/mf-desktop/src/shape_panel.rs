@@ -19,6 +19,7 @@ use mf_parts::GeneratorRecord;
 use mf_spec::{ParamKind, ParamValue, Params};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{InspectorSection, RegisterError, Shell};
 use crate::widgets;
 use crate::{icons, t, theme};
@@ -201,22 +202,14 @@ pub fn regenerate(
 ) {
     let Some(&first) = ids.first() else { return };
     app.refusal = None;
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: mf_command::SET_SHAPE_PARAMS.into(),
-            target: first,
-            selection: None,
-            operands: ids[1..]
-                .iter()
-                .map(|&o| ("target".to_owned(), o, None))
-                .collect(),
-            raw_params: BTreeMap::from([(
-                "generators".to_owned(),
-                mf_operations::shapes::generators_param(&records),
-            )]),
-        },
-        label,
-    );
+    let intent = Intent::op(mf_command::SET_SHAPE_PARAMS)
+        .on(first)
+        .operands(ids[1..].iter().map(|&o| ("target".to_owned(), o, None)))
+        .param(
+            "generators",
+            mf_operations::shapes::generators_param(&records),
+        );
+    app.run_intent(intent, label);
 }
 
 fn refuse(app: &mut MeshFixerApp, message: String) {
@@ -496,6 +489,7 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     };
     let idle = app.busy.is_none();
     let options = text_options(app);
+    let scale = app.scale_ctx();
     let Some(draft) = app.shape_edit.as_mut() else {
         return;
     };
@@ -509,6 +503,7 @@ pub fn editor(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             live: false,
             idle,
             text_options: &options,
+            scale: &scale,
         },
     );
     if let (Ok(c), Ok(m)) = (
@@ -549,6 +544,9 @@ pub struct GridOptions<'a> {
     /// False while a command runs: the fields are shown but disabled.
     pub idle: bool,
     pub text_options: &'a dyn Fn(&str) -> Vec<String>,
+    /// The document's scale: a length param's field shows, parses and
+    /// scrubs through it (`widgets::length_field`).
+    pub scale: &'a mf_units::ScaleCtx,
 }
 
 /// One field per param of `spec`, built from the schema alone (its kind,
@@ -583,20 +581,59 @@ pub fn param_grid(
                     continue;
                 };
                 let name = label(&p.name);
-                ui.add(egui::Label::new(&name).wrap_mode(egui::TextWrapMode::Extend))
-                    .on_hover_text(&p.description);
+                // A length's field carries its own label (its scrub
+                // handle and accessible name): the first column stays
+                // empty for it.
+                let length_unit = match p.unit {
+                    mf_spec::ParamUnit::Length(u) => Some(u),
+                    mf_spec::ParamUnit::Document => Some(opts.scale.doc),
+                    _ => None,
+                };
+                let is_length = length_unit.is_some() && matches!(p.kind, ParamKind::Float { .. });
+                if is_length {
+                    ui.label("");
+                } else {
+                    ui.add(egui::Label::new(&name).wrap_mode(egui::TextWrapMode::Extend))
+                        .on_hover_text(&p.description);
+                }
                 let suffix = match p.unit.symbol() {
                     Some("mm") => " mm",
                     Some("deg") => "°",
                     _ => "",
                 };
                 ui.add_enabled_ui(opts.idle, |ui| match (&p.kind, value) {
+                    (ParamKind::Float { min, max, .. }, ParamValue::Float(v))
+                        if let Some(unit) = length_unit =>
+                    {
+                        // The param's own unit is the spec's: the field
+                        // holds a `Length` in it and commits the value
+                        // back in that same unit (no conversion here).
+                        let mut length = mf_units::Length::new(*v, unit);
+                        let field = widgets::LengthFieldOpts {
+                            range: (
+                                mf_units::Length::new(min.unwrap_or(f64::NEG_INFINITY), unit),
+                                mf_units::Length::new(max.unwrap_or(f64::INFINITY), unit),
+                            ),
+                            scale: opts.scale,
+                            label: &name,
+                        };
+                        let r = widgets::length_field(
+                            ui,
+                            ui.make_persistent_id(("param length", &p.name)),
+                            &mut length,
+                            &field,
+                        )
+                        .on_hover_text(&p.description);
+                        if r.changed() {
+                            *v = length.to(unit).value;
+                            commit = Some((p.name.clone(), ParamValue::Float(*v)));
+                        }
+                    }
                     (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
                         let r = ui.add(
                             egui::DragValue::new(v)
                                 .speed(0.1)
                                 .range(min.unwrap_or(f64::MIN)..=max.unwrap_or(f64::MAX))
-                                .max_decimals(3)
                                 .suffix(suffix)
                                 .update_while_editing(opts.live),
                         );

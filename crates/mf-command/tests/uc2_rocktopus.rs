@@ -436,8 +436,8 @@ fn seam_is_faired_and_a_far_head_is_refused() {
         let before = s.revision();
         let err = s.execute(boolean_union(body, far_head, 3.0)).unwrap_err();
         match err {
-            CommandError::Operation(mf_operations::OpError::Failed { code, message }) => {
-                assert_eq!(code, "opening_not_covered", "{message}")
+            CommandError::Operation(mf_operations::OpError::Refused { code, args }) => {
+                assert_eq!(code, "opening_not_covered", "{args:?}")
             }
             other => panic!("{other:?}"),
         }

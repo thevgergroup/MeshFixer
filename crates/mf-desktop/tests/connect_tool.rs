@@ -712,7 +712,7 @@ fn the_counterpart_is_flattened_onto_the_same_place_as_the_footprint() {
 
     let a = h.state();
     let joint = a.split_flow.open_joint().unwrap().clone();
-    let scale = mf_desktop::split_flow::mm(a);
+    let scale = mf_desktop::split_flow::doc_units_per_millimetre(a);
     let parts = mf_operations::placed_parts(&joint.frame, &p, scale).unwrap();
     let solid = joint.solid();
     let counterpart = parts
@@ -1111,4 +1111,53 @@ fn a_registry_only_connector_appears_places_checks_and_applies() {
     settle(&mut h);
     assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
     assert_eq!(h.state().session.history_labels().len(), history + 1);
+}
+
+/// Consolidation plan C15's per-panel test: "min wall" is print intent,
+/// mm (the spec's own `unit: mm`), typed through `length_field`
+/// (`app.split_flow.min_wall`): a value typed as a *physical* 3 mm
+/// reaches `split.place_connectors` as exactly that, never a value
+/// read as if it were document units (this fixture's document is
+/// millimetres, so the bug's shape — a value silently read in the
+/// wrong unit — would only show up as a scaling by the wrong factor,
+/// caught here by using a value, 3, different from the spec's own
+/// default, 1.5, so a dropped conversion is visible either way).
+#[test]
+fn min_wall_typed_in_millimetres_reaches_place_connectors_as_physical_millimetres() {
+    require_gpu!("min_wall_typed_in_millimetres_reaches_place_connectors_as_physical_millimetres");
+    let mut h = ball_cut_in_two();
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    // Place one connector so Apply is enabled.
+    let p = cap_point(&h, [-12.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    assert_eq!(placements(&h).len(), 1);
+    // The field itself: a physical 3 mm, off the spec's 1.5 mm default.
+    h.state_mut().split_flow.min_wall = Some(3.0);
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    scroll_and_click(&mut h, "Add connectors");
+    wait_until(&mut h, "the connectors", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let record = h
+        .state()
+        .session
+        .records_to_current()
+        .into_iter()
+        .rev()
+        .find(|r| r.op_id == "split.place_connectors")
+        .expect("a split.place_connectors command");
+    let recorded = record.params.get_float("min_wall").unwrap();
+    assert!(
+        (recorded - 3.0).abs() < 1e-9,
+        "a 3 mm min wall on a millimetres document should record 3.0 \
+         doc units, got {recorded}"
+    );
 }

@@ -29,8 +29,9 @@ pub const UNCALIBRATED_NAME: &str = "Uncalibrated";
 /// mode, owner 2026-11-11): absent any calibration, the uncalibrated
 /// profile's own volume (a generous default; nothing is assumed about a
 /// real printer until the user says so, same spirit as the tolerances
-/// above).
-const DEFAULT_VOLUME_MM: [f64; 3] = [220.0, 220.0, 250.0];
+/// above). 250 mm on every side: the owner's stated default plate
+/// (2026-11-14), and the one the import dialog's "fits the plate" rule uses.
+const DEFAULT_VOLUME_MM: [f64; 3] = [250.0, 250.0, 250.0];
 
 fn default_volume_mm() -> [f64; 3] {
     DEFAULT_VOLUME_MM

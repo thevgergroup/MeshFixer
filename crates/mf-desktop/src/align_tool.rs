@@ -11,13 +11,12 @@
 //! (`shape_tools.rs`): an icon, a panel, and a share of the viewport's
 //! input (`claims`/`viewport_input`) for the dots and the anchor pick.
 
-use std::collections::BTreeMap;
-
 use eframe::egui::{self, RichText};
 use glam::DVec3;
-use mf_command::{Invocation, ObjectId};
+use mf_command::ObjectId;
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, Claims, Input, RegisterError, Shell, Tool as T};
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme};
@@ -560,23 +559,15 @@ pub fn apply(app: &mut MeshFixerApp, axis: usize, mode: Mode) {
         operands.push(("anchor".to_owned(), a, None));
     }
     let leaders_json = serde_json::to_string(&leaders).expect("leaders always serialize");
-    let params = BTreeMap::from([
-        ("axis".to_owned(), ["x", "y", "z"][axis].to_owned()),
-        ("mode".to_owned(), mode.as_str().to_owned()),
-        ("leaders".to_owned(), leaders_json),
-    ]);
+    let intent = Intent::op("object.align")
+        .on(first)
+        .operands(operands)
+        .param("axis", ["x", "y", "z"][axis])
+        .param("mode", mode.as_str())
+        .param("leaders", leaders_json);
     let label = history_label(selected.len(), axis, mode, anchor_name.as_deref());
     app.align.preview.clear();
-    app.run_invocation(
-        Invocation {
-            op_id: "object.align".into(),
-            target: first,
-            selection: None,
-            operands,
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent, label);
 }
 
 // ---------------------------------------------------------------------
@@ -684,7 +675,7 @@ fn section(ui: &mut egui::Ui, text: &str) -> egui::Response {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::shape_tools::refusal_card_for(app, ui, "object.align");
+    crate::refusal_card::show_for(app, ui, "object.align");
     let selected = app.selected_objects();
     if selected.len() < 2 {
         widgets::body(ui, t!("align.select_more"));

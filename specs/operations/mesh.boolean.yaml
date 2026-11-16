@@ -51,3 +51,62 @@ effects: [geometry_changes, topology_changes, removes_objects]
 runtime:
   cancellable: true
   progress: true
+# ADR-0010, consolidation plan C14: every refusal mesh.boolean can
+# return, through the one registry helper (crate::refusal::refuse),
+# including mesh.blend's own codes (the blend step runs inside this
+# op's union; it has no spec of its own).
+refusals:
+  - code: operand_not_closed
+    message: refusal.operand_not_closed
+    next: repair
+  - code: tool_not_closed
+    message: refusal.tool_not_closed
+    next: repair
+  - code: opening_not_covered
+    message: refusal.opening_not_covered
+    next: repair
+  - code: opening_too_large_for_join
+    message: refusal.opening_too_large_for_join
+    next: repair
+  - code: no_overlap
+    message: refusal.no_overlap
+    next: none
+  - code: operand_overlaps_itself
+    message: refusal.operand_overlaps_itself
+    next: run_make_solid
+  - code: section_self_intersects
+    message: refusal.section_self_intersects
+    next: run_make_solid
+  - code: window_degenerate
+    message: refusal.window_degenerate
+    next: run_make_solid
+  - code: result_not_manifold
+    message: refusal.result_not_manifold
+    next: none
+  - code: result_self_intersects
+    message: refusal.result_self_intersects
+    next: none
+  - code: result_empty
+    message: refusal.result_empty
+    next: none
+  - code: kernel_internal
+    message: refusal.kernel_internal
+    next: none
+  - code: blend_needs_union
+    message: refusal.blend_needs_union
+    next: none
+  - code: blend_self_intersects
+    message: refusal.blend_self_intersects
+    next: none
+  - code: blend_did_not_converge
+    message: refusal.blend_did_not_converge
+    next: none
+  - code: blend_too_wide
+    message: refusal.blend_too_wide
+    next: none
+  - code: blend_too_narrow
+    message: refusal.blend_too_narrow
+    next: none
+  - code: stamp_not_embedded
+    message: refusal.stamp_not_embedded
+    next: none

@@ -201,7 +201,7 @@ fn history_details_use_document_unit() {
         settle(&mut h);
         // A physical 3 mm wall, off the spec's 2 mm default, in this
         // document's own unit.
-        h.state_mut().hollow.wall = Some(wall_in(unit));
+        h.state_mut().hollow.wall = Some(mf_units::Length::new(wall_in(unit), unit));
         panel_button(&h, "Hollow").click();
         wait_until(&mut h, "the hollow", |a| a.busy.is_none());
         settle(&mut h);
@@ -231,4 +231,121 @@ fn history_details_use_document_unit() {
              show the document's own unit {symbol:?}: got {details:?}"
         );
     }
+}
+
+/// Inspect's Units control (import-units-brief.md, "Fix it afterwards",
+/// consolidation plan C15): "Reinterpret" relabels the document's unit
+/// with no object changed, "Scale" changes every object's physical
+/// size with the document's own unit unchanged. Each runs its recorded
+/// command (`document.reinterpret_units` / `document.scale_units`,
+/// C07) and round-trips with undo.
+#[test]
+fn inspect_units_reinterpret_and_scale_round_trip_with_undo() {
+    require_gpu!("inspect_units_reinterpret_and_scale_round_trip_with_undo");
+    // A 10 mm cube in a millimetres document.
+    let mut h = opened_at(
+        vec![("cube", mf_fixtures::cube(10.0), at([0.0; 3]))],
+        Unit::Millimeter,
+    );
+    assert_eq!(h.state().session.document().units(), Unit::Millimeter);
+    let part = h.state().session.document().objects()[0].id;
+    let original_transform = h.state().session.document().object(part).unwrap().transform;
+    let original_hash = h
+        .state()
+        .session
+        .document()
+        .object(part)
+        .unwrap()
+        .geometry
+        .content_hash();
+
+    h.get_by_label("Inspect").click();
+    settle(&mut h);
+
+    // Reinterpret to metres: the document's unit changes, the object's
+    // own coordinates and transform don't.
+    h.state_mut().inspect_units = Some(Unit::Meter);
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    panel_button(&h, "Reinterpret").click();
+    wait_until(&mut h, "reinterpret", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+    assert_eq!(
+        h.state().session.document().object(part).unwrap().transform,
+        original_transform,
+        "reinterpret must not touch the transform"
+    );
+    assert_eq!(
+        h.state()
+            .session
+            .document()
+            .object(part)
+            .unwrap()
+            .geometry
+            .content_hash(),
+        original_hash,
+        "reinterpret must not touch the mesh"
+    );
+
+    assert!(h.state_mut().session.undo());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().units(),
+        Unit::Millimeter,
+        "undo relabels back"
+    );
+
+    assert!(h.state_mut().session.redo());
+    settle(&mut h);
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+
+    // Scale to metres: the document keeps millimetres... no, stays
+    // metres (reinterpret above already changed it); scale itself
+    // never relabels, only resizes. Pick a different unit (inches) so
+    // the ratio isn't 1 and a change is guaranteed.
+    h.get_by_label("Inspect").click();
+    settle(&mut h);
+    h.state_mut().inspect_units = Some(Unit::Inch);
+    settle(&mut h);
+    let before_scale = h.state().session.document().object(part).unwrap().transform;
+    let history = h.state().session.history_labels().len();
+    panel_button(&h, "Scale").click();
+    wait_until(&mut h, "scale", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    let after_scale = h.state().session.document().object(part).unwrap().transform;
+    assert_eq!(
+        h.state().session.document().units(),
+        Unit::Meter,
+        "scale never relabels the document"
+    );
+    // 1 inch in metres (0.0254) is the ratio every transform component
+    // scales by.
+    for k in 0..12 {
+        assert!(
+            (after_scale[k] - before_scale[k] * 0.0254).abs() < 1e-9,
+            "index {k}: {after_scale:?} vs {before_scale:?} * 0.0254"
+        );
+    }
+
+    assert!(h.state_mut().session.undo());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().object(part).unwrap().transform,
+        before_scale,
+        "undo restores the pre-scale transform exactly"
+    );
+
+    assert!(h.state_mut().session.redo());
+    settle(&mut h);
+    assert_eq!(
+        h.state().session.document().object(part).unwrap().transform,
+        after_scale
+    );
 }

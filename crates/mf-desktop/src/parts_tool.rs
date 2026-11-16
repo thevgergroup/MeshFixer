@@ -33,10 +33,12 @@ use std::collections::BTreeMap;
 use eframe::egui;
 use mf_command::ObjectId;
 use mf_parts::{Attach, Library, PartKind, SurfaceFrame};
+use mf_units::{Length, Unit};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, RegisterError, Shell, Tool as T};
-use crate::widgets::{self, Kind};
+use crate::widgets::{self, Kind, LengthFieldOpts, length_slider};
 use crate::{icons, t, theme};
 
 pub const PARTS: &str = "parts";
@@ -64,7 +66,7 @@ pub struct PartsState {
     /// offer to act between it and the object it landed on).
     pub placed: Option<PlacedPart>,
     pub join: JoinMode,
-    pub blend_width: f64,
+    pub blend_width: Length,
 }
 
 impl Default for PartsState {
@@ -76,7 +78,7 @@ impl Default for PartsState {
             thumbs: Default::default(),
             placed: None,
             join: JoinMode::KeepSeparate,
-            blend_width: 2.0,
+            blend_width: Length::new(2.0, Unit::Millimeter),
         }
     }
 }
@@ -164,25 +166,9 @@ pub(crate) fn drop_point(app: &MeshFixerApp, id: ObjectId) -> Option<[f64; 12]> 
     })
 }
 
-fn run_on(
-    app: &mut MeshFixerApp,
-    target: ObjectId,
-    op_id: &str,
-    label: String,
-    params: BTreeMap<String, String>,
-    operands: Vec<(String, ObjectId, Option<mf_selection::Selection>)>,
-) {
+fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: String) {
     app.refusal = None;
-    app.run_invocation(
-        mf_command::Invocation {
-            op_id: op_id.into(),
-            target,
-            selection: None,
-            operands,
-            raw_params: params,
-        },
-        label,
-    );
+    app.run_intent(intent.on(target), label);
 }
 
 /// Places library part `id` onto the active object, with its content
@@ -201,25 +187,15 @@ fn place_part(app: &mut MeshFixerApp, id: &str) {
     let Some(part) = lib.get(id) else { return };
     // allow-swallow: a bad hash just skips the replay check; add_part reports the real reason
     let hash = part.content_hash().unwrap_or_default();
-    let params = BTreeMap::from([
-        ("part_id".to_owned(), id.to_owned()),
-        ("part_hash".to_owned(), hash),
-        (
-            "transform".to_owned(),
-            transform
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
-    ]);
+    let intent = Intent::op("object.add_part")
+        .param("part_id", id)
+        .param("part_hash", hash)
+        .param("transform", crate::intent::affine_text(&transform));
     run_on(
         app,
         scan,
-        "object.add_part",
+        intent,
         t!("parts.apply", name = part.manifest.name.clone()),
-        params,
-        Vec::new(),
     );
     if app.busy.is_some() {
         app.pending_open_transform = Some(crate::app::PendingPlacement::Part { scan });
@@ -303,29 +279,11 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
     // The shape's own mesh is generated in mm (D16/D20); `object.add_shape`
     // itself scales it by the document's unit (consolidation plan C12),
     // so the placement transform goes through unscaled, never doubled up.
-    let params = BTreeMap::from([
-        (
-            "shapes".to_owned(),
-            mf_operations::shapes::shapes_param(&shapes),
-        ),
-        (
-            "transform".to_owned(),
-            transform
-                .iter()
-                .map(|v| v.to_string())
-                .collect::<Vec<_>>()
-                .join(","),
-        ),
-        ("group".to_owned(), String::new()),
-    ]);
-    run_on(
-        app,
-        scan,
-        "object.add_shape",
-        t!("parts.apply", name = shape.name()),
-        params,
-        Vec::new(),
-    );
+    let intent = Intent::op("object.add_shape")
+        .param("shapes", mf_operations::shapes::shapes_param(&shapes))
+        .param("transform", crate::intent::affine_text(&transform))
+        .param("group", "");
+    run_on(app, scan, intent, t!("parts.apply", name = shape.name()));
     if app.busy.is_some() {
         app.pending_open_transform = Some(crate::app::PendingPlacement::Part { scan });
     }
@@ -844,7 +802,6 @@ fn dialog(app: &mut MeshFixerApp, ctx: &egui::Context) {
 }
 
 fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
-    let units = crate::defects::unit_symbol(app.session.document().units());
     widgets::section(ui, &t!("parts.section.join"));
     let open_stamp = app
         .session
@@ -881,12 +838,21 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
         app.parts.join = modes[i].0;
     }
     if app.parts.join == JoinMode::Blend {
-        ui.add(
-            egui::Slider::new(&mut app.parts.blend_width, 0.0..=20.0)
-                .suffix(format!(" {units}"))
-                .max_decimals(2),
+        let scale = app.scale_ctx();
+        let opts = LengthFieldOpts {
+            range: (
+                Length::new(0.0, Unit::Millimeter),
+                Length::new(20.0, Unit::Millimeter),
+            ),
+            scale: &scale,
+            label: &t!("parts.blend_width_help"),
+        };
+        length_slider(
+            ui,
+            egui::Id::unique("parts blend width"),
+            &mut app.parts.blend_width,
+            &opts,
         );
-        widgets::caption(ui, t!("parts.blend_width_help", unit = units.to_owned()));
     }
     ui.add_space(theme::SPACE_S);
     let can = app.busy.is_none() && app.parts.join != JoinMode::KeepSeparate;
@@ -925,36 +891,20 @@ pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, lab
                 .object(placed.part)
                 .is_some_and(|o| o.is_hole());
             let slot = if hole { "holes" } else { "solids" };
-            run_on(
-                app,
-                placed.scan,
-                "mesh.combine",
-                label,
-                BTreeMap::from([("keep_holes".to_owned(), "false".to_owned())]),
-                vec![(slot.to_owned(), placed.part, None)],
-            );
+            let intent = Intent::op("mesh.combine")
+                .operand(slot, placed.part, None)
+                .param("keep_holes", false);
+            run_on(app, placed.scan, intent, label);
         }
         JoinMode::Blend => {
-            // `blend_width` is a `unit: mm` param (D20); `app.parts.blend_width`
-            // is document units (the panel's own slider), so cross to mm
-            // here, once, or `Session::prepare`'s single mm-to-document
-            // conversion runs on an already-document-units number.
-            let mm = crate::transform_tool::mm_per(app.session.document().units());
-            let params = BTreeMap::from([
-                ("operation".to_owned(), "union".to_owned()),
-                (
-                    "blend_width".to_owned(),
-                    (app.parts.blend_width * mm).to_string(),
-                ),
-            ]);
-            run_on(
-                app,
-                placed.scan,
-                "mesh.boolean",
-                label,
-                params,
-                vec![("tool".to_owned(), placed.part, None)],
-            );
+            // `app.parts.blend_width` is a typed `Length` exactly as
+            // typed in the field (ADR-0006 rule 2): `Session::prepare`
+            // alone converts it to document units.
+            let intent = Intent::op("mesh.boolean")
+                .operand("tool", placed.part, None)
+                .param("operation", "union")
+                .set("blend_width", app.parts.blend_width);
+            run_on(app, placed.scan, intent, label);
         }
     }
     app.parts.placed = None;

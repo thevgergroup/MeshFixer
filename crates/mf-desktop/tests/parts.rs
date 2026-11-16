@@ -212,6 +212,98 @@ fn merge_joins_the_part_into_the_scan_as_a_second_command() {
     still(&mut h, "merged");
 }
 
+/// Consolidation plan C15's per-panel test: a typed "3 mm" blend width
+/// on a *metres* document reaches `mesh.boolean` as 3 mm physical (doc
+/// units 0.003), not 3 document units (3 m) and not the raw 3.0 with
+/// no unit at all (the double-conversion bug's shape). The field itself
+/// is `widgets::length_field`/`length_slider` (`app.parts.blend_width:
+/// mf_units::Length`); only `Session::prepare` converts it.
+#[test]
+fn blend_width_typed_in_millimetres_reaches_mesh_boolean_as_physical_millimetres() {
+    require_gpu!("blend_width_typed_in_millimetres_reaches_mesh_boolean_as_physical_millimetres");
+    let mut h = Harness::builder()
+        .with_size(WINDOW)
+        .with_step_dt(1.0 / 60.0)
+        .wgpu()
+        .build_eframe(move |cc| {
+            MeshFixerApp::with_settings(cc, None, Settings::default()).unwrap()
+        });
+    // A 20 mm ball, modelled at 0.02 doc units in a *metres* document
+    // (mirrors `unit_bugs.rs`'s own metres-document pattern).
+    h.state_mut().import_model(ImportedModel {
+        metadata: Default::default(),
+        objects: vec![ModelObject {
+            metadata: Default::default(),
+            name: "scan".into(),
+            mesh: mf_fixtures::scaled(&mf_fixtures::uv_sphere(32, 48), 0.01),
+            transform: at([0.0, 0.0, 0.01]),
+        }],
+        unit: Some(Unit::Meter),
+        source: SourceInfo {
+            path: "blend.3mf".into(),
+            content_hash: ContentHash([0; 32]),
+            format: Format::ThreeMf,
+            precision: SourcePrecision::F32,
+            exporter_hint: None,
+        },
+        warnings: Vec::new(),
+    });
+    wait_until(&mut h, "analysis and picking", |a| {
+        a.current_analysis().is_some() && a.picking_ready() && a.camera.is_some()
+    });
+    h.event(egui::Event::PointerGone);
+    settle(&mut h);
+    assert_eq!(h.state().session.document().units(), Unit::Meter);
+
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    let history = h.state().session.history_labels().len();
+    h.get_by_label("Sphere").click();
+    wait_until(&mut h, "the part placed", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > history
+    });
+    settle(&mut h);
+    let part = h.state().active.unwrap();
+    let mut t = h.state().session.document().object(part).unwrap().transform;
+    t[11] -= 0.004; // sink in by 4 mm (0.004 m) so the union has overlap
+    h.state_mut().commit_transform(part, t, "test setup".into());
+    wait_until(&mut h, "the sink-in", |a| a.busy.is_none());
+    settle(&mut h);
+
+    h.get_by_label("Parts").click();
+    settle(&mut h);
+    h.get_by_label("Blend").click();
+    settle(&mut h);
+    // The field itself: typed as "3 mm" (a `Length`, not a bare 3.0 of
+    // document units), as if the person had entered it in the field.
+    h.state_mut().parts.blend_width = mf_units::Length::new(3.0, mf_units::Unit::Millimeter);
+    let before = h.state().session.history_labels().len();
+    h.get_by_label("Join").click();
+    wait_until(&mut h, "the blend", |a| {
+        a.busy.is_none() && a.session.history_labels().len() > before
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+
+    let record = h
+        .state()
+        .session
+        .records_to_current()
+        .into_iter()
+        .rev()
+        .find(|r| r.op_id == "mesh.boolean")
+        .expect("a mesh.boolean command");
+    let recorded = record.params.get_float("blend_width").unwrap();
+    // 3 mm, in a metres document, is 0.003 doc units: never 3.0 (the
+    // bug's shape, a bare document-unit value) and never 3 m (0.003's
+    // absence).
+    assert!(
+        (recorded - 0.003).abs() < 1e-9,
+        "a 3 mm blend width on a metres document should record 0.003 \
+         doc units, got {recorded}"
+    );
+}
+
 /// With no model open there's nothing to place a part on: Parts is
 /// greyed out on the rail (`needs_object`, the same rule every whole-
 /// object tool uses), not an error, so it adds nothing rather than

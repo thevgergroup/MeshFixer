@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 
 use mf_parts::connectors::joint::{Dovetail, Dowel, Peg, Shape, dovetail_reach};
-use mf_parts::{GenContext, Generator, ShapePart};
+use mf_parts::{GenContext, Generator, ShapePart, TargetSlot, Targets};
 use mf_runtime::RunContext;
 
 fn params(connector: &dyn Generator, extra: &[(&str, &str)]) -> mf_spec::Params {
@@ -322,4 +322,112 @@ fn the_groove_never_ends_up_shorter_than_the_tail_that_slides_through_it() {
     }
     assert!(lo <= -20.0, "lo = {lo}");
     assert!(hi >= 20.0, "hi = {hi}");
+}
+
+// ---------------------------------------------------------------------
+// Consolidation plan C18: `OVER_THE_EDGE` is relative to the target's
+// bbox, not a flat millimetre constant that assumed every piece was
+// under a metre.
+// ---------------------------------------------------------------------
+
+/// A fixed cut-face edge distance each way from the drag's centre (in
+/// `mf_parts`'s own mm generator space, D16), for [`Generator::line_params`].
+struct FixedEdge(f64);
+
+impl Targets for FixedEdge {
+    fn boundary_along(&self, slot: TargetSlot, _dir: [f64; 2]) -> Option<f64> {
+        (slot == TargetSlot::B).then_some(self.0)
+    }
+}
+
+/// A dovetail dragged all the way to the edge on both sides of a 3 m
+/// part (edge at 1500 mm each way from the drag's centre): the groove
+/// still reads as through on both ends, and its reach is unambiguously
+/// past the edge (never merely equal to it, which a rounding wobble
+/// could undo) — the bug `OVER_THE_EDGE`'s old flat 1000 mm constant
+/// invited by tying "clearly past" to an absolute size instead of the
+/// part's own.
+#[test]
+fn groove_spans_3m_part() {
+    let edge = 1500.0; // mm: half of a 3 m part.
+    let run = RunContext::none();
+    let targets = FixedEdge(edge);
+    let ctx = GenContext::with_targets(&run, &targets);
+    let patch = Dovetail.line_params(edge, &ctx);
+
+    let get = |name: &str| match patch.set.get(name) {
+        Some(mf_spec::ParamValue::Float(v)) => *v,
+        other => panic!("{name}: {other:?}"),
+    };
+    let open = |name: &str| get(name) != 0.0;
+
+    assert!(
+        open("open_a"),
+        "a 3 m part's drag-to-edge should read through"
+    );
+    assert!(
+        open("open_b"),
+        "a 3 m part's drag-to-edge should read through"
+    );
+    let (ga, gb) = (get("groove_a"), get("groove_b"));
+    assert!(ga > edge, "groove_a {ga} should clear the edge at {edge}");
+    assert!(gb > edge, "groove_b {gb} should clear the edge at {edge}");
+
+    // Generated: the actual groove mesh spans at least from edge to
+    // edge (never stopping short of either real cut-face boundary).
+    let parts = generate(
+        &Dovetail,
+        &[
+            ("diameter", "8"),
+            ("length", "10"),
+            ("depth_on", "3"),
+            ("depth_other", "5"),
+            ("groove_a", &ga.to_string()),
+            ("groove_b", &gb.to_string()),
+            ("open_a", "true"),
+            ("open_b", "true"),
+        ],
+    );
+    let groove = part(&parts, "counterpart groove");
+    let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+    for (_, p) in groove.vertices() {
+        lo = lo.min(p[0]);
+        hi = hi.max(p[0]);
+    }
+    assert!(lo <= -edge, "lo = {lo}, want at most {}", -edge);
+    assert!(hi >= edge, "hi = {hi}, want at least {edge}");
+}
+
+/// The margin past the edge scales with the part instead of staying a
+/// flat millimetre constant: a 3 m part's overshoot is well past what a
+/// fixed, metre-scale-unaware constant would give relative to its own
+/// edge, and a tiny part still gets a sane, non-vanishing minimum.
+#[test]
+fn over_the_edge_margin_scales_with_the_part() {
+    let run = RunContext::none();
+    let targets = FixedEdge(1500.0);
+    let ctx = GenContext::with_targets(&run, &targets);
+    let patch = Dovetail.line_params(1500.0, &ctx);
+    let margin_3m = match patch.set.get("groove_b") {
+        Some(mf_spec::ParamValue::Float(v)) => *v - 1500.0,
+        other => panic!("groove_b: {other:?}"),
+    };
+    // Comfortably more than a flat 1 mm/10 mm-scale margin would give
+    // for a part this size, and more than the old flat 1000 mm margin
+    // scaled down would suggest is "a lot": proportional, not a
+    // constant.
+    assert!(margin_3m > 500.0, "margin on a 3 m part: {margin_3m} mm");
+
+    let targets_tiny = FixedEdge(5.0);
+    let ctx_tiny = GenContext::with_targets(&run, &targets_tiny);
+    let patch_tiny = Dovetail.line_params(5.0, &ctx_tiny);
+    let margin_tiny = match patch_tiny.set.get("groove_b") {
+        Some(mf_spec::ParamValue::Float(v)) => *v - 5.0,
+        other => panic!("groove_b: {other:?}"),
+    };
+    // A tiny part's proportional margin doesn't vanish to nothing.
+    assert!(
+        margin_tiny >= 10.0,
+        "margin on a tiny part: {margin_tiny} mm"
+    );
 }

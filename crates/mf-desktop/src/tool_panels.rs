@@ -8,11 +8,12 @@ use eframe::egui::{self, RichText};
 use mf_command::ObjectId;
 use mf_selection::{Selection, SelectionKind};
 use mf_spec::{ParamKind, ParamValue};
+use mf_units::Unit;
 
 use crate::app::{MeshFixerApp, NarrowFocus, Tool, TreeItem};
 use crate::defects::{
-    Defect, HoleGroup, choice_copy, count, defect_copy, measure, param_label, thousands,
-    tool_summary, unit_symbol,
+    Defect, HoleGroup, choice_copy, count, defect_copy, param_label, thousands, tool_summary,
+    unit_symbol,
 };
 use crate::shell::{
     Availability, Category, Claims, ContextAction, Input, InspectorSection, RegisterError,
@@ -852,11 +853,10 @@ fn inspector_summary(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         widgets::caption(
             ui,
             format!(
-                "{} × {} × {} {}",
-                measure(size[0]),
-                measure(size[1]),
-                measure(size[2]),
-                unit_symbol(units)
+                "{} × {} × {}",
+                mf_units::format_length(size[0], units),
+                mf_units::format_length(size[1], units),
+                mf_units::format_length(size[2], units),
             ),
         );
     }
@@ -1402,8 +1402,20 @@ fn transform_field(
         .and_then(|t| t.editing.clone())
         .filter(|(f, _)| *f == field)
         .map(|(_, text)| text);
-    let mut text = editing
-        .unwrap_or_else(|| value.map_or_else(|| "—".to_owned(), crate::transform_tool::field_text));
+    // A position is a length (ADR-0006 rules 1b and 4): shown through
+    // `format_length` with its unit and parsed through `parse_length`
+    // ("10 in", "5 cm + 2 mm", a bare number in the document's unit).
+    // Rotation and scale are an angle and a percentage.
+    let doc = app.session.document().units();
+    let is_length = matches!(field, crate::transform_tool::Field::Position(_));
+    let show = |v: f64| {
+        if is_length {
+            mf_units::format_length(v, doc)
+        } else {
+            crate::transform_tool::field_text(v)
+        }
+    };
+    let mut text = editing.unwrap_or_else(|| value.map_or_else(|| "—".to_owned(), show));
     let label = field.label();
     let r = ui.add_enabled(
         enabled,
@@ -1428,16 +1440,23 @@ fn transform_field(
         tool.editing = None;
     }
     if entered {
-        let shown = value.map(crate::transform_tool::field_text);
-        match text
-            .trim()
-            .trim_end_matches(['%', '°'])
-            .trim()
-            .parse::<f64>()
-        {
+        let shown = value.map(show);
+        let parsed = if is_length {
+            mf_units::parse_length(&text, doc)
+                .map(|l| l.in_doc(doc))
+                .map_err(|_| ())
+        } else {
+            text.trim()
+                .trim_end_matches(['%', '°'])
+                .trim()
+                .parse::<f64>()
+                .map_err(|_| ())
+        };
+        match parsed {
             // Enter on the value as shown changes nothing (the field shows
-            // 4 decimals: compare what it shows, not the bits behind it).
-            Ok(v) if shown.as_deref() == Some(crate::transform_tool::field_text(v).as_str()) => {}
+            // 3 significant figures or 4 decimals: compare what it shows,
+            // not the bits behind it).
+            Ok(v) if shown.as_deref() == Some(show(v).as_str()) => {}
             Ok(v) if v.is_finite() => app.set_transform_field(field, v),
             _ => {
                 app.status = Some(format!(
@@ -1459,6 +1478,7 @@ fn transform_field(
 /// selected in the Browser or the view shows the same way, with its
 /// operation.
 fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    crate::refusal_card::show_issued(app, ui);
     let defect_target = app.current_inspected().is_some()
         || app.current_selection().is_some_and(|s| {
             app.current_analysis()
@@ -1798,6 +1818,7 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
     }
     widgets::caption(ui, &spec.summary);
     let batch = tool.op_id == "mesh.fill_holes" && tool.selection.is_none();
+    let scale = app.scale_ctx();
     let values = app.params_for(&tool.op_id);
     // A fill that isn't flat always refines (MF-OP-002): it needs the
     // added points to curve.
@@ -1848,6 +1869,32 @@ fn tool_body(app: &mut MeshFixerApp, ui: &mut egui::Ui, tool: &Tool) {
                     ui.add(egui::DragValue::new(v).range(range))
                         .on_hover_text(&p.description);
                 });
+            }
+            (ParamKind::Float { min, max, .. }, ParamValue::Float(v))
+                if let Some(unit) = match p.unit {
+                    mf_spec::ParamUnit::Length(u) => Some(u),
+                    mf_spec::ParamUnit::Document => Some(scale.doc),
+                    _ => None,
+                } =>
+            {
+                // A length (ADR-0006 rule 1): a `length_field` in the
+                // param's own spec unit; `Session::prepare` converts it.
+                let mut length = mf_units::Length::new(*v, unit);
+                let opts = widgets::LengthFieldOpts {
+                    range: (
+                        mf_units::Length::new(min.unwrap_or(f64::NEG_INFINITY), unit),
+                        mf_units::Length::new(max.unwrap_or(f64::INFINITY), unit),
+                    ),
+                    scale: &scale,
+                    label: &name,
+                };
+                let id = egui::Id::unique(("tool length", &tool.op_id, &p.name));
+                if widgets::length_field(ui, id, &mut length, &opts)
+                    .on_hover_text(&p.description)
+                    .changed()
+                {
+                    *v = length.to(unit).value;
+                }
             }
             (ParamKind::Float { min, max, .. }, ParamValue::Float(v)) => {
                 ui.horizontal(|ui| {
@@ -2064,6 +2111,10 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         return;
     };
     let d = analysis.diagnostics.clone();
+    // Area and volume are of the object's mesh, in document units: shown
+    // through the one formatter with their unit (ADR-0006 rule 4), never
+    // a bare "0.0000".
+    let units = app.session.document().units();
     if let Some((holes, cracks, marked, loose, tangled)) = defect_counts(app) {
         section(ui, &t!("inspect.section.print"));
         let (icon, color) = verdict_icon(holes + cracks, loose, tangled, &d);
@@ -2133,14 +2184,12 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         (
             "Surface area",
             "Total area of the faces",
-            d.surface_area
-                .map_or("too large".into(), |a| format!("{a:.4}")),
+            crate::defects::area_text(d.surface_area, units),
         ),
         (
             "Volume",
             "Signed volume (only for a closed mesh)",
-            d.signed_volume
-                .map_or("— (not closed)".into(), |v| format!("{v:.4}")),
+            crate::defects::volume_text(d.signed_volume, units),
         ),
         (
             "Unused space",
@@ -2151,6 +2200,7 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     for (label, term, value) in rows {
         stat_row(ui, label, term, &value);
     }
+    inspect_units_section(app, ui);
     if !app.warnings.is_empty() {
         section(ui, &t!("inspect.section.warnings"));
         egui::CollapsingHeader::new(format!(
@@ -2164,6 +2214,120 @@ fn inspect_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             }
         });
     }
+}
+
+/// Inspect's Units control (import-units-brief.md, "Fix it afterwards"):
+/// a unit picker and the two document-wide actions, each the recorded
+/// command of the same name (consolidation plan C07) and so undoable
+/// like any other command.
+///
+/// - **Reinterpret** (`document.reinterpret_units`): the numbers were
+///   in the picked unit, not the document's own; only the document's
+///   unit label changes, so the same coordinates now mean a different
+///   physical size. Needs at least one object (any one does: the op
+///   only reads the document's own unit).
+/// - **Scale** (`document.scale_units`): the document keeps its own
+///   unit, but every object's transform is scaled by the ratio between
+///   the picked unit and the document's, so the physical size becomes
+///   what it would have been had the numbers actually been in the
+///   picked unit. Targets every object (`unit: document` reads this as
+///   `many: true`).
+fn inspect_units_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
+    let Some(first) = app.session.document().objects().first().map(|o| o.id) else {
+        return;
+    };
+    let doc_unit = app.session.document().units();
+    let picked = app.inspect_units.unwrap_or(doc_unit);
+    section(ui, &t!("inspect.section.units"));
+    widgets::caption(
+        ui,
+        t!(
+            "inspect.units.help",
+            unit = crate::defects::unit_symbol(doc_unit)
+        ),
+    );
+    egui::ComboBox::from_id_salt("inspect units picker")
+        .selected_text(crate::import_dialog::unit_name(picked))
+        .show_ui(ui, |ui| {
+            for unit in Unit::ALL {
+                if ui
+                    .selectable_label(picked == unit, crate::import_dialog::unit_name(unit))
+                    .clicked()
+                {
+                    app.inspect_units = Some(unit);
+                }
+            }
+        });
+    let idle = app.busy.is_none();
+    ui.horizontal(|ui| {
+        if ui
+            .add_enabled_ui(idle, |ui| {
+                widgets::button(
+                    ui,
+                    Kind::Secondary,
+                    None,
+                    &t!("inspect.units.reinterpret"),
+                    0.0,
+                )
+            })
+            .inner
+            .on_hover_text(t!("inspect.units.reinterpret.help"))
+            .clicked()
+        {
+            reinterpret_units(app, first, picked);
+        }
+        if ui
+            .add_enabled_ui(idle, |ui| {
+                widgets::button(ui, Kind::Secondary, None, &t!("inspect.units.scale"), 0.0)
+            })
+            .inner
+            .on_hover_text(t!("inspect.units.scale.help"))
+            .clicked()
+        {
+            scale_units(app, first, picked);
+        }
+    });
+}
+
+/// `document.reinterpret_units` and `document.scale_units`'s `unit`
+/// param is a plain-ASCII choice (`um|mm|cm|m|in|ft`, matching
+/// [`Unit::parse_symbol`]'s accepted set), not [`Unit::symbol`]'s
+/// display form (`"µm"` for a micron, which the spec's `values:` list
+/// doesn't contain and so would fail validation).
+fn unit_choice_text(unit: Unit) -> &'static str {
+    match unit {
+        Unit::Micron => "um",
+        other => other.symbol(),
+    }
+}
+
+/// Runs `document.reinterpret_units` with `picked` as "the unit the
+/// numbers were actually in".
+fn reinterpret_units(app: &mut MeshFixerApp, target: ObjectId, picked: Unit) {
+    let intent = crate::intent::Intent::op("document.reinterpret_units")
+        .on(target)
+        .param("unit", unit_choice_text(picked));
+    app.run_intent(intent, t!("inspect.units.reinterpret"));
+}
+
+/// Runs `document.scale_units` with `picked`, targeting every object in
+/// the document (the op's own `many: true` target).
+fn scale_units(app: &mut MeshFixerApp, first: ObjectId, picked: Unit) {
+    let rest: Vec<ObjectId> = app
+        .session
+        .document()
+        .objects()
+        .iter()
+        .map(|o| o.id)
+        .filter(|&id| id != first)
+        .collect();
+    let mut intent = crate::intent::Intent::op("document.scale_units")
+        .on(first)
+        .param("unit", unit_choice_text(picked));
+    for id in rest {
+        intent = intent.operand(mf_command::TARGET_OPERAND, id, None);
+    }
+    app.run_intent(intent, t!("inspect.units.scale"));
 }
 
 /// One Inspect row: the label left (never wrapped), the value right

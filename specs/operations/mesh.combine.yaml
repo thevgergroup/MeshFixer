@@ -39,3 +39,86 @@ effects: [geometry_changes, topology_changes, removes_objects]
 runtime:
   cancellable: true
   progress: true
+# ADR-0010, consolidation plan C14: every step is a mesh.boolean step on
+# the same kernel and validator, so a refused step can return any of
+# mesh.boolean's codes (named by object through refuse_naming), plus
+# mesh.combine's own.
+refusals:
+  - code: nothing_to_combine
+    message: refusal.nothing_to_combine
+    next: none
+    args:
+      - name: object
+        kind: text
+  - code: operand_not_closed
+    message: refusal.operand_not_closed
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: tool_not_closed
+    message: refusal.tool_not_closed
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: opening_not_covered
+    message: refusal.opening_not_covered
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: opening_too_large_for_join
+    message: refusal.opening_too_large_for_join
+    next: repair
+    args:
+      - name: object
+        kind: text
+  - code: no_overlap
+    message: refusal.no_overlap
+    next: none
+    args:
+      - name: object
+        kind: text
+  - code: operand_overlaps_itself
+    message: refusal.operand_overlaps_itself
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text
+  - code: section_self_intersects
+    message: refusal.section_self_intersects
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text
+  - code: window_degenerate
+    message: refusal.window_degenerate
+    next: run_make_solid
+    args:
+      - name: object
+        kind: text
+  - code: result_not_manifold
+    message: refusal.result_not_manifold
+    next: none
+    args:
+      - name: object
+        kind: text
+  - code: result_self_intersects
+    message: refusal.result_self_intersects
+    next: none
+    args:
+      - name: object
+        kind: text
+  - code: result_empty
+    message: refusal.result_empty
+    next: none
+    args:
+      - name: object
+        kind: text
+  - code: kernel_internal
+    message: refusal.kernel_internal
+    next: none
+    args:
+      - name: object
+        kind: text

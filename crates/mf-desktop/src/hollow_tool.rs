@@ -10,7 +10,6 @@
 //! the parts left solid because they're thinner than twice the wall
 //! outlined in `THIN_WALL`. Placed drain holes are clicked on the surface.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -22,10 +21,14 @@ use mf_operations::hollow;
 use mf_runtime::{Cancelled, RunContext};
 
 use crate::MeshFixerApp;
+use crate::intent::Intent;
 use crate::shell::{Availability, Category, Input, RegisterError, Shell, Tool as T};
 use crate::tools::LegendRow;
 use crate::viewport::{ToolPointer, ViewLayer};
-use crate::widgets::{self, Kind};
+use mf_units::{Length, Unit};
+
+use crate::widgets::length_field::display_text;
+use crate::widgets::{self, Kind, LengthFieldOpts, length_field, length_slider};
 use crate::worker::{Gpu, Message, RenderMesh, UPLOAD_CHUNK_BYTES};
 use crate::{icons, t, theme};
 
@@ -51,13 +54,16 @@ pub struct HolePoint {
 /// The Hollow tool's settings (document units) and its preview.
 #[derive(Default)]
 pub struct HollowState {
-    /// Wall thickness; `None` until the object's default (2 mm) is set.
-    pub wall: Option<f64>,
-    /// The cell size; `None` is automatic.
-    pub detail: Option<f64>,
+    /// Wall thickness, as typed; `None` until the object's default (the
+    /// spec's print-intent default, in mm) is set.
+    pub wall: Option<Length>,
+    /// The cell size, as typed; `None` is automatic.
+    pub detail: Option<Length>,
     /// "none", "auto" or "placed".
     pub drain: String,
-    pub diameter: f64,
+    /// Each drain hole's diameter, as typed; `None` until the default
+    /// (the spec's, in mm) is set.
+    pub diameter: Option<Length>,
     pub count: i64,
     /// "auto", "round", "teardrop" or "flat_top".
     pub profile: String,
@@ -114,7 +120,7 @@ pub struct PreviewRequest {
 pub struct Preview {
     pub key: PreviewKey,
     pub mesh: Mesh,
-    pub outcome: Result<PreviewShell, (String, String)>,
+    pub outcome: Result<PreviewShell, crate::refusal_card::Refusal>,
 }
 
 /// The hollowed object as the preview draws it.
@@ -138,8 +144,17 @@ pub fn preview_work(
 ) -> Result<Message, Cancelled> {
     let outcome = match hollow::hollow_shell(&req.mesh, req.key.wall, req.key.detail, ctx) {
         Err(mf_operations::OpError::Cancelled) => return Err(Cancelled),
-        Err(mf_operations::OpError::Failed { code, message }) => Err((code.to_owned(), message)),
-        Err(e) => Err(("invalid_parameter".to_owned(), e.to_string())),
+        // The preview's refusal is rendered exactly as Apply's would be
+        // (ADR-0010, C16): the same RefusalCard, in this panel.
+        Err(e) => Err(
+            crate::refusal_card::Refusal::from_op_error("mesh.hollow", &e).unwrap_or_else(|| {
+                crate::refusal_card::Refusal {
+                    op_id: "mesh.hollow".to_owned(),
+                    code: "invalid_parameter".to_owned(),
+                    message: e.to_string(),
+                }
+            }),
+        ),
         Ok(shell) => {
             ctx.checkpoint()?;
             let render = Arc::new(RenderMesh::build(
@@ -240,11 +255,6 @@ fn legend() -> Vec<LegendRow> {
     }]
 }
 
-/// The document's millimetres per unit.
-fn mm_per(app: &MeshFixerApp) -> f64 {
-    crate::transform_tool::mm_per(app.session.document().units())
-}
-
 /// The active object's placement.
 fn transform_of(app: &MeshFixerApp, id: ObjectId) -> [f64; 12] {
     app.session
@@ -257,15 +267,14 @@ fn transform_of(app: &MeshFixerApp, id: ObjectId) -> [f64; 12] {
 
 /// Settings for `id`, defaulted the first time it's shown.
 fn ensure_defaults(app: &mut MeshFixerApp, id: ObjectId) {
-    let mm = mm_per(app);
     let s = &mut app.hollow;
     if s.for_object != Some(id) || s.wall.is_none() {
         let section = s.for_object.is_none() || s.section;
         *s = HollowState {
-            wall: Some(2.0 / mm),
+            wall: Some(default_wall()),
             detail: None,
             drain: "none".into(),
-            diameter: 3.0 / mm,
+            diameter: Some(default_diameter()),
             count: 1,
             profile: "auto".into(),
             points: Vec::new(),
@@ -280,6 +289,19 @@ fn ensure_defaults(app: &mut MeshFixerApp, id: ObjectId) {
             last_result: s.last_result.take(),
         };
     }
+}
+
+/// The wall's default: print intent, from `mesh.hollow`'s spec (a
+/// physical `unit: mm` default), never a document-unit literal.
+fn default_wall() -> Length {
+    crate::intent::spec_length_default("mesh.hollow", "wall_thickness")
+        .expect("mesh.hollow declares wall_thickness as a length with a default")
+}
+
+/// The drain hole's default diameter, as [`default_wall`].
+fn default_diameter() -> Length {
+    crate::intent::spec_length_default("mesh.hollow", "hole_diameter")
+        .expect("mesh.hollow declares hole_diameter as a length with a default")
 }
 
 fn changed(app: &mut MeshFixerApp) {
@@ -314,11 +336,13 @@ pub fn refresh_preview(app: &mut MeshFixerApp, ctx: &egui::Context) {
     if scale.is_nan() || scale <= 0.0 {
         return;
     }
+    let doc = app.session.document().units();
     let s = &app.hollow;
+    let in_object = |v: Option<Length>| v.map_or(0.0, |v| v.in_doc(doc)) / scale;
     let key = PreviewKey {
         object: id,
-        wall: s.wall.unwrap_or(0.0) / scale,
-        detail: s.detail.unwrap_or(0.0) / scale,
+        wall: in_object(s.wall),
+        detail: in_object(s.detail),
     };
     if s.asked
         .as_ref()
@@ -757,8 +781,7 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str, report: &serde_json::Value
         // allow-swallow: a report without a thin-face count has none to report
         Some(below) if report["thin"]["faces"].as_u64().unwrap_or(0) > 0 => t!(
             "hollow.thin",
-            size = hollow::short(below),
-            unit = crate::defects::unit_symbol(app.session.document().units())
+            size = mf_units::format_length(below, app.session.document().units())
         ),
         _ => t!("hollow.done"),
     });
@@ -775,8 +798,7 @@ fn section(ui: &mut egui::Ui, text: &str) {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::shape_tools::refusal_card_for(app, ui, "mesh.hollow");
-    let units = crate::defects::unit_symbol(app.session.document().units());
+    crate::refusal_card::show_for(app, ui, "mesh.hollow");
     let Some(id) = app.active else { return };
     ensure_defaults(app, id);
     // A pick from a revision that's no longer shown (undo, redo, an
@@ -795,38 +817,37 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     let diag = (hi - lo).length().max(1e-9);
     widgets::body(ui, t!("hollow.what"));
 
-    // Wall thickness: a slider and a field.
-    section(ui, &t!("hollow.section.wall", unit = units));
-    let mm = mm_per(app);
-    let mut wall = app.hollow.wall.unwrap_or(2.0 / mm);
-    let before = wall;
-    ui.horizontal(|ui| {
-        ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
-        let r = ui.add(
-            egui::Slider::new(&mut wall, (0.4 / mm)..=(10.0 / mm))
-                .logarithmic(true)
-                .show_value(false),
-        );
-        r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Wall thickness"));
-        ui.add(
-            egui::DragValue::new(&mut wall)
-                .speed(0.02)
-                .range((0.01 / mm)..=(diag / 2.0))
-                .suffix(format!(" {units}"))
-                .max_decimals(2),
-        )
-        .on_hover_text(t!("hollow.wall_help"));
-    });
-    if wall != before {
+    // Wall thickness: a slider and a field, holding the typed length
+    // (ADR-0006 rule 1): a 2 mm wall on a metres document shows "2.00 mm",
+    // never "0".
+    section(ui, &t!("hollow.section.wall"));
+    let doc = app.session.document().units();
+    let lengths = app.scale_ctx();
+    let mut wall = app.hollow.wall.unwrap_or_else(default_wall);
+    let wall_label = t!("hollow.wall");
+    let opts = LengthFieldOpts {
+        range: (
+            Length::new(0.0, Unit::Millimeter),
+            Length::new(diag / 2.0, doc),
+        ),
+        scale: &lengths,
+        label: &wall_label,
+    };
+    if length_slider(ui, egui::Id::unique("hollow wall"), &mut wall, &opts)
+        .on_hover_text(t!("hollow.wall_help"))
+        .changed()
+    {
         app.hollow.wall = Some(wall);
         changed(app);
     }
     widgets::caption(ui, t!("hollow.tradeoff"));
 
-    // Detail.
-    section(ui, &t!("hollow.section.detail", unit = units));
+    // Detail: geometry resolution, automatic from the wall and the
+    // model's size (`hollow::cell_size`) unless typed.
+    section(ui, &t!("hollow.section.detail"));
     let scale = hollow::world_per_object(&transform_of(app, id));
-    let auto = hollow::cell_size(0.0, wall, diag);
+    let wall_doc = wall.in_doc(doc);
+    let auto = Length::new(hollow::cell_size(0.0, wall_doc, diag), doc);
     let mut automatic = app.hollow.detail.is_none();
     if ui
         .checkbox(&mut automatic, t!("hollow.detail_auto"))
@@ -840,26 +861,20 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         None => {
             widgets::caption(
                 ui,
-                t!(
-                    "hollow.detail_is",
-                    cell = crate::defects::measure(auto),
-                    unit = units
-                ),
+                t!("hollow.detail_is", cell = display_text(auto, &lengths)),
             );
         }
         Some(mut cell) => {
-            let before = cell;
-            ui.scope(|ui| {
-                ui.spacing_mut().slider_width = (ui.available_width() - 90.0).max(60.0);
-                let r = ui.add(
-                    egui::Slider::new(&mut cell, (wall / 16.0)..=(wall / 2.0))
-                        .logarithmic(true)
-                        .suffix(format!(" {units}"))
-                        .max_decimals(3),
-                );
-                r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Slider, true, "Detail"));
-            });
-            if cell != before {
+            let detail_label = t!("hollow.detail");
+            let opts = LengthFieldOpts {
+                range: (
+                    Length::new(wall_doc / 16.0, doc),
+                    Length::new(wall_doc / 2.0, doc),
+                ),
+                scale: &lengths,
+                label: &detail_label,
+            };
+            if length_field(ui, egui::Id::unique("hollow detail"), &mut cell, &opts).changed() {
                 app.hollow.detail = Some(cell);
                 changed(app);
             }
@@ -906,16 +921,26 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
     if app.hollow.drain != "none" {
         ui.add_space(theme::SPACE_XS);
-        ui.horizontal(|ui| {
-            ui.label(t!("hollow.holes.diameter", unit = units));
-            ui.add(
-                egui::DragValue::new(&mut app.hollow.diameter)
-                    .speed(0.05)
-                    .range((0.1 / mm)..=(diag / 4.0))
-                    .suffix(format!(" {units}"))
-                    .max_decimals(2),
-            );
-        });
+        let mut diameter = app.hollow.diameter.unwrap_or_else(default_diameter);
+        let diameter_label = t!("hollow.holes.diameter");
+        let opts = LengthFieldOpts {
+            range: (
+                Length::new(0.0, Unit::Millimeter),
+                Length::new(diag / 4.0, doc),
+            ),
+            scale: &lengths,
+            label: &diameter_label,
+        };
+        if length_field(
+            ui,
+            egui::Id::unique("hollow drain diameter"),
+            &mut diameter,
+            &opts,
+        )
+        .changed()
+        {
+            app.hollow.diameter = Some(diameter);
+        }
         if app.hollow.drain == "auto" {
             widgets::caption(ui, t!("hollow.holes.auto_help"));
             ui.horizontal(|ui| {
@@ -976,8 +1001,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     t!(
                         "hollow.preview_ready",
                         faces = s.inner_faces,
-                        cell = crate::defects::measure(s.cell * scale),
-                        unit = units
+                        cell = mf_units::format_length(s.cell * scale, doc)
                     ),
                 );
                 if s.thin_faces > 0 {
@@ -987,8 +1011,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                         theme::THIN_WALL,
                         &t!(
                             "hollow.thin",
-                            size = hollow::short(2.0 * wall),
-                            unit = units
+                            size = display_text(Length::new(2.0 * wall.value, wall.unit), &lengths)
                         ),
                     );
                     widgets::caption(
@@ -1000,12 +1023,11 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                     );
                 }
             }
-            Some(Err((code, message))) => {
-                widgets::card(ui, |ui| {
-                    ui.label(RichText::new(t!("hollow.preview_refused")).color(theme::TEXT_STRONG));
-                    widgets::body(ui, message);
-                    widgets::caption(ui, format!("({code})"));
-                });
+            Some(Err(refusal)) => {
+                let refusal = refusal.clone();
+                crate::refusal_card::RefusalCard::new(&refusal)
+                    .title(t!("hollow.preview_refused"))
+                    .show(app, ui);
             }
         }
     }
@@ -1027,27 +1049,23 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .iter()
             .map(|p| format!("{},{},{},{},0", p.face.0, p.bary[0], p.bary[1], p.bary[2]))
             .collect();
-        // `wall_thickness`, `inner_detail` and `hole_diameter` are
-        // `unit: mm` params (D20): `wall`, `s.detail` and `s.diameter`
-        // are document units (the panel's own sliders and fields), so
-        // cross to mm here, once, or `Session::prepare`'s single
-        // mm-to-document conversion runs on an already-document-units
-        // number.
-        let mm = mm_per(app);
-        let mut params = BTreeMap::from([
-            ("wall_thickness".to_owned(), (wall * mm).to_string()),
-            (
-                "inner_detail".to_owned(),
-                (s.detail.unwrap_or(0.0) * mm).to_string(),
-            ),
-            ("drain_holes".to_owned(), s.drain.clone()),
-            ("hole_diameter".to_owned(), (s.diameter * mm).to_string()),
-            ("hole_count".to_owned(), s.count.to_string()),
-            ("hole_profile".to_owned(), s.profile.clone()),
-            ("open_through".to_owned(), s.open_through.to_string()),
-        ]);
+        // `wall`, `s.detail` and `s.diameter` are typed lengths (the
+        // panel's own fields): `Session::prepare` alone converts them.
+        // An automatic detail is the spec's 0 ("automatic").
+        let mut intent = Intent::op("mesh.hollow")
+            .on(id)
+            .set("wall_thickness", wall)
+            .set(
+                "inner_detail",
+                s.detail.unwrap_or(Length::new(0.0, Unit::Millimeter)),
+            )
+            .param("drain_holes", &s.drain)
+            .set("hole_diameter", s.diameter.unwrap_or_else(default_diameter))
+            .param("hole_count", s.count)
+            .param("hole_profile", &s.profile)
+            .param("open_through", s.open_through);
         if s.drain == "placed" {
-            params.insert("hole_points".to_owned(), points.join(";"));
+            intent = intent.param("hole_points", points.join(";"));
         }
         if s.open_through
             && let Some(r) = &s.picked_region
@@ -1058,19 +1076,10 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .map(|f| f.0.to_string())
                 .collect::<Vec<_>>()
                 .join(",");
-            params.insert("open_through_faces".to_owned(), faces);
+            intent = intent.param("open_through_faces", faces);
         }
         app.refusal = None;
-        app.run_invocation(
-            mf_command::Invocation {
-                op_id: "mesh.hollow".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: params,
-            },
-            t!("hollow.apply"),
-        );
+        app.run_intent(intent, t!("hollow.apply"));
     }
 }
 

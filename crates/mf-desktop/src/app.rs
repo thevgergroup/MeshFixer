@@ -298,6 +298,14 @@ pub enum PendingPlacement {
     },
 }
 
+/// A command the app sent to a worker (or queued), with the tool that
+/// issued it (C16: its refusal is routed to that tool's panel).
+struct Issued {
+    inv: Invocation,
+    label: String,
+    by: &'static str,
+}
+
 pub struct MeshFixerApp {
     pub session: Session,
     pub active: Option<ObjectId>,
@@ -438,11 +446,6 @@ pub struct MeshFixerApp {
     /// The Sculpt panel's "Show sculpt changes" overlay (off by default):
     /// tints vertices by how far they've moved since the tool was opened.
     pub sculpt_show_changes: bool,
-    /// The radius panel's typed-unit field while it has focus (ADR-0006
-    /// rule 1b: "3 mm" and the like): `None` shows the live "≈ X at this
-    /// zoom" readout instead. Mirrors [`crate::transform_tool::TransformTool::editing`]'s
-    /// pattern — the text a person is typing, not yet committed.
-    pub sculpt_radius_text: Option<String>,
     /// The active object's mesh as it was when Sculpt was opened (the
     /// "Show sculpt changes" overlay's reference point): `None` outside
     /// Sculpt. Reset whenever the active object changes while Sculpt
@@ -482,13 +485,6 @@ pub struct MeshFixerApp {
     /// asynchronous (the job pool), so none of that can happen inside
     /// the call that starts it.
     pub pending_open_transform: Option<PendingPlacement>,
-    /// The op id [`Self::run_invocation`] just started, so a refusal
-    /// `Message::Completed` carries back (which doesn't otherwise name
-    /// the op that failed) can still be shown by a tool whose panel
-    /// runs more than one operation (Parts, Connectors:
-    /// `shape_tools::ops_of`), not just the one-op-per-tool
-    /// `shape_tools::op_of` tools.
-    last_invocation_op: Option<&'static str>,
     /// The command [`Self::run_invocation`] actually sent to a worker
     /// (its label, for the status/error text), kept so that if it comes
     /// back `StaleInput` only because this app's own next queued command
@@ -496,8 +492,11 @@ pub struct MeshFixerApp {
     /// revision and re-run (I5 single-queue fix): operations are
     /// deterministic, so replaying ours against our own later revision
     /// is always safe, and the error is shown only when the document's
-    /// own content makes the command invalid.
-    in_flight_invocation: Option<(Invocation, String)>,
+    /// own content makes the command invalid. It also records the tool
+    /// that issued it (the active tool when it was asked for, C16): its
+    /// refusal goes to that tool's panel, never to whichever tool
+    /// happens to be open when the result lands.
+    in_flight_invocation: Option<Issued>,
     /// Later commands asked for while one is already running, in order,
     /// run one at a time once the running one finishes. A command for
     /// the same op and target as the *last* queued one replaces it
@@ -505,10 +504,14 @@ pub struct MeshFixerApp {
     /// ones), so rapid edits leave one pending step, not a backlog; any
     /// other command queues behind it and is never dropped (final
     /// review I2: a single overwritten slot lost queued edits silently).
-    pending_invocation: std::collections::VecDeque<(Invocation, String)>,
+    pending_invocation: std::collections::VecDeque<Issued>,
     /// The last operation refusal, shown in its tool's panel in plain
     /// words with the next action.
     pub refusal: Option<crate::shape_tools::Refusal>,
+    /// The tool that issued the command `refusal` came back from (C16),
+    /// kept with the refusal it belongs to: a refusal a panel built
+    /// itself has no issuer and isn't matched by a stale one.
+    refusal_issuer: Option<(crate::shape_tools::Refusal, &'static str)>,
     /// The UI's context, for background work that asks for a frame.
     egui_ctx: Option<egui::Context>,
     /// A placement committed from the Transform tool, drawn until its
@@ -541,6 +544,11 @@ pub struct MeshFixerApp {
     pub selection: Option<Selection>,
     /// A tangled edge shown in Properties (only while nothing is selected).
     pub inspected: Option<Inspected>,
+    /// Inspect's Units control (import-units-brief.md, "Fix it
+    /// afterwards"): the unit picked for "Reinterpret" or "Scale",
+    /// `None` until the person opens the picker (the document's own
+    /// unit is shown as the field's starting value, not stored here).
+    pub inspect_units: Option<mf_units::Unit>,
     /// What the pointer is over in the tree this frame (outlined in the view).
     pub hover: Option<(ObjectId, OverlayTarget)>,
     /// What the pointer is over in the 3D view (a defect of the active
@@ -913,7 +921,6 @@ impl MeshFixerApp {
             sculpt_pending: None,
             sculpt_hover: None,
             sculpt_show_changes: false,
-            sculpt_radius_text: None,
             sculpt_baseline: None,
             solid: Default::default(),
             parts: Default::default(),
@@ -923,10 +930,10 @@ impl MeshFixerApp {
             pending_reorient: None,
             pending_scale_to_fit: None,
             pending_open_transform: None,
-            last_invocation_op: None,
             in_flight_invocation: None,
             pending_invocation: std::collections::VecDeque::new(),
             refusal: None,
+            refusal_issuer: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
             pending_status: None,
@@ -943,6 +950,7 @@ impl MeshFixerApp {
             replay_report: None,
             selection: None,
             inspected: None,
+            inspect_units: None,
             hover: None,
             view_hover: None,
             hover_picks: HoverPicks::default(),
@@ -1010,6 +1018,39 @@ impl MeshFixerApp {
         self.active
             .and_then(|id| self.session.document().object(id))
             .and_then(|o| o.mesh())
+    }
+
+    /// The [`mf_units::ScaleCtx`] a panel's `length_field`/`length_slider`
+    /// uses (consolidation plan C15/C17, units-audit.md §6.4-6.5): the
+    /// document's unit as both doc and display (the app has no separate
+    /// display-unit preference yet), `bbox_diag` from the active object
+    /// so bbox-relative defaults and `length_slider`'s range follow the
+    /// model, and `world_per_pt` at the camera's target from the live
+    /// view, so a label scrub steps by a `nice_step` that is a few points
+    /// on screen at the current zoom (millimetres on a framed 0.156 m
+    /// bunny, never 0.5 m). Without a camera yet it is `None` and the
+    /// step falls back to the document scale.
+    pub fn scale_ctx(&self) -> mf_units::ScaleCtx {
+        let doc = self.session.document().units();
+        let bbox_diag = self
+            .active_mesh()
+            .and_then(|m| m.bounding_box())
+            .map(|b| b.diagonal())
+            .unwrap_or(0.0);
+        let world_per_pt = self
+            .camera
+            .zip(self.viewport.last_rect)
+            .map(|(cam, rect)| {
+                let depth = (cam.target - cam.eye()).length();
+                2.0 * depth * (cam.fov_y * 0.5).tan() / f64::from(rect.height()).max(1.0)
+            })
+            .filter(|w| w.is_finite() && *w > 0.0);
+        mf_units::ScaleCtx {
+            doc,
+            display: doc,
+            bbox_diag,
+            world_per_pt,
+        }
     }
 
     pub fn open(&mut self, path: PathBuf) {
@@ -1083,7 +1124,13 @@ impl MeshFixerApp {
                     .then(|| profiles.active_profile());
                 let plate = crate::import_dialog::Plate::from_profile(active);
                 let hint = model.source.exporter_hint.clone();
-                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint));
+                let (memory, memory_err) = crate::import_dialog::import_memory(self);
+                if let Some(e) = memory_err {
+                    self.warnings.push(format!(
+                        "Your remembered import units couldn't be read ({e}); asking fresh."
+                    ));
+                }
+                self.unit_prompt = Some(UnitPrompt::new(name, extent, model, plate, hint, &memory));
             }
             _ => {
                 model.warnings.push(format!(
@@ -1110,6 +1157,7 @@ impl MeshFixerApp {
             None => {}
             Some((true, scale_to_fit)) => {
                 if let Some(prompt) = self.unit_prompt.take() {
+                    self.remember_import_unit(&prompt);
                     let factor = scale_to_fit.then(|| prompt.scale_to_fit_factor());
                     self.import_model(prompt.into_model());
                     if let (Some(factor), Some(id)) = (factor, self.active) {
@@ -1124,6 +1172,25 @@ impl MeshFixerApp {
                 self.status = Some("Import cancelled: nothing opened".into());
             }
         }
+    }
+
+    /// Records the unit `prompt` was confirmed with (its final
+    /// [`UnitPrompt::choice`], after any dialog edits) against its
+    /// folder and exporter signature, so the next import from either
+    /// preselects it (import-units-brief.md, "Remember choices"). Never
+    /// an error the user sees: a settings directory that can't be
+    /// written just means the next import asks fresh, same as today.
+    fn remember_import_unit(&self, prompt: &UnitPrompt) {
+        let Some(dir) = self.settings_dir() else {
+            return;
+        };
+        let (mut memory, _) = crate::import_dialog::import_memory(self);
+        memory.remember(
+            prompt.folder.as_deref(),
+            prompt.exporter_signature,
+            prompt.choice,
+        );
+        let _ = memory.save(&dir); // allow-swallow: a failed save leaves this import's memory for this session only; the next import retries the write
     }
 
     /// Applies a "Scale to fit plate" import's scaling, once the import
@@ -1141,7 +1208,11 @@ impl MeshFixerApp {
         let Some(current) = self.session.document().object(id).map(|o| o.transform) else {
             return; // the object was removed (e.g. the import was undone)
         };
-        let scaled = transform_tool::scale_linear(&current, factor);
+        // A uniform scale of the linear part; the translation stays.
+        let mut scaled = current;
+        for v in &mut scaled[0..9] {
+            *v *= factor;
+        }
         self.active = Some(id);
         self.commit_transform(id, scaled, "Scale to fit plate".into());
     }
@@ -1547,20 +1618,11 @@ impl MeshFixerApp {
         }
         let mut params = self.params_for(&tool.op_id).clone();
         params.extend(tool.fixed.clone());
-        let raw_params = params
-            .iter()
-            .map(|(k, v)| (k.clone(), v.to_string()))
-            .collect();
-        self.run_invocation(
-            Invocation {
-                operands: Vec::new(),
-                selection: tool.selection.clone(),
-                op_id: tool.op_id.clone(),
-                target,
-                raw_params,
-            },
-            tool.label.clone(),
-        );
+        let intent = crate::intent::Intent::op(&tool.op_id)
+            .on(target)
+            .selection(tool.selection.clone())
+            .values(&params);
+        self.run_intent(intent, tool.label.clone());
     }
 
     /// The history breadcrumb: the current path from the first import, then
@@ -2235,50 +2297,74 @@ impl MeshFixerApp {
     /// strokes queued behind a running one are three undo steps, not
     /// fewer.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        let issued = Issued {
+            inv,
+            label,
+            by: self.active_tool,
+        };
         if self.busy.is_some() {
+            let inv = &issued.inv;
             let coalesces = mf_spec::builtin::get(&inv.op_id)
                 .is_some_and(|spec| spec.coalesce == mf_spec::Coalesce::Absolute);
             match self.pending_invocation.back_mut() {
-                Some((queued, queued_label))
-                    if coalesces && queued.op_id == inv.op_id && queued.target == inv.target =>
+                Some(queued)
+                    if coalesces
+                        && queued.inv.op_id == inv.op_id
+                        && queued.inv.target == inv.target =>
                 {
-                    *queued = inv;
-                    *queued_label = label;
+                    *queued = issued;
                 }
-                _ => self.pending_invocation.push_back((inv, label)),
+                _ => self.pending_invocation.push_back(issued),
             }
             return;
         }
-        self.start_invocation(inv, label);
+        self.start_invocation(issued);
     }
 
     /// Actually prepares and starts `inv`: only called with no command
     /// running, either straight from [`Self::run_invocation`] or when
     /// draining the one queued command.
-    fn start_invocation(&mut self, inv: Invocation, label: String) {
-        // Interned against the known op-sets for `ops_of`'s panels
-        // (Parts, Connectors): `Invocation::op_id` is an owned `String`
-        // (it comes from a spec id built at runtime in general), but
-        // every id this matches is one of a small set of `&'static
-        // str`s, so a failure the job pool reports back can still name
-        // which op it was without `Message::Completed` itself carrying
-        // the id on its `Err` path.
-        self.last_invocation_op = crate::shape_tools::ops_of(self.active_tool)
-            .iter()
-            .copied()
-            .find(|&id| id == inv.op_id);
-        match self.session.prepare(inv.clone()) {
+    fn start_invocation(&mut self, issued: Issued) {
+        match self.session.prepare(issued.inv.clone()) {
             Ok(prepared) => {
-                self.in_flight_invocation = Some((inv, label.clone()));
-                let run = self.start_job(format!("{label}…"), true);
+                let run = self.start_job(format!("{}…", issued.label), true);
+                self.in_flight_invocation = Some(issued);
                 self.workers.run(prepared, run);
+            }
+            Err(CommandError::Operation(e)) if self.route_refusal(&issued, &e) => {
+                self.in_flight_invocation = None;
             }
             Err(e) => {
                 self.in_flight_invocation = None;
                 self.error = Some(format!(
-                    "{label} can't run: {e}. Change the settings and Apply again."
+                    "{} can't run: {e}. Change the settings and Apply again.",
+                    issued.label
                 ))
             }
+        }
+    }
+
+    /// Sends `e`, the refusal of the command `issued`, to the panel of
+    /// the tool that issued it (ADR-0010, C16): `app.refusal`, rendered
+    /// by `RefusalCard`, never the generic error bar. False when `e`
+    /// isn't a refusal (a cancellation, a spec error).
+    fn route_refusal(&mut self, issued: &Issued, e: &mf_operations::OpError) -> bool {
+        let Some(r) = crate::refusal_card::Refusal::from_op_error(&issued.inv.op_id, e) else {
+            return false;
+        };
+        self.status = Some(format!("Nothing was changed: {}", r.message));
+        self.refusal_issuer = Some((r.clone(), issued.by));
+        self.refusal = Some(r);
+        true
+    }
+
+    /// The tool that issued the command the shown refusal came back from,
+    /// if it came back from one (C16): its panel is the only one that
+    /// shows it.
+    pub fn refusal_issuer(&self) -> Option<&'static str> {
+        match (&self.refusal, &self.refusal_issuer) {
+            (Some(r), Some((issued, by))) if r == issued => Some(by),
+            _ => None,
         }
     }
 
@@ -2291,8 +2377,8 @@ impl MeshFixerApp {
         if self.busy.is_some() {
             return;
         }
-        if let Some((inv, label)) = self.pending_invocation.pop_front() {
-            self.start_invocation(inv, label);
+        if let Some(issued) = self.pending_invocation.pop_front() {
+            self.start_invocation(issued);
         }
     }
 
@@ -2308,15 +2394,15 @@ impl MeshFixerApp {
         let CommandError::StaleInput { actual, .. } = e else {
             return false;
         };
-        let Some((inv, label)) = self.in_flight_invocation.take() else {
-            return false;
-        };
         if self.session.current().0 != *actual {
             // Not (or no longer) at the revision the failure named: don't
             // guess at a moving target.
             return false;
         }
-        self.start_invocation(inv, label);
+        let Some(issued) = self.in_flight_invocation.take() else {
+            return false;
+        };
+        self.start_invocation(issued);
         true
     }
 
@@ -2747,14 +2833,8 @@ impl MeshFixerApp {
         if self.busy.is_some() || self.is_locked(id) {
             return;
         }
-        self.run_invocation(
-            Invocation {
-                op_id: "object.delete".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: BTreeMap::new(),
-            },
+        self.run_intent(
+            crate::intent::Intent::op("object.delete").on(id),
             "Delete object".into(),
         );
     }
@@ -2775,14 +2855,10 @@ impl MeshFixerApp {
         {
             return;
         }
-        self.run_invocation(
-            Invocation {
-                op_id: "object.rename".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: BTreeMap::from([("name".to_owned(), trimmed.to_owned())]),
-            },
+        self.run_intent(
+            crate::intent::Intent::op("object.rename")
+                .on(id)
+                .param("name", trimmed),
             "Rename object".into(),
         );
     }
@@ -2844,7 +2920,7 @@ impl MeshFixerApp {
                 {
                     return;
                 }
-                self.in_flight_invocation = None;
+                let issued = self.in_flight_invocation.take();
                 // The Transform tool's placement is the document's now (or
                 // wasn't committed): stop drawing it over the document's.
                 self.preview = None;
@@ -2904,25 +2980,14 @@ impl MeshFixerApp {
                         self.status = Some(format!("Nothing to change: {}", report(&r)));
                     }
                     Err(CommandError::Cancelled) => self.status = Some(CANCELLED.into()),
-                    // The Shape tools' (and Parts'/Connectors') refusals
-                    // show in their panel, in plain words with the next
-                    // action.
-                    Err(CommandError::Operation(mf_operations::OpError::Failed {
-                        code,
-                        message,
-                    })) if crate::shape_tools::op_of(self.active_tool).is_some()
-                        || self.last_invocation_op.is_some() =>
-                    {
-                        self.status = Some(format!("Nothing was changed: {message}"));
-                        let op_id = crate::shape_tools::op_of(self.active_tool)
-                            .or(self.last_invocation_op)
-                            .expect("checked above");
-                        self.refusal = Some(crate::shape_tools::Refusal {
-                            op_id: op_id.to_owned(),
-                            code: code.to_owned(),
-                            message,
-                        });
-                    }
+                    // Every operation's refusal goes to the panel of the
+                    // tool that issued the command (ADR-0010, C16), as a
+                    // RefusalCard: never the raw "code: message" in the
+                    // error bar.
+                    Err(CommandError::Operation(e))
+                        if issued
+                            .as_ref()
+                            .is_some_and(|issued| self.route_refusal(issued, &e)) => {}
                     Err(e) => {
                         self.error = Some(format!(
                             "The operation failed: {e}. Nothing was changed; try other settings \
@@ -5289,7 +5354,7 @@ impl MeshFixerApp {
     /// fixed default spacing without a live camera/viewport yet (the
     /// first frame, before either is set).
     fn plate(&self) -> mf_render::Plate {
-        let mm = transform_tool::mm_per(self.session.document().units());
+        let mm = self.session.document().units().mm_per();
         let d = mf_render::Plate::default();
         let grid_mm = self
             .camera
@@ -5559,20 +5624,14 @@ impl MeshFixerApp {
         let ids: Vec<ObjectId> = members.iter().map(|(m, _)| *m).collect();
         self.preview = Some((object, transform));
         self.pending_status = Some(status.to_owned());
-        self.run_invocation(
-            Invocation {
-                op_id: "object.move_group".into(),
-                target: ids[0],
-                selection: None,
-                operands: ids[1..]
-                    .iter()
-                    .map(|&o| ("target".to_owned(), o, None))
-                    .collect(),
-                raw_params: BTreeMap::from([(
-                    "transforms".to_owned(),
+        self.run_intent(
+            crate::intent::Intent::op("object.move_group")
+                .on(ids[0])
+                .operands(ids[1..].iter().map(|&o| ("target".to_owned(), o, None)))
+                .set_doc(
+                    "transforms",
                     mf_operations::shapes::transforms_param(&transforms),
-                )]),
-            },
+                ),
             "Move group".into(),
         );
         if self.busy.is_none() {
@@ -7265,21 +7324,16 @@ mod tests {
         let id = ids[0];
 
         let cut = session
-            .execute(mf_command::Invocation {
-                op_id: "mesh.split_plane".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: [
-                    ("plane_point", "0,0,2.0"),
-                    ("plane_normal", "0,0,1"),
-                    ("keep", "above"),
-                    ("cap", "true"),
-                ]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            })
+            .execute(
+                crate::intent::Intent::op("mesh.split_plane")
+                    .on(id)
+                    .set_point("plane_point", [0.0, 0.0, 2.0], mf_units::Unit::Millimeter)
+                    .param("plane_normal", "0,0,1")
+                    .param("keep", "above")
+                    .param("cap", true)
+                    .build()
+                    .unwrap(),
+            )
             .unwrap();
         let mf_command::CommitOutcome::NewRevision { report } = cut else {
             panic!("expected a new revision");
@@ -7298,21 +7352,22 @@ mod tests {
         let faces_param = cap_faces.join(",");
 
         session
-            .execute(mf_command::Invocation {
-                op_id: "mesh.hollow".into(),
-                target: id,
-                selection: None,
-                operands: Vec::new(),
-                raw_params: [
-                    ("wall_thickness", "2"),
-                    ("inner_detail", "0.5"),
-                    ("open_through", "true"),
-                    ("open_through_faces", faces_param.as_str()),
-                ]
-                .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
-                .collect(),
-            })
+            .execute(
+                crate::intent::Intent::op("mesh.hollow")
+                    .on(id)
+                    .set(
+                        "wall_thickness",
+                        mf_units::Length::new(2.0, mf_units::Unit::Millimeter),
+                    )
+                    .set(
+                        "inner_detail",
+                        mf_units::Length::new(0.5, mf_units::Unit::Millimeter),
+                    )
+                    .param("open_through", true)
+                    .param("open_through_faces", &faces_param)
+                    .build()
+                    .unwrap(),
+            )
             .unwrap();
 
         let node = session.node(session.current()).unwrap();

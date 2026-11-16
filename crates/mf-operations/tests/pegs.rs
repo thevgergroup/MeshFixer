@@ -387,7 +387,8 @@ fn too_thin_section_refuses_with_widest_fit() {
         &scaled(&cube(1.0), 4.0),
         &[("pegs", "dowels"), ("plane_point", "0,0,2.1")],
     ) {
-        Err(OpError::Failed { code, message }) => {
+        Err(OpError::Refused { code, args }) => {
+            let message = mf_operations::refusal::render_args(&args);
             assert_eq!(code, "section_too_thin");
             assert!(
                 message.contains("the widest hole that fits is 1.00"),

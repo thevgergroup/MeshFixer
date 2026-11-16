@@ -11,7 +11,7 @@ mod params;
 
 pub use model::{
     Coalesce, FitDefaults, OperandRole, OperandSpec, OperationSpec, ParamKind, ParamSpec,
-    ParamUnit, RuntimeSpec, TargetSpec,
+    ParamUnit, RefusalArgKind, RefusalArgSpec, RefusalNext, RefusalSpec, RuntimeSpec, TargetSpec,
 };
 pub use params::{FaceList, ParamValue, Params, SpecError};
 

@@ -15,16 +15,18 @@
 //!   table words ([`crate::boolean::refusal_copy`]).
 
 use std::borrow::Cow;
+use std::collections::BTreeMap;
 
 use mf_boolean::{BoolOp, BooleanError, boolean, operand_in_frame};
 use mf_geometry::{Mesh, Provenance};
 use mf_parts::ShapeRole;
 use mf_spec::Params;
 
-use crate::boolean::{kernel, refusal_copy};
+use crate::boolean::kernel;
+use crate::refusal::RefusalArg;
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, needs_document, unsupported_target,
+    Target, Unit, needs_document, unsupported_target,
 };
 
 pub struct Combine;
@@ -38,13 +40,24 @@ const TARGET_CODES: &[&str] = &[
     "window_degenerate",
 ];
 
-/// A refusal naming `object` first, then the copy table's words.
+/// A refusal naming `object` first, then the copy table's "what"/"next"
+/// words composed with `detail` exactly as the pre-registry text did
+/// (ADR-0010: built through the one registry helper, with `object` and
+/// the composed `detail` as the named arguments
+/// `specs/operations/mesh.boolean.yaml`'s message fills in — the same
+/// codes and copy `mesh.boolean` itself refuses with).
 fn refuse_naming(object: &str, code: &'static str, detail: String) -> OpError {
-    let message = match refusal_copy(code) {
-        Some((what, next)) => format!("'{object}': {what} ({detail}). {next}."),
-        None => format!("'{object}': {detail}"),
+    let message = match crate::boolean::refusal_copy(code) {
+        Some((what, next)) => format!("{what} ({detail}). {next}."),
+        None => detail,
     };
-    OpError::Failed { code, message }
+    crate::refusal::refuse(
+        code,
+        BTreeMap::from([
+            ("object", RefusalArg::Text(object.to_owned())),
+            ("detail", RefusalArg::Text(message)),
+        ]),
+    )
 }
 
 impl Operation for Combine {
@@ -86,14 +99,10 @@ impl Operation for Combine {
             }
         }
         if rest.is_empty() {
-            return Err(OpError::Failed {
-                code: "nothing_to_combine",
-                message: format!(
-                    "'{}' is the only object: there is nothing to join or cut. Select more \
-                     objects.",
-                    target.name
-                ),
-            });
+            return Err(crate::refusal::refuse(
+                "nothing_to_combine",
+                BTreeMap::from([("object", RefusalArg::Text(target.name.to_owned()))]),
+            ));
         }
         let keep_holes = params.get_bool("keep_holes")?;
         if let Some(other) = rest
@@ -331,11 +340,17 @@ pub fn apply_parts(
 /// The gap two attached targets keep where they meet (a hinge's moving
 /// parts): refused as `moving_parts_fused` if it's under `gap` (less a
 /// tenth for the chord tolerance). Returns the measured distance (`None`
-/// when they're further apart than the measure looks).
+/// when they're further apart than the measure looks). `unit` is the
+/// document's own unit (consolidation plan C14): `gap` and the measured
+/// distance are document-unit `f64`s (D20), carried into the refusal as
+/// [`mf_units::Length`] rather than a pre-formatted string with a
+/// hard-coded "mm" and `{:.3}` (the owner's bug this fixes: a "mm"
+/// gap message on a metres document).
 pub fn check_moving_gap(
     a: (&Mesh, &OperandInput),
     b: (&Mesh, &OperandInput),
     gap: f64,
+    unit: Unit,
     ctx: &RunContext,
 ) -> Result<Option<f64>, OpError> {
     let bvh = mf_geometry::Bvh::build(a.0, ctx)?;
@@ -349,14 +364,21 @@ pub fn check_moving_gap(
     if let Some(d) = measured
         && d < gap - tolerance
     {
-        return Err(OpError::Failed {
-            code: "moving_parts_fused",
-            message: format!(
-                "'{}' and '{}' would print fused ({d:.3} mm apart where they meet, at least \
-                 {gap:.3} mm expected); move the parts apart or pick a looser Fit class.",
-                a.1.name, b.1.name
-            ),
-        });
+        return Err(crate::refusal::refuse(
+            "moving_parts_fused",
+            BTreeMap::from([
+                ("a", RefusalArg::Text(a.1.name.to_owned())),
+                ("b", RefusalArg::Text(b.1.name.to_owned())),
+                (
+                    "measured",
+                    RefusalArg::Length(mf_units::Length::new(d, unit)),
+                ),
+                (
+                    "expected",
+                    RefusalArg::Length(mf_units::Length::new(gap, unit)),
+                ),
+            ]),
+        ));
     }
     Ok(measured)
 }

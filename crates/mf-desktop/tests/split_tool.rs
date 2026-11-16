@@ -242,7 +242,7 @@ fn print_volume_box_cuts_into_pieces_that_fit() {
         a.split_flow.volume.center = DVec3::new(0.7, -0.4, 24.35);
     }
     settle(&mut h);
-    h.get_by_label("In the box: about 40 × 38 × 44");
+    h.get_by_label("In the box: about 40.3 mm × 37.9 mm × 44.1 mm");
     // Drag the +X face's handle outwards: the box grows along X only.
     let before = h.state().split_flow.volume.clone();
     let face = before.center + DVec3::new(before.size.x / 2.0, 0.0, 0.0);

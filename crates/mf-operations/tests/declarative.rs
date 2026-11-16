@@ -229,11 +229,13 @@ fn run_case(case: &Case) -> Result<Vec<String>, String> {
 
     let mut problems = Vec::new();
     if let Some(Value::String(code)) = case.expect.get("error") {
-        match result {
-            Err(mf_operations::OpError::Failed { code: got, .. }) if got == code => {}
-            other => problems.push(format!(
+        match &result {
+            Err(mf_operations::OpError::Failed { code: got, .. })
+            | Err(mf_operations::OpError::Refused { code: got, .. })
+                if got == code => {}
+            _ => problems.push(format!(
                 "error: expected '{code}', got {:?}",
-                other.map(|o| o.report)
+                result.map(|o| o.report)
             )),
         }
         return Ok(problems);

@@ -6,20 +6,32 @@
 //! default plate with none), preselecting whichever unit "fits the
 //! plate" best.
 
+use std::path::Path;
+
 use eframe::egui::{self, RichText};
 use mf_io::ImportedModel;
 use mf_io::threemf::Unit;
 use mf_parts::MachineProfile;
+use serde::{Deserialize, Serialize};
 
+use crate::MeshFixerApp;
 use crate::defects::{measure, unit_symbol};
 use crate::theme;
 
-/// The units offered, in the order shown.
-const OFFERED: [Unit; 4] = [Unit::Millimeter, Unit::Centimeter, Unit::Meter, Unit::Inch];
+/// The units offered, in the order shown (consolidation plan C15: every
+/// [`Unit`], not the import dialog's original 4).
+const OFFERED: [Unit; 6] = Unit::ALL;
 
-/// The plate used when no Machine profile is active (brief: "the
-/// default 250 × 250 × 250 mm").
-const DEFAULT_PLATE_MM: [f64; 3] = [250.0, 250.0, 250.0];
+/// The plate used when no Machine profile is active: the one print
+/// volume the app knows without a user choice, the built-in Uncalibrated
+/// profile's own (consolidation plan C18, "There is ONE print volume,
+/// from the machine profile"). This used to be a second, independent
+/// `250 × 250 × 250 mm` literal, inconsistent with both
+/// [`mf_parts::MachineProfile::uncalibrated`]'s volume and the render
+/// plate's own default.
+fn default_plate_mm() -> [f64; 3] {
+    mf_parts::MachineProfile::uncalibrated().print_volume_mm
+}
 
 /// Below this, on its largest side, a unit's reading is unprintable.
 const TOO_SMALL_MM: f64 = 5.0;
@@ -32,16 +44,10 @@ const VERY_SMALL_MM: f64 = 15.0;
 /// preselected just because it's "the biggest that's over").
 const MAX_OVERSIZE_MULTIPLE: f64 = 10.0;
 
-/// Millimetres in one `unit`.
+/// Millimetres in one `unit`: [`mf_units::Length`]'s own conversion,
+/// the one table (ADR-0006 rule 1; this used to duplicate it locally).
 pub fn millimetres(unit: Unit) -> f64 {
-    match unit {
-        Unit::Micron => 0.001,
-        Unit::Millimeter => 1.0,
-        Unit::Centimeter => 10.0,
-        Unit::Meter => 1000.0,
-        Unit::Inch => 25.4,
-        Unit::Foot => 304.8,
-    }
+    mf_units::Length::new(1.0, unit).mm()
 }
 
 /// How a unit's reading compares to the plate: shown next to every
@@ -90,8 +96,8 @@ fn classify(extent_mm: [f64; 3], volume_mm: [f64; 3]) -> Fit {
 }
 
 /// The plate a model is checked against: the active Machine profile's
-/// print volume and a name to show, or [`DEFAULT_PLATE_MM`] unnamed
-/// when there's no profile (brief: "Fits a 250 mm plate").
+/// print volume and a name to show, or [`default_plate_mm`] unnamed when
+/// there's no profile.
 #[derive(Debug, Clone)]
 pub struct Plate {
     pub name: Option<String>,
@@ -107,17 +113,151 @@ impl Plate {
             },
             None => Plate {
                 name: None,
-                volume_mm: DEFAULT_PLATE_MM,
+                volume_mm: default_plate_mm(),
             },
         }
     }
 
-    /// "Fits your Prusa MK4 plate" / "Fits a 250 mm plate" with none.
+    /// "Fits your Prusa MK4 plate" / "Fits a 250 mm plate"
+    /// with none — the actual numbers, read off `self`, rather than a
+    /// second copy of [`default_plate_mm`]'s own values that could drift
+    /// from them.
     fn fits_label(&self) -> String {
+        format!("Fits {}", self.words())
+    }
+
+    /// The plate in words, the one phrasing every label uses: "your
+    /// Prusa MK4 plate", "a 250 mm plate" (a cube), or "a 220 × 220 ×
+    /// 250 mm plate".
+    fn words(&self) -> String {
         match &self.name {
-            Some(name) => format!("Fits your {name} plate"),
-            None => "Fits a 250 mm plate".into(),
+            Some(name) => format!("your {name} plate"),
+            None => {
+                let [x, y, z] = self.volume_mm;
+                if x == y && y == z {
+                    format!("a {x:.0} mm plate")
+                } else {
+                    format!("a {x:.0} × {y:.0} × {z:.0} mm plate")
+                }
+            }
         }
+    }
+}
+
+/// The file name the import-unit memory is saved under, in
+/// [`crate::MeshFixerApp::settings_dir`] (the same directory Parts and
+/// Connectors keep their own settings in).
+const MEMORY_FILE: &str = "import-units.json";
+
+/// Why a unit was preselected instead of [`choose_unit`]'s own pick
+/// (import-units-brief.md, "Remember choices": "Say why").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Remembered {
+    /// The same folder's last import used this unit.
+    Folder,
+    /// The same exporter (an STL header/OBJ comment signature, e.g.
+    /// "Blender") last imported to this unit.
+    Exporter,
+}
+
+impl Remembered {
+    /// The reason shown in the dialog (brief: "Same as your last
+    /// import from this folder").
+    pub fn reason(self) -> &'static str {
+        match self {
+            Remembered::Folder => "Same as your last import from this folder",
+            Remembered::Exporter => "Same as your last import from this exporter",
+        }
+    }
+}
+
+/// The last unit chosen per folder and per exporter signature
+/// (import-units-brief.md, "Remember choices"), saved as
+/// [`MEMORY_FILE`] next to the Machine profile and Fit class settings.
+/// A folder match wins over an exporter match when both are known (it's
+/// the more specific signal: the same project, not just the same CAD
+/// tool); `recall` tries the folder first.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportMemory {
+    #[serde(default)]
+    by_folder: std::collections::BTreeMap<String, Unit>,
+    #[serde(default)]
+    by_exporter: std::collections::BTreeMap<String, Unit>,
+}
+
+impl ImportMemory {
+    /// Reads [`MEMORY_FILE`] from `dir`; an absent file is an empty,
+    /// unremarkable memory (nothing imported here yet), never an error.
+    /// A present-but-malformed file is an error (D4: never silently
+    /// replaced by "no memory").
+    pub fn load(dir: &Path) -> Result<ImportMemory, String> {
+        let path = dir.join(MEMORY_FILE);
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => text,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(ImportMemory::default());
+            }
+            Err(e) => return Err(format!("{}: {e}", path.display())),
+        };
+        serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+    }
+
+    /// Writes this memory to [`MEMORY_FILE`] in `dir`, creating `dir` if
+    /// it doesn't exist yet.
+    pub fn save(&self, dir: &Path) -> Result<(), String> {
+        let path = dir.join(MEMORY_FILE);
+        let text = serde_json::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        std::fs::write(&path, text).map_err(|e| e.to_string())
+    }
+
+    /// The remembered unit for this import, and why, trying the folder
+    /// before the exporter signature.
+    pub fn recall(
+        &self,
+        folder: Option<&str>,
+        exporter: Option<&str>,
+    ) -> Option<(Unit, Remembered)> {
+        if let Some(u) = folder.and_then(|f| self.by_folder.get(f)) {
+            return Some((*u, Remembered::Folder));
+        }
+        exporter
+            .and_then(|e| self.by_exporter.get(e))
+            .map(|&u| (u, Remembered::Exporter))
+    }
+
+    /// Records `unit` as the choice for this folder and/or exporter
+    /// signature, so the next import from either preselects it.
+    pub fn remember(&mut self, folder: Option<&str>, exporter: Option<&str>, unit: Unit) {
+        if let Some(f) = folder {
+            self.by_folder.insert(f.to_owned(), unit);
+        }
+        if let Some(e) = exporter {
+            self.by_exporter.insert(e.to_owned(), unit);
+        }
+    }
+}
+
+/// `path`'s parent directory as a string key for [`ImportMemory`]
+/// (`None` for a path with no parent, e.g. a bare file name).
+pub fn folder_key(path: &std::path::Path) -> Option<String> {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().into_owned())
+}
+
+/// The import-unit memory from `app`'s settings directory (empty, with
+/// no error, when there's no settings directory or no file yet: the
+/// same "nothing saved there yet" treatment as Machine profiles and Fit
+/// classes).
+pub(crate) fn import_memory(app: &MeshFixerApp) -> (ImportMemory, Option<String>) {
+    let Some(dir) = app.settings_dir() else {
+        return (ImportMemory::default(), None);
+    };
+    match ImportMemory::load(&dir) {
+        Ok(m) => (m, None),
+        Err(e) => (ImportMemory::default(), Some(e)),
     }
 }
 
@@ -174,13 +314,16 @@ pub struct UnitPrompt {
     pub name: String,
     /// The model's size along each axis, in the file's own numbers.
     pub extent: [f64; 3],
-    /// The unit picked so far (preselected by [`choose_unit`]); the
-    /// unit imported at either way, "Scale to fit plate" scales
-    /// afterwards rather than changing this.
+    /// The unit picked so far (preselected by [`choose_unit`], or by
+    /// [`ImportMemory::recall`] when it has one for this folder or
+    /// exporter); the unit imported at either way, "Scale to fit plate"
+    /// scales afterwards rather than changing this.
     pub choice: Unit,
     /// Set when the preselected unit still doesn't fit the plate: the
     /// dialog offers "Scale to fit plate" (brief, "Nothing fits"),
-    /// preselected in that case.
+    /// preselected in that case. Never set together with
+    /// [`UnitPrompt::remembered`] (a remembered choice always fits, or
+    /// at least the person already said it was right last time).
     pub needs_scale: bool,
     /// The dialog's own radio selection: `true` while "Scale to fit
     /// plate" is chosen instead of one of the plain unit rows. Only
@@ -192,6 +335,18 @@ pub struct UnitPrompt {
     /// A hint read from the file itself (an STL header or OBJ comment
     /// naming its exporter), shown but never acted on automatically.
     pub exporter_hint: Option<String>,
+    /// Why [`UnitPrompt::choice`] was preselected from
+    /// [`ImportMemory`] instead of [`choose_unit`]'s own "fits the
+    /// plate" pick (import-units-brief.md, "Remember choices": "Say
+    /// why"); `None` when nothing was remembered and the size rule
+    /// picked it.
+    pub remembered: Option<Remembered>,
+    /// This import's folder, for [`ImportMemory::remember`] once it's
+    /// confirmed.
+    pub(crate) folder: Option<String>,
+    /// This import's exporter signature (e.g. "Blender"), for
+    /// [`ImportMemory::remember`] once it's confirmed.
+    pub(crate) exporter_signature: Option<&'static str>,
     pub(crate) model: ImportedModel,
 }
 
@@ -202,16 +357,29 @@ impl UnitPrompt {
         model: ImportedModel,
         plate: Plate,
         exporter_hint: Option<String>,
+        memory: &ImportMemory,
     ) -> UnitPrompt {
-        let Choice { unit, needs_scale } = choose_unit(extent, &plate);
+        let folder = folder_key(&model.source.path);
+        let exporter_signature = exporter_hint.as_deref().and_then(exporter_signature);
+        let remembered = memory.recall(folder.as_deref(), exporter_signature.map(|(n, _)| n));
+        let (choice, needs_scale, remembered) = match remembered {
+            Some((unit, reason)) => (unit, false, Some(reason)),
+            None => {
+                let Choice { unit, needs_scale } = choose_unit(extent, &plate);
+                (unit, needs_scale, None)
+            }
+        };
         UnitPrompt {
             name,
             extent,
-            choice: unit,
+            choice,
             needs_scale,
             scale_to_fit: needs_scale,
             plate,
             exporter_hint: exporter_hint.map(|h| exporter_hint_line(&h)),
+            remembered,
+            folder,
+            exporter_signature: exporter_signature.map(|(n, _)| n),
             model,
         }
     }
@@ -284,7 +452,7 @@ pub fn exporter_hint_line(raw: &str) -> String {
 }
 
 /// The unit's plain name ("Millimetres", "Metres", ...).
-fn unit_name(unit: Unit) -> &'static str {
+pub(crate) fn unit_name(unit: Unit) -> &'static str {
     match unit {
         Unit::Micron => "Microns",
         Unit::Millimeter => "Millimetres",
@@ -313,8 +481,10 @@ fn dims_row(unit: Unit, extent: [f64; 3]) -> String {
     }
 }
 
-/// One option's full row label: the size, and either the preselected
-/// unit's "Fits your plate" wording or the plain status of the rest.
+/// One option's full row label: the size, and the preselected unit's
+/// reason (a remembered choice's "Same as your last import..." when
+/// there is one, else "Fits your plate") or the plain status of the
+/// rest.
 fn option_row(prompt: &UnitPrompt, unit: Unit) -> String {
     let dims = dims_row(unit, prompt.extent);
     if unit == prompt.choice && !prompt.needs_scale {
@@ -324,7 +494,11 @@ fn option_row(prompt: &UnitPrompt, unit: Unit) -> String {
             .map(|&v| measure(v))
             .collect::<Vec<_>>()
             .join(" × ");
-        format!("{dims} — {} ({dims_mm} mm)", prompt.plate.fits_label())
+        let reason = match prompt.remembered {
+            Some(r) => r.reason().to_owned(),
+            None => prompt.plate.fits_label(),
+        };
+        format!("{dims} — {reason} ({dims_mm} mm)")
     } else {
         let fit = classify(prompt.extent_mm(unit), prompt.plate.volume_mm);
         format!("{dims} — {}", fit.words())
@@ -334,10 +508,7 @@ fn option_row(prompt: &UnitPrompt, unit: Unit) -> String {
 /// The "Scale to fit plate" row's label, shown only when nothing fits:
 /// the unit it imports at, and the plate it scales down to.
 fn scale_to_fit_row(prompt: &UnitPrompt) -> String {
-    let plate_words = prompt.plate.name.as_deref().map_or_else(
-        || "a 250 mm plate".to_string(),
-        |n| format!("your {n} plate"),
-    );
+    let plate_words = prompt.plate.words();
     format!(
         "Scale to fit plate — import at {} and scale down to 90% of {plate_words}",
         unit_name(prompt.choice).to_lowercase()
@@ -367,8 +538,12 @@ pub fn show(prompt: &mut UnitPrompt, ctx: &egui::Context) -> Option<(bool, bool)
                 .radio(prompt.choice == unit && !prompt.scale_to_fit, row)
                 .clicked()
             {
+                // A choice typed by hand no longer carries the
+                // remembered reason, even if it happens to match the
+                // unit that was preselected (re-picking it by hand).
                 prompt.choice = unit;
                 prompt.scale_to_fit = false;
+                prompt.remembered = None;
             }
         }
         if prompt.needs_scale {
@@ -399,6 +574,7 @@ pub fn show(prompt: &mut UnitPrompt, ctx: &egui::Context) -> Option<(bool, bool)
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::unwrap_used)] // tests may panic on failure
     use super::*;
 
     fn plate(volume_mm: [f64; 3]) -> Plate {
@@ -413,11 +589,11 @@ mod tests {
         // The brief's test: "the bunny (0.156 units) defaults to m,
         // which gives 156 mm, labelled fits."
         let extent = [0.156, 0.156, 0.156];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Meter);
         assert!(!choice.needs_scale);
         assert_eq!(
-            classify(extent.map(|v| v * 1000.0), DEFAULT_PLATE_MM),
+            classify(extent.map(|v| v * 1000.0), default_plate_mm()),
             Fit::Fits
         );
     }
@@ -425,20 +601,23 @@ mod tests {
     #[test]
     fn a_100_unit_cube_defaults_to_millimetres() {
         let extent = [100.0, 100.0, 100.0];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Millimeter);
         assert!(!choice.needs_scale);
     }
 
     #[test]
     fn a_3000_unit_part_defaults_to_scale_to_fit() {
-        // Every candidate unit overflows a 250 mm plate (3000 mm, 30 m,
-        // 300 cm, 76200 in): nothing fits.
+        // Every candidate unit overflows the default plate (3000 mm,
+        // 30 m, 300 cm, 76200 in): nothing fits.
         let extent = [3000.0, 3000.0, 3000.0];
-        let choice = choose_unit(extent, &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit(extent, &plate(default_plate_mm()));
         assert!(choice.needs_scale, "{choice:?}");
 
-        // Scaling to fit brings it to 90% of the plate on every axis.
+        // Scaling to fit brings a cube model to 90% of the plate's own
+        // smallest axis (its tightest constraint): the other axes land
+        // short of their own 90%, since one uniform factor applies to
+        // every axis of a cube model.
         let model = mf_io::ImportedModel {
             objects: Vec::new(),
             unit: None,
@@ -452,11 +631,19 @@ mod tests {
             warnings: Vec::new(),
             metadata: Default::default(),
         };
-        let prompt = UnitPrompt::new("p".into(), extent, model, plate(DEFAULT_PLATE_MM), None);
+        let prompt = UnitPrompt::new(
+            "p".into(),
+            extent,
+            model,
+            plate(default_plate_mm()),
+            None,
+            &ImportMemory::default(),
+        );
         let factor = prompt.scale_to_fit_factor();
         let scaled_mm = prompt.extent_mm(prompt.choice).map(|v| v * factor);
-        for (s, p) in scaled_mm.iter().zip(DEFAULT_PLATE_MM) {
-            assert!((s - 0.9 * p).abs() < 1e-9, "{scaled_mm:?}");
+        let smallest = default_plate_mm().into_iter().fold(f64::INFINITY, f64::min);
+        for s in scaled_mm {
+            assert!((s - 0.9 * smallest).abs() < 1e-9, "{scaled_mm:?}");
         }
     }
 
@@ -465,19 +652,19 @@ mod tests {
         // At 0.02 units: mm -> 0.02mm (too small), cm -> 0.2mm (too
         // small), m -> 20mm (fits), inch -> 0.508mm (too small). Only
         // metres fits, so it wins outright.
-        let choice = choose_unit([0.02, 0.02, 0.02], &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit([0.02, 0.02, 0.02], &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Meter);
 
         // At 5.0 units: mm -> 5mm (fits, borderline), cm -> 50mm
         // (fits), m -> 5000mm (too big), inch -> 127mm (fits). The
         // largest that fits is inches.
-        let choice = choose_unit([5.0, 5.0, 5.0], &plate(DEFAULT_PLATE_MM));
+        let choice = choose_unit([5.0, 5.0, 5.0], &plate(default_plate_mm()));
         assert_eq!(choice.unit, Unit::Inch);
     }
 
     #[test]
     fn status_words_cover_every_bracket() {
-        let v = DEFAULT_PLATE_MM;
+        let v = default_plate_mm();
         assert_eq!(classify([1.0, 1.0, 1.0], v), Fit::TooSmall);
         assert_eq!(classify([10.0, 10.0, 10.0], v), Fit::VerySmall);
         assert_eq!(classify([50.0, 50.0, 50.0], v), Fit::Fits);
@@ -522,7 +709,136 @@ mod tests {
             volume_mm: [250.0, 210.0, 220.0],
         };
         assert_eq!(p.fits_label(), "Fits your Prusa MK4 plate");
-        let none = plate(DEFAULT_PLATE_MM);
-        assert_eq!(none.fits_label(), "Fits a 250 mm plate");
+        // The default plate is the owner's 250 mm cube, named by its side.
+        assert_eq!(
+            plate(default_plate_mm()).fits_label(),
+            "Fits a 250 mm plate"
+        );
+        // A plate that isn't a cube is named by all three sides.
+        assert_eq!(
+            plate([220.0, 220.0, 250.0]).fits_label(),
+            "Fits a 220 × 220 × 250 mm plate"
+        );
+    }
+
+    fn model_at(path: &str, exporter_hint: Option<String>) -> ImportedModel {
+        ImportedModel {
+            objects: Vec::new(),
+            unit: None,
+            source: mf_io::SourceInfo {
+                path: path.into(),
+                content_hash: mf_geometry::ContentHash([0; 32]),
+                format: mf_io::Format::StlBinary,
+                precision: mf_io::SourcePrecision::F32,
+                exporter_hint,
+            },
+            warnings: Vec::new(),
+            metadata: Default::default(),
+        }
+    }
+
+    /// Import-units-brief.md's test: "A second import from the same
+    /// folder pre-selects the same unit, with that reason." Even though
+    /// the model's own size would default to millimetres (a 100-unit
+    /// cube), a remembered inches choice for the same folder wins, and
+    /// says why.
+    #[test]
+    fn a_second_import_from_the_same_folder_is_remembered() {
+        let extent = [100.0, 100.0, 100.0];
+        let plate = plate(default_plate_mm());
+
+        let first = UnitPrompt::new(
+            "a.stl".into(),
+            extent,
+            model_at("/scans/batch/a.stl", None),
+            plate.clone(),
+            None,
+            &ImportMemory::default(),
+        );
+        assert_eq!(first.choice, Unit::Millimeter, "the size rule, unaided");
+        assert_eq!(first.remembered, None);
+
+        let mut memory = ImportMemory::default();
+        memory.remember(
+            first.folder.as_deref(),
+            first.exporter_signature,
+            Unit::Inch,
+        );
+
+        let second = UnitPrompt::new(
+            "b.stl".into(),
+            extent,
+            model_at("/scans/batch/b.stl", None),
+            plate,
+            None,
+            &memory,
+        );
+        assert_eq!(second.choice, Unit::Inch, "remembered for this folder");
+        assert_eq!(second.remembered, Some(Remembered::Folder));
+        assert!(!second.needs_scale);
+        let row = option_row(&second, Unit::Inch);
+        assert!(
+            row.contains("Same as your last import from this folder"),
+            "{row}"
+        );
+    }
+
+    /// The same memory, by exporter signature instead of folder (a
+    /// different folder, same CAD tool).
+    #[test]
+    fn a_second_import_from_the_same_exporter_is_remembered() {
+        let extent = [100.0, 100.0, 100.0];
+        let plate = plate(default_plate_mm());
+        let hint = Some("Exported from Blender-3.6.0".to_owned());
+
+        let first = UnitPrompt::new(
+            "a.stl".into(),
+            extent,
+            model_at("/one/a.stl", hint.clone()),
+            plate.clone(),
+            hint.clone(),
+            &ImportMemory::default(),
+        );
+        let mut memory = ImportMemory::default();
+        memory.remember(None, first.exporter_signature, Unit::Centimeter);
+
+        // A different folder, same exporter: the folder lookup misses,
+        // the exporter lookup hits.
+        let second = UnitPrompt::new(
+            "b.stl".into(),
+            extent,
+            model_at("/two/b.stl", hint.clone()),
+            plate,
+            hint,
+            &memory,
+        );
+        assert_eq!(second.choice, Unit::Centimeter);
+        assert_eq!(second.remembered, Some(Remembered::Exporter));
+    }
+
+    #[test]
+    fn every_unit_all_is_offered() {
+        assert_eq!(OFFERED, Unit::ALL);
+    }
+
+    #[test]
+    fn import_memory_round_trips_through_the_settings_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut memory = ImportMemory::load(dir.path()).unwrap();
+        assert_eq!(memory, ImportMemory::default(), "nothing saved there yet");
+
+        memory.remember(Some("/scans/batch"), Some("Blender"), Unit::Meter);
+        memory.save(dir.path()).unwrap();
+
+        let reloaded = ImportMemory::load(dir.path()).unwrap();
+        assert_eq!(
+            reloaded.recall(Some("/scans/batch"), None),
+            Some((Unit::Meter, Remembered::Folder))
+        );
+        assert_eq!(
+            reloaded.recall(None, Some("Blender")),
+            Some((Unit::Meter, Remembered::Exporter))
+        );
+        assert_eq!(reloaded.recall(Some("/elsewhere"), None), None);
     }
 }
