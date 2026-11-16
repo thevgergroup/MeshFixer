@@ -6,7 +6,7 @@
 //!
 //! Rendering runs off the UI thread (MF-RT-001): the panel asks for a
 //! thumbnail each frame ([`Thumbs::get`]); one that isn't cached yet is
-//! queued with its mesh, a worker renders the queue, and the panel
+//! queued with its mesh on the background lane (`crate::jobs`), and the panel
 //! shows the part's name alone until its picture arrives. Without a GPU
 //! a thumbnail simply never arrives (the name is the whole cell), and
 //! the failure is kept, never retried every frame.
@@ -67,6 +67,7 @@ impl Thumbs {
     pub fn get(
         &mut self,
         ctx: &egui::Context,
+        jobs: &crate::jobs::Jobs,
         dir: Option<&std::path::Path>,
         key: &str,
         mesh: impl FnOnce() -> Option<Mesh>,
@@ -89,21 +90,34 @@ impl Thumbs {
         };
         self.queued.insert(key.to_owned());
         let done = self.done.clone();
-        let repaint = ctx.clone();
         let key = key.to_owned();
         let dir = dir.map(std::path::Path::to_path_buf);
-        std::thread::spawn(move || {
-            let result = render(&mesh).inspect(|image| {
-                if let Some(dir) = &dir {
-                    // allow-swallow: a picture that can't be cached on disk is still shown; it's rendered again next session
-                    let _ = write_png(dir, &key, image);
-                }
-            });
-            done.lock()
-                .unwrap_or_else(|e| e.into_inner())
-                .push((key, result));
-            repaint.request_repaint();
-        });
+        let at = key.clone();
+        // On the background lane (ADR-0009): counted by `settle()`, and a
+        // panicking render is this thumbnail's failure, kept like any
+        // other, never a cell that waits forever. Nothing cancels it (a
+        // thumbnail is cached for good once rendered).
+        jobs.once(
+            &mut None,
+            move |_| {
+                Ok(render(&mesh).inspect(|image| {
+                    if let Some(dir) = &dir {
+                        // allow-swallow: a picture that can't be cached on disk is still shown; it's rendered again next session
+                        let _ = write_png(dir, &at, image);
+                    }
+                }))
+            },
+            move |result| {
+                let result = match result {
+                    Ok(r) => r,
+                    Err(crate::jobs::Failure::Panicked(why)) => Err(why),
+                    Err(crate::jobs::Failure::Cancelled) => Err("cancelled".to_owned()),
+                };
+                done.lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((key, result));
+            },
+        );
         None
     }
 

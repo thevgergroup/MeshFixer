@@ -294,14 +294,14 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         .param("transform", crate::intent::affine_text(&transform))
         .param("group", &group);
     run_on(app, scan, intent, t!("connectors.apply", name = name));
-    if app.busy.is_some() {
-        app.pending_open_transform = Some(crate::app::PendingPlacement::Connector {
+    app.follow_up(crate::app::FollowUp::Placement(
+        crate::app::PendingPlacement::Connector {
             connector_id: id.to_owned(),
             connector_params_json,
             gap,
             group,
-        });
-    }
+        },
+    ));
 }
 
 /// A fresh linked-group id for connector `id`: unique in the document

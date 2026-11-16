@@ -176,7 +176,7 @@ fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: S
 /// changes): `object.add_part`, one undo step. `app.parts.placed`
 /// (naming the new part and the scan it landed on) and the Transform
 /// tool both follow once the command actually commits
-/// ([`MeshFixerApp::pending_open_transform`]: placing runs on the job
+/// ([`crate::app::FollowUp::Placement`]: placing runs on the job
 /// pool, so neither can happen synchronously here).
 fn place_part(app: &mut MeshFixerApp, id: &str) {
     let Some(scan) = app.active else { return };
@@ -197,9 +197,9 @@ fn place_part(app: &mut MeshFixerApp, id: &str) {
         intent,
         t!("parts.apply", name = part.manifest.name.clone()),
     );
-    if app.busy.is_some() {
-        app.pending_open_transform = Some(crate::app::PendingPlacement::Part { scan });
-    }
+    app.follow_up(crate::app::FollowUp::Placement(
+        crate::app::PendingPlacement::Part { scan },
+    ));
 }
 
 /// The built-in library parts the parametric shapes replace (a sphere,
@@ -284,9 +284,9 @@ pub(crate) fn place_shape(app: &mut MeshFixerApp, id: &str) {
         .param("transform", crate::intent::affine_text(&transform))
         .param("group", "");
     run_on(app, scan, intent, t!("parts.apply", name = shape.name()));
-    if app.busy.is_some() {
-        app.pending_open_transform = Some(crate::app::PendingPlacement::Part { scan });
-    }
+    app.follow_up(crate::app::FollowUp::Placement(
+        crate::app::PendingPlacement::Part { scan },
+    ));
 }
 
 /// One cell of the library grid.
@@ -441,7 +441,10 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
     let thumb = {
         let ctx = ui.ctx().clone();
         let mut thumbs = std::mem::take(&mut app.parts.thumbs);
-        let t = thumbs.get(&ctx, dir.as_deref(), &cell.key, || cell_mesh(app, cell));
+        let jobs = app.jobs().clone();
+        let t = thumbs.get(&ctx, &jobs, dir.as_deref(), &cell.key, || {
+            cell_mesh(app, cell)
+        });
         app.parts.thumbs = thumbs;
         t
     };

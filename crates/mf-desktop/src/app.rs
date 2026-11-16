@@ -16,11 +16,12 @@ use mf_render::{
 use mf_runtime::RunContext;
 use mf_spec::ParamValue;
 
-use crate::analysis::{AnalysisCache, LatestWorker};
+use crate::analysis::AnalysisCache;
 use crate::defects::{
     Defect, HoleNumbers, HoleView, count, measure, operation_label, param_label, thousands,
 };
 use crate::import_dialog::UnitPrompt;
+use crate::jobs::PreviewSlot;
 use crate::metrics::{JobStart, MetricsSnapshot, RecentJobs, Rss};
 use crate::tools::{Interactive, LegendRow, ToolGroup, ToolKind};
 use crate::transform_tool::{self, Dragging, Field, Placement, TransformTool};
@@ -280,8 +281,7 @@ pub struct Inspected {
 }
 
 /// What Parts/Connectors asked to do once a placement they started
-/// (`object.add_part`) actually commits (see
-/// [`MeshFixerApp::pending_open_transform`]).
+/// (`object.add_part`) actually commits (its [`FollowUp::Placement`]).
 #[derive(Debug, Clone)]
 pub enum PendingPlacement {
     /// A library part was placed on `scan`.
@@ -304,6 +304,28 @@ struct Issued {
     inv: Invocation,
     label: String,
     by: &'static str,
+    /// Its number ([`MeshFixerApp::follow_up`] attaches to the latest).
+    seq: u64,
+    /// What runs once its own result has been handled.
+    then: Vec<FollowUp>,
+}
+
+/// A continuation on one command (ADR-0009): what runs once *that*
+/// command's result has been handled, never a field whichever command
+/// finishes next would read. Attached with [`MeshFixerApp::follow_up`]
+/// right after issuing the command; dropped with it if it never starts
+/// (refused at prepare) or is coalesced away.
+#[derive(Debug, Clone)]
+pub enum FollowUp {
+    /// The status line says this once it commits (a placement's own
+    /// words, rather than the op's report).
+    Status(String),
+    /// Once a placement commits, open Transform on what it made and
+    /// record it in its tool's state.
+    Placement(PendingPlacement),
+    /// Once `split.place_connectors` commits, record joint `j`'s
+    /// connectors as applied.
+    JointApplied(usize),
 }
 
 pub struct MeshFixerApp {
@@ -313,7 +335,7 @@ pub struct MeshFixerApp {
     /// Analyses keyed by revision identity (pointer, so recognizing a
     /// revision is O(1) on the UI thread).
     analyses: AnalysisCache<Analysis>,
-    analyzer: LatestWorker<worker::AnalysisRequest>,
+    analyzer: PreviewSlot<worker::AnalysisRequest>,
     /// Last revision submitted for analysis.
     requested: Option<(Mesh, [f64; 12])>,
     /// The last revision whose analysis failed: not retried (it would fail
@@ -321,7 +343,7 @@ pub struct MeshFixerApp {
     analysis_failed: Option<Mesh>,
     /// Measures an analysed revision again after a transform-only change
     /// (a move, a turn, an undo of one): see `worker::remeasure`.
-    remeasurer: LatestWorker<worker::RemeasureRequest>,
+    remeasurer: PreviewSlot<worker::RemeasureRequest>,
     /// The (revision, transform) last sent to it.
     remeasure_asked: Option<(Mesh, [f64; 12])>,
     /// Vertices currently drawn for the active object, tagged with the
@@ -416,8 +438,8 @@ pub struct MeshFixerApp {
     /// The Alignment panel's hole preview for the plane and settings last
     /// asked for ([`worker::peg_preview`]); `None` before the first answer,
     /// or once pegs are off.
-    peg_preview: Option<Arc<worker::PegPreview>>,
-    peg_preview_worker: LatestWorker<worker::PegPreviewRequest>,
+    peg_preview: Option<(crate::shape_tools::PegPreviewKey, Arc<worker::PegPreview>)>,
+    peg_preview_worker: PreviewSlot<worker::PegPreviewRequest>,
     /// What was last asked for (everything a `PegPreviewRequest` carries
     /// but the `Mesh`, which has no `PartialEq`: MF-DOC-001).
     peg_preview_asked: Option<crate::shape_tools::PegPreviewKey>,
@@ -455,7 +477,7 @@ pub struct MeshFixerApp {
     /// The Hollow tool's settings and preview (MF-ISSUE-112).
     pub hollow: crate::hollow_tool::HollowState,
     /// Works out Hollow's preview on a worker, the latest settings only.
-    pub(crate) hollow_worker: LatestWorker<crate::hollow_tool::PreviewRequest>,
+    pub(crate) hollow_worker: PreviewSlot<crate::hollow_tool::PreviewRequest>,
     /// The Parts tool's state (Task 23): search, the part last placed
     /// and its Join-to-scan settings.
     pub parts: crate::parts_tool::PartsState,
@@ -477,14 +499,8 @@ pub struct MeshFixerApp {
     /// import, matching the brief's "Record the scaling as its own
     /// undoable step").
     pub pending_scale_to_fit: Option<(ObjectId, f64)>,
-    /// Set by Parts/Connectors right before placing (`object.add_part`):
-    /// once that command's `Message::Completed` has run (so `active` is
-    /// already the newly created object, D6's own `after_object_changes`
-    /// rule), the next frame opens Transform on it, records the
-    /// placement in the tool's own state, and clears this. Placing is
-    /// asynchronous (the job pool), so none of that can happen inside
-    /// the call that starts it.
-    pub pending_open_transform: Option<PendingPlacement>,
+    /// The number of the latest command issued ([`Issued::seq`]).
+    issued_seq: u64,
     /// The command [`Self::run_invocation`] actually sent to a worker
     /// (its label, for the status/error text), kept so that if it comes
     /// back `StaleInput` only because this app's own next queued command
@@ -517,13 +533,11 @@ pub struct MeshFixerApp {
     /// A placement committed from the Transform tool, drawn until its
     /// command finishes (so the object doesn't jump back meanwhile).
     preview: Option<(ObjectId, [f64; 12])>,
-    /// What the status line says once that command commits.
-    pending_status: Option<String>,
     /// The lowest world z of an object at a transform (the plate snap),
     /// found on a worker; and what was last asked for.
     lowest: Option<(ObjectId, Mesh, [f64; 12], Option<f64>)>,
     lowest_asked: Option<(ObjectId, Mesh, [f64; 12])>,
-    lowest_worker: LatestWorker<(ObjectId, Mesh, [f64; 12])>,
+    lowest_worker: PreviewSlot<(ObjectId, Mesh, [f64; 12])>,
     pub op_params: BTreeMap<String, BTreeMap<String, ParamValue>>,
     pub show_boundaries: bool,
     pub error: Option<String>,
@@ -559,7 +573,7 @@ pub struct MeshFixerApp {
     bvhs: BTreeMap<ObjectId, (Mesh, Arc<Bvh>)>,
     /// Builds BVHs on the background pool, a newer request (a revision
     /// changed) cancelling the one running.
-    bvh_builder: LatestWorker<Vec<(ObjectId, Mesh)>>,
+    bvh_builder: PreviewSlot<Vec<(ObjectId, Mesh)>>,
     /// The revisions last asked for.
     bvh_requested: Vec<(ObjectId, Mesh)>,
     /// Revisions whose topology was asked for on its own: they have their
@@ -593,6 +607,8 @@ pub struct MeshFixerApp {
     tree_hold: Option<(Option<ObjectId>, f64)>,
     pub viewport: Viewport,
     workers: Workers,
+    /// The background lane previews and one-shot tasks run on (ADR-0009).
+    jobs: crate::jobs::Jobs,
     /// Shares the workers' upload totals.
     gpu_totals: worker::Gpu,
     rx: Receiver<Message>,
@@ -628,7 +644,7 @@ pub struct MeshFixerApp {
     /// view has the window but the rail (M4 final UX I5).
     pub side_panels_hidden: bool,
     /// Works out the overview's markers on the background pool.
-    marker_worker: LatestWorker<worker::MarkerRequest>,
+    marker_worker: PreviewSlot<worker::MarkerRequest>,
     /// What the markers were last asked for, and its number.
     marker_query: Option<(MarkerQuery, u64)>,
     /// The latest markers (request number, markers).
@@ -639,7 +655,7 @@ pub struct MeshFixerApp {
     /// background pool (`mesh.intersections`): a newer request (roles,
     /// transforms, or a Transform drag) cancels the one running, and the
     /// previous curves stay shown until the new ones arrive.
-    intersection_worker: LatestWorker<worker::IntersectionRequest>,
+    intersection_worker: PreviewSlot<worker::IntersectionRequest>,
     /// What the curves were last asked for, and its request number.
     intersection_query: Option<(IntersectionQuery, u64)>,
     /// The latest curves found (request number, one entry per overlapping
@@ -733,10 +749,13 @@ impl MeshFixerApp {
         );
         let gpu_totals = gpu.clone();
         let analyze = settings.analyze.unwrap_or(worker::analyze);
+        // The background lane (ADR-0009): every slot's panic is reported
+        // as `Message::Failed`, never left to abort the app.
+        let jobs = crate::jobs::Jobs::new(workers.background(), tx.clone(), cc.egui_ctx.clone());
         let bvh_builder = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
-            LatestWorker::new(
-                workers.background(),
+            let lane = jobs.clone();
+            jobs.preview(
+                "BVH build",
                 move |revisions: Vec<(ObjectId, Mesh)>, run: &RunContext| {
                     // Each is reported as soon as it's built: a superseded
                     // request keeps the ones it finished.
@@ -748,55 +767,43 @@ impl MeshFixerApp {
                         // it too, the first to finish publishes it (no
                         // waiting: see `Mesh::topology_with`).
                         mesh.topology_with(run)?;
-                        // allow-swallow: the receiver only disappears while the app is closing
-                        let _ = tx.send(Message::BvhBuilt { object, mesh, bvh });
-                        ctx.request_repaint();
+                        lane.send(Message::BvhBuilt { object, mesh, bvh });
                     }
                     Ok(())
                 },
-                |()| {},
+                |_, ()| {},
             )
         };
         let marker_worker = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
-            LatestWorker::new(
-                workers.background(),
+            let lane = jobs.clone();
+            jobs.preview(
+                "hole markers",
                 |req: worker::MarkerRequest, run: &RunContext| {
                     Ok((req.key, Arc::new(worker::markers(&req, run)?)))
                 },
-                move |(key, markers)| {
-                    // allow-swallow: the receiver only disappears while the app is closing
-                    let _ = tx.send(Message::Markers { key, markers });
-                    ctx.request_repaint();
-                },
+                move |_, (key, markers)| lane.send(Message::Markers { key, markers }),
             )
         };
         let remeasurer = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
-            LatestWorker::new(workers.background(), worker::remeasure, move |msg| {
-                // allow-swallow: the receiver only disappears while the app is closing
-                let _ = tx.send(msg);
-                ctx.request_repaint();
+            let lane = jobs.clone();
+            jobs.preview("re-measure", worker::remeasure, move |_, msg| {
+                lane.send(msg)
             })
         };
         let intersection_worker = {
-            let (tx, ctx, gpu) = (tx.clone(), cc.egui_ctx.clone(), gpu.clone());
-            LatestWorker::new(
-                workers.background(),
+            let (lane, gpu) = (jobs.clone(), gpu.clone());
+            jobs.preview(
+                "intersections",
                 move |req: worker::IntersectionRequest, run: &RunContext| {
                     worker::intersections(req, run, &gpu)
                 },
-                move |curves| {
-                    // allow-swallow: the receiver only disappears while the app is closing
-                    let _ = tx.send(Message::IntersectionsFound(curves));
-                    ctx.request_repaint();
-                },
+                move |_, curves| lane.send(Message::IntersectionsFound(curves)),
             )
         };
         let lowest_worker = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
-            LatestWorker::new(
-                workers.background(),
+            let lane = jobs.clone();
+            jobs.preview(
+                "lowest point",
                 |(object, mesh, transform): (ObjectId, Mesh, [f64; 12]), run: &RunContext| {
                     let z = mf_operations::world_min_z_with(&mesh, &transform, run)?;
                     Ok(Message::LowestPoint {
@@ -806,33 +813,31 @@ impl MeshFixerApp {
                         z,
                     })
                 },
-                move |msg| {
-                    // allow-swallow: the receiver only disappears while the app is closing
-                    let _ = tx.send(msg);
-                    ctx.request_repaint();
-                },
+                move |_, msg| lane.send(msg),
             )
         };
         let hollow_worker = {
-            let (tx, ctx, gpu) = (tx.clone(), cc.egui_ctx.clone(), gpu.clone());
-            LatestWorker::new(
-                workers.background(),
+            let (lane, gpu) = (jobs.clone(), gpu.clone());
+            jobs.preview(
+                "hollow preview",
                 move |req: crate::hollow_tool::PreviewRequest, run: &RunContext| {
                     crate::hollow_tool::preview_work(req, run, &gpu)
                 },
-                move |msg| {
-                    // allow-swallow: the receiver only disappears while the app is closing
-                    let _ = tx.send(msg);
-                    ctx.request_repaint();
+                move |ticket, msg| {
+                    lane.send(Message::Preview {
+                        ticket,
+                        result: Box::new(msg),
+                    })
                 },
             )
         };
         let peg_preview_worker = {
-            let (tx, ctx) = (tx.clone(), cc.egui_ctx.clone());
-            LatestWorker::new(workers.background(), worker::peg_preview, move |msg| {
-                // allow-swallow: the receiver only disappears while the app is closing
-                let _ = tx.send(msg);
-                ctx.request_repaint();
+            let lane = jobs.clone();
+            jobs.preview("peg preview", worker::peg_preview, move |ticket, msg| {
+                lane.send(Message::Preview {
+                    ticket,
+                    result: Box::new(msg),
+                })
             })
         };
         let mut app = MeshFixerApp {
@@ -845,12 +850,13 @@ impl MeshFixerApp {
                     .unwrap_or(crate::analysis::DEFAULT_EXTRA_GPU_BYTES),
             ),
             analyzer: {
-                let ctx = cc.egui_ctx.clone();
-                LatestWorker::new(
-                    workers.background(),
+                let lane = jobs.clone();
+                jobs.preview(
+                    "analysis",
                     move |request: worker::AnalysisRequest, run: &RunContext| {
-                        // A panic is reported for that revision, not left
-                        // to abort the app (or to look like work forever).
+                        // A panic is reported for that revision (so it isn't
+                        // retried, nor shown as analysing), not only as a
+                        // generic failure.
                         let (mesh, transform) = (request.mesh.clone(), request.transform);
                         let analysed =
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -858,27 +864,17 @@ impl MeshFixerApp {
                             }));
                         match analysed {
                             Ok(result) => result,
-                            Err(payload) => {
-                                let Message::Failed { message, .. } =
-                                    worker::failed("analysis", false, payload)
-                                else {
-                                    unreachable!("worker::failed makes a Failed message")
-                                };
-                                Ok(Message::AnalysisFailed {
-                                    mesh,
-                                    transform,
-                                    message,
-                                })
-                            }
+                            Err(payload) => Ok(Message::AnalysisFailed {
+                                mesh,
+                                transform,
+                                message: crate::jobs::panic_message(payload),
+                            }),
                         }
                     },
-                    move |msg| {
-                        // allow-swallow: the receiver only disappears while the app is closing
-                        let _ = tx.send(msg);
-                        ctx.request_repaint();
-                    },
+                    move |_, msg| lane.send(msg),
                 )
             },
+            jobs,
             requested: None,
             analysis_failed: None,
             remeasurer,
@@ -929,14 +925,13 @@ impl MeshFixerApp {
             hinge: Default::default(),
             pending_reorient: None,
             pending_scale_to_fit: None,
-            pending_open_transform: None,
+            issued_seq: 0,
             in_flight_invocation: None,
             pending_invocation: std::collections::VecDeque::new(),
             refusal: None,
             refusal_issuer: None,
             egui_ctx: Some(cc.egui_ctx.clone()),
             preview: None,
-            pending_status: None,
             lowest: None,
             lowest_asked: None,
             lowest_worker,
@@ -1220,7 +1215,7 @@ impl MeshFixerApp {
     /// Mark a job as running (`label` in the status bar) and return the
     /// context it runs with. `cancellable` jobs get a Cancel button.
     fn start_job(&mut self, label: String, cancellable: bool) -> RunContext {
-        let run = RunContext::none();
+        let run = crate::jobs::context();
         self.job = Some(RunningJob {
             run: cancellable.then(|| run.clone()),
             cancel_requested: false,
@@ -2275,6 +2270,35 @@ impl MeshFixerApp {
         (tool.on_open)(self);
     }
 
+    /// A preview is cancelled once the tool that asked for it closes
+    /// (ADR-0009), however it closed (its rail button, Esc, a tool
+    /// opening over it): checked every frame against the open tool.
+    fn release_closed_tools_previews(&mut self) {
+        let open = self.active_tool;
+        self.peg_preview_worker.release_unless_owner(open);
+        self.hollow_worker.release_unless_owner(open);
+        if self.hinge.swing.as_ref().is_some_and(|s| s.owner != open)
+            && let Some(mut s) = self.hinge.swing.take()
+        {
+            s.cancel();
+        }
+    }
+
+    /// Whether `tool`'s previews are all stopped: none queued, running or
+    /// owned by it (tests: closing a tool cancels its preview).
+    pub fn previews_owned_by(&self, tool: &str) -> usize {
+        usize::from(self.peg_preview_worker.owner() == Some(tool))
+            + usize::from(self.hollow_worker.owner() == Some(tool))
+            + usize::from(self.hinge.swing.as_ref().is_some_and(|s| s.owner == tool))
+    }
+
+    /// The background lane tool previews and one-shot tasks run on
+    /// (ADR-0009): panic-safe, cancellable, counted by
+    /// [`Self::background_work_in_flight`].
+    pub fn jobs(&self) -> &crate::jobs::Jobs {
+        &self.jobs
+    }
+
     /// The UI's context (background work asks it for a frame).
     pub fn repaint_context(&self) -> Option<egui::Context> {
         self.egui_ctx.clone()
@@ -2297,10 +2321,13 @@ impl MeshFixerApp {
     /// strokes queued behind a running one are three undo steps, not
     /// fewer.
     pub fn run_invocation(&mut self, inv: Invocation, label: String) {
+        self.issued_seq += 1;
         let issued = Issued {
             inv,
             label,
             by: self.active_tool,
+            seq: self.issued_seq,
+            then: Vec::new(),
         };
         if self.busy.is_some() {
             let inv = &issued.inv;
@@ -2341,6 +2368,85 @@ impl MeshFixerApp {
                     issued.label
                 ))
             }
+        }
+    }
+
+    /// Attach `then` to the command just issued (the latest
+    /// [`Self::run_invocation`]), whether it is running or queued: it
+    /// runs once that command's own result has been handled. False (and
+    /// `then` dropped) if that command never started (refused at
+    /// prepare, or not issued at all).
+    pub fn follow_up(&mut self, then: FollowUp) -> bool {
+        let seq = self.issued_seq;
+        let issued = self
+            .pending_invocation
+            .iter_mut()
+            .rev()
+            .chain(self.in_flight_invocation.as_mut())
+            .find(|i| i.seq == seq);
+        match issued {
+            Some(issued) => {
+                issued.then.push(then);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Run `issued`'s follow-ups now its result has been handled;
+    /// `committed` is whether it made a new revision.
+    fn run_follow_ups(&mut self, then: Vec<FollowUp>, committed: bool) {
+        for f in then {
+            match f {
+                // Shown in place of the report when it commits (see the
+                // `Completed` handler).
+                FollowUp::Status(_) => {}
+                // A refused, cancelled or no-op placement leaves nothing
+                // to open Transform on (the owner-reported connector bug:
+                // a refused `object.add_shape` still opened Transform on
+                // the scan and recorded it as the placed connector).
+                FollowUp::Placement(p) if committed => self.open_placed(p),
+                FollowUp::JointApplied(j) if committed => {
+                    crate::split_flow::joint_applied(self, j);
+                }
+                FollowUp::Placement(_) | FollowUp::JointApplied(_) => {}
+            }
+        }
+    }
+
+    /// A placement committed: `after_object_changes` already made the new
+    /// object active; open Transform on it and record it in its tool's
+    /// state.
+    fn open_placed(&mut self, pending: PendingPlacement) {
+        let Some(new_object) = self.active else {
+            return;
+        };
+        match pending {
+            PendingPlacement::Part { scan } if new_object != scan => {
+                self.parts.placed = Some(crate::parts_tool::PlacedPart {
+                    part: new_object,
+                    scan,
+                });
+                self.open_rail_tool(crate::transform_tool::ID);
+            }
+            PendingPlacement::Connector {
+                connector_id,
+                connector_params_json,
+                gap,
+                group,
+            } => {
+                self.connectors.placed = Some(crate::connector_tool::PlacedConnector {
+                    object: new_object,
+                    group,
+                    connector_id,
+                    connector_params_json,
+                    gap,
+                    side_a: None,
+                    side_b: None,
+                });
+                self.open_rail_tool(crate::transform_tool::ID);
+            }
+            PendingPlacement::Part { .. } => {} // allow-swallow: active is still the scan, meaning add_part was refused; its own refusal card already says why
         }
     }
 
@@ -2924,7 +3030,16 @@ impl MeshFixerApp {
                 // The Transform tool's placement is the document's now (or
                 // wasn't committed): stop drawing it over the document's.
                 self.preview = None;
-                let placed = self.pending_status.take();
+                let (then, placed) = match &issued {
+                    Some(i) => (
+                        i.then.clone(),
+                        i.then.iter().find_map(|f| match f {
+                            FollowUp::Status(text) => Some(text.clone()),
+                            _ => None,
+                        }),
+                    ),
+                    None => (Vec::new(), None),
+                };
                 // A warning in the result is kept in full until dismissed
                 // or the next command finishes (I1).
                 self.notice = match &committed {
@@ -2936,17 +3051,6 @@ impl MeshFixerApp {
                     _ => None,
                 };
                 let is_new_revision = matches!(&committed, Ok(CommitOutcome::NewRevision { .. }));
-                // A refused, cancelled or no-op placement command leaves
-                // nothing to open Transform on: drop the pending
-                // placement right here rather than letting the frame
-                // loop's drain (`pending_open_transform.take()`) act on
-                // it later with no way to tell the refusal apart from a
-                // commit (the owner-reported connector bug: a refused
-                // `object.add_shape` still opened Transform on the scan
-                // and recorded it as the placed connector).
-                if !is_new_revision {
-                    self.pending_open_transform = None;
-                }
                 match committed {
                     Ok(CommitOutcome::NewRevision { report: r }) => {
                         self.status = Some(match placed {
@@ -3007,6 +3111,9 @@ impl MeshFixerApp {
                 if op == "mesh.sculpt_stroke" && !is_new_revision {
                     self.sculpt_pending = None;
                 }
+                // This command's own follow-ups (ADR-0009), before anything
+                // queued behind it starts.
+                self.run_follow_ups(then, is_new_revision);
                 // Whatever a drag, an auto re-aim or another tool queued
                 // behind this command while it ran: now that `busy` is
                 // clear and the document reflects this command's result,
@@ -3260,22 +3367,30 @@ impl MeshFixerApp {
                     self.intersections = Some((key, curves));
                 }
             }
-            Message::HollowPreview(preview) => {
-                crate::hollow_tool::on_preview(self, *preview);
-            }
-            Message::PegPreview(preview) => {
-                // The latest request only (a slower, older one finishing
-                // after a newer must not overwrite it): compared by the
-                // object and settings asked for, since `PegPreview` holds
-                // a `Mesh` with no `PartialEq` (MF-DOC-001).
-                if self
-                    .peg_preview_asked
-                    .as_ref()
-                    .is_some_and(|k| k.object == preview.object)
-                {
-                    self.peg_preview = Some(Arc::new(preview));
+            Message::Preview { ticket, result } => match *result {
+                // A preview is accepted only for its slot's current request
+                // (ADR-0009): the latest key and base revision asked for,
+                // and not cancelled since (its tool closing). A slower,
+                // older one finishing after a newer one is dropped.
+                Message::HollowPreview(preview) => {
+                    if self.hollow_worker.is_current(ticket) {
+                        crate::hollow_tool::on_preview(self, *preview);
+                    }
                 }
-            }
+                Message::PegPreview(preview) => {
+                    if self.peg_preview_worker.is_current(ticket)
+                        && let Some(key) = self
+                            .peg_preview_asked
+                            .clone()
+                            .filter(|k| k.object == preview.object)
+                    {
+                        self.peg_preview = Some((key, Arc::new(preview)));
+                    }
+                }
+                other => self.handle(other),
+            },
+            // allow-swallow: previews only ever arrive ticketed (`Message::Preview`); an unticketed one can't be matched to its request, so it is never shown
+            Message::HollowPreview(_) | Message::PegPreview(_) => {}
             Message::Analyzed { mesh, analysis } => {
                 // The object's numbering grows with each analysis.
                 let object = self
@@ -4932,7 +5047,7 @@ impl MeshFixerApp {
     /// (including a live Transform drag): the view keeps showing the
     /// previous curves until the new ones arrive (throttled to the latest
     /// request; a stale one in flight is cancelled by
-    /// [`crate::analysis::LatestWorker`]).
+    /// [`crate::jobs::PreviewSlot`]).
     fn refresh_intersections(&mut self) {
         let doc = self.session.document();
         let mut objects: Vec<(ObjectId, Mesh, [u64; 12], bool)> = doc
@@ -5014,6 +5129,15 @@ impl MeshFixerApp {
             .unwrap_or_default()
     }
 
+    /// No hole preview: none shown, none asked for, and any still being
+    /// worked out cancelled.
+    fn clear_peg_preview(&mut self) {
+        if self.peg_preview_asked.take().is_some() {
+            self.peg_preview_worker.cancel();
+        }
+        self.peg_preview = None;
+    }
+
     /// The Alignment panel's hole preview, kept matching the Split plane
     /// and peg settings while Split is open with pegs on: cuts the active
     /// object on a worker ([`worker::peg_preview`]) and places holes,
@@ -5022,14 +5146,12 @@ impl MeshFixerApp {
     fn refresh_peg_preview(&mut self) {
         let open = self.active_tool == crate::shape_tools::SPLIT;
         let Some(id) = self.active.filter(|_| open) else {
-            self.peg_preview = None;
-            self.peg_preview_asked = None;
+            self.clear_peg_preview();
             return;
         };
         let a = &self.alignment;
         if a.pegs == "none" {
-            self.peg_preview = None;
-            self.peg_preview_asked = None;
+            self.clear_peg_preview();
             return;
         }
         let Some(mesh) = self.active_mesh().cloned() else {
@@ -5060,22 +5182,25 @@ impl MeshFixerApp {
             return;
         }
         self.peg_preview_asked = Some(key.clone());
-        self.peg_preview_worker.submit(worker::PegPreviewRequest {
-            object: id,
-            mesh,
-            transform: key.transform,
-            plane_point: key.plane_point,
-            plane_normal: key.plane_normal,
-            shape: key.shape,
-            diameter: key.diameter,
-            depth_above: key.depth_above,
-            depth_below: key.depth_below,
-            clearance: key.clearance,
-            allowance: key.allowance,
-            count: key.count,
-            min_wall: key.min_wall,
-            unit: self.session.document().units(),
-        });
+        self.peg_preview_worker.submit_for(
+            crate::shape_tools::SPLIT,
+            worker::PegPreviewRequest {
+                object: id,
+                mesh,
+                transform: key.transform,
+                plane_point: key.plane_point,
+                plane_normal: key.plane_normal,
+                shape: key.shape,
+                diameter: key.diameter,
+                depth_above: key.depth_above,
+                depth_below: key.depth_below,
+                clearance: key.clearance,
+                allowance: key.allowance,
+                count: key.count,
+                min_wall: key.min_wall,
+                unit: self.session.document().units(),
+            },
+        );
     }
 
     /// What the view shows for the active object now (its render mesh),
@@ -5088,12 +5213,22 @@ impl MeshFixerApp {
     /// The Alignment panel's current hole preview, for the active
     /// object's current revision only.
     pub fn peg_preview(&self) -> Option<&worker::PegPreview> {
-        let preview = self.peg_preview.as_deref()?;
-        (Some(preview.object) == self.active
+        let (key, preview) = self.peg_preview.as_ref()?;
+        // Only for the settings asked for now: an answer for the old
+        // settings never shows while the new one is worked out.
+        (self.peg_preview_asked.as_ref() == Some(key)
+            && Some(preview.object) == self.active
             && self
                 .active_mesh()
                 .is_some_and(|m| Mesh::ptr_eq(m, &preview.mesh)))
-        .then_some(preview)
+        .then_some(&**preview)
+    }
+
+    /// The settings the shown hole preview ([`Self::peg_preview`]) was
+    /// worked out for: always the ones asked for now, never older.
+    pub fn peg_preview_settings(&self) -> Option<&crate::shape_tools::PegPreviewKey> {
+        self.peg_preview()?;
+        self.peg_preview.as_ref().map(|(k, _)| k)
     }
 
     /// A box drawn in the view (Select mode, or B): select the visible
@@ -5554,7 +5689,6 @@ impl MeshFixerApp {
             return;
         }
         self.preview = Some((object, transform));
-        self.pending_status = Some(status);
         self.run_tool(&Tool {
             op_id: "object.set_transform".into(),
             label: "Transform".into(),
@@ -5563,10 +5697,9 @@ impl MeshFixerApp {
             kind: ToolKind::OneShot,
             group: None,
         });
-        if self.busy.is_none() {
+        if !self.follow_up(FollowUp::Status(status)) {
             // It didn't start (the error banner says why).
             self.preview = None;
-            self.pending_status = None;
         }
     }
 
@@ -5623,7 +5756,6 @@ impl MeshFixerApp {
             .collect();
         let ids: Vec<ObjectId> = members.iter().map(|(m, _)| *m).collect();
         self.preview = Some((object, transform));
-        self.pending_status = Some(status.to_owned());
         self.run_intent(
             crate::intent::Intent::op("object.move_group")
                 .on(ids[0])
@@ -5634,9 +5766,8 @@ impl MeshFixerApp {
                 ),
             "Move group".into(),
         );
-        if self.busy.is_none() {
+        if !self.follow_up(FollowUp::Status(status.to_owned())) {
             self.preview = None;
-            self.pending_status = None;
         }
         true
     }
@@ -5862,45 +5993,9 @@ impl MeshFixerApp {
         // an import, a replay) starts once that job is over, not only
         // when some later command finishes (final review I2).
         self.drain_pending_invocation();
+        self.release_closed_tools_previews();
         crate::shape_panel::run_pending_reorient(self);
         self.run_pending_scale_to_fit();
-        if self.busy.is_none()
-            && let Some(pending) = self.pending_open_transform.take()
-        {
-            // `after_object_changes` (handled above, in the message
-            // loop) already made the new object active if the command
-            // committed; a refusal leaves `active` where it was, so
-            // there's nothing of this placement to record or open.
-            if let Some(new_object) = self.active {
-                match pending {
-                    PendingPlacement::Part { scan } if new_object != scan => {
-                        self.parts.placed = Some(crate::parts_tool::PlacedPart {
-                            part: new_object,
-                            scan,
-                        });
-                        self.open_rail_tool(crate::transform_tool::ID);
-                    }
-                    PendingPlacement::Connector {
-                        connector_id,
-                        connector_params_json,
-                        gap,
-                        group,
-                    } => {
-                        self.connectors.placed = Some(crate::connector_tool::PlacedConnector {
-                            object: new_object,
-                            group,
-                            connector_id,
-                            connector_params_json,
-                            gap,
-                            side_a: None,
-                            side_b: None,
-                        });
-                        self.open_rail_tool(crate::transform_tool::ID);
-                    }
-                    PendingPlacement::Part { .. } => {} // allow-swallow: active is still the scan, meaning add_part was refused; its own refusal card already says why
-                }
-            }
-        }
         self.refresh_analysis();
         self.refresh_object_vertices();
         self.refresh_bvhs();
