@@ -1,27 +1,11 @@
-//! The tool framework (M4 final UX review I8): which tools Properties
-//! offers for a whole object, in which group and order; which kind each is
-//! (a one-shot operation with parameters and Apply, or an interactive tool
-//! that works in the 3D view); and what the view's legend shows.
-//!
-//! The spec registry says what operations *exist*; this table says what
-//! people are *offered*. An operation that isn't listed here never appears
-//! as a button, so a new spec (an object operation, a sculpt stroke) can't
-//! show up in Properties as a raw "parameters + Apply" tool by accident.
+//! Shared tool vocabulary: the groups Repair lists its operations in
+//! (`tool_panels::REPAIRS` is the curated list), what a tool's key does,
+//! and what the view's legend shows. Tools themselves are `shell::Tool`s
+//! with a `session::ToolSession` (ADR-0007).
 
 use eframe::egui::Color32;
 
 use crate::theme;
-
-/// How a tool works.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ToolKind {
-    /// Parameters, then Apply: one command (Fill all holes, Compact).
-    OneShot,
-    /// Works in the 3D view while it's open (Transform; later Split,
-    /// Sculpt). While open it gets the view's primary drag before the
-    /// camera does, and its own keys; Esc leaves it.
-    Interactive,
-}
 
 /// The groups Properties lists whole-object tools in, in this order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -49,111 +33,6 @@ impl ToolGroup {
     }
 }
 
-/// One tool Properties offers for a whole object.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct Entry {
-    /// The operation id (one-shot), or the tool's own id (interactive).
-    pub id: &'static str,
-    pub group: ToolGroup,
-    pub kind: ToolKind,
-    /// The key that opens it from anywhere (no modifiers).
-    pub shortcut: Option<eframe::egui::Key>,
-}
-
-/// Every whole-object tool, in the order Properties lists them (grouped by
-/// [`ToolGroup`], and in this order within a group). An allowlist: what
-/// isn't here isn't offered.
-pub const CATALOGUE: &[Entry] = &[
-    Entry {
-        id: crate::transform_tool::ID,
-        group: ToolGroup::Modify,
-        kind: ToolKind::Interactive,
-        shortcut: Some(eframe::egui::Key::T),
-    },
-    Entry {
-        id: "mesh.fill_holes",
-        group: ToolGroup::Repair,
-        kind: ToolKind::OneShot,
-        shortcut: None,
-    },
-    Entry {
-        id: "mesh.remove_small_components",
-        group: ToolGroup::Repair,
-        kind: ToolKind::OneShot,
-        shortcut: None,
-    },
-    Entry {
-        id: "mesh.compact",
-        group: ToolGroup::Housekeeping,
-        kind: ToolKind::OneShot,
-        shortcut: None,
-    },
-];
-
-/// The catalogue entry for `id`, if it's offered.
-pub fn entry(id: &str) -> Option<&'static Entry> {
-    CATALOGUE.iter().find(|e| e.id == id)
-}
-
-/// An interactive tool that is open. While one is, it owns the view's
-/// primary drag (ahead of the camera and selection, though Alt and Shift
-/// camera drags still win) and its own keys, and supplies the legend's
-/// rows. Esc leaves it (after cancelling a running job, then its drag).
-///
-/// Phase 1 adds its tools here (Transform, then Split, Sculpt).
-#[derive(Debug)]
-pub enum Interactive {
-    Transform(crate::transform_tool::TransformTool),
-}
-
-impl Interactive {
-    /// The interactive tool `id` names, opened on `app`'s target (`None`:
-    /// `id` is a one-shot tool).
-    pub fn open(app: &crate::MeshFixerApp, id: &str) -> Option<Interactive> {
-        // Each works on an object: with none open, there's nothing to open.
-        app.active_mesh()?;
-        (id == crate::transform_tool::ID)
-            .then(|| Interactive::Transform(crate::transform_tool::TransformTool::default()))
-    }
-
-    /// The keys it takes while open (no modifiers), each with what it
-    /// does. The app routes only these to it, before its own shortcuts;
-    /// with no tool open none are taken.
-    pub fn keys(&self) -> &'static [(eframe::egui::Key, ToolKey)] {
-        use eframe::egui::Key;
-        match self {
-            Interactive::Transform(_) => &[
-                (Key::W, ToolKey::Mode(mf_render::GizmoMode::Move)),
-                (Key::E, ToolKey::Mode(mf_render::GizmoMode::Rotate)),
-                (Key::R, ToolKey::Mode(mf_render::GizmoMode::Scale)),
-            ],
-        }
-    }
-
-    /// True if, while it's open, the defect and recent-repair overlays
-    /// (tints, outlines, markers, hover and its tooltip) are hidden, so its
-    /// own colours mean one thing (Transform's axes, D8).
-    pub fn hides_defects(&self) -> bool {
-        match self {
-            Interactive::Transform(_) => true,
-        }
-    }
-
-    /// Its catalogue id.
-    pub fn id(&self) -> &'static str {
-        match self {
-            Interactive::Transform(_) => crate::transform_tool::ID,
-        }
-    }
-
-    /// Its legend rows.
-    pub fn legend(&self) -> Vec<LegendRow> {
-        match self {
-            Interactive::Transform(_) => transform_legend(),
-        }
-    }
-}
-
 /// What a tool's key does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolKey {
@@ -165,11 +44,6 @@ pub enum ToolKey {
     /// that takes this key owns it while open: the app's own Delete
     /// (`object.delete`) never runs instead (owner 2026-11-11).
     DeleteSelection,
-}
-
-/// The keys the open tool (if any) takes.
-pub fn tool_keys(open: Option<&Interactive>) -> &'static [(eframe::egui::Key, ToolKey)] {
-    open.map_or(&[], Interactive::keys)
 }
 
 /// The legend while Transform is open (D8): the gizmo's axis colours, in
@@ -346,28 +220,6 @@ impl LeftTab {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Every one-shot tool names a built-in, whole-object operation, and
-    /// the list is grouped in group order.
-    #[test]
-    fn the_catalogue_is_grouped_and_names_real_operations() {
-        for e in CATALOGUE.iter().filter(|e| e.kind == ToolKind::OneShot) {
-            let spec = mf_spec::builtin::get(e.id).expect("a built-in operation");
-            assert!(spec.target.whole_object && !spec.is_read_only(), "{}", e.id);
-        }
-        assert!(CATALOGUE.windows(2).all(|w| w[0].group <= w[1].group));
-    }
-
-    /// Keys go to the open tool only: with none open, W, E and R are
-    /// nobody's (review I3).
-    #[test]
-    fn only_an_open_tool_takes_keys() {
-        assert!(tool_keys(None).is_empty());
-        let t = Interactive::Transform(crate::transform_tool::TransformTool::default());
-        let keys: Vec<_> = tool_keys(Some(&t)).iter().map(|(k, _)| *k).collect();
-        use eframe::egui::Key;
-        assert_eq!(keys, [Key::W, Key::E, Key::R]);
-    }
 
     /// Each colour in the default legend means one thing (the hole colour
     /// twice: the outline and its markers are both holes).

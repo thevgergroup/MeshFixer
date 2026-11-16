@@ -7,7 +7,9 @@
 //!
 //! Contributions carry message ids (`crate::i18n`), not display text.
 //! Behaviour is plain function pointers on the app, so a contribution is
-//! data the shell can list, check and route to.
+//! data the shell can list, check and route to; a tool's work and state
+//! are its `session::ToolSession` (ADR-0007), whose lifecycle the shell
+//! owns (`session.rs`).
 //!
 //! What still lives outside the contract (tracked in docs/issues.md, plan
 //! step 5): the built-in overlays' *drawing* is the core view-layer code
@@ -20,6 +22,10 @@ use crate::MeshFixerApp;
 use crate::app::TreeItem;
 use crate::tools::{LegendRow, ToolKey};
 use crate::viewport::ToolPointer;
+
+/// The tool open when no other is: the rail's Select (the shell's own
+/// resting state, not a tool module's).
+pub const SELECT: &str = "select";
 
 /// The rail's groups, in order (ui-plan.md §3), separated by thin rules.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -131,6 +137,16 @@ pub struct Tool {
     /// One level back inside the tool (Esc): from a sub-tool's settings or
     /// a selection back to the tool's list. True if it went back.
     pub back: fn(&mut MeshFixerApp) -> bool,
+    /// A plain click in the view the tool's input didn't claim, ahead of
+    /// picking (Align: a selected object becomes the anchor). True if it
+    /// took it.
+    pub on_view_click: fn(&mut MeshFixerApp, (f64, f64)) -> bool,
+    /// Open this tool on operation `op` (an operation spec's command), if
+    /// it is the tool that offers it: true if it did.
+    pub on_operation: fn(&mut MeshFixerApp, &str) -> bool,
+    /// Its session (ADR-0007): the work and the state, made once when the
+    /// app starts. A tool with no work of its own keeps the default.
+    pub session: fn() -> Box<dyn crate::session::ToolSession>,
 }
 
 impl Tool {
@@ -162,6 +178,9 @@ impl Tool {
             on_open: |_| {},
             on_close: |_, _| {},
             back: |_| false,
+            on_view_click: |_, _| false,
+            on_operation: |_, _| false,
+            session: crate::session::no_session,
         }
     }
 }

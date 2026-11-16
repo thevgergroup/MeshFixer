@@ -395,23 +395,10 @@ pub fn after_commit(app: &mut MeshFixerApp, op: &str) {
             }
         }
     }
-    if !stale.is_empty() {
-        app.pending_reorient = Some(stale);
-    }
-}
-
-/// Runs a re-orientation [`after_commit`] queued, once the app is idle.
-pub fn run_pending_reorient(app: &mut MeshFixerApp) {
-    if app.busy.is_some() {
-        return;
-    }
-    let Some(stale) = app.pending_reorient.take() else {
-        return;
-    };
-    let (ids, records): (Vec<ObjectId>, Vec<GeneratorRecord>) = stale
-        .into_iter()
-        .filter(|(id, _)| app.session.document().object(*id).is_some())
-        .unzip();
+    // The re-aim is its own step, issued now that the move has committed
+    // (the command queue runs it next, ahead of anything queued behind
+    // the move): never a field a later frame has to remember to drain.
+    let (ids, records): (Vec<ObjectId>, Vec<GeneratorRecord>) = stale.into_iter().unzip();
     if !ids.is_empty() {
         regenerate(app, ids, records, t!("shape.reorient"));
     }

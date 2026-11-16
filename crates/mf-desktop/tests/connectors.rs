@@ -199,7 +199,9 @@ fn clicking_a_connector_adds_it_and_opens_transform() {
     still(&mut h, "library");
     // A print-in-place hinge needs clearance: Snug (the default) would
     // print it fused, so pick Free running first.
-    h.state_mut().connectors.fit_class = "Free running".into();
+    h.state_mut()
+        .tool_state_mut::<mf_desktop::connector_tool::ConnectorsState>()
+        .fit_class = "Free running".into();
     let history = h.state().session.history_labels().len();
     h.get_by_label("Pin hinge").click();
     wait_until(&mut h, "the hinge placed", |a| {
@@ -334,7 +336,9 @@ fn save_connector_to_library_names_what_was_saved() {
     let (mut h, settings_dir) = opened(vec![("body", cube(40.0), IDENTITY)]);
     h.get_by_label("Connectors").click();
     settle(&mut h);
-    h.state_mut().connectors.fit_class = "Free running".into();
+    h.state_mut()
+        .tool_state_mut::<mf_desktop::connector_tool::ConnectorsState>()
+        .fit_class = "Free running".into();
     let history = h.state().session.history_labels().len();
     h.get_by_label("Pin hinge").click();
     wait_until(&mut h, "the hinge placed", |a| {
@@ -396,7 +400,9 @@ fn a_machine_profiles_print_volume_shows_and_a_preset_can_be_picked() {
     scroll_and_click(&mut h, "New machine profile…");
     settle(&mut h);
     assert_eq!(
-        h.state().connectors.machine_profile,
+        h.state()
+            .tool_state::<mf_desktop::connector_tool::ConnectorsState>()
+            .machine_profile,
         "My printer",
         "the new profile becomes the active pick"
     );

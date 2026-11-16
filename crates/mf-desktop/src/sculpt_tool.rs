@@ -148,7 +148,9 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         on_close: |app, close| {
             end_stroke(app, close);
             app.sculpt_baseline = None;
+            app.sculpt_hover = None;
         },
+        session: || Box::new(SculptSession),
         ..T::new(
             SCULPT,
             "tool.sculpt.name",
@@ -157,6 +159,45 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             30,
         )
     })
+}
+
+/// Sculpt's session (ADR-0007): a thin adapter around the stroke and
+/// brush state on the app until C24 moves them here.
+#[derive(Debug, Default)]
+pub struct SculptSession;
+
+impl crate::session::ToolSession for SculptSession {
+    /// A stroke in progress draws its own running mesh, not the last
+    /// committed revision (Task 19).
+    fn preview(&self, app: &MeshFixerApp) -> crate::session::PreviewSpec {
+        match &app.sculpt_stroke {
+            Some(stroke) if Some(stroke.object) == app.active => {
+                crate::session::PreviewSpec::Geometry(stroke.object, stroke.render.clone())
+            }
+            _ => crate::session::PreviewSpec::None,
+        }
+    }
+
+    /// A stroke mid-drag is dropped, not committed (unlike closing the
+    /// tool, which commits it): Task 19's Esc semantics.
+    fn cancel_drag(&mut self, app: &mut MeshFixerApp) -> bool {
+        app.sculpt_stroke.take().is_some()
+    }
+
+    fn paint(&self, app: &MeshFixerApp, ctx: &egui::Context) {
+        cursor_overlay(app, ctx);
+    }
+
+    fn held(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        [
+            (app.sculpt_stroke.is_some(), "a stroke"),
+            (app.sculpt_hover.is_some(), "the brush cursor"),
+            (app.sculpt_baseline.is_some(), "the changes baseline"),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
 }
 
 /// "Show sculpt changes" (off by default) measures from the active
@@ -727,7 +768,7 @@ fn commit_stroke(app: &mut MeshFixerApp, stroke: SculptStroke) {
     // view…" over it — the flicker the owner saw. `refresh_analysis`
     // clears this once the real revision has swapped in, in that same
     // frame (owner: "swap in a single frame").
-    app.sculpt_pending = Some((stroke.object, stroke.render.clone()));
+    app.settle_render(stroke.object, stroke.render.clone());
     let samples: Vec<[f64; 5]> = stroke.samples.iter().map(DabSample::to_array).collect();
     // `radius` and `pivot` are lengths in document units (fixed when the
     // stroke began — [`world_radius_at`] at the time, and the stroke's
@@ -959,7 +1000,6 @@ fn radius_typed_field(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 }
 
 fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::refusal_card::show_issued(app, ui);
     widgets::body(ui, t!("sculpt.help"));
 
     section(ui, &t!("sculpt.section.brush"));

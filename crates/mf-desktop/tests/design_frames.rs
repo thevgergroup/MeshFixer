@@ -170,7 +170,7 @@ fn design_frame_no_tool() {
     require_gpu!("design_frame_no_tool");
     for size in SIZES {
         let mut h = opened(size, vec![("bracket", part())]);
-        assert!(h.state().interactive.is_none());
+        assert!(h.state().transform_tool().is_none());
         still(&mut h, "no-tool-part", size);
         let mut h = opened(size, vec![("scan", scan())]);
         still(&mut h, "no-tool-scan", size);

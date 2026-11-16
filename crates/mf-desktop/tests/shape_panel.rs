@@ -262,9 +262,7 @@ fn a_sideways_hole_is_re_aimed_and_warned_about() {
     let before = h.state().session.history_labels().len();
     h.state_mut().commit_transform(id, t, "on its side".into());
     wait_until(&mut h, "the move and the re-aim", |a| {
-        a.busy.is_none()
-            && a.pending_reorient.is_none()
-            && a.session.history_labels().len() >= before + 2
+        a.busy.is_none() && a.session.history_labels().len() >= before + 2
     });
     settle(&mut h);
     assert_eq!(h.state().session.history_labels().len(), before + 2);
@@ -474,7 +472,7 @@ fn move_then_reaim_never_races_even_back_to_back() {
     t[0..3].copy_from_slice(&[-z[0], -z[1], -z[2]]);
     t[6..9].copy_from_slice(&x);
     h.state_mut().commit_transform(id, t, "on its side".into());
-    // `pending_reorient` is only set once the move's own `Completed`
+    // The re-aim is only issued once the move's own `Completed`
     // message is handled; nudge the queue the same way a second
     // frame's UI interaction would, straight after asking for the move,
     // well before it can have returned.
@@ -482,7 +480,6 @@ fn move_then_reaim_never_races_even_back_to_back() {
 
     wait_until(&mut h, "the move and the re-aim", |a| {
         a.busy.is_none()
-            && a.pending_reorient.is_none()
             && a.pending_invocation_depth() == 0
             && a.session.history_labels().len() >= before + 2
     });

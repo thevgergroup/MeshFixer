@@ -365,7 +365,8 @@ pub fn placement_section(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             if widgets::wide_button(ui, Kind::Secondary, None, &t!("hinge.use_free_running"))
                 .clicked()
             {
-                app.connectors.fit_class = mf_parts::FitClass::builtins()[3].name.clone();
+                crate::connector_tool::connectors_mut(app).fit_class =
+                    mf_parts::FitClass::builtins()[3].name.clone();
             }
             true
         }
@@ -584,6 +585,36 @@ pub fn swung(app: &MeshFixerApp, id: ObjectId) -> Option<[f64; 12]> {
     let t = app.session.document().object(id)?.transform;
     let turned = mf_parts::swing::rotation_about(s.origin, s.dir, s.angle) * mat(&t);
     Some(rows(&turned))
+}
+
+/// The swing check is cancelled once the tool that asked for it closes
+/// (ADR-0009): the shell calls this on every switch and frame.
+pub(crate) fn release_unless_owner(app: &mut MeshFixerApp, open: &str) {
+    if app.hinge.swing.as_ref().is_some_and(|s| s.owner != open)
+        && let Some(mut s) = app.hinge.swing.take()
+    {
+        s.cancel();
+    }
+}
+
+/// 1 if `tool` owns the swing check, else 0.
+pub(crate) fn previews_owned_by(app: &MeshFixerApp, tool: &str) -> usize {
+    usize::from(app.hinge.swing.as_ref().is_some_and(|s| s.owner == tool))
+}
+
+/// The swing preview's contacts over the view (a generator overlay the
+/// shell paints after the open tool's, C26).
+pub(crate) fn paint(app: &MeshFixerApp, ctx: &egui::Context) {
+    let Some(rect) = app.viewport.last_rect else {
+        return;
+    };
+    let painter = ctx
+        .layer_painter(egui::LayerId::new(
+            egui::Order::Middle,
+            egui::Id::unique("hinge swing overlay"),
+        ))
+        .with_clip_rect(rect);
+    overlay(app, &painter, rect);
 }
 
 /// Highlights where the two sides collide at the slider's angle.

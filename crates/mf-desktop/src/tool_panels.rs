@@ -19,10 +19,11 @@ use crate::shell::{
     Availability, Category, Claims, ContextAction, Input, InspectorSection, RegisterError,
     SettingsPage, Shell,
 };
+use crate::tools::ToolGroup;
 use crate::widgets::{self, Kind};
 use crate::{icons, t, theme, tp};
 
-pub const SELECT: &str = "select";
+pub const SELECT: &str = crate::shell::SELECT;
 pub const TRANSFORM: &str = crate::transform_tool::ID;
 pub const REPAIR: &str = "repair";
 pub const INSPECT: &str = "inspect";
@@ -48,6 +49,74 @@ fn needs_object(app: &MeshFixerApp) -> Availability {
         Availability::Available
     } else {
         Availability::Unavailable(crate::panels::empty_state())
+    }
+}
+
+/// The one-shot operations Repair offers for a whole object, its
+/// sub-sections, in the order and groups it lists them. A curated list
+/// (M4 final UX review I8), never the raw registry: object operations
+/// (delete, drop) and strokes have their own places, and a new spec
+/// isn't offered until it's listed here.
+pub const REPAIRS: &[(&str, ToolGroup)] = &[
+    ("mesh.fill_holes", ToolGroup::Repair),
+    ("mesh.remove_small_components", ToolGroup::Repair),
+    ("mesh.compact", ToolGroup::Housekeeping),
+];
+
+/// Repair's session (ADR-0007): the sub-section open inside it (one of
+/// [`REPAIRS`], whose settings replace Repair's list).
+#[derive(Debug, Default)]
+pub struct RepairSession {
+    pub open: Option<String>,
+}
+
+impl crate::session::ToolSession for RepairSession {
+    fn close(&mut self, _app: &mut MeshFixerApp) {
+        self.open = None;
+    }
+
+    fn held(&self, _app: &MeshFixerApp) -> Vec<&'static str> {
+        if self.open.is_some() {
+            vec!["an open repair"]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn repair(app: &MeshFixerApp) -> &RepairSession {
+    app.tool_state::<RepairSession>()
+}
+
+fn repair_mut(app: &mut MeshFixerApp) -> &mut RepairSession {
+    app.tool_state_mut::<RepairSession>()
+}
+
+impl MeshFixerApp {
+    /// The repair open inside Repair, if one is.
+    pub fn repair_open(&self) -> Option<&str> {
+        self.sessions.find::<RepairSession>()?.open.as_deref()
+    }
+
+    /// The operations Repair offers for the current target: the ones
+    /// valid for the selected hole(s) or piece(s), or, when nothing is
+    /// targeted (or the target has none), its whole-object repairs.
+    pub fn tools(&self) -> Vec<Tool> {
+        let targeted = self.targeted_tools();
+        if !targeted.is_empty() || self.target_blocks_whole_object() {
+            return targeted;
+        }
+        REPAIRS
+            .iter()
+            .map(|&(id, group)| Tool {
+                op_id: id.to_owned(),
+                label: crate::defects::operation_label(id, None)
+                    .expect("every listed repair has plain words"),
+                selection: None,
+                fixed: std::collections::BTreeMap::new(),
+                group: Some(group),
+            })
+            .collect()
     }
 }
 
@@ -77,10 +146,24 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             })
         },
         viewport_input: |app, input| {
+            app.keep_transform_target();
             app.transform_pointer(input.pointer, input.hover, input.modifiers);
             Input::Consumed
         },
-        keys: |app| crate::tools::tool_keys(app.interactive.as_ref()),
+        on_operation: |app, op| {
+            let mine = op == "object.set_transform";
+            if mine {
+                app.open_transform();
+            }
+            mine
+        },
+        keys: |app| {
+            if app.transform_tool().is_some() {
+                crate::transform_tool::KEYS
+            } else {
+                &[]
+            }
+        },
         on_key: |app, key| match key {
             crate::tools::ToolKey::Mode(mode) => app.set_transform_mode(mode),
             // Transform's own keys never include a brush shortcut or
@@ -93,13 +176,9 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         hides_defects: |_| true,
         on_open: |app| {
             app.clear_selection();
-            app.tool = None;
             app.start_transform();
         },
-        on_close: |app, _| {
-            app.cancel_tool_drag();
-            app.interactive = None;
-        },
+        session: || Box::new(crate::transform_tool::TransformSession::default()),
         ..T::new(
             TRANSFORM,
             "tool.transform.name",
@@ -114,13 +193,25 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         help: "tool.repair.help",
         availability: needs_object,
         panel: Some(repair_panel),
-        on_close: |app, _| app.tool = None,
+        session: || Box::new(RepairSession::default()),
+        on_operation: |app, op| {
+            if !REPAIRS.iter().any(|(id, _)| *id == op) {
+                return false;
+            }
+            if app.active_tool != REPAIR {
+                app.open_rail_tool(REPAIR);
+            }
+            if app.active_tool == REPAIR {
+                repair_mut(app).open = Some(op.to_owned());
+            }
+            true
+        },
         back: |app| {
             if app.selection.is_some() || app.inspected.is_some() {
                 app.clear_selection();
                 true
-            } else if app.tool.is_some() {
-                app.tool = None;
+            } else if repair(app).open.is_some() {
+                repair_mut(app).open = None;
                 true
             } else {
                 false
@@ -133,6 +224,13 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         help: "tool.inspect.help",
         availability: needs_object,
         panel: Some(inspect_panel),
+        on_operation: |app, op| {
+            let mine = op == "mesh.inspect";
+            if mine {
+                app.open_rail_tool(INSPECT);
+            }
+            mine
+        },
         ..T::new(
             INSPECT,
             "tool.inspect.name",
@@ -590,6 +688,10 @@ pub fn tool_dock(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
                 .show(ui, |ui| {
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     notice(app, ui);
+                    // Refusal routing is the shell's (ADR-0007): a
+                    // refused command's card shows in the panel of the
+                    // tool that issued it, whatever op it was.
+                    crate::refusal_card::show_issued(app, ui);
                     panel(app, ui);
                 });
         });
@@ -741,6 +843,9 @@ pub fn inspector_card(app: &mut MeshFixerApp, ctx: &egui::Context) {
                     ui.set_width(width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     notice(app, ui);
+                    // Select's panel is this card: a command issued with
+                    // no tool open shows its refusal here (ADR-0007).
+                    crate::refusal_card::show_issued(app, ui);
                     if app.active_mesh().is_none() {
                         empty_card(app, ui);
                         return;
@@ -1478,7 +1583,6 @@ fn transform_field(
 /// selected in the Browser or the view shows the same way, with its
 /// operation.
 fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    crate::refusal_card::show_issued(app, ui);
     let defect_target = app.current_inspected().is_some()
         || app.current_selection().is_some_and(|s| {
             app.current_analysis()
@@ -1499,7 +1603,7 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         selection_card(app, ui, true);
         return;
     }
-    if let Some(op) = app.tool.clone() {
+    if let Some(op) = repair(app).open.clone() {
         back_link(app, ui);
         ui.add_space(theme::SPACE_XS);
         if let Some(tool) = app
@@ -1592,7 +1696,7 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .on_hover_text("Choose how, then Apply: one step, one Undo")
         .clicked()
     {
-        app.tool = Some("mesh.fill_holes".into());
+        repair_mut(app).open = Some("mesh.fill_holes".into());
     }
     if holes > 0 {
         hole_groups(app, ui);
@@ -1640,7 +1744,7 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .on_hover_text("Choose which, then Apply: one step, one Undo")
         .clicked()
     {
-        app.tool = Some("mesh.remove_small_components".into());
+        repair_mut(app).open = Some("mesh.remove_small_components".into());
     }
 
     counted_section(
@@ -1681,7 +1785,7 @@ fn repair_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
-        app.tool = Some("mesh.compact".into());
+        repair_mut(app).open = Some("mesh.compact".into());
     }
     ui.add_space(theme::SPACE_L);
     if widgets::wide_button(ui, Kind::Secondary, None, &t!("repair.done"))

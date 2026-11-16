@@ -109,6 +109,76 @@ pub struct PlacedPart {
     pub scan: ObjectId,
 }
 
+/// Parts is its own session (ADR-0007): the search, the join settings
+/// and the part last placed (its Join section, which follows it into
+/// Transform and back) are kept across a close; an open dialog isn't.
+impl crate::session::ToolSession for PartsState {
+    /// A placement it issued committed: the new part is the active object
+    /// (`after_object_changes`); record it and open Transform on it. A
+    /// refused, cancelled or no-op placement leaves nothing to open
+    /// Transform on (the owner-reported connector bug).
+    fn on_result(&mut self, app: &mut MeshFixerApp, r: &crate::session::CommandResult<'_>) {
+        if !r.committed() {
+            return;
+        }
+        for f in r.follow_ups {
+            if let crate::app::FollowUp::Placement(crate::app::PendingPlacement::Part { scan }) = f
+                && let Some(part) = app.active
+                && part != *scan
+            {
+                self.placed = Some(PlacedPart { part, scan: *scan });
+                app.open_rail_tool(crate::tool_panels::TRANSFORM);
+            }
+        }
+    }
+
+    /// A placed part an undo took away is no longer there to join.
+    fn on_revision(&mut self, app: &mut MeshFixerApp, _moved: crate::session::HistoryMove) {
+        let doc = app.session.document();
+        if self
+            .placed
+            .is_some_and(|p| doc.object(p.part).is_none() || doc.object(p.scan).is_none())
+        {
+            self.placed = None;
+        }
+    }
+
+    fn close(&mut self, _app: &mut MeshFixerApp) {
+        self.dialog = None;
+        self.confirm_delete = None;
+    }
+
+    fn held(&self, _app: &MeshFixerApp) -> Vec<&'static str> {
+        [
+            (self.dialog.is_some(), "the save dialog"),
+            (self.confirm_delete.is_some(), "a delete question"),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
+
+    fn stale(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let doc = app.session.document();
+        let gone = self
+            .placed
+            .is_some_and(|p| doc.object(p.part).is_none() || doc.object(p.scan).is_none());
+        if gone {
+            vec!["a placed part that is gone"]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+fn parts(app: &MeshFixerApp) -> &PartsState {
+    app.tool_state::<PartsState>()
+}
+
+fn parts_mut(app: &mut MeshFixerApp) -> &mut PartsState {
+    app.tool_state_mut::<PartsState>()
+}
+
 fn needs_object(app: &MeshFixerApp) -> Availability {
     if app.active_mesh().is_some() {
         Availability::Available
@@ -123,6 +193,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         availability: needs_object,
         panel: Some(panel),
         on_open: |app| app.refusal = None,
+        session: || Box::new(PartsState::default()),
         ..T::new(PARTS, "tool.parts.name", icons::PARTS, Category::Add, 0)
     })
 }
@@ -173,7 +244,7 @@ fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: S
 
 /// Places library part `id` onto the active object, with its content
 /// hash recorded (so replay refuses if the library part's content ever
-/// changes): `object.add_part`, one undo step. `app.parts.placed`
+/// changes): `object.add_part`, one undo step. `PartsState::placed`
 /// (naming the new part and the scan it landed on) and the Transform
 /// tool both follow once the command actually commits
 /// ([`crate::app::FollowUp::Placement`]: placing runs on the job
@@ -440,12 +511,12 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
     let dir = app.settings_dir().map(|d| d.join("thumbnails"));
     let thumb = {
         let ctx = ui.ctx().clone();
-        let mut thumbs = std::mem::take(&mut app.parts.thumbs);
+        let mut thumbs = std::mem::take(&mut parts_mut(app).thumbs);
         let jobs = app.jobs().clone();
         let t = thumbs.get(&ctx, &jobs, dir.as_deref(), &cell.key, || {
             cell_mesh(app, cell)
         });
-        app.parts.thumbs = thumbs;
+        parts_mut(app).thumbs = thumbs;
         t
     };
     let idle = app.busy.is_none();
@@ -555,7 +626,7 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
                 )
                 .clicked()
                 {
-                    app.parts.dialog = Some(PartDialog {
+                    parts_mut(app).dialog = Some(PartDialog {
                         target: DialogTarget::Edit(cell.id.clone()),
                         name: cell.name.clone(),
                         category: cell.category.clone(),
@@ -571,7 +642,7 @@ fn cell_ui(app: &mut MeshFixerApp, ui: &mut egui::Ui, cell: &Cell) {
                 )
                 .clicked()
                 {
-                    app.parts.confirm_delete = Some(cell.id.clone());
+                    parts_mut(app).confirm_delete = Some(cell.id.clone());
                 }
             }
         },
@@ -612,7 +683,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "mesh.boolean");
     crate::shape_tools::refusal_card_for(app, ui, "mesh.combine");
     // The part just placed comes first: joining it is the next step.
-    if let Some(placed) = app.parts.placed
+    if let Some(placed) = parts(app).placed
         && app.session.document().object(placed.part).is_some()
         && app.session.document().object(placed.scan).is_some()
     {
@@ -621,12 +692,12 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
 
     widgets::section(ui, &t!("parts.section.library"));
     ui.add(
-        egui::TextEdit::singleline(&mut app.parts.search)
+        egui::TextEdit::singleline(&mut parts_mut(app).search)
             .hint_text(t!("parts.search_hint"))
             .desired_width(ui.available_width()),
     );
     ui.add_space(theme::SPACE_XS);
-    let query = app.parts.search.to_lowercase();
+    let query = parts(app).search.to_lowercase();
     let (builtin, user) = cells(app, &query);
     if builtin.is_empty() && user.is_empty() {
         widgets::caption(ui, t!("parts.none_found"));
@@ -675,7 +746,7 @@ pub fn open_save_dialog(app: &mut MeshFixerApp, id: ObjectId) {
     let Some(o) = app.session.document().object(id) else {
         return;
     };
-    app.parts.dialog = Some(PartDialog {
+    parts_mut(app).dialog = Some(PartDialog {
         target: DialogTarget::Save(id),
         name: o.name.clone(),
         category: String::new(),
@@ -685,7 +756,7 @@ pub fn open_save_dialog(app: &mut MeshFixerApp, id: ObjectId) {
 
 /// "Delete <name>?" with Delete and Cancel, for the user part waiting on it.
 fn delete_confirmation(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
-    let Some(id) = app.parts.confirm_delete.clone() else {
+    let Some(id) = parts(app).confirm_delete.clone() else {
         return;
     };
     let name = library(app)
@@ -713,7 +784,7 @@ fn delete_confirmation(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         });
     });
     if close {
-        app.parts.confirm_delete = None;
+        parts_mut(app).confirm_delete = None;
     }
 }
 
@@ -734,7 +805,7 @@ pub fn delete_part(app: &mut MeshFixerApp, id: &str) {
 
 /// The save / edit dialog, while open: name, category and description.
 fn dialog(app: &mut MeshFixerApp, ctx: &egui::Context) {
-    let Some(mut d) = app.parts.dialog.clone() else {
+    let Some(mut d) = parts(app).dialog.clone() else {
         return;
     };
     let title = match d.target {
@@ -779,14 +850,14 @@ fn dialog(app: &mut MeshFixerApp, ctx: &egui::Context) {
     });
     cancel |= ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape));
     if cancel {
-        app.parts.dialog = None;
+        parts_mut(app).dialog = None;
         return;
     }
     if !done {
-        app.parts.dialog = Some(d);
+        parts_mut(app).dialog = Some(d);
         return;
     }
-    app.parts.dialog = None;
+    parts_mut(app).dialog = None;
     match &d.target {
         DialogTarget::Save(id) => save_as_part(app, *id, &d.name, &d.category, &d.description),
         DialogTarget::Edit(id) => {
@@ -834,13 +905,13 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
         .collect();
     let current = modes
         .iter()
-        .position(|(m, _)| *m == app.parts.join)
-        // allow-swallow: `modes` is the exhaustive, fixed list of JoinMode values, so app.parts.join is always found; the default is unreachable.
+        .position(|(m, _)| *m == parts(app).join)
+        // allow-swallow: `modes` is the exhaustive, fixed list of JoinMode values, so the chosen join is always found; the default is unreachable.
         .unwrap_or(0);
     if let (Some(i), _) = widgets::segmented(ui, &options, current) {
-        app.parts.join = modes[i].0;
+        parts_mut(app).join = modes[i].0;
     }
-    if app.parts.join == JoinMode::Blend {
+    if parts(app).join == JoinMode::Blend {
         let scale = app.scale_ctx();
         let opts = LengthFieldOpts {
             range: (
@@ -853,13 +924,13 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
         length_slider(
             ui,
             egui::Id::unique("parts blend width"),
-            &mut app.parts.blend_width,
+            &mut parts_mut(app).blend_width,
             &opts,
         );
     }
     ui.add_space(theme::SPACE_S);
-    let can = app.busy.is_none() && app.parts.join != JoinMode::KeepSeparate;
-    let label = match app.parts.join {
+    let can = app.busy.is_none() && parts(app).join != JoinMode::KeepSeparate;
+    let label = match parts(app).join {
         JoinMode::Blend => t!("parts.join.blend_into", target = target),
         _ => combine_label,
     };
@@ -876,7 +947,8 @@ fn join_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: PlacedPart) {
         .on_hover_text(&label)
         .clicked()
     {
-        join_part(app, placed, app.parts.join, label);
+        let mode = parts(app).join;
+        join_part(app, placed, mode, label);
     }
 }
 
@@ -900,17 +972,17 @@ pub fn join_part(app: &mut MeshFixerApp, placed: PlacedPart, mode: JoinMode, lab
             run_on(app, placed.scan, intent, label);
         }
         JoinMode::Blend => {
-            // `app.parts.blend_width` is a typed `Length` exactly as
+            // `PartsState::blend_width` is a typed `Length` exactly as
             // typed in the field (ADR-0006 rule 2): `Session::prepare`
             // alone converts it to document units.
             let intent = Intent::op("mesh.boolean")
                 .operand("tool", placed.part, None)
                 .param("operation", "union")
-                .set("blend_width", app.parts.blend_width);
+                .set("blend_width", parts(app).blend_width);
             run_on(app, placed.scan, intent, label);
         }
     }
-    app.parts.placed = None;
+    parts_mut(app).placed = None;
 }
 
 /// Saves object `id` as a user part named `name`, filed under

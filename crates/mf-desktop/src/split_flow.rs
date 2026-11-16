@@ -76,6 +76,9 @@ pub struct VolumeBox {
     /// the box at the start, and where on the face's axis it was grabbed.
     pub face_drag: Option<(usize, DVec3, DVec3, f64)>,
     pub hover_face: Option<usize>,
+    /// The box as it was when a drag (either kind) started: its centre,
+    /// size and preset, put back if Esc cancels the drag.
+    pub before_drag: Option<(DVec3, DVec3, String)>,
 }
 
 impl Default for VolumeBox {
@@ -89,6 +92,7 @@ impl Default for VolumeBox {
             hover: None,
             face_drag: None,
             hover_face: None,
+            before_drag: None,
         }
     }
 }
@@ -267,10 +271,13 @@ pub struct Flow {
     pub min_wall: Option<f64>,
     /// Connect's own Fit class (owner 2026-11-11: defaults to Sliding,
     /// a positive clearance, not Snug at 0 mm — independent of the
-    /// Parts/Connectors tool's `app.connectors.fit_class`, so changing
+    /// Parts/Connectors tool's `ConnectorsState::fit_class`, so changing
     /// one doesn't silently change the other).
     pub fit_class: Option<String>,
     pub(crate) drag: Option<Drag>,
+    /// The open joint's placement a drag is changing, as it was when the
+    /// drag started (joint, index, placement): put back if Esc cancels.
+    pub(crate) drag_from: Option<(usize, usize, Placement)>,
     pub(crate) hover: Option<Hit>,
     pub(crate) geom: GeomSlot,
     pub(crate) checks: Option<(ChecksKey, Arc<Vec<Vec<Check>>>)>,
@@ -966,7 +973,7 @@ pub(crate) fn settings(app: &MeshFixerApp) -> mf_operations::CheckSettings {
             .cloned()
             .unwrap_or_else(|| mf_parts::FitClass::builtins()[2].clone()),
         machine: profiles
-            .get(&app.connectors.machine_profile)
+            .get(&crate::connector_tool::connectors(app).machine_profile)
             .cloned()
             .unwrap_or_else(mf_parts::MachineProfile::uncalibrated),
         mm: doc_units_per_millimetre(app),
@@ -1379,7 +1386,7 @@ pub fn place_box(app: &mut MeshFixerApp, force: bool) {
         let all = presets(app);
         let chosen = all
             .iter()
-            .find(|(n, _)| *n == app.connectors.machine_profile)
+            .find(|(n, _)| *n == crate::connector_tool::connectors(app).machine_profile)
             .or(all.first())
             .cloned();
         if let Some((name, v)) = chosen {
@@ -1807,6 +1814,8 @@ fn volume_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Inpu
     };
     match input.pointer {
         Some(ToolPointer::Start { from, at }) => {
+            let v = &app.split_flow.volume;
+            app.split_flow.volume.before_drag = Some((v.center, v.size, v.preset.clone()));
             if let Some(k) = face_hit(app, from) {
                 let v = &app.split_flow.volume;
                 let (c, n) = v.face(k);
@@ -1850,6 +1859,7 @@ fn volume_input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Inpu
             if matches!(input.pointer, Some(ToolPointer::End(_))) {
                 app.split_flow.volume.drag = None;
                 app.split_flow.volume.face_drag = None;
+                app.split_flow.volume.before_drag = None;
             }
         }
         Some(ToolPointer::Click(_)) | None => {}
