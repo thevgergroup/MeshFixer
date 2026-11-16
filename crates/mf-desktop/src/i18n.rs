@@ -455,16 +455,16 @@ static CATALOGUE: &[(&str, &str)] = &[
     ("hinge.swing", "Swing preview"),
     ("hinge.swing.checking", "Checking the swing…"),
     (
-        "hinge.swing.failed",
-        "The swing check stopped unexpectedly ({why}). Save the command log and report it.",
-    ),
-    (
         "hinge.swing.clear",
         "Opens the whole {limit}° without touching anything",
     ),
     (
         "hinge.swing.colliding",
         "Colliding here in {n} place(s), highlighted in the view",
+    ),
+    (
+        "hinge.swing.failed",
+        "The swing check stopped unexpectedly ({why}). Save the command log and report it.",
     ),
     ("hinge.swing.first_contact", "First touches at {angle}°"),
     ("hinge.swing.open", "Open"),
