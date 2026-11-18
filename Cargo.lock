@@ -2700,7 +2700,7 @@ dependencies = [
 
 [[package]]
 name = "mf-boolean"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "manifold-rust",
@@ -2719,7 +2719,7 @@ dependencies = [
 
 [[package]]
 name = "mf-cli"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "ctrlc",
@@ -2746,7 +2746,7 @@ dependencies = [
 
 [[package]]
 name = "mf-command"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "glam",
@@ -2770,7 +2770,7 @@ dependencies = [
 
 [[package]]
 name = "mf-desktop"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "eframe",
@@ -2800,7 +2800,7 @@ dependencies = [
 
 [[package]]
 name = "mf-document"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "mf-geometry",
  "mf-io",
@@ -2810,7 +2810,7 @@ dependencies = [
 
 [[package]]
 name = "mf-fixtures"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "mf-geometry",
  "mf-runtime",
@@ -2819,7 +2819,7 @@ dependencies = [
 
 [[package]]
 name = "mf-geometry"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "glam",
@@ -2837,7 +2837,7 @@ dependencies = [
 
 [[package]]
 name = "mf-io"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "mf-fixtures",
@@ -2863,7 +2863,7 @@ dependencies = [
 
 [[package]]
 name = "mf-metrics"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "libc",
  "serde",
@@ -2872,7 +2872,7 @@ dependencies = [
 
 [[package]]
 name = "mf-operations"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "faer",
  "glam",
@@ -2898,7 +2898,7 @@ dependencies = [
 
 [[package]]
 name = "mf-parts"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "glam",
@@ -2919,7 +2919,7 @@ dependencies = [
 
 [[package]]
 name = "mf-render"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2938,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "mf-runtime"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "rayon",
  "thiserror 2.0.21",
@@ -2946,7 +2946,7 @@ dependencies = [
 
 [[package]]
 name = "mf-selection"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "mf-document",
  "mf-fixtures",
@@ -2957,7 +2957,7 @@ dependencies = [
 
 [[package]]
 name = "mf-spec"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "clap",
  "jsonschema",
@@ -2971,7 +2971,7 @@ dependencies = [
 
 [[package]]
 name = "mf-units"
-version = "0.0.1"
+version = "0.1.0"
 dependencies = [
  "serde",
  "thiserror 2.0.21",
