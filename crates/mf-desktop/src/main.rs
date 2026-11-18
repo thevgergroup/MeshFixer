@@ -103,7 +103,15 @@ fn main() -> eframe::Result {
             .with_inner_size([width, height])
             // A laptop window still fits the panels and the view (M4 final
             // UX I5); the panels collapse below that (View > Hide side panels).
-            .with_min_inner_size([960.0, 600.0]),
+            .with_min_inner_size([960.0, 600.0])
+            // The app icon (assets/icon/meshfixer.svg, rendered at 256 px):
+            // the Dock/taskbar icon when run outside a bundle.
+            .with_icon(std::sync::Arc::new(
+                eframe::icon_data::from_png_bytes(include_bytes!(
+                    "../assets/icon/meshfixer-256.png"
+                ))
+                .expect("the embedded app icon is a valid PNG"),
+            )),
         wgpu_options: mf_desktop::gpu::wgpu_configuration(),
         ..Default::default()
     };
