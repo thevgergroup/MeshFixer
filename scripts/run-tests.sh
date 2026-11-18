@@ -81,6 +81,10 @@ timing=(
   # Idle memory with each previewing tool open on the bunny (memleak-report):
   # resource counts and heap stay flat over many frames. ~51 s in debug.
   "mf-desktop idle_memory idle_with_tool_open_memory_is_bounded"
+  # Randomised property tests (owner 2026-11-18: no fuzz-style testing in the
+  # everyday gate). Run on demand only.
+  "mf-command combine_robust combine_under_small_transforms_is_valid_or_refused_by_name"
+  "mf-operations plans preview_equals_apply_for_split preview_equals_apply_for_align"
 )
 
 # Skipped here and run by nobody in this script: the boolean kernel
