@@ -18,9 +18,12 @@ target="${CARGO_TARGET_DIR:-$root/target}"
 
 dist="$root/dist"
 app="$dist/MeshFixer.app"
-mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources/bin"
 cp "$target/release/meshfixer-desktop" "$app/Contents/MacOS/MeshFixer"
-cp "$target/release/meshfixer" "$app/Contents/MacOS/meshfixer"
+# The CLI lives apart from the app binary: macOS file names are
+# case-insensitive, so "meshfixer" in Contents/MacOS would overwrite
+# "MeshFixer".
+cp "$target/release/meshfixer" "$app/Contents/Resources/bin/meshfixer"
 cp crates/mf-desktop/assets/icon/MeshFixer.icns "$app/Contents/Resources/MeshFixer.icns"
 cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
