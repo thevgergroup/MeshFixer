@@ -92,12 +92,86 @@ fn needs_object(app: &MeshFixerApp) -> Availability {
     }
 }
 
+/// Connectors is its own session (ADR-0007): the search, the Fit class
+/// and Machine profile chosen, the quick settings and the connector last
+/// placed (its Merge section) are kept across a close.
+impl crate::session::ToolSession for ConnectorsState {
+    /// A connector placement it issued committed: the new connector is
+    /// the active object (`after_object_changes`); record it with its
+    /// recorded parameters (so Merge can run `connector.join` without
+    /// reading the object's live state) and open Transform on it. A
+    /// refused one records nothing and opens nothing (the owner-reported
+    /// bug: a refused `object.add_shape` once recorded the scan).
+    fn on_result(&mut self, app: &mut MeshFixerApp, r: &crate::session::CommandResult<'_>) {
+        if !r.committed() {
+            return;
+        }
+        for f in r.follow_ups {
+            if let crate::app::FollowUp::Placement(crate::app::PendingPlacement::Connector {
+                connector_id,
+                connector_params_json,
+                gap,
+                group,
+            }) = f
+                && let Some(object) = app.active
+            {
+                self.placed = Some(PlacedConnector {
+                    object,
+                    group: group.clone(),
+                    connector_id: connector_id.clone(),
+                    connector_params_json: connector_params_json.clone(),
+                    gap: *gap,
+                    side_a: None,
+                    side_b: None,
+                });
+                app.open_rail_tool(crate::tool_panels::TRANSFORM);
+            }
+        }
+    }
+
+    /// A placed connector an undo took away is no longer there to merge.
+    fn on_revision(&mut self, app: &mut MeshFixerApp, _moved: crate::session::HistoryMove) {
+        let doc = app.session.document();
+        if self
+            .placed
+            .as_ref()
+            .is_some_and(|p| doc.object(p.object).is_none())
+        {
+            self.placed = None;
+        }
+    }
+
+    fn stale(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let doc = app.session.document();
+        let gone = self
+            .placed
+            .as_ref()
+            .is_some_and(|p| doc.object(p.object).is_none());
+        if gone {
+            vec!["a placed connector that is gone"]
+        } else {
+            Vec::new()
+        }
+    }
+}
+
+/// The Connectors tool's state (its chosen Fit class and Machine
+/// profile are read by Connect, Split and the hinge too).
+pub(crate) fn connectors(app: &MeshFixerApp) -> &ConnectorsState {
+    app.tool_state::<ConnectorsState>()
+}
+
+pub(crate) fn connectors_mut(app: &mut MeshFixerApp) -> &mut ConnectorsState {
+    app.tool_state_mut::<ConnectorsState>()
+}
+
 pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
     shell.register_tool(T {
         help: "tool.connectors.help",
         availability: needs_object,
         panel: Some(panel),
         on_open: |app| app.refusal = None,
+        session: || Box::new(ConnectorsState::default()),
         ..T::new(
             CONNECTORS,
             "tool.connectors.name",
@@ -135,13 +209,7 @@ pub(crate) fn fit_classes(app: &MeshFixerApp) -> (FitClasses, Option<String>) {
 
 /// As [`fit_classes`], for Machine profiles.
 pub(crate) fn machine_profiles(app: &MeshFixerApp) -> (MachineProfiles, Option<String>) {
-    let Some(dir) = app.settings_dir() else {
-        return (MachineProfiles::default(), None);
-    };
-    match MachineProfiles::load(&dir) {
-        Ok(p) => (p, None),
-        Err(e) => (MachineProfiles::default(), Some(e.to_string())),
-    }
+    app.machine_profiles()
 }
 
 /// The Fit class and Machine profile chosen in this panel, resolved
@@ -155,11 +223,11 @@ pub(crate) fn chosen_fit(app: &MeshFixerApp) -> Result<(FitClass, MachineProfile
         return Err(e);
     }
     let class = classes
-        .get(&app.connectors.fit_class)
+        .get(&connectors(app).fit_class)
         .cloned()
         .unwrap_or_else(|| FitClass::builtins()[1].clone());
     let machine = profiles
-        .get(&app.connectors.machine_profile)
+        .get(&connectors(app).machine_profile)
         .cloned()
         .unwrap_or_else(MachineProfile::uncalibrated);
     Ok((class, machine))
@@ -200,11 +268,11 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
         return Err(e);
     }
     let class = classes
-        .get(&app.connectors.fit_class)
+        .get(&connectors(app).fit_class)
         .cloned()
         .unwrap_or_else(|| FitClass::builtins()[1].clone());
     let machine = profiles
-        .get(&app.connectors.machine_profile)
+        .get(&connectors(app).machine_profile)
         .cloned()
         .unwrap_or_else(MachineProfile::uncalibrated);
     let gap = mf_parts::resolve(&class, &machine, Compensation::None).max(0.0);
@@ -213,8 +281,7 @@ fn connector_params(app: &MeshFixerApp, id: &str) -> Result<(String, f64), Strin
         .ok_or_else(|| format!("'{id}' isn't a built-in connector"))?;
     // The quick params picked in the library card (a thread's size and
     // length), then the fit.
-    let mut raw: BTreeMap<String, String> = app
-        .connectors
+    let mut raw: BTreeMap<String, String> = connectors(app)
         .quick
         .get(id)
         .map(|q| {
@@ -294,14 +361,14 @@ fn place_connector(app: &mut MeshFixerApp, id: &str) {
         .param("transform", crate::intent::affine_text(&transform))
         .param("group", &group);
     run_on(app, scan, intent, t!("connectors.apply", name = name));
-    if app.busy.is_some() {
-        app.pending_open_transform = Some(crate::app::PendingPlacement::Connector {
+    app.follow_up(crate::app::FollowUp::Placement(
+        crate::app::PendingPlacement::Connector {
             connector_id: id.to_owned(),
             connector_params_json,
             gap,
             group,
-        });
-    }
+        },
+    ));
 }
 
 /// A fresh linked-group id for connector `id`: unique in the document
@@ -424,22 +491,22 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     crate::shape_tools::refusal_card_for(app, ui, "object.attach");
     widgets::section(ui, &t!("connectors.section.library"));
     ui.add(
-        egui::TextEdit::singleline(&mut app.connectors.search)
+        egui::TextEdit::singleline(&mut connectors_mut(app).search)
             .hint_text(t!("connectors.search_hint"))
             .desired_width(ui.available_width()),
     );
     ui.add_space(theme::SPACE_XS);
     let lib = connector_library(app);
-    let query = app.connectors.search.to_lowercase();
-    let mut connectors: Vec<(String, String)> = lib
+    let query = connectors(app).search.to_lowercase();
+    let mut listed: Vec<(String, String)> = lib
         .parts
         .iter()
         .filter(|p| matches!(p.manifest.kind, mf_parts::PartKind::Connector { .. }))
         .filter(|p| query.is_empty() || p.manifest.name.to_lowercase().contains(&query))
         .map(|p| (p.manifest.id.clone(), p.manifest.name.clone()))
         .collect();
-    connectors.sort_by(|a, b| a.1.cmp(&b.1));
-    for (id, name) in &connectors {
+    listed.sort_by(|a, b| a.1.cmp(&b.1));
+    for (id, name) in &listed {
         library_entry(app, ui, id, name);
     }
     widgets::caption(ui, t!("connectors.click_help"));
@@ -447,7 +514,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     fit_pickers(app, ui);
     crate::hinge_tool::placement_section(app, ui);
 
-    if let Some(placed) = app.connectors.placed.clone()
+    if let Some(placed) = connectors(app).placed.clone()
         && app.session.document().object(placed.object).is_some()
     {
         fit_check_section(app, ui, &placed);
@@ -485,8 +552,7 @@ fn library_entry(app: &mut MeshFixerApp, ui: &mut egui::Ui, id: &str, name: &str
     let options = crate::shape_panel::text_options(app);
     let scale = app.scale_ctx();
     let idle = app.busy.is_none();
-    let entry = app
-        .connectors
+    let entry = connectors_mut(app)
         .quick
         .entry(id.to_owned())
         .or_insert_with(|| {
@@ -540,7 +606,7 @@ fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     ui.label(t!("connectors.fit_class"));
     for c in &classes.classes {
         let label = format!("{} ({:+.2} mm)", c.name, c.clearance);
-        let on = app.connectors.fit_class == c.name;
+        let on = connectors(app).fit_class == c.name;
         if widgets::button(
             ui,
             if on { Kind::Primary } else { Kind::Secondary },
@@ -550,7 +616,7 @@ fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.connectors.fit_class = c.name.clone();
+            connectors_mut(app).fit_class = c.name.clone();
         }
     }
     if let Some(e) = &class_err {
@@ -568,7 +634,7 @@ fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         } else {
             t!("connectors.not_calibrated", name = p.name.clone())
         };
-        let on = app.connectors.machine_profile == p.name;
+        let on = connectors(app).machine_profile == p.name;
         if widgets::button(
             ui,
             if on { Kind::Primary } else { Kind::Secondary },
@@ -578,7 +644,7 @@ fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         )
         .clicked()
         {
-            app.connectors.machine_profile = p.name.clone();
+            connectors_mut(app).machine_profile = p.name.clone();
         }
     }
     if let Some(e) = &profile_err {
@@ -588,7 +654,7 @@ fn fit_pickers(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         );
     }
     if !profiles
-        .get(&app.connectors.machine_profile)
+        .get(&connectors(app).machine_profile)
         .is_some_and(|p| p.calibrated)
     {
         widgets::caption(ui, t!("connectors.uncalibrated_help"));
@@ -661,11 +727,11 @@ fn fit_check_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedC
         );
     }
     let fit_class = classes
-        .get(&app.connectors.fit_class)
+        .get(&connectors(app).fit_class)
         .cloned()
         .unwrap_or_else(|| FitClass::builtins()[1].clone());
     let machine = profiles
-        .get(&app.connectors.machine_profile)
+        .get(&connectors(app).machine_profile)
         .cloned()
         .unwrap_or_else(MachineProfile::uncalibrated);
     let check = (|| -> Option<FitCheck> {
@@ -703,7 +769,7 @@ fn fit_check_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedC
                         .filter(|cl| cl.clearance > fit_class.clearance)
                         .min_by(|x, y| x.clearance.total_cmp(&y.clearance));
                     if let Some(looser) = looser {
-                        app.connectors.fit_class = looser.name.clone();
+                        connectors_mut(app).fit_class = looser.name.clone();
                     }
                 }
             }
@@ -759,7 +825,7 @@ fn merge_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedConne
             side_b = Some(*id);
         }
     }
-    if let Some(p) = &mut app.connectors.placed {
+    if let Some(p) = &mut connectors_mut(app).placed {
         p.side_a = side_a;
         p.side_b = side_b;
     }
@@ -779,7 +845,7 @@ fn merge_section(app: &mut MeshFixerApp, ui: &mut egui::Ui, placed: &PlacedConne
         && let (Some(a), Some(b)) = (side_a, side_b)
     {
         attach_group(app, &placed.group, a, b, placed.gap, t!("connectors.merge"));
-        app.connectors.placed = None;
+        connectors_mut(app).placed = None;
     }
     ui.add_space(theme::SPACE_L);
     widgets::caption(ui, t!("connectors.save_help"));
@@ -1018,7 +1084,7 @@ fn machine_profiles_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             .is_ok()
         {
             let _ = profiles.save(&dir); // allow-swallow: a failed save leaves the new profile for this session; the next edit retries the write
-            app.connectors.machine_profile = name;
+            connectors_mut(app).machine_profile = name;
         }
     }
 }
@@ -1097,7 +1163,7 @@ fn fit_classes_page(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
             clearance: 0.0,
         });
         let _ = classes.save(&dir); // allow-swallow: a failed save leaves the new class for this session; the next edit retries the write
-        app.connectors.fit_class = name;
+        connectors_mut(app).fit_class = name;
     }
 }
 

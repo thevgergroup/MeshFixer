@@ -197,8 +197,13 @@ fn drag_x_arrow_moves_object_and_one_undo_restores_it() {
     require_gpu!("drag_x_arrow_moves_object_and_one_undo_restores_it");
     let dir = tempfile::tempdir().unwrap();
     let mut h = open(cube_file(dir.path()));
-    // Properties lists Transform first among the whole-object tools.
-    assert_eq!(h.state().tools()[0].label, "Transform");
+    // Transform is on the rail, never one of Repair's one-shot tools.
+    assert!(
+        h.state()
+            .tools()
+            .iter()
+            .all(|t| t.op_id != "object.set_transform")
+    );
     open_transform(&mut h);
     h.run_steps(3);
     save(&mut h, "transform-move.png");
@@ -669,7 +674,7 @@ fn transform_tool_hides_defect_hover() {
 
 /// Review I3: the tools' keys go to the open tool only (W, E and R are
 /// Transform's while it's open, and nobody's otherwise: see
-/// `tools::Interactive::keys`); typed into one of its fields, they're text.
+/// `transform_tool::KEYS`); typed into one of its fields, they're text.
 #[test]
 fn tool_keys_go_to_the_open_tool_only() {
     require_gpu!("tool_keys_go_to_the_open_tool_only");

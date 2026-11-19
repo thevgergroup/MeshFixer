@@ -61,9 +61,9 @@ fn whole_object_tools_are_curated_and_grouped() {
     let (_dir, mut h) = open_cube();
     h.run();
     let ids: Vec<String> = h.state().tools().into_iter().map(|t| t.op_id).collect();
-    let catalogue: Vec<String> = mf_desktop::tools::CATALOGUE
+    let catalogue: Vec<String> = mf_desktop::tool_panels::REPAIRS
         .iter()
-        .map(|e| e.id.to_owned())
+        .map(|(id, _)| (*id).to_owned())
         .collect();
     assert_eq!(ids, catalogue);
     // The rail lists the built tools; Repair holds the repairs and the
@@ -104,4 +104,16 @@ fn the_overlays_popover_opens_and_closes() {
     h.get_by_label("Overlays").click();
     h.run();
     assert!(h.query_by_label("Recent repairs").is_none());
+}
+
+/// Every repair Repair offers names a built-in, whole-object operation
+/// that changes the model, and the list is in group order.
+#[test]
+fn repairs_are_grouped_and_name_real_operations() {
+    let repairs = mf_desktop::tool_panels::REPAIRS;
+    for (id, _) in repairs {
+        let spec = mf_spec::builtin::get(id).expect("a built-in operation");
+        assert!(spec.target.whole_object && !spec.is_read_only(), "{id}");
+    }
+    assert!(repairs.windows(2).all(|w| w[0].1 <= w[1].1));
 }

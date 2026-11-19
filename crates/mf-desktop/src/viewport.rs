@@ -16,6 +16,17 @@ use mf_render::{
 use crate::theme;
 use crate::worker::RenderMesh;
 
+/// The smallest a zoom-adaptive grid step's on-screen size is let fall
+/// (screen points): below this a step reads as "not really a grid"
+/// (ADR-0006 rule 3: "at least about 8 pt"). Matches the plate snap's
+/// own 8pt catch distance ([`mf_render::PlateSnap::within_pt`]), a
+/// separate, pre-existing feature this isn't replacing. In the view, so
+/// `MeshFixerApp::plate`'s own zoom-adaptive grid-line spacing and
+/// every gizmo snap share this one constant, rather than a second
+/// "8.0" literal (consolidation plan C09: "delete duplicate step
+/// logic").
+pub(crate) const MIN_SNAP_PX: f64 = 8.0;
+
 pub const MSAA_SAMPLES: u32 = 4;
 
 /// One drawn object's dirty-check key: identity of its render mesh, its

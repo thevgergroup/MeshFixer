@@ -5,19 +5,20 @@ use std::sync::mpsc::channel;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use mf_desktop::analysis::{AnalysisCache, GpuHeld, LatestWorker};
+use mf_desktop::analysis::{AnalysisCache, GpuHeld};
+use mf_desktop::jobs::PreviewSlot;
 use mf_fixtures::{cube, tetrahedron};
 use mf_runtime::{JobPool, RunContext};
 
 #[test]
-fn latest_worker_bounds_work_and_always_runs_the_last_request() {
+fn preview_slot_bounds_work_and_always_runs_the_last_request() {
     let started = Arc::new(AtomicUsize::new(0));
     let running = Arc::new(AtomicUsize::new(0));
     let max_running = Arc::new(AtomicUsize::new(0));
     let (tx, rx) = channel();
     let (s, r, m) = (started.clone(), running.clone(), max_running.clone());
     let (pool, _) = JobPool::new(Some(4));
-    let worker = LatestWorker::new(
+    let worker = PreviewSlot::new(
         Arc::new(pool),
         move |n: u32, _ctx: &RunContext| {
             s.fetch_add(1, Ordering::SeqCst);
@@ -27,7 +28,8 @@ fn latest_worker_bounds_work_and_always_runs_the_last_request() {
             r.fetch_sub(1, Ordering::SeqCst);
             Ok(n)
         },
-        move |n| tx.send(n).unwrap(),
+        move |_, n| tx.send(n).unwrap(),
+        |_, m| panic!("{m}"),
     );
     for n in 0..50 {
         worker.submit(n);
@@ -59,7 +61,7 @@ fn a_newer_request_cancels_the_running_one() {
     let (tx, rx) = channel();
     let (pool, _) = JobPool::new(Some(2));
     let (started_tx, started_rx) = channel();
-    let worker = LatestWorker::new(
+    let worker = PreviewSlot::new(
         Arc::new(pool),
         move |n: u32, ctx: &RunContext| {
             started_tx.send(n).unwrap();
@@ -72,7 +74,8 @@ fn a_newer_request_cancels_the_running_one() {
             }
             Ok((n, std::time::Instant::now()))
         },
-        move |r| tx.send(r).unwrap(),
+        move |_, r| tx.send(r).unwrap(),
+        |_, m| panic!("{m}"),
     );
     worker.submit(0);
     assert_eq!(started_rx.recv_timeout(Duration::from_secs(5)).unwrap(), 0);

@@ -6,3 +6,4 @@
 *.profraw
 /.superpowers/
 /fixtures/real
+/dist*/

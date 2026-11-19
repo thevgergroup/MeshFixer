@@ -556,6 +556,14 @@ pub enum Message {
     /// The Hollow tool's preview for the latest settings
     /// ([`crate::hollow_tool::preview_work`]).
     HollowPreview(Box<crate::hollow_tool::Preview>),
+    /// A tool preview's result (a [`Message::PegPreview`] or
+    /// [`Message::HollowPreview`]) for its slot's request `ticket`:
+    /// accepted only while that ticket is still its slot's current one
+    /// (`crate::jobs::PreviewSlot::is_current`).
+    Preview {
+        ticket: crate::jobs::Ticket,
+        result: Box<Message>,
+    },
     /// The analysis of `mesh` at `transform` panicked.
     AnalysisFailed {
         mesh: Mesh,
@@ -618,14 +626,11 @@ pub struct Workers {
 
 /// The message for a worker that panicked with `payload`.
 pub fn failed(what: &'static str, job: bool, payload: Box<dyn std::any::Any + Send>) -> Message {
-    let message = match payload.downcast::<String>() {
-        Ok(s) => *s,
-        Err(payload) => match payload.downcast::<&'static str>() {
-            Ok(s) => (*s).to_owned(),
-            Err(_) => "unknown panic".to_owned(),
-        },
-    };
-    Message::Failed { what, job, message }
+    Message::Failed {
+        what,
+        job,
+        message: crate::jobs::panic_message(payload),
+    }
 }
 
 /// Run `f` on `pool` and send what it returns (`None`: nothing to say, as
@@ -1193,7 +1198,7 @@ pub struct PegPreview {
 /// uses) and places holes on the cut's section regions: what the
 /// Alignment panel shows while the Split tool is open, before Apply runs
 /// the real command. O(n) like the cut itself, so it runs on a worker
-/// ([`crate::analysis::LatestWorker`]), debounced to only the plane and
+/// ([`crate::jobs::PreviewSlot`]), debounced to only the plane and
 /// peg settings that actually changed.
 pub fn peg_preview(request: PegPreviewRequest, ctx: &RunContext) -> Result<Message, Cancelled> {
     let world_to_object = |p: [f64; 3]| {
@@ -2043,7 +2048,7 @@ pub struct IntersectionCurve {
 }
 
 /// Every pair's curve for request `key` (the latest only: see
-/// [`crate::analysis::LatestWorker`]).
+/// [`crate::jobs::PreviewSlot`]).
 pub struct IntersectionCurves {
     pub key: u64,
     pub curves: Vec<IntersectionCurve>,

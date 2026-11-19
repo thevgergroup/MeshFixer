@@ -23,11 +23,11 @@ pub use stroke::{DabDelta, StrokeState};
 use mf_geometry::{FaceId, Mesh};
 use mf_spec::Params;
 
-use crate::affine::{apply, apply_linear, determinant, inverse};
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
     Target, needs_document, unsupported_target,
 };
+use mf_geometry::affine::{apply, apply_linear, determinant, inverse};
 
 /// The progress stages of `mesh.sculpt_stroke`.
 pub const INDEXING: &str = "finding the faces";

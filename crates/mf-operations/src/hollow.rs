@@ -74,8 +74,9 @@ use rayon::prelude::*;
 use crate::make_solid::{Grid, corner, crossings, march_cells, nearest_face, taubin};
 use crate::{
     DocContext, DocOutput, ObjectChange, OpError, OpOutput, OperandInput, Operation, RunContext,
-    Target, affine, needs_document,
+    Target, needs_document,
 };
+use mf_geometry::affine;
 
 pub struct Hollow;
 

@@ -466,7 +466,11 @@ fn more_keeps_holes_and_intersects_two() {
     settle(&mut h);
     h.get_by_label("Keep the hole objects").click();
     settle(&mut h);
-    assert!(h.state().combine.keep_holes);
+    assert!(
+        h.state()
+            .tool_state::<mf_desktop::shape_tools::CombineState>()
+            .keep_holes
+    );
     still(&mut h, "combine-more");
     let history = h.state().session.history_labels().len();
     panel_button(&h, "Combine").click();

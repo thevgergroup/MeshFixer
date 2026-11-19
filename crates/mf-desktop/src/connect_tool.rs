@@ -99,8 +99,10 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         },
         on_close: |app, _| {
             app.split_flow.drag = None;
+            app.split_flow.drag_from = None;
             app.split_flow.hover = None;
         },
+        session: || Box::new(ConnectSession),
         ..T::new(
             CONNECT,
             "tool.connect.name",
@@ -109,6 +111,74 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             1,
         )
     })
+}
+
+/// Connect's session (ADR-0007): a thin adapter around the workflow's
+/// state on the app (`split_flow`) until C23 moves it here.
+#[derive(Debug, Default)]
+pub struct ConnectSession;
+
+impl crate::session::ToolSession for ConnectSession {
+    /// Its `split.place_connectors` committed: record the joint's
+    /// connectors as applied.
+    fn on_result(&mut self, app: &mut MeshFixerApp, r: &crate::session::CommandResult<'_>) {
+        if !r.committed() {
+            return;
+        }
+        for f in r.follow_ups {
+            if let crate::app::FollowUp::JointApplied(j) = f {
+                split_flow::joint_applied(app, *j);
+            }
+        }
+    }
+
+    fn cancel_drag(&mut self, app: &mut MeshFixerApp) -> bool {
+        if app.split_flow.drag.take().is_none() {
+            return false;
+        }
+        if let Some((j, i, p)) = app.split_flow.drag_from.take()
+            && let Some(slot) = app
+                .split_flow
+                .joints
+                .get_mut(j)
+                .and_then(|joint| joint.placements.get_mut(i))
+        {
+            *slot = p;
+        }
+        true
+    }
+
+    fn paint(&self, app: &MeshFixerApp, ctx: &egui::Context) {
+        let Some(rect) = app.viewport.last_rect else {
+            return;
+        };
+        let painter = ctx
+            .layer_painter(egui::LayerId::new(
+                egui::Order::Middle,
+                egui::Id::unique("connect overlay"),
+            ))
+            .with_clip_rect(rect);
+        overlay(app, &painter, rect);
+    }
+
+    fn held(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let f = &app.split_flow;
+        [
+            (f.drag.is_some(), "a connector drag"),
+            (f.hover.is_some(), "the hovered connector"),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
+
+    fn view_state(&self, app: &MeshFixerApp) -> String {
+        let f = &app.split_flow;
+        match f.joint.and_then(|j| f.joints.get(j)) {
+            Some(joint) => format!("{:?}", joint.placements),
+            None => String::new(),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -653,13 +723,15 @@ fn fit_row(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     egui::ComboBox::from_id_salt("connect machine profile")
         .selected_text(t!(
             "connect.fit.machine",
-            name = app.connectors.machine_profile.clone()
+            name = crate::connector_tool::connectors(app)
+                .machine_profile
+                .clone()
         ))
         .width(ui.available_width())
         .show_ui(ui, |ui| {
             for p in &profiles.profiles {
                 ui.selectable_value(
-                    &mut app.connectors.machine_profile,
+                    &mut crate::connector_tool::connectors_mut(app).machine_profile,
                     p.name.clone(),
                     p.name.clone(),
                 );
@@ -888,10 +960,12 @@ fn apply_connectors(app: &mut MeshFixerApp, j: usize, label: String) {
     }
     let s = split_flow::settings(app);
     let (profiles, _) = crate::connector_tool::machine_profiles(app);
-    let plate = profiles.get(&app.connectors.machine_profile).map_or(
-        mf_parts::MachineProfile::uncalibrated().print_volume_mm,
-        |p| p.print_volume_mm,
-    );
+    let plate = profiles
+        .get(&crate::connector_tool::connectors(app).machine_profile)
+        .map_or(
+            mf_parts::MachineProfile::uncalibrated().print_volume_mm,
+            |p| p.print_volume_mm,
+        );
     let connectors = serde_json::to_string(&joint.placements).unwrap_or_default(); // allow-swallow: Placement is plain data; serializing it can't fail
     // The joint's frame and gap are already in document units (`unit:
     // document`); the print-intent sizes (wall, clearances, plate) are
@@ -911,11 +985,8 @@ fn apply_connectors(app: &mut MeshFixerApp, j: usize, label: String) {
         .set("plate_width", mm(plate[0]))
         .set("plate_depth", mm(plate[1]));
     app.refusal = None;
-    app.split_flow.pending_apply = Some(j);
     app.run_intent(intent, label);
-    if app.busy.is_none() {
-        app.split_flow.pending_apply = None;
-    }
+    app.follow_up(crate::app::FollowUp::JointApplied(j));
 }
 
 fn vec3(v: DVec3) -> String {
@@ -1178,6 +1249,15 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                 }
                 _ => None,
             };
+            app.split_flow.drag_from = match app.split_flow.drag {
+                Some(
+                    Drag::Move { index, .. } | Drag::Size { index } | Drag::Depth { index, .. },
+                ) => app.split_flow.joints[j]
+                    .placements
+                    .get(index)
+                    .map(|p| (j, index, p.clone())),
+                Some(Drag::PlaceLine { .. }) | None => None,
+            };
         }
         Some(ToolPointer::Move(px)) | Some(ToolPointer::End(px)) => {
             let drag = app.split_flow.drag;
@@ -1236,6 +1316,7 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
             }
             if matches!(input.pointer, Some(ToolPointer::End(_))) {
                 app.split_flow.drag = None;
+                app.split_flow.drag_from = None;
             }
         }
         Some(ToolPointer::Click(px)) => match state.hit(px) {

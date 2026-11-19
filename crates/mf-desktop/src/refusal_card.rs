@@ -183,7 +183,11 @@ fn follow(app: &mut MeshFixerApp, op_id: &str, next: RefusalNext) {
                 }
             }
             _ => {
-                if let Some(c) = app.solid.cell.as_mut() {
+                if let Some(c) = app
+                    .tool_state_mut::<crate::shape_tools::SolidState>()
+                    .cell
+                    .as_mut()
+                {
                     c.value *= 2.0;
                 }
                 app.open_rail_tool(crate::shape_tools::MAKE_SOLID);
@@ -199,18 +203,15 @@ fn follow(app: &mut MeshFixerApp, op_id: &str, next: RefusalNext) {
 }
 
 /// Shows `app.refusal` in the panel being drawn when it names `op_id`
-/// and was issued by this tool (the one whose panel is open). Returns
-/// true if it was shown. A refusal a panel built itself (Parts'
-/// unreadable fit settings, Connect's no-joint) has no recorded issuer
-/// and shows wherever its op id is asked for, as before.
+/// and has no recorded issuer: a refusal a panel built itself (a
+/// preview's, Parts' unreadable fit settings, Connect's no-joint). A
+/// refused command's card is the shell's: the tool dock draws it in its
+/// issuer's panel ([`show_issued`]). Returns true if it was shown.
 pub(crate) fn show_for(app: &mut MeshFixerApp, ui: &mut egui::Ui, op_id: &str) -> bool {
     let Some(r) = app.refusal.clone().filter(|r| r.op_id == op_id) else {
         return false;
     };
-    if app
-        .refusal_issuer()
-        .is_some_and(|tool| tool != app.active_tool)
-    {
+    if app.refusal_issuer().is_some() {
         return false;
     }
     RefusalCard::new(&r).show(app, ui);

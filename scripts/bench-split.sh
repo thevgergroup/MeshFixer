@@ -24,7 +24,7 @@ results="$out/split-$label.jsonl"
 : > "$results"
 
 cargo build --release -j "${CARGO_BUILD_JOBS:-4}" -p mf-cli || exit 1
-bin="$root/target/release/meshfixer"
+bin="${CARGO_TARGET_DIR:-$root/target}/release/meshfixer"
 real="$root/fixtures/real"
 
 # label|args

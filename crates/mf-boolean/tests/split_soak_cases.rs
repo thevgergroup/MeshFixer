@@ -58,33 +58,6 @@ const CASES: &[(&str, [f64; 3], [f64; 3])] = &[
     ),
 ];
 
-/// `mf-operations`' `affine::inverse`, verbatim: the plane must be
-/// mapped to the object exactly as `mesh.split_plane` maps it, to the bit.
-fn inverse(t: &[f64; 12]) -> [f64; 12] {
-    let m = [[t[0], t[1], t[2]], [t[3], t[4], t[5]], [t[6], t[7], t[8]]];
-    let det = m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
-        - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
-        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]);
-    let cof = |r: usize, c: usize| {
-        let (r0, r1) = ((r + 1) % 3, (r + 2) % 3);
-        let (c0, c1) = ((c + 1) % 3, (c + 2) % 3);
-        m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0]
-    };
-    let mut inv = [[0.0; 3]; 3];
-    for (r, row) in inv.iter_mut().enumerate() {
-        for (c, x) in row.iter_mut().enumerate() {
-            *x = cof(c, r) / det;
-        }
-    }
-    let tr = [t[9], t[10], t[11]];
-    let it: [f64; 3] =
-        std::array::from_fn(|c| -(tr[0] * inv[0][c] + tr[1] * inv[1][c] + tr[2] * inv[2][c]));
-    [
-        inv[0][0], inv[0][1], inv[0][2], inv[1][0], inv[1][1], inv[1][2], inv[2][0], inv[2][1],
-        inv[2][2], it[0], it[1], it[2],
-    ]
-}
-
 /// The scene and the cut plane in its object space (`affine::apply` of
 /// the inverse for the point, `normal_to_object` for the normal).
 pub fn case(seed: &str, point: [f64; 3], normal: [f64; 3]) -> (Mesh, Plane) {
@@ -97,13 +70,11 @@ pub fn case(seed: &str, point: [f64; 3], normal: [f64; 3]) -> (Mesh, Plane) {
     assert_eq!(model.objects.len(), 1);
     let o = &model.objects[0];
     let t = o.transform;
-    let inv = inverse(&t);
-    let local: [f64; 3] = std::array::from_fn(|c| {
-        inv[c] * point[0] + inv[3 + c] * point[1] + inv[6 + c] * point[2] + inv[9 + c]
-    });
-    let n: [f64; 3] = std::array::from_fn(|r| {
-        t[3 * r] * normal[0] + t[3 * r + 1] * normal[1] + t[3 * r + 2] * normal[2]
-    });
+    // The one affine module (C22), exactly as `mesh.split_plane`'s plan
+    // maps the plane, to the bit.
+    let inv = mf_geometry::affine::inverse(&t).unwrap();
+    let local = mf_geometry::affine::apply(&inv, point);
+    let n = mf_geometry::affine::normal_to_object(&t, normal);
     (
         o.mesh.clone(),
         Plane {

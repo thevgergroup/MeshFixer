@@ -192,7 +192,7 @@ fn merge_joins_the_part_into_the_scan_as_a_second_command() {
     settle(&mut h);
     let after_sink = h.state().session.history_labels().len();
     // Back to Parts (Transform opened on the new part): the Join-to-
-    // scan section is keyed off app.parts.placed, which survives the
+    // scan section is keyed off `PartsState::placed`, which survives the
     // tool switch.
     h.get_by_label("Parts").click();
     settle(&mut h);
@@ -216,8 +216,8 @@ fn merge_joins_the_part_into_the_scan_as_a_second_command() {
 /// on a *metres* document reaches `mesh.boolean` as 3 mm physical (doc
 /// units 0.003), not 3 document units (3 m) and not the raw 3.0 with
 /// no unit at all (the double-conversion bug's shape). The field itself
-/// is `widgets::length_field`/`length_slider` (`app.parts.blend_width:
-/// mf_units::Length`); only `Session::prepare` converts it.
+/// is `widgets::length_field`/`length_slider` (`PartsState::blend_width`,
+/// an `mf_units::Length`); only `Session::prepare` converts it.
 #[test]
 fn blend_width_typed_in_millimetres_reaches_mesh_boolean_as_physical_millimetres() {
     require_gpu!("blend_width_typed_in_millimetres_reaches_mesh_boolean_as_physical_millimetres");
@@ -276,7 +276,9 @@ fn blend_width_typed_in_millimetres_reaches_mesh_boolean_as_physical_millimetres
     settle(&mut h);
     // The field itself: typed as "3 mm" (a `Length`, not a bare 3.0 of
     // document units), as if the person had entered it in the field.
-    h.state_mut().parts.blend_width = mf_units::Length::new(3.0, mf_units::Unit::Millimeter);
+    h.state_mut()
+        .tool_state_mut::<mf_desktop::parts_tool::PartsState>()
+        .blend_width = mf_units::Length::new(3.0, mf_units::Unit::Millimeter);
     let before = h.state().session.history_labels().len();
     h.get_by_label("Join").click();
     wait_until(&mut h, "the blend", |a| {
@@ -353,7 +355,11 @@ fn save_as_part_names_what_was_saved() {
     // The dialog: the name filled in from the object, a category and a
     // description typed.
     assert_eq!(
-        h.state().parts.dialog.as_ref().map(|d| d.name.as_str()),
+        h.state()
+            .tool_state::<mf_desktop::parts_tool::PartsState>()
+            .dialog
+            .as_ref()
+            .map(|d| d.name.as_str()),
         Some("widget")
     );
     h.get_by_label("Category").click();
@@ -534,7 +540,11 @@ fn the_library_is_a_thumbnail_grid_cached_by_content_hash() {
     h.get_by_label("Parts").click();
     settle(&mut h);
     wait_until(&mut h, "the thumbnails", |a| {
-        h_ready(a) > 10 && !a.parts.thumbs.busy()
+        h_ready(a) > 10
+            && !a
+                .tool_state::<mf_desktop::parts_tool::PartsState>()
+                .thumbs
+                .busy()
     });
     let cached: Vec<_> = dir
         .path()
@@ -561,12 +571,26 @@ fn the_library_is_a_thumbnail_grid_cached_by_content_hash() {
     let mut h = opened_with(vec![("scan", ball(), at([0.0, 0.0, 10.0]))], settings());
     h.get_by_label("Parts").click();
     h.run_steps(3);
-    assert!(!h.state().parts.thumbs.busy(), "nothing rendered again");
-    assert!(h.state().parts.thumbs.ready() > 10);
+    assert!(
+        !h.state()
+            .tool_state::<mf_desktop::parts_tool::PartsState>()
+            .thumbs
+            .busy(),
+        "nothing rendered again"
+    );
+    assert!(
+        h.state()
+            .tool_state::<mf_desktop::parts_tool::PartsState>()
+            .thumbs
+            .ready()
+            > 10
+    );
 }
 
 fn h_ready(a: &MeshFixerApp) -> usize {
-    a.parts.thumbs.ready()
+    a.tool_state::<mf_desktop::parts_tool::PartsState>()
+        .thumbs
+        .ready()
 }
 
 /// The tool rail's own width, left of the tool dock (`tool_panels::RAIL_WIDTH`,

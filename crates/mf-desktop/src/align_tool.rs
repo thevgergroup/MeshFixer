@@ -69,6 +69,75 @@ pub struct AlignState {
     /// commits) were applied: the ghost preview, drawn through
     /// `MeshFixerApp::shown_transform` exactly like a live drag.
     pub preview: Vec<(ObjectId, [f64; 12])>,
+    /// A dot pressed and held (a drag): its preview stays up while the
+    /// button is down, and releasing over the view applies it, as a click
+    /// would. Esc drops it, applying nothing.
+    pub drag: Option<Dot>,
+    /// The dot whose drag Esc cancelled: its hover preview stays down
+    /// until the pointer leaves it.
+    pub cancelled: Option<Dot>,
+}
+
+/// Align is its own session (ADR-0007): the anchor, the hovered dot, the
+/// ghosts and a held dot all live here, and none of it outlasts a close.
+impl crate::session::ToolSession for AlignState {
+    fn preview(&self, _app: &MeshFixerApp) -> crate::session::PreviewSpec {
+        if self.preview.is_empty() {
+            crate::session::PreviewSpec::None
+        } else {
+            crate::session::PreviewSpec::Placement(self.preview.clone())
+        }
+    }
+
+    fn cancel_drag(&mut self, _app: &mut MeshFixerApp) -> bool {
+        let Some(dot) = self.drag.take() else {
+            return false;
+        };
+        self.cancelled = Some(dot);
+        self.preview.clear();
+        true
+    }
+
+    fn on_revision(&mut self, app: &mut MeshFixerApp, _moved: crate::session::HistoryMove) {
+        // The ghosts were worked out from the boxes before the move.
+        self.preview.clear();
+        self.hover = None;
+        self.drag = None;
+        if let Some(a) = self.anchor
+            && app.session.document().object(a).is_none()
+        {
+            self.anchor = None;
+        }
+    }
+
+    fn paint(&self, app: &MeshFixerApp, ctx: &egui::Context) {
+        view_overlay(app, ctx);
+    }
+
+    fn close(&mut self, _app: &mut MeshFixerApp) {
+        *self = AlignState::default();
+    }
+
+    fn held(&self, _app: &MeshFixerApp) -> Vec<&'static str> {
+        [
+            (self.hover.is_some(), "the hovered dot"),
+            (!self.preview.is_empty(), "the ghost preview"),
+            (self.drag.is_some(), "a dot drag"),
+            (self.cancelled.is_some(), "a cancelled dot"),
+            (self.anchor.is_some(), "the anchor"),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
+}
+
+fn state(app: &MeshFixerApp) -> &AlignState {
+    app.tool_state::<AlignState>()
+}
+
+fn state_mut(app: &mut MeshFixerApp) -> &mut AlignState {
+    app.tool_state_mut::<AlignState>()
 }
 
 fn available(app: &MeshFixerApp) -> Availability {
@@ -95,14 +164,9 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             Some(Box::new(move |px: (f64, f64)| hit_dot(&dots, &cam, view, px).is_some()) as Claims)
         },
         viewport_input: input,
-        on_open: |app| {
-            app.align = AlignState::default();
-            app.refusal = None;
-        },
-        on_close: |app, _| {
-            app.align.hover = None;
-            app.align.preview.clear();
-        },
+        on_open: |app| app.refusal = None,
+        on_view_click: anchor_click,
+        session: || Box::new(AlignState::default()),
         ..T::new(ID, "tool.align.name", icons::ALIGN, Category::Arrange, 20)
     })?;
     Ok(())
@@ -120,7 +184,7 @@ fn dot_box(app: &MeshFixerApp) -> Option<(DVec3, DVec3)> {
     if selected.len() < 2 {
         return None;
     }
-    if let Some(anchor) = app.align.anchor
+    if let Some(anchor) = state(app).anchor
         && selected.contains(&anchor)
     {
         return crate::shape_tools::world_bounds(app, anchor);
@@ -329,8 +393,7 @@ fn target_boxes(app: &MeshFixerApp) -> Vec<(ObjectId, Option<(DVec3, DVec3)>)> {
 /// 2026-11-13).
 pub fn preview_for(app: &MeshFixerApp, axis: usize, mode: Mode) -> Vec<(ObjectId, [f64; 12])> {
     let targets = target_boxes(app);
-    let anchor_box = app
-        .align
+    let anchor_box = state(app)
         .anchor
         .filter(|&a| app.selected_objects().contains(&a))
         .and_then(|a| crate::shape_tools::world_bounds_committed(app, a));
@@ -519,7 +582,7 @@ pub fn apply(app: &mut MeshFixerApp, axis: usize, mode: Mode) {
     if selected.len() < 2 || app.busy.is_some() {
         return;
     }
-    let anchor = app.align.anchor.filter(|&a| selected.contains(&a));
+    let anchor = state(app).anchor.filter(|&a| selected.contains(&a));
     let anchor_name = anchor
         .and_then(|a| app.session.document().object(a))
         .map(|o| o.name.clone());
@@ -566,7 +629,7 @@ pub fn apply(app: &mut MeshFixerApp, axis: usize, mode: Mode) {
         .param("mode", mode.as_str())
         .param("leaders", leaders_json);
     let label = history_label(selected.len(), axis, mode, anchor_name.as_deref());
-    app.align.preview.clear();
+    state_mut(app).preview.clear();
     app.run_intent(intent, label);
 }
 
@@ -588,16 +651,31 @@ fn input(app: &mut MeshFixerApp, input: &crate::shell::ToolInput) -> Input {
                 apply(app, dot.axis, dot.mode);
             }
         }
-        None => {}
-        _ => {}
+        // A press on a dot, held: its preview stays up until release.
+        Some(ToolPointer::Start { from, .. }) => {
+            state_mut(app).drag = hit_dot(&the_dots, &cam, view, from);
+        }
+        Some(ToolPointer::End(_)) => {
+            if let Some(dot) = state_mut(app).drag.take() {
+                apply(app, dot.axis, dot.mode);
+            }
+        }
+        Some(ToolPointer::Move(_)) | None => {}
     }
-    app.align.hover = input
+    let hover = input
         .hover
         .and_then(|px| hit_dot(&the_dots, &cam, view, px));
-    app.align.preview = match app.align.hover {
+    let s = state_mut(app);
+    if s.cancelled.is_some() && hover != s.cancelled {
+        s.cancelled = None;
+    }
+    s.hover = hover;
+    let shown = s.drag.or(hover.filter(|_| s.cancelled.is_none()));
+    let preview = match shown {
         Some(d) => preview_for(app, d.axis, d.mode),
         None => Vec::new(),
     };
+    state_mut(app).preview = preview;
     Input::Consumed
 }
 
@@ -643,9 +721,6 @@ fn pick_selected_object(
 /// the asynchronous pick-and-select path, so Align's anchor pick never
 /// races a background worker or changes the selection.
 pub fn anchor_click(app: &mut MeshFixerApp, px: (f64, f64)) -> bool {
-    if app.active_tool != ID {
-        return false;
-    }
     let (Some(cam), Some(rect)) = (app.camera, app.viewport.last_rect) else {
         return false;
     };
@@ -655,7 +730,8 @@ pub fn anchor_click(app: &mut MeshFixerApp, px: (f64, f64)) -> bool {
     };
     // Clicking the anchor again clears it (back to the selection's own
     // overall bounds).
-    app.align.anchor = (app.align.anchor != Some(id)).then_some(id);
+    let s = state_mut(app);
+    s.anchor = (s.anchor != Some(id)).then_some(id);
     true
 }
 
@@ -682,8 +758,7 @@ fn panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         return;
     }
     widgets::body(ui, t!("align.what"));
-    let anchor_name = app
-        .align
+    let anchor_name = state(app)
         .anchor
         .filter(|&a| selected.contains(&a))
         .and_then(|a| app.session.document().object(a))
@@ -813,7 +888,7 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     for dot in &the_dots {
         let Some(p) = at(dot.world) else { continue };
         let color = [theme::AXIS_X, theme::AXIS_Y, theme::AXIS_Z][dot.axis];
-        let hovered = app.align.hover == Some(*dot);
+        let hovered = state(app).hover == Some(*dot);
         let radius = if hovered { 7.0 } else { 5.0 };
         painter.circle_filled(p, radius, color);
         painter.circle_stroke(p, radius, egui::Stroke::new(1.5, theme::TEXT_STRONG));
@@ -821,7 +896,7 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
             hover_label(&painter, p, dot.axis, dot.mode);
         }
     }
-    if let Some(id) = app.align.anchor
+    if let Some(id) = state(app).anchor
         && app.selected_objects().contains(&id)
         && let Some((alo, ahi)) = crate::shape_tools::world_bounds(app, id)
     {

@@ -236,6 +236,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             app.hollow.picked_region = None;
             app.hollow.open_through = false;
         },
+        session: || Box::new(HollowSession),
         ..T::new(
             HOLLOW,
             "tool.hollow.name",
@@ -244,6 +245,92 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             25,
         )
     })
+}
+
+/// Hollow's session (ADR-0007): a thin adapter around its settings and
+/// preview on the app until C24 moves them here.
+#[derive(Debug, Default)]
+pub struct HollowSession;
+
+impl crate::session::ToolSession for HollowSession {
+    /// The hollowed preview, drawn in place of the object.
+    fn preview(&self, app: &MeshFixerApp) -> crate::session::PreviewSpec {
+        match app
+            .active
+            .and_then(|id| Some((id, preview_render(app, id)?)))
+        {
+            Some((id, r)) => crate::session::PreviewSpec::Geometry(id, r),
+            None => crate::session::PreviewSpec::None,
+        }
+    }
+
+    fn on_result(&mut self, app: &mut MeshFixerApp, r: &crate::session::CommandResult<'_>) {
+        if let (crate::session::Outcome::Committed, Some(report)) = (&r.outcome, r.report) {
+            after_commit(app, r.op_id, report);
+        }
+    }
+
+    /// Undo or redo leaves a different revision on screen: the preview,
+    /// the pick, the placed holes and the last result were all for the
+    /// one it left (a fresh preview is asked for the one it shows now).
+    fn on_revision(&mut self, app: &mut MeshFixerApp, _moved: crate::session::HistoryMove) {
+        let h = &mut app.hollow;
+        h.preview = None;
+        h.asked = None;
+        h.made = None;
+        h.last_result = None;
+        h.points.clear();
+        h.picked_region = None;
+        h.open_through = false;
+        app.hollow_worker.cancel();
+    }
+
+    fn paint(&self, app: &MeshFixerApp, ctx: &egui::Context) {
+        crate::shape_tools::view_overlay(app, ctx);
+    }
+
+    fn held(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let h = &app.hollow;
+        [
+            (h.picked_region.is_some(), "a picked region"),
+            (h.preview.is_some(), "a preview"),
+            (h.asked.is_some(), "a preview asked for"),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
+
+    fn stale(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let h = &app.hollow;
+        let shown = app.active_mesh();
+        let other = |m: &Mesh| !shown.is_some_and(|s| Mesh::ptr_eq(s, m));
+        [
+            (
+                h.preview.as_ref().is_some_and(|p| other(&p.mesh)),
+                "a preview of another revision",
+            ),
+            (
+                h.asked.as_ref().is_some_and(|(_, m)| other(m)),
+                "a preview asked for another revision",
+            ),
+            (
+                h.picked_region.as_ref().is_some_and(|r| other(&r.mesh)),
+                "a region picked on another revision",
+            ),
+            (
+                h.made.as_ref().is_some_and(other),
+                "the result of another revision",
+            ),
+            (
+                h.last_result.is_some() && h.made.as_ref().is_none_or(other),
+                "a result note for another revision",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
 }
 
 fn legend() -> Vec<LegendRow> {
@@ -315,7 +402,10 @@ fn changed(app: &mut MeshFixerApp) {
 pub fn refresh_preview(app: &mut MeshFixerApp, ctx: &egui::Context) {
     if app.active_tool != HOLLOW {
         app.hollow.preview = None;
-        app.hollow.asked = None;
+        if app.hollow.asked.take().is_some() {
+            // Hollow closed: its preview's work stops too (ADR-0009).
+            app.hollow_worker.cancel();
+        }
         return;
     }
     let Some(id) = app.active else { return };
@@ -358,11 +448,23 @@ pub fn refresh_preview(app: &mut MeshFixerApp, ctx: &egui::Context) {
     }
     let previous = app.active_render();
     app.hollow.asked = Some((key.clone(), mesh.clone()));
-    app.hollow_worker.submit(PreviewRequest {
-        key,
-        mesh,
-        previous,
-    });
+    app.hollow_worker.submit_for(
+        HOLLOW,
+        PreviewRequest {
+            key,
+            mesh,
+            previous,
+        },
+    );
+}
+
+/// True unless a preview was asked for (or is shown) for a revision
+/// other than the one on screen (tests: undo leaves no stale preview).
+pub fn preview_asked_for_current(app: &MeshFixerApp) -> bool {
+    let shown = app.active_mesh();
+    let current = |m: &Mesh| shown.is_some_and(|s| Mesh::ptr_eq(s, m));
+    app.hollow.asked.as_ref().is_none_or(|(_, m)| current(m))
+        && app.hollow.preview.as_ref().is_none_or(|p| current(&p.mesh))
 }
 
 /// A preview came back: kept if it's still the one asked for.

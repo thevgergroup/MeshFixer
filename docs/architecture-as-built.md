@@ -232,7 +232,7 @@ Generators work in mm. The op that places them scales the result once, using `Do
 flowchart TB
   subgraph UI["UI thread (egui frame)"]
     App["MeshFixerApp (app.rs, ~7.3k lines)"]
-    Shell["Shell: tool rail, panels, Esc, chrome<br/>shell::Tool"]
+    Shell["Shell: tool rail, panels, Esc, undo notice,<br/>refusal routing, shown transform/render<br/>shell::Tool + session.rs"]
     Tools["Tools: Transform, Align, Split, Connect, Connectors,<br/>Parts, Hinge, Dovetail, Combine, Hollow, Make solid,<br/>Sculpt, Repair, Inspect"]
     Viewport["viewport.rs: camera, picking, gizmos"]
     Panels["panels / shape_panel / tool_panels<br/>widgets (length_field: C13)"]
@@ -263,7 +263,7 @@ flowchart TB
 
 | Today | Target | ADR / task |
 |---|---|---|
-| `shell::Tool` covers only the chrome. Each tool wires its own preview, apply, undo and cancel in `app.rs`. | One `ToolSession` contract (intent, preview, on_result, on_revision, cancel_drag, paint) | ADR-0007 / C21 |
+| Done for Transform, Align, Combine, Make solid, Parts, Connectors and Repair (C21): each is a `ToolSession` holding its own state; the shell (`session.rs`) derives the shown transform and render, the Esc order, undo notice and refusal routing. Split, Connect, Hollow and Sculpt are thin adapters around their old app fields; the hinge swing is read by the shell. `tests/session_contract.rs` checks every tool; `tests/lint_tools.rs` keeps tool modules out of `app.rs`. | Split and Connect sessions (C23), Hollow and Sculpt (C24), hinge and dovetail generator facts (C26) | ADR-0007 / C21, C23, C24, C26 |
 | Previews re-run op geometry in the desktop, sometimes on the UI thread | The op exposes `plan()`, and preview and Apply share it | ADR-0008 / C22, C23 |
 | `LatestWorker`, ad-hoc threads and `pending_*` fields | Three lanes (command queue, `PreviewSlot`, pick lane); coalescing declared per spec | ADR-0009 / C04 done, C19 |
 | Refusals land in the generic error bar | A `RefusalCard` in the panel of the tool that issued the command | ADR-0010 / C14, C16 |

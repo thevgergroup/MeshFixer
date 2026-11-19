@@ -170,6 +170,35 @@ pub struct CombineState {
     pub keep_holes: bool,
 }
 
+/// Combine is its own session (ADR-0007): its one setting is kept across
+/// a close; it previews nothing and holds nothing else.
+impl crate::session::ToolSession for CombineState {
+    fn intent(&self, app: &MeshFixerApp) -> Option<(Intent<'static>, String)> {
+        combine_intent(app, self.keep_holes)
+    }
+}
+
+/// `mesh.combine` on the selected objects, each by its role, the first
+/// solid the target: what Combine's Apply runs (`None`: fewer than two
+/// selected, or no solid among them).
+fn combine_intent(app: &MeshFixerApp, keep_holes: bool) -> Option<(Intent<'static>, String)> {
+    let (solids, holes) = combine_roles(app);
+    if app.selected_objects().len() < 2 {
+        return None;
+    }
+    let (&first, others) = solids.split_first()?;
+    let intent = Intent::op("mesh.combine")
+        .on(first)
+        .operands(
+            others
+                .iter()
+                .map(|&id| ("solids".to_owned(), id, None))
+                .chain(holes.iter().map(|&id| ("holes".to_owned(), id, None))),
+        )
+        .param("keep_holes", keep_holes);
+    Some((intent, t!("combine.apply")))
+}
+
 /// Split's Alignment section (Phase 1 Task 13, D12): holes and dowels at
 /// the cut, from the fit profile's defaults.
 #[derive(Debug, Clone)]
@@ -237,6 +266,87 @@ pub struct SolidState {
     pub for_object: Option<ObjectId>,
 }
 
+/// Make solid is its own session (ADR-0007): its settings are kept
+/// across a close (and reset when the active object changes); it
+/// previews nothing.
+impl crate::session::ToolSession for SolidState {
+    fn intent(&self, app: &MeshFixerApp) -> Option<(Intent<'static>, String)> {
+        let target = app.active.filter(|&id| self.for_object == Some(id))?;
+        // `cell` and `offset` are typed lengths (the panel's own fields):
+        // `Session::prepare` alone converts them (the owner's bug: a
+        // 0.001 m cell size once reached `prepare` as 0.000001 on a
+        // metre document, converted twice).
+        let intent = Intent::op("mesh.make_solid")
+            .on(target)
+            .set("cell_size", self.cell?)
+            .set("offset", self.offset?)
+            .param("preserve_sharp", !self.smooth);
+        Some((intent, t!("solid.apply")))
+    }
+}
+
+/// Split's session (ADR-0007): a thin adapter around the plane, the box
+/// and the workflow's state on the app until C23 moves them here (and
+/// the preview onto the op's plan).
+#[derive(Debug, Default)]
+pub struct SplitSession;
+
+impl crate::session::ToolSession for SplitSession {
+    fn on_result(&mut self, app: &mut MeshFixerApp, r: &crate::session::CommandResult<'_>) {
+        if let (crate::session::Outcome::Committed, Some(report)) = (&r.outcome, r.report) {
+            // A cut's joints.
+            crate::split_flow::after_commit(app, r.op_id, report);
+        }
+    }
+
+    fn cancel_drag(&mut self, app: &mut MeshFixerApp) -> bool {
+        if let Some((_, start)) = app.split.drag.take() {
+            app.split.plane = start;
+            return true;
+        }
+        let v = &mut app.split_flow.volume;
+        let moving = v.drag.take().is_some();
+        let resizing = v.face_drag.take().is_some();
+        if moving || resizing {
+            if let Some((center, size, preset)) = v.before_drag.take() {
+                v.center = center;
+                v.size = size;
+                v.preset = preset;
+            }
+            return true;
+        }
+        false
+    }
+
+    fn paint(&self, app: &MeshFixerApp, ctx: &egui::Context) {
+        view_overlay(app, ctx);
+    }
+
+    fn held(&self, app: &MeshFixerApp) -> Vec<&'static str> {
+        let v = &app.split_flow.volume;
+        [
+            (app.split.drag.is_some(), "a plane drag"),
+            (app.split.hover.is_some(), "the hovered plane handle"),
+            (v.drag.is_some() || v.face_drag.is_some(), "a box drag"),
+            (
+                v.hover.is_some() || v.hover_face.is_some(),
+                "the hovered box handle",
+            ),
+        ]
+        .into_iter()
+        .filter_map(|(on, what)| on.then_some(what))
+        .collect()
+    }
+
+    fn view_state(&self, app: &MeshFixerApp) -> String {
+        let v = &app.split_flow.volume;
+        format!(
+            "plane {:?} box {:?} {:?} {}",
+            app.split.plane, v.center, v.size, v.preset
+        )
+    }
+}
+
 fn needs_object(app: &MeshFixerApp) -> Availability {
     if app.active_mesh().is_some() {
         Availability::Available
@@ -264,7 +374,11 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             app.split.hover = None;
             app.split_flow.volume.drag = None;
             app.split_flow.volume.face_drag = None;
+            app.split_flow.volume.before_drag = None;
+            app.split_flow.volume.hover = None;
+            app.split_flow.volume.hover_face = None;
         },
+        session: || Box::new(SplitSession),
         ..T::new(SPLIT, "tool.split.name", icons::SPLIT, Category::Shape, 0)
     })?;
     shell.register_tool(T {
@@ -280,6 +394,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
             }
         },
         panel: Some(combine_panel),
+        session: || Box::new(CombineState::default()),
         on_open: |app| {
             app.clear_selection();
             app.refusal = None;
@@ -297,6 +412,7 @@ pub fn register(shell: &mut Shell) -> Result<(), RegisterError> {
         help: "tool.make_solid.help",
         availability: needs_object,
         panel: Some(solid_panel),
+        session: || Box::new(SolidState::default()),
         on_open: |app| app.refusal = None,
         ..T::new(
             MAKE_SOLID,
@@ -482,14 +598,8 @@ pub(crate) fn plane_miss_warning(app: &MeshFixerApp, ui: &mut egui::Ui) {
     ui.add_space(theme::SPACE_S);
 }
 
-/// Run `intent` on the active object, on the job pool (progress and
-/// Cancel in the status bar).
-fn run(app: &mut MeshFixerApp, intent: Intent<'_>, label: String) {
-    let Some(target) = app.active else { return };
-    run_on(app, target, intent, label);
-}
-
-/// As [`run`], on `target` rather than the active object.
+/// Run `intent` on `target`, on the job pool (progress and Cancel in
+/// the status bar).
 fn run_on(app: &mut MeshFixerApp, target: ObjectId, intent: Intent<'_>, label: String) {
     app.refusal = None;
     app.run_intent(intent.on(target), label);
@@ -1160,23 +1270,17 @@ fn combine_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         })
         .inner
         .clicked()
-        && let Some((&first, others)) = solids.split_first()
     {
-        let intent = Intent::op("mesh.combine")
-            .operands(
-                others
-                    .iter()
-                    .map(|&id| ("solids".to_owned(), id, None))
-                    .chain(holes.iter().map(|&id| ("holes".to_owned(), id, None))),
-            )
-            .param("keep_holes", app.combine.keep_holes);
-        run_on(app, first, intent, t!("combine.apply"));
+        app.apply_tool();
     }
     ui.add_space(theme::SPACE_S);
     egui::CollapsingHeader::new(t!("combine.more"))
         .id_salt("combine more")
         .show(ui, |ui| {
-            ui.checkbox(&mut app.combine.keep_holes, t!("combine.keep_holes"));
+            ui.checkbox(
+                &mut app.tool_state_mut::<CombineState>().keep_holes,
+                t!("combine.keep_holes"),
+            );
             ui.add_space(theme::SPACE_XS);
             // Intersect: the overlap of exactly two objects.
             let two = selected.len() == 2;
@@ -1220,8 +1324,9 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     // Geometry resolution from the model (units-audit §6.4), as the
     // operation chooses by default: 1/256 of the diagonal.
     let auto = Length::new(diag / 256.0, doc);
-    if app.solid.for_object != Some(id) || app.solid.cell.is_none() {
-        app.solid = SolidState {
+    let solid = app.tool_state::<SolidState>();
+    if solid.for_object != Some(id) || solid.cell.is_none() {
+        *app.tool_state_mut::<SolidState>() = SolidState {
             cell: Some(auto),
             offset: Some(Length::new(0.0, doc)),
             smooth: false,
@@ -1232,7 +1337,7 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     section(ui, &t!("solid.section.cell"));
     let lengths = app.scale_ctx();
     // allow-swallow: set just above whenever it is None
-    let mut cell = app.solid.cell.unwrap_or(auto);
+    let mut cell = app.tool_state::<SolidState>().cell.unwrap_or(auto);
     let cell_label = t!("solid.cell");
     let opts = LengthFieldOpts {
         range: (
@@ -1246,7 +1351,7 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     // re-read through its display text, so a 0.6 mm cell on a metres
     // document stays 0.6 mm (it used to round to 0.001 m).
     if length_slider(ui, egui::Id::unique("make solid cell"), &mut cell, &opts).changed() {
-        app.solid.cell = Some(cell);
+        app.tool_state_mut::<SolidState>().cell = Some(cell);
     }
     // The trade-off, in plain words, with the size it implies.
     let cell_doc = cell.in_doc(doc);
@@ -1264,7 +1369,10 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     }
     section(ui, &t!("solid.section.offset"));
     // allow-swallow: set with the cell above
-    let mut offset = app.solid.offset.unwrap_or(Length::new(0.0, doc));
+    let mut offset = app
+        .tool_state::<SolidState>()
+        .offset
+        .unwrap_or(Length::new(0.0, doc));
     let offset_label = t!("solid.offset");
     let opts = LengthFieldOpts {
         range: UNBOUNDED,
@@ -1280,11 +1388,14 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
     .on_hover_text(t!("solid.offset_help"))
     .changed()
     {
-        app.solid.offset = Some(offset);
+        app.tool_state_mut::<SolidState>().offset = Some(offset);
     }
     ui.add_space(theme::SPACE_XS);
-    ui.checkbox(&mut app.solid.smooth, t!("solid.smooth"))
-        .on_hover_text(t!("solid.smooth_help"));
+    ui.checkbox(
+        &mut app.tool_state_mut::<SolidState>().smooth,
+        t!("solid.smooth"),
+    )
+    .on_hover_text(t!("solid.smooth_help"));
     ui.add_space(theme::SPACE_L);
     if ui
         .add_enabled_ui(app.busy.is_none(), |ui| {
@@ -1298,15 +1409,7 @@ fn solid_panel(app: &mut MeshFixerApp, ui: &mut egui::Ui) {
         .inner
         .clicked()
     {
-        // `cell` and `offset` are typed lengths (the panel's own fields):
-        // `Session::prepare` alone converts them (the owner's bug: a
-        // 0.001 m cell size once reached `prepare` as 0.000001 on a
-        // metre document, converted twice).
-        let intent = Intent::op("mesh.make_solid")
-            .set("cell_size", cell)
-            .set("offset", offset)
-            .param("preserve_sharp", !app.solid.smooth);
-        run(app, intent, t!("solid.apply"));
+        app.apply_tool();
     }
 }
 
@@ -1419,6 +1522,4 @@ pub fn view_overlay(app: &MeshFixerApp, ctx: &egui::Context) {
     }
     crate::split_flow::overlay(app, &painter, rect);
     crate::hollow_tool::overlay(app, &painter, rect);
-    crate::connect_tool::overlay(app, &painter, rect);
-    crate::hinge_tool::overlay(app, &painter, rect);
 }

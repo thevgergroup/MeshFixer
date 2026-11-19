@@ -94,12 +94,12 @@ mf-desktop/src/sculpt_tool.rs 1e-12 world-per-point floor for the brush radius
 mf-desktop/src/shape_tools.rs 1e-9 zero-size bounds guard
 mf-desktop/src/split_flow.rs 1e-18 singular linear part guard (AR 4: the duplicated affine inverse, C22 deletes it)
 mf-desktop/src/split_flow.rs 1e-12 ray parallel to the plane guard
-mf-desktop/src/transform_tool.rs 1e-12 matrices compared for display as unchanged
-mf-desktop/src/transform_tool.rs 1e-300 singular linear part guard before inverting
-mf-desktop/src/transform_tool.rs 1e-9 axis-aligned rotation detection (dimensionless cosine)
-mf-desktop/src/transform_tool.rs 1e-300 zero-size guard before a percentage
-mf-desktop/src/transform_tool.rs 1e-9 uniform scale detection, x against y (percent)
-mf-desktop/src/transform_tool.rs 1e-9 uniform scale detection, y against z (percent)
-mf-desktop/src/transform_tool.rs 1e-9 shown value rounded to zero (UI)
+mf-desktop/src/defects.rs 1e-12 matrices compared for display as unchanged
+mf-desktop/src/defects.rs 1e-300 singular linear part guard before inverting
+mf-desktop/src/defects.rs 1e-9 axis-aligned rotation detection (dimensionless cosine)
+mf-desktop/src/defects.rs 1e-300 zero-size guard before a percentage
+mf-desktop/src/defects.rs 1e-9 uniform scale detection, x against y (percent)
+mf-desktop/src/defects.rs 1e-9 uniform scale detection, y against z (percent)
+mf-desktop/src/defects.rs 1e-9 shown value rounded to zero (UI)
 mf-desktop/src/worker.rs 1e-6 peg placement hit must be strictly nearer (relative)
 mf-desktop/src/worker.rs 1e-6 peg placement slack relative to the distance

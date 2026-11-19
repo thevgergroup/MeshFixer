@@ -1123,6 +1123,83 @@ pub fn count(n: usize, noun: &str) -> String {
     }
 }
 
+/// What the status line says after a placement changed from `from` to
+/// `to`: "Moved scan by 12.0, 0, 0 mm", "Rotated plate 90° about Z",
+/// "Scaled part by 150%".
+pub fn placement_change(
+    name: &str,
+    unit: Unit,
+    from: &[f64; 12],
+    to: &[f64; 12],
+    centre: DVec3,
+) -> String {
+    let linear = |t: &[f64; 12]| DMat3::from_mat4(mf_geometry::affine::to_dmat4(t));
+    let world = |t: &[f64; 12]| DVec3::from(mf_geometry::affine::apply(t, centre.to_array()));
+    let (l0, l1) = (linear(from), linear(to));
+    let close = |a: DMat3, b: DMat3| (a - b).to_cols_array().iter().all(|v| v.abs() < 1e-12);
+    if close(l0, l1) {
+        let d = world(to) - world(from);
+        return format!(
+            "Moved {name} by {}, {}, {} {}",
+            placement_number(d.x),
+            placement_number(d.y),
+            placement_number(d.z),
+            unit_symbol(unit)
+        );
+    }
+    if l0.determinant().abs() > 1e-300 {
+        let rel = l1 * l0.inverse();
+        let ortho = close(rel.transpose() * rel, DMat3::IDENTITY) && rel.determinant() > 0.0;
+        if ortho {
+            let q = glam::DQuat::from_mat3(&rel);
+            let (axis, angle) = q.to_axis_angle();
+            for (k, e) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate() {
+                let along = axis.dot(e);
+                if (along.abs() - 1.0).abs() < 1e-9 {
+                    return format!(
+                        "Rotated {name} {}° about {}",
+                        placement_degrees(angle.to_degrees() * along.signum()),
+                        ["X", "Y", "Z"][k]
+                    );
+                }
+            }
+            return format!("Rotated {name} {}°", placement_degrees(angle.to_degrees()));
+        }
+    }
+    let s0 = [l0.col(0).length(), l0.col(1).length(), l0.col(2).length()];
+    let s1 = [l1.col(0).length(), l1.col(1).length(), l1.col(2).length()];
+    let pct: Vec<f64> = (0..3).map(|k| 100.0 * s1[k] / s0[k].max(1e-300)).collect();
+    if (pct[0] - pct[1]).abs() < 1e-9 && (pct[1] - pct[2]).abs() < 1e-9 {
+        format!("Scaled {name} by {}%", placement_degrees(pct[0]))
+    } else {
+        format!(
+            "Scaled {name} by {}%, {}%, {}%",
+            placement_degrees(pct[0]),
+            placement_degrees(pct[1]),
+            placement_degrees(pct[2])
+        )
+    }
+}
+
+/// A length in the status line: 3 significant figures, and 0 for a
+/// rounding speck.
+fn placement_number(v: f64) -> String {
+    if v.abs() < 1e-9 {
+        "0".into()
+    } else {
+        measure(v)
+    }
+}
+
+/// An angle or percentage: whole when it is whole, else one decimal.
+fn placement_degrees(v: f64) -> String {
+    if (v - v.round()).abs() < 0.05 {
+        format!("{}", v.round() as i64)
+    } else {
+        format!("{v:.1}")
+    }
+}
+
 /// A length to three significant figures (whole numbers from 100 up):
 /// the one formatter every panel's caption uses, now `mf_units`'s own
 /// unitless core (`significant_figures`, consolidation plan C11) rather

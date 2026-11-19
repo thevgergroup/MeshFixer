@@ -94,13 +94,6 @@ fn resting_tolerance(scale: f64) -> f64 {
 /// from any finite height it rests after two or three.
 pub const MAX_CORRECTIONS: usize = 8;
 
-/// Determinant of the linear part (3MF's rows are the column-vector
-/// matrix's columns; the determinant is the same).
-fn determinant(t: &[f64; 12]) -> f64 {
-    t[0] * (t[4] * t[8] - t[5] * t[7]) - t[1] * (t[3] * t[8] - t[5] * t[6])
-        + t[2] * (t[3] * t[7] - t[4] * t[6])
-}
-
 fn whole_object<'a>(
     op: &str,
     inputs: &'a [OperandInput<'a>],
@@ -162,7 +155,7 @@ impl Operation for SetTransform {
         ctx.checkpoint()?;
         // A singular transform flattens the object to a plane, a line or a
         // point, and no later edit could undo that from the placement.
-        let det = determinant(&transform);
+        let det = mf_geometry::affine::determinant(&transform);
         if det == 0.0 || !det.is_finite() {
             return Err(OpError::Failed {
                 code: "singular_transform",

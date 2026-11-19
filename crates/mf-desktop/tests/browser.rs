@@ -759,7 +759,10 @@ fn every_operation_parameter_has_a_tooltip() {
         let Some(label) = mf_desktop::defects::operation_label(&spec.id, None) else {
             continue;
         };
-        if !mf_desktop::tools::CATALOGUE.iter().any(|e| e.id == spec.id) {
+        if !mf_desktop::tool_panels::REPAIRS
+            .iter()
+            .any(|(id, _)| *id == spec.id)
+        {
             continue;
         }
         open_repair(&mut h);

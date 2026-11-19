@@ -22,7 +22,7 @@ mf-operations/src/combine.rs 5 missing_operand x3 and singular_transform x2 are 
 mf-operations/src/align.rs 1 the fn failed helper itself (invalid_leaders/leaders_mismatch/invalid_leader/unknown_mode: malformed leaders/mode the panel never sends)
 mf-operations/src/connector_ops.rs 1 the fn failed helper itself (missing_operand/unknown_connector/invalid_connector_params: a stale or malformed command log)
 mf-operations/src/shapes.rs 1 the fn failed helper itself (invalid_shapes/nothing_to_add/singular_transform/invalid_members/invalid_generated/invalid_transforms/generators_mismatch/members_mismatch/transforms_mismatch: malformed invocations); a generator's own refusal is relayed as Refused by generator_error, not here
-mf-operations/src/split/mod.rs 3 the fn failed helper itself, missing_target, and the many-targets relay's own Failed re-wrap (naming the target) for a code that isn't one of this op's declared ones
+mf-operations/src/split/mod.rs 2 the fn failed helper itself (also used by split/plan.rs for missing_target and singular_transform, and by execute for a plan that names a target it was not given), and the many-targets relay's own Failed re-wrap (name_target, naming the target) for a code that isn't one of this op's declared ones
 mf-operations/src/make_solid.rs 0 every Failed site here was migrated to Refused through fn failed
 mf-operations/src/hollow.rs 1 missing_target is a malformed invocation; part_error and fn failed were migrated to Refused
 mf-parts/src/connectors/leaf_hinge.rs 1 the fn refuse helper itself (cancelled/invalid_parameter: RunContext cancellation and malformed params the panel never sends)

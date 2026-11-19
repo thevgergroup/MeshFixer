@@ -331,7 +331,7 @@ fn stroke_and_release_never_flicker() {
 
     // Release, then keep sampling every frame until the committed
     // revision's own render and analysis are fully ready (`sculpt_stroke`
-    // *and* `sculpt_pending` both clear, and the job finishes): the gap
+    // *and* the settling render both clear, and the job finishes): the gap
     // this closes is exactly where the owner saw the flicker (a revert to
     // the pre-stroke mesh, then "Updating view…" over it).
     h.event(egui::Event::PointerButton {
@@ -345,7 +345,7 @@ fn stroke_and_release_never_flicker() {
         h.step();
         samples.push((steps + 1, pixel_at(&mut h)));
         if h.state().sculpt_stroke.is_none()
-            && h.state().sculpt_pending.is_none()
+            && h.state().settling_render().is_none()
             && h.state().busy.is_none()
         {
             break;

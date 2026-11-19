@@ -230,9 +230,16 @@ fn a_fine_make_solid_cell_on_a_metres_document_keeps_its_value() {
     h.get_by_label("Make solid").click();
     settle(&mut h);
     let cell = Length::new(0.0006, Unit::Meter);
-    h.state_mut().solid.cell = Some(cell);
+    h.state_mut()
+        .tool_state_mut::<mf_desktop::shape_tools::SolidState>()
+        .cell = Some(cell);
     h.run_steps(10);
-    assert_eq!(h.state().solid.cell, Some(cell));
+    assert_eq!(
+        h.state()
+            .tool_state::<mf_desktop::shape_tools::SolidState>()
+            .cell,
+        Some(cell)
+    );
     assert_eq!(shown(&h, "Cell"), "0.600 mm");
 }
 
@@ -271,7 +278,12 @@ fn defaults(h: &mut Harness<'_, MeshFixerApp>) -> Defaults {
     let step_mm = mf_desktop::widgets::length_field::scrub_step(&h.state().scale_ctx()).mm();
     h.get_by_label("Make solid").click();
     settle(h);
-    let cell_mm = h.state().solid.cell.unwrap().mm();
+    let cell_mm = h
+        .state()
+        .tool_state::<mf_desktop::shape_tools::SolidState>()
+        .cell
+        .unwrap()
+        .mm();
     h.get_by_label("Hollow").click();
     settle(h);
     let wall_mm = h.state().hollow.wall.unwrap().mm();

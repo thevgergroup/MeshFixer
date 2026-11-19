@@ -3404,7 +3404,8 @@ fn align_anchor_stays_fixed() {
     // `picking_ready()` being true is as settled as it gets, but a
     // single press can still land a frame before the BVH it reads is
     // swapped in on a freshly warmed-up test binary.
-    let anchor_set = |a: &MeshFixerApp| a.align.anchor == Some(idc);
+    let anchor_set =
+        |a: &MeshFixerApp| a.tool_state::<mf_desktop::align_tool::AlignState>().anchor == Some(idc);
     for _ in 0..5 {
         if anchor_set(h.state()) {
             break;
@@ -3422,7 +3423,7 @@ fn align_anchor_stays_fixed() {
         settle(&mut h);
     }
     wait_until(&mut h, "c becomes the anchor", |a| {
-        a.align.anchor == Some(idc)
+        a.tool_state::<mf_desktop::align_tool::AlignState>().anchor == Some(idc)
     });
     settle(&mut h);
     capture(&mut h, "anchor-set");
@@ -3762,7 +3763,9 @@ fn uc3_hinged_box_through_the_gui() {
     // way to place a second hinge clear of the first before).
     h.get_by_label("Connectors").click();
     settle(&mut h);
-    h.state_mut().connectors.fit_class = "Free running".into(); // Snug would print it fused.
+    h.state_mut()
+        .tool_state_mut::<mf_desktop::connector_tool::ConnectorsState>()
+        .fit_class = "Free running".into(); // Snug would print it fused.
     h.state_mut().hinge.a = Some(body_id);
     h.state_mut().hinge.b = Some(lid_id);
     settle(&mut h);
@@ -4531,7 +4534,9 @@ mod unit_parity {
         let mut h = cube_doc(20.0, unit, doc_units_per_mm);
         h.get_by_label("Make solid").click();
         settle(&mut h);
-        h.state_mut().solid.cell = Some(mf_units::Length::new(cell_mm * doc_units_per_mm, unit));
+        h.state_mut()
+            .tool_state_mut::<mf_desktop::shape_tools::SolidState>()
+            .cell = Some(mf_units::Length::new(cell_mm * doc_units_per_mm, unit));
         let history = history_len(&h);
         h.get_by_label("Make it solid").click();
         wait_until(&mut h, "make solid", |a| {
@@ -5224,4 +5229,259 @@ mod gizmo_snap {
             "the plane's move handle still didn't move it: {point:?} -> {after:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------------
+// Tool sessions (ADR-0007, C21): Esc cancels a drag in every tool, and
+// undo leaves no stale tool state.
+// ---------------------------------------------------------------------
+
+/// A point of the view (window points) the open tool claims a press at,
+/// nearest `near` (the shell's own `claims` test, scanned on a grid).
+fn claimed_point(h: &Harness<'_, MeshFixerApp>, near: egui::Pos2) -> Option<egui::Pos2> {
+    let app = h.state();
+    let rect = app.viewport.last_rect?;
+    let claims = (app.active_tool_def().claims)(app)?;
+    let mut best: Option<egui::Pos2> = None;
+    let mut y = 2.0;
+    while y < rect.height() {
+        let mut x = 2.0;
+        while x < rect.width() {
+            if claims((x as f64, y as f64)) {
+                let p = rect.left_top() + egui::vec2(x, y);
+                if best.is_none_or(|b| (p - near).length() < (b - near).length()) {
+                    best = Some(p);
+                }
+            }
+            x += 4.0;
+        }
+        y += 4.0;
+    }
+    best
+}
+
+/// Press at `from` and move to `to` in steps, the button still held.
+fn press_and_move(h: &mut Harness<'_, MeshFixerApp>, from: egui::Pos2, to: egui::Pos2) {
+    h.event(egui::Event::PointerMoved(from));
+    h.step();
+    h.event(egui::Event::PointerButton {
+        pos: from,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    for i in 1..=8 {
+        let p = from + (to - from) * (i as f32 / 8.0);
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+    }
+}
+
+fn release_at(h: &mut Harness<'_, MeshFixerApp>, at: egui::Pos2) {
+    h.event(egui::Event::PointerButton {
+        pos: at,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    });
+    h.step();
+    h.run_steps(2);
+}
+
+/// Owner: "Esc can't cancel the Split drag". Dragging the cut plane's
+/// gizmo, then Esc while the button is still down, puts the plane back
+/// where it was; Split stays open, and the release afterwards neither
+/// moves it again nor cuts.
+#[test]
+fn esc_cancels_a_split_drag() {
+    require_gpu!("esc_cancels_a_split_drag");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    assert_eq!(h.state().active_tool, "split");
+    let plane = h.state().split.plane;
+    let centre = h.state().screen_point([0.0, 0.0, 30.0]).unwrap();
+    let from = claimed_point(&h, centre).expect("the plane's gizmo is under the pointer somewhere");
+    let history = history_len(&h);
+    let to = from + egui::vec2(0.0, -60.0);
+    press_and_move(&mut h, from, to);
+    assert_ne!(h.state().split.plane, plane, "the drag moved the plane");
+
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert_eq!(h.state().split.plane, plane, "Esc put the plane back");
+    assert_eq!(
+        h.state().active_tool,
+        "split",
+        "Esc took one step: the drag, not the tool"
+    );
+
+    h.event(egui::Event::PointerMoved(to + egui::vec2(0.0, -30.0)));
+    h.step();
+    release_at(&mut h, to + egui::vec2(0.0, -30.0));
+    settle(&mut h);
+    assert_eq!(
+        h.state().split.plane,
+        plane,
+        "the cancelled drag stays cancelled"
+    );
+    assert_eq!(history_len(&h), history, "nothing was cut");
+}
+
+/// Owner: "Esc can't cancel the Align drag". Pressing an Align dot and
+/// holding it shows where every target would go; Esc while it's held
+/// takes the ghosts away, Align stays open, and the release applies
+/// nothing.
+#[test]
+fn esc_cancels_an_align_drag() {
+    use mf_desktop::align_tool::Mode;
+    require_gpu!("esc_cancels_an_align_drag");
+    let mut h = opened(three_balls_on(0));
+    open_align(&mut h, &["a", "b", "c"]);
+    let ids: Vec<mf_command::ObjectId> = ["a", "b", "c"].iter().map(|n| id_of(&h, n)).collect();
+    let before: Vec<[f64; 12]> = ids
+        .iter()
+        .map(|&id| h.state().session.document().object(id).unwrap().transform)
+        .collect();
+    let shown = |h: &Harness<'_, MeshFixerApp>| -> Vec<Option<[f64; 12]>> {
+        ids.iter()
+            .map(|&id| h.state().shown_transform(id))
+            .collect()
+    };
+    let dot = dot_point(&h, find_dot(&h, 0, Mode::Max));
+    let history = history_len(&h);
+    press_and_move(&mut h, dot, dot + egui::vec2(10.0, 10.0));
+    assert!(
+        shown(&h).iter().any(Option::is_some),
+        "holding the dot shows where the targets would go"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert!(
+        shown(&h).iter().all(Option::is_none),
+        "Esc took the ghosts away: {:?}",
+        shown(&h)
+    );
+    assert_eq!(
+        h.state().active_tool,
+        "align",
+        "Esc took one step: the drag, not the tool"
+    );
+
+    release_at(&mut h, dot + egui::vec2(10.0, 10.0));
+    settle(&mut h);
+    assert_eq!(history_len(&h), history, "nothing was aligned");
+    let after: Vec<[f64; 12]> = ids
+        .iter()
+        .map(|&id| h.state().session.document().object(id).unwrap().transform)
+        .collect();
+    assert_eq!(after, before);
+}
+
+/// Owner: "Esc can't cancel the Connect drag". Dragging a placed dowel
+/// across the cut face, then Esc with the button still down, puts it
+/// back where it was; Connect stays open and the release doesn't move it
+/// again.
+#[test]
+fn esc_cancels_a_connect_drag() {
+    require_gpu!("esc_cancels_a_connect_drag");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    h.get_by_label("Split").click();
+    settle(&mut h);
+    h.state_mut().split.plane[11] += 1.3;
+    settle(&mut h);
+    let history = history_len(&h);
+    h.get_by_label("Cut").click();
+    wait_until(&mut h, "the cut", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    h.get_by_label("Connect").click();
+    wait_until(&mut h, "the joint's cut faces", |a| {
+        a.split_flow.geometry().is_some()
+    });
+    settle(&mut h);
+    let p = cap_point(&h, [0.0, 0.0]);
+    click_at(&mut h, p);
+    settle(&mut h);
+    let placed = placements(&h);
+    assert_eq!(placed.len(), 1, "{placed:?}");
+
+    let to = cap_point(&h, [12.0, 0.0]);
+    press_and_move(&mut h, p, to);
+    assert_ne!(
+        placements(&h)[0].at,
+        placed[0].at,
+        "the drag moved the dowel"
+    );
+
+    h.key_press(egui::Key::Escape);
+    h.step();
+    assert_eq!(placements(&h), placed, "Esc put the dowel back");
+    assert_eq!(
+        h.state().active_tool,
+        "connect",
+        "Esc took one step: the drag, not the tool"
+    );
+
+    release_at(&mut h, to);
+    settle(&mut h);
+    assert_eq!(placements(&h), placed, "the cancelled drag stays cancelled");
+}
+
+/// Undo after Hollow leaves nothing of the hollowed revision in the tool:
+/// no preview, pick or result note for it (the panel no longer says the
+/// object was hollowed), and the view draws the solid ball again.
+#[test]
+fn undo_after_hollow_clears_the_preview() {
+    require_gpu!("undo_after_hollow_clears_the_preview");
+    let mut h = opened(vec![("ball", ball(30.0), at([0.0, 0.0, 30.0]))]);
+    let solid = mesh_of(&h, "ball").content_hash();
+    h.get_by_label("Hollow").click();
+    settle(&mut h);
+    let id = id_of(&h, "ball");
+    wait_until(&mut h, "the hollow preview", |a| {
+        mf_desktop::hollow_tool::preview_render(a, id).is_some()
+    });
+    settle(&mut h);
+    let history = history_len(&h);
+    panel_button(&h, "Hollow").click();
+    wait_until(&mut h, "the hollow", |a| {
+        a.busy.is_none() && (a.session.history_labels().len() > history || a.refusal.is_some())
+    });
+    settle(&mut h);
+    assert!(h.state().refusal.is_none(), "{:?}", h.state().refusal);
+    assert!(
+        h.state().hollow.last_result.is_some(),
+        "the panel says it hollowed"
+    );
+    let revisions = h.state().revisions_seen("hollow");
+
+    h.get_by_label("Undo").click();
+    wait_until(&mut h, "the undo", |a| {
+        a.busy.is_none() && mesh_of_state(a, id).is_some_and(|m| m.content_hash() == solid)
+    });
+    settle(&mut h);
+    assert!(
+        h.state().revisions_seen("hollow") > revisions,
+        "Hollow heard about the undo"
+    );
+    assert!(
+        h.state().hollow.last_result.is_none(),
+        "no result note for the undone hollow: {:?}",
+        h.state().hollow.last_result
+    );
+    assert_eq!(h.state().tool_stale("hollow"), Vec::<&str>::new());
+    // Whatever preview shows now is of the solid ball on screen, never
+    // of the shell the undo took away.
+    assert!(
+        mf_desktop::hollow_tool::preview_asked_for_current(h.state()),
+        "any preview asked for is of the revision on screen"
+    );
+}
+
+fn mesh_of_state(a: &MeshFixerApp, id: mf_command::ObjectId) -> Option<&Mesh> {
+    a.session.document().object(id)?.mesh()
 }

@@ -2,6 +2,10 @@
 //! row by row, then the translation; a point is placed as `p · M + t`.
 //! One implementation for the boolean (D10's tool-in-target frame) and
 //! intersection detection, so both place every point identically.
+//! **The only affine module** (C22, ADR-0008): every backend crate places
+//! points, directions and plane normals through these functions, so a
+//! preview and its Apply can never disagree on the frame
+//! (`affine_is_implemented_once`, mf-operations/tests/plans.rs).
 
 use glam::DMat4;
 
@@ -63,6 +67,18 @@ pub fn apply(t: &[f64; 12], p: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+/// A direction `d` under the linear part only: `d · M` (no translation).
+pub fn apply_linear(t: &[f64; 12], d: [f64; 3]) -> [f64; 3] {
+    [
+        t[0] * d[0] + t[3] * d[1] + t[6] * d[2],
+        t[1] * d[0] + t[4] * d[1] + t[7] * d[2],
+        t[2] * d[0] + t[5] * d[1] + t[8] * d[2],
+    ]
+}
+
+/// The identity placement.
+pub const IDENTITY: [f64; 12] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0];
+
 /// The same transform as a column-vector `DMat4` (exact: entries copied).
 pub fn to_dmat4(t: &[f64; 12]) -> DMat4 {
     DMat4::from_cols_array(&[
@@ -96,9 +112,16 @@ pub fn tool_to_target(tool: &[f64; 12], target: &[f64; 12]) -> Option<[f64; 12]>
 /// scale needs this one: a plane's normal doesn't scale the way its
 /// points do (MF-SPLIT-PARITY-001, split_parity.rs). Every caller that
 /// needs a plane's normal in object space from a world one — Apply
-/// (`mf_operations::split::normal_to_object`), Split's region preview
+/// (the Split plan, `mf_operations::split::plan`), Split's region preview
 /// and the peg preview worker — must go through this, so the preview
 /// always cuts the same regions Apply would.
-pub fn world_normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
+pub fn normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
     std::array::from_fn(|r| t[3 * r] * n[0] + t[3 * r + 1] * n[1] + t[3 * r + 2] * n[2])
+}
+
+/// [`normal_to_object`] under the name the desktop's region and peg
+/// previews still call it by, until C23 moves them onto the Split plan
+/// (`mf_operations::SplitPlan`) and this name goes.
+pub fn world_normal_to_object(t: &[f64; 12], n: [f64; 3]) -> [f64; 3] {
+    normal_to_object(t, n)
 }
