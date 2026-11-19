@@ -55,7 +55,7 @@ Every step can be undone. History shows each one in plain words, with its settin
 **macOS:**
 1. Download `MeshFixer-<version>-macos.zip` from [Releases](https://github.com/thevgergroup/MeshFixer/releases) and unzip it.
 2. Move **MeshFixer.app** to Applications.
-3. Open it. The app is signed and notarized by Apple.
+3. The app is signed but not notarized yet, so macOS will block it the first time. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**.
 
 **Windows and Linux:** there are no ready-made downloads yet. [Build from source](#building-from-source); it takes a few minutes.
 
