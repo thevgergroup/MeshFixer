@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used)] // tests may panic on failure
 //! README screenshots: opens the Stanford bunny and steps through the main
 //! tools, saving one 1440×900 frame per step to `$MF_SCREENSHOTS`.
 //!
