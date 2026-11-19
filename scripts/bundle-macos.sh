@@ -1,8 +1,14 @@
 #!/usr/bin/env bash
 # Builds the release desktop app and the CLI, then assembles
 # dist/MeshFixer.app (Info.plist, the icon, the binary) and
-# dist/MeshFixer-<version>-macos.zip. Not signed or notarised: on another Mac,
-# open it the first time with right-click > Open. Open models with
+# dist/MeshFixer-<version>-macos.zip.
+#
+# Signing (optional): MF_SIGN_IDENTITY="Developer ID Application: …" signs the
+# CLI and the app with the hardened runtime and a secure timestamp.
+# Notarising (optional, needs signing): MF_NOTARY_PROFILE=<name> submits the
+# zip to Apple with `xcrun notarytool` (credentials stored once with
+# `xcrun notarytool store-credentials <name>`), waits, and staples the ticket.
+# Without either, the app is unsigned: open it the first time with right-click > Open. Open models with
 # File > Open or by dropping them on the window (Finder "Open With" isn't
 # wired up yet).
 #
@@ -45,6 +51,22 @@ cat > "$app/Contents/Info.plist" <<PLIST
 PLIST
 
 zip="$dist/MeshFixer-$version-macos.zip"
+if [ -n "${MF_SIGN_IDENTITY:-}" ]; then
+  # Inside out: the nested CLI first, then the app itself.
+  codesign --force --options runtime --timestamp --sign "$MF_SIGN_IDENTITY" \
+    "$app/Contents/Resources/bin/meshfixer"
+  codesign --force --options runtime --timestamp --sign "$MF_SIGN_IDENTITY" "$app"
+  codesign --verify --deep --strict --verbose=2 "$app"
+fi
 (cd "$dist" && ditto -c -k --keepParent MeshFixer.app "$zip")
+if [ -n "${MF_NOTARY_PROFILE:-}" ]; then
+  [ -n "${MF_SIGN_IDENTITY:-}" ] || { echo "error: notarising needs MF_SIGN_IDENTITY" >&2; exit 1; }
+  xcrun notarytool submit "$zip" --keychain-profile "$MF_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$app"
+  xcrun stapler validate "$app"
+  spctl --assess --type execute --verbose=2 "$app"
+  # Re-zip so the download carries the stapled ticket.
+  (cd "$dist" && ditto -c -k --keepParent MeshFixer.app "$zip.stapled" && mv "$zip.stapled" "$zip")
+fi
 echo "$app"
 echo "$zip"
