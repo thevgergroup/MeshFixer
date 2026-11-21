@@ -38,6 +38,9 @@ serde_json.workspace = true
 image.workspace = true
 blake3.workspace = true
 
+[target.'cfg(windows)'.build-dependencies]
+winresource = "0.1"
+
 [dev-dependencies]
 # The test-only generators, so the desktop suites can drive one through
 # the UI (never in a normal build: dev-dependencies only).

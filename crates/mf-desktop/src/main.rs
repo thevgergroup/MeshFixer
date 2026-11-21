@@ -1,3 +1,6 @@
+// A release build on Windows is a GUI app: no console window opens behind it.
+#![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
+
 use mf_desktop::{MeshFixerApp, Settings};
 use mf_metrics::CountingAlloc;
 
