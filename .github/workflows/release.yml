@@ -1,0 +1,62 @@
+name: Release (Windows)
+# Manual only: start it from the Actions tab (or `gh workflow run release.yml
+# -f ref=v0.1.1 -f upload=true`). It builds the Windows app and CLI at `ref`
+# and uploads MeshFixer-<version>-windows-x64.zip as a workflow artifact.
+# With upload=true it also attaches the zip to the GitHub Release named by
+# `ref`, which must already exist. The macOS build is made and signed locally
+# (scripts/bundle-macos.sh), because signing needs the Developer ID
+# certificate.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Tag or branch to build (e.g. v0.1.1)"
+        required: true
+      upload:
+        description: "Attach the zip to the GitHub Release named by ref"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: never
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: dtolnay/rust-toolchain@1.99.1
+      - uses: Swatinem/rust-cache@v2
+      - name: Build the app and the CLI (release)
+        run: cargo build --release -p mf-desktop -p mf-cli
+      - name: Package
+        id: package
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+          $dir = "dist/MeshFixer-$version-windows-x64"
+          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          Copy-Item target/release/meshfixer-desktop.exe "$dir/MeshFixer.exe"
+          Copy-Item target/release/meshfixer.exe "$dir/meshfixer.exe"
+          Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, THIRD_PARTY_NOTICES.md $dir
+          $zip = "dist/MeshFixer-$version-windows-x64.zip"
+          Compress-Archive -Path $dir -DestinationPath $zip -Force
+          "zip=$zip" >> $env:GITHUB_OUTPUT
+      - name: Smoke test the CLI
+        shell: pwsh
+        run: target/release/meshfixer.exe --version
+      - uses: actions/upload-artifact@v7
+        with:
+          name: meshfixer-windows-x64
+          path: ${{ steps.package.outputs.zip }}
+      - name: Attach to the release
+        if: ${{ inputs.upload }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ inputs.ref }}" "${{ steps.package.outputs.zip }}" --clobber
