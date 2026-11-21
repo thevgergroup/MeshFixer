@@ -40,10 +40,19 @@ jobs:
         run: |
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
           $dir = "dist/MeshFixer-$version-windows-x64"
-          New-Item -ItemType Directory -Force -Path $dir | Out-Null
+          # The CLI goes in its own folder: Windows names are case-insensitive,
+          # so "meshfixer.exe" next to "MeshFixer.exe" would overwrite the app.
+          New-Item -ItemType Directory -Force -Path "$dir/cli" | Out-Null
           Copy-Item target/release/meshfixer-desktop.exe "$dir/MeshFixer.exe"
-          Copy-Item target/release/meshfixer.exe "$dir/meshfixer.exe"
+          Copy-Item target/release/meshfixer.exe "$dir/cli/meshfixer.exe"
           Copy-Item README.md, LICENSE-MIT, LICENSE-APACHE, THIRD_PARTY_NOTICES.md $dir
+          # Fail rather than ship a zip with one binary missing.
+          foreach ($f in "$dir/MeshFixer.exe", "$dir/cli/meshfixer.exe") {
+            if (-not (Test-Path $f)) { throw "missing $f" }
+          }
+          if ((Get-FileHash "$dir/MeshFixer.exe").Hash -eq (Get-FileHash "$dir/cli/meshfixer.exe").Hash) {
+            throw "MeshFixer.exe and cli/meshfixer.exe are the same file"
+          }
           $zip = "dist/MeshFixer-$version-windows-x64.zip"
           Compress-Archive -Path $dir -DestinationPath $zip -Force
           "zip=$zip" >> $env:GITHUB_OUTPUT
