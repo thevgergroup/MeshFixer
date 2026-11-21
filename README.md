@@ -52,12 +52,25 @@ Every step can be undone. History shows each one in plain words, with its settin
 
 ## Install
 
-**macOS:**
-1. Download `MeshFixer-<version>-macos.zip` from [Releases](https://github.com/thevgergroup/MeshFixer/releases) and unzip it.
+Download the latest version from [**Releases**](https://github.com/thevgergroup/MeshFixer/releases/latest).
+
+### macOS (Apple silicon)
+
+1. Download `MeshFixer-<version>-macos.zip` and unzip it.
 2. Move **MeshFixer.app** to Applications.
 3. The app is signed but not notarized yet, so macOS will block it the first time. Open it once, then go to **System Settings › Privacy & Security** and click **Open Anyway**.
 
-**Windows and Linux:** there are no ready-made downloads yet. [Build from source](#building-from-source); it takes a few minutes.
+### Windows (64-bit)
+
+1. Download `MeshFixer-<version>-windows-x64.zip`, right-click it and choose **Extract All**.
+2. Open the extracted folder and run **MeshFixer.exe**.
+3. The app isn't code-signed on Windows yet, so SmartScreen may warn you the first time. Click **More info**, then **Run anyway**.
+
+Nothing is installed system-wide: to remove MeshFixer, delete the folder.
+
+### Linux
+
+There's no ready-made download yet. [Build from source](#building-from-source); it takes a few minutes.
 
 ## Your first print-ready model
 
@@ -145,7 +158,9 @@ Move, rotate and scale objects with the gizmo or by typing values. **Drop to pla
 
 ## Command line
 
-Every operation in the app is also available as a `meshfixer` command, for scripting and batch work. On macOS, the command is inside the app at `MeshFixer.app/Contents/Resources/bin/meshfixer`.
+Every operation in the app is also available as a `meshfixer` command, for scripting and batch work. It comes with the app:
+- **macOS:** `MeshFixer.app/Contents/Resources/bin/meshfixer`.
+- **Windows:** `cli\meshfixer.exe`, in the extracted folder.
 
 ```bash
 meshfixer inspect scan.stl                                  # what's wrong with it
@@ -159,8 +174,9 @@ Each command records what it did. `meshfixer replay` re-runs a saved session exa
 ## Known limitations
 
 This is an early release (0.1). Things to know:
+- The Windows build is new. Please [report anything](https://github.com/thevgergroup/MeshFixer/issues) that doesn't work.
 - On macOS, Finder's **Open With › MeshFixer** isn't supported yet. Use File › Open, or drop the file on the window.
-- There are no packaged downloads for Windows or Linux yet, and those builds haven't been checked by hand.
+- There's no packaged Linux download yet.
 - The interface can stutter briefly while filling holes on very large (5-million-triangle) models.
 - Some long part names in the Parts library are cut off.
 - The hinged box's clasp doesn't show its latch yet.
