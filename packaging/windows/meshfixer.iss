@@ -51,6 +51,10 @@ UninstallDisplayName={#AppName}
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
+; Wizard art from scripts/make-installer-art.sh; Inno picks the size that
+; fits the display scale (100%, 150%, 200%).
+WizardImageFile=wizard-164x314.bmp,wizard-246x459.bmp,wizard-328x604.bmp
+WizardSmallImageFile=small-55x55.bmp,small-83x80.bmp,small-110x106.bmp
 ChangesAssociations=yes
 CloseApplications=yes
 

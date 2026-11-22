@@ -1,6 +1,6 @@
 name: Release (Windows)
 # Manual only: start it from the Actions tab (or `gh workflow run release.yml
-# -f ref=v0.1.1 -f upload=true`). It builds the Windows app and CLI at `ref`
+# -f ref=v0.1.2 -f upload=true`). It builds the Windows app and CLI at `ref`
 # and makes two downloads: the portable MeshFixer-<version>-windows-x64.zip
 # and the installer MeshFixer-<version>-windows-x64-setup.exe
 # (packaging/windows/meshfixer.iss, Inno Setup). Both are uploaded as a
@@ -12,7 +12,7 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Tag or branch to build (e.g. v0.1.1)"
+        description: "Tag or branch to build (e.g. v0.1.2)"
         required: true
       upload:
         description: "Attach the zip to the GitHub Release named by ref"
