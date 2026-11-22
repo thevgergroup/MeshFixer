@@ -1,16 +1,18 @@
 name: Release (Windows)
 # Manual only: start it from the Actions tab (or `gh workflow run release.yml
-# -f ref=v0.1.1 -f upload=true`). It builds the Windows app and CLI at `ref`
-# and uploads MeshFixer-<version>-windows-x64.zip as a workflow artifact.
-# With upload=true it also attaches the zip to the GitHub Release named by
-# `ref`, which must already exist. The macOS build is made and signed locally
+# -f ref=v0.1.2 -f upload=true`). It builds the Windows app and CLI at `ref`
+# and makes two downloads: the portable MeshFixer-<version>-windows-x64.zip
+# and the installer MeshFixer-<version>-windows-x64-setup.exe
+# (packaging/windows/meshfixer.iss, Inno Setup). Both are uploaded as a
+# workflow artifact. With upload=true they are also attached to the GitHub
+# Release named by `ref`, which must already exist. The macOS build is made and signed locally
 # (scripts/bundle-macos.sh), because signing needs the Developer ID
 # certificate.
 on:
   workflow_dispatch:
     inputs:
       ref:
-        description: "Tag or branch to build (e.g. v0.1.1)"
+        description: "Tag or branch to build (e.g. v0.1.2)"
         required: true
       upload:
         description: "Attach the zip to the GitHub Release named by ref"
@@ -56,16 +58,58 @@ jobs:
           $zip = "dist/MeshFixer-$version-windows-x64.zip"
           Compress-Archive -Path $dir -DestinationPath $zip -Force
           "zip=$zip" >> $env:GITHUB_OUTPUT
+          "version=$version" >> $env:GITHUB_OUTPUT
+          "dir=$dir" >> $env:GITHUB_OUTPUT
       - name: Smoke test the CLI
         shell: pwsh
         run: target/release/meshfixer.exe --version
+      - name: Build the installer
+        id: installer
+        shell: pwsh
+        run: |
+          $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw "installing Inno Setup failed" }
+          }
+          $version = "${{ steps.package.outputs.version }}"
+          $src = (Resolve-Path "${{ steps.package.outputs.dir }}").Path
+          $out = (Resolve-Path dist).Path
+          & $iscc "/DAppVersion=$version" "/DSourceDir=$src" "/DOutputDir=$out" packaging/windows/meshfixer.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed with exit code $LASTEXITCODE" }
+          $setup = "dist/MeshFixer-$version-windows-x64-setup.exe"
+          if (-not (Test-Path $setup)) { throw "missing $setup" }
+          "setup=$setup" >> $env:GITHUB_OUTPUT
+      - name: Smoke test the installer (install, run the CLI, uninstall)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "MeshFixer-install-test"
+          $p = Start-Process "${{ steps.installer.outputs.setup }}" -Wait -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=`"$dir`""
+          if ($p.ExitCode -ne 0) { throw "setup exited with $($p.ExitCode)" }
+          foreach ($f in "MeshFixer.exe", "cli\meshfixer.exe", "unins000.exe") {
+            if (-not (Test-Path (Join-Path $dir $f))) { throw "installer did not put $f in $dir" }
+          }
+          $got = & (Join-Path $dir "cli\meshfixer.exe") --version
+          if ($LASTEXITCODE -ne 0) { throw "installed CLI failed" }
+          if ($got -notmatch [regex]::Escape("${{ steps.package.outputs.version }}")) { throw "installed CLI reports '$got'" }
+          if (-not (Test-Path "HKCU:\Software\Classes\.stl\OpenWithProgids")) { throw "no Open with entry for .stl" }
+          $u = Start-Process (Join-Path $dir "unins000.exe") -Wait -PassThru -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART"
+          if ($u.ExitCode -ne 0) { throw "uninstall exited with $($u.ExitCode)" }
+          # unins000.exe hands off to a temporary copy of itself and exits, so
+          # wait (up to a minute) for that copy to remove the files and registry keys.
+          for ($i = 0; $i -lt 60 -and ((Test-Path (Join-Path $dir "MeshFixer.exe")) -or (Test-Path "HKCU:\Software\Classes\MeshFixer.Mesh")); $i++) { Start-Sleep 1 }
+          if (Test-Path (Join-Path $dir "MeshFixer.exe")) { throw "uninstall left MeshFixer.exe behind" }
+          if (Test-Path "HKCU:\Software\Classes\MeshFixer.Mesh") { throw "uninstall left the MeshFixer.Mesh ProgID" }
+          "installer OK: $got"
       - uses: actions/upload-artifact@v7
         with:
           name: meshfixer-windows-x64
-          path: ${{ steps.package.outputs.zip }}
+          path: |
+            ${{ steps.package.outputs.zip }}
+            ${{ steps.installer.outputs.setup }}
       - name: Attach to the release
         if: ${{ inputs.upload }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ inputs.ref }}" "${{ steps.package.outputs.zip }}" --clobber
+        run: gh release upload "${{ inputs.ref }}" "${{ steps.package.outputs.zip }}" "${{ steps.installer.outputs.setup }}" --clobber

@@ -62,11 +62,12 @@ Download the latest version from [**Releases**](https://github.com/thevgergroup/
 
 ### Windows (64-bit)
 
-1. Download `MeshFixer-<version>-windows-x64.zip`, right-click it and choose **Extract All**.
-2. Open the extracted folder and run **MeshFixer.exe**.
-3. The app isn't code-signed on Windows yet, so SmartScreen may warn you the first time. Click **More info**, then **Run anyway**.
+There are two downloads. Pick one:
 
-Nothing is installed system-wide: to remove MeshFixer, delete the folder.
+- **Installer (recommended):** download `MeshFixer-<version>-windows-x64-setup.exe` and run it. It installs for your user account only, so it doesn't ask for admin rights. You get a Start menu shortcut and an uninstaller in **Settings › Apps**. MeshFixer also appears under **Open with** for `.stl`, `.obj` and `.3mf` files. Your current default app for those files stays the default.
+- **Portable zip:** download `MeshFixer-<version>-windows-x64.zip`, right-click it and choose **Extract All**, then run **MeshFixer.exe** from the extracted folder. Nothing is installed. To remove it, delete the folder.
+
+Neither download is code-signed yet, so SmartScreen may warn you the first time. Click **More info**, then **Run anyway**.
 
 ### Linux
 
@@ -160,7 +161,7 @@ Move, rotate and scale objects with the gizmo or by typing values. **Drop to pla
 
 Every operation in the app is also available as a `meshfixer` command, for scripting and batch work. It comes with the app:
 - **macOS:** `MeshFixer.app/Contents/Resources/bin/meshfixer`.
-- **Windows:** `cli\meshfixer.exe`, in the extracted folder.
+- **Windows:** `cli\meshfixer.exe`, in the install folder (`%LOCALAPPDATA%\Programs\MeshFixer` by default) or the extracted zip.
 
 ```bash
 meshfixer inspect scan.stl                                  # what's wrong with it
